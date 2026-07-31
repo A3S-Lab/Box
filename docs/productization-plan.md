@@ -392,10 +392,23 @@ Current notes:
   is the commit point: a restarted caller refreshes its authoritative
   cross-process index, adopts output committed in the output-to-terminal-receipt
   crash gap, and replays without reopening the source tree. Cleanup removes the
-  workspace, receipt, and operation-specific image reference idempotently.
-  Cache import/export receipts and multi-platform assembly remain the Box build
-  release gates; Cloud consumption, publication, and SPDX/SLSA evidence remain
-  integration gates.
+  workspace, receipt, operation-specific cache export, and image reference
+  idempotently.
+- Content-addressed plans now export one portable Box-native OCI cache artifact
+  from the existing `BuildCache`. One trace spans native cache hits and stores;
+  no second cache service, queue, scheduler, publisher, or lifecycle store was
+  added. The operation-derived journal path owns the immutable export snapshot,
+  and the existing journal lock orders its publication before the ImageStore
+  commit. The cache key binds source digest, canonical plan digest, platform,
+  and cache-schema semantics. Recovery adopts the cache and image together
+  across the terminal-receipt crash gap, while replay revalidates the exact OCI
+  entries, manifest, config, layer bytes, descriptor sizes, blob inventory, and
+  content bytes. The v2 operation record durably enforces that new
+  `content-addressed` plans contain cache evidence and `disabled` plans do not;
+  legacy v1 records remain readable without cache evidence.
+- Typed cache import and hydration plus multi-platform assembly remain the Box
+  build release gates; Cloud consumption, publication, and SPDX/SLSA evidence
+  remain integration gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

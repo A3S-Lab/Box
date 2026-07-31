@@ -222,7 +222,7 @@ pub(crate) fn read_verified_oci_blob(
     Ok(bytes)
 }
 
-fn verify_oci_blob_file(
+pub(crate) fn verify_oci_blob_file(
     root_dir: &Path,
     digest: &str,
     size: i64,

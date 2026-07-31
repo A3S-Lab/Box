@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use a3s_box_core::OperationId;
+use serde::Serialize;
 
 use super::*;
 use crate::oci::build::{
     execute_recorded_build_plan, inspect_recorded_build_plan, inspect_recorded_build_status,
-    remove_recorded_build_plan, BoxBuildPlan, BuildPlanExecutionError,
+    remove_recorded_build_plan, BoxBuildPlan, BuildCacheReceipt, BuildPlanExecutionError,
 };
 use crate::oci::ImageStore;
 
@@ -52,6 +53,32 @@ fn identity(operation: &str, digest_byte: char) -> BuildOperationIdentity {
     .unwrap()
 }
 
+fn overwrite_record(path: &std::path::Path, record: &impl Serialize) {
+    let mut bytes = serde_json::to_vec_pretty(record).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(path, bytes).unwrap();
+}
+
+async fn assert_cache_blob_tampering_is_rejected(
+    blob: &std::path::Path,
+    operation: &BuildOperationIdentity,
+    plan: &BoxBuildPlan,
+    store: &ImageStore,
+) {
+    let original = std::fs::read(blob).unwrap();
+    let mut corrupt = original.clone();
+    corrupt[0] ^= 1;
+    std::fs::write(blob, corrupt).unwrap();
+    let error = inspect_recorded_build_plan(operation, plan, store)
+        .await
+        .unwrap_err();
+    std::fs::write(blob, original).unwrap();
+    assert!(matches!(
+        error,
+        BuildPlanExecutionError::Receipt(BuildReceiptError::CacheInvalid { .. })
+    ));
+}
+
 #[tokio::test]
 async fn recorded_build_replays_the_exact_output_after_reconstruction() {
     let temporary = tempfile::tempdir().unwrap();
@@ -72,6 +99,8 @@ async fn recorded_build_replays_the_exact_output_after_reconstruction() {
             .unwrap();
 
     assert!(!first.replayed);
+    assert!(first.cache.is_none());
+    assert!(first.receipt.cache.is_none());
     assert_eq!(first.receipt.schema, BuildOutputReceipt::SCHEMA);
     assert_eq!(first.receipt.operation_id, *operation.operation_id());
     assert_eq!(first.receipt.source_digest, source_digest('a'));
@@ -136,6 +165,153 @@ async fn recorded_build_replays_the_exact_output_after_reconstruction() {
 }
 
 #[tokio::test]
+async fn content_addressed_build_exports_and_replays_one_native_cache_receipt() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-cache-export", 'a');
+    let build_plan = plan("content-addressed");
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+
+    let built =
+        execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+            .await
+            .unwrap();
+    let cache = built
+        .cache
+        .as_ref()
+        .expect("content-addressed plans export one native cache artifact");
+    assert_eq!(built.receipt.cache.as_ref(), Some(&cache.receipt));
+    assert_eq!(cache.receipt.schema, BuildCacheReceipt::SCHEMA);
+    assert_eq!(cache.receipt.source_digest, operation.source_digest());
+    assert_eq!(
+        cache.receipt.plan_digest,
+        build_plan.canonical_digest().unwrap()
+    );
+    assert_eq!(cache.receipt.platform, *build_plan.platform());
+    assert_eq!(cache.receipt.entry_count, 1);
+    assert!(cache.receipt.blob_count >= 3);
+    assert!(cache.receipt.content_bytes > cache.receipt.descriptor.size);
+    assert_eq!(
+        cache.layout_directory,
+        journal.cache_export_path(operation.operation_id())
+    );
+    assert!(cache.layout_directory.join("oci-layout").is_file());
+    assert!(cache.layout_directory.join("index.json").is_file());
+
+    let receipt_path = journal.receipt_path(operation.operation_id());
+    let persisted = std::fs::read_to_string(&receipt_path).unwrap();
+    assert!(persisted.contains(BuildCacheReceipt::SCHEMA));
+    assert!(
+        !persisted.contains(cache.layout_directory.to_string_lossy().as_ref()),
+        "the receipt must re-derive its operation-owned cache path"
+    );
+
+    let expected_receipt = cache.receipt.clone();
+    let expected_path = cache.layout_directory.clone();
+    drop(built);
+    drop(journal);
+    drop(store);
+    std::fs::remove_dir_all(&source).unwrap();
+
+    let reopened = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let replay = execute_recorded_build_plan(
+        &operation,
+        &build_plan,
+        &source,
+        true,
+        Arc::clone(&reopened),
+    )
+    .await
+    .unwrap();
+    let replayed_cache = replay.cache.expect("cache receipt survives reconstruction");
+    assert!(replay.replayed);
+    assert_eq!(replayed_cache.receipt, expected_receipt);
+    assert_eq!(replayed_cache.layout_directory, expected_path);
+}
+
+#[tokio::test]
+async fn content_addressed_cache_tampering_fails_closed_on_replay() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-cache-tamper", 'a');
+    let build_plan = plan("content-addressed");
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let built =
+        execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+            .await
+            .unwrap();
+    let cache_root = built.cache.unwrap().layout_directory;
+    std::fs::write(
+        cache_root.join("blobs/sha256").join("f".repeat(64)),
+        b"unreferenced",
+    )
+    .unwrap();
+
+    let error = inspect_recorded_build_plan(&operation, &build_plan, &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BuildPlanExecutionError::Receipt(BuildReceiptError::CacheInvalid { .. })
+    ));
+}
+
+#[tokio::test]
+async fn content_addressed_cache_revalidates_manifest_config_and_layer_bytes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-cache-blob-tamper", 'a');
+    let build_plan = plan("content-addressed");
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let built =
+        execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+            .await
+            .unwrap();
+    let cache = built.cache.as_ref().unwrap();
+    let blob_root = cache.layout_directory.join("blobs/sha256");
+    let manifest_path = blob_root.join(
+        cache
+            .receipt
+            .descriptor
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap(),
+    );
+    let manifest_bytes = std::fs::read(&manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let config_path = blob_root.join(
+        manifest["config"]["digest"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("sha256:")
+            .unwrap(),
+    );
+    let layer_path = blob_root.join(
+        manifest["layers"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("sha256:")
+            .unwrap(),
+    );
+
+    assert_cache_blob_tampering_is_rejected(&manifest_path, &operation, &build_plan, &store).await;
+    assert_cache_blob_tampering_is_rejected(&config_path, &operation, &build_plan, &store).await;
+    assert_cache_blob_tampering_is_rejected(&layer_path, &operation, &build_plan, &store).await;
+}
+
+#[tokio::test]
 async fn pending_intent_adopts_output_committed_before_terminal_receipt() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source");
@@ -155,13 +331,7 @@ async fn pending_intent_adopts_output_committed_before_terminal_receipt() {
             .unwrap();
     let expected_descriptor = built.output.descriptor.clone();
     let pending = PendingBuildOperation::new(&operation, plan_digest).unwrap();
-    let mut pending_bytes = serde_json::to_vec_pretty(&pending).unwrap();
-    pending_bytes.push(b'\n');
-    std::fs::write(
-        receipts.receipt_path(operation.operation_id()),
-        pending_bytes,
-    )
-    .unwrap();
+    overwrite_record(&receipts.receipt_path(operation.operation_id()), &pending);
     std::fs::remove_dir_all(&source).unwrap();
     drop(receipts);
     drop(store);
@@ -185,7 +355,7 @@ async fn pending_intent_adopts_output_committed_before_terminal_receipt() {
     assert_eq!(recovered.output.descriptor, expected_descriptor);
     let committed =
         std::fs::read_to_string(reopened_receipts.receipt_path(operation.operation_id())).unwrap();
-    assert!(committed.contains(BuildOutputReceipt::SCHEMA));
+    assert!(committed.contains(BuildOutputReceipt::LEGACY_SCHEMA));
     assert!(!committed.contains(PendingBuildOperation::SCHEMA));
 }
 
@@ -197,7 +367,7 @@ async fn supervised_recovery_adopts_the_image_store_commit_gap() {
     write_source(&source);
 
     let operation = identity("cloud-build-supervised-output-gap", 'a');
-    let build_plan = plan("disabled");
+    let build_plan = plan("content-addressed");
     let plan_digest = build_plan.canonical_digest().unwrap();
     let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
     let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
@@ -208,15 +378,13 @@ async fn supervised_recovery_adopts_the_image_store_commit_gap() {
             .await
             .unwrap();
     let expected_descriptor = built.output.descriptor.clone();
-    let workspace = journal
-        .prepare_workspace(operation.operation_id())
-        .await
-        .unwrap();
+    let cache_receipt = built.cache.as_ref().unwrap().receipt.clone();
+    let workspace = journal.workspace_path(operation.operation_id());
+    std::fs::create_dir(&workspace).unwrap();
     std::fs::write(workspace.join("uncommitted"), "partial").unwrap();
-    let active = SupervisedBuildOperation::new(&operation, plan_digest).unwrap();
-    let mut active_bytes = serde_json::to_vec_pretty(&active).unwrap();
-    active_bytes.push(b'\n');
-    std::fs::write(journal.receipt_path(operation.operation_id()), active_bytes).unwrap();
+    let active =
+        SupervisedBuildOperation::new(&operation, plan_digest, build_plan.cache()).unwrap();
+    overwrite_record(&journal.receipt_path(operation.operation_id()), &active);
     std::fs::remove_dir_all(&source).unwrap();
     drop(store);
 
@@ -229,6 +397,7 @@ async fn supervised_recovery_adopts_the_image_store_commit_gap() {
         panic!("committed ImageStore output must win the receipt gap");
     };
     assert_eq!(recovered.output.descriptor, expected_descriptor);
+    assert_eq!(recovered.cache.as_ref().unwrap().receipt, cache_receipt);
     assert!(!journal.workspace_path(operation.operation_id()).exists());
     let committed =
         std::fs::read_to_string(journal.receipt_path(operation.operation_id())).unwrap();
@@ -237,11 +406,105 @@ async fn supervised_recovery_adopts_the_image_store_commit_gap() {
 }
 
 #[tokio::test]
+async fn current_content_addressed_operation_rejects_a_missing_cache_commit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-cache-missing-gap", 'a');
+    let build_plan = plan("content-addressed");
+    let plan_digest = build_plan.canonical_digest().unwrap();
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    let built =
+        execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+            .await
+            .unwrap();
+    std::fs::remove_dir_all(built.cache.unwrap().layout_directory).unwrap();
+    let active =
+        SupervisedBuildOperation::new(&operation, plan_digest, build_plan.cache()).unwrap();
+    overwrite_record(&journal.receipt_path(operation.operation_id()), &active);
+
+    let error = inspect_recorded_build_status(&operation, &build_plan, &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BuildPlanExecutionError::Receipt(BuildReceiptError::CacheInvalid { .. })
+    ));
+}
+
+#[tokio::test]
+async fn current_cache_disabled_operation_rejects_an_unexpected_cache_commit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-disabled-cache-gap", 'a');
+    let build_plan = plan("disabled");
+    let plan_digest = build_plan.canonical_digest().unwrap();
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+        .await
+        .unwrap();
+    std::fs::create_dir(journal.cache_export_path(operation.operation_id())).unwrap();
+    let active =
+        SupervisedBuildOperation::new(&operation, plan_digest, build_plan.cache()).unwrap();
+    overwrite_record(&journal.receipt_path(operation.operation_id()), &active);
+
+    let error = inspect_recorded_build_status(&operation, &build_plan, &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BuildPlanExecutionError::Receipt(BuildReceiptError::CacheInvalid { .. })
+    ));
+}
+
+#[tokio::test]
+async fn current_content_addressed_receipt_requires_cache_evidence() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-cache-policy-receipt", 'a');
+    let build_plan = plan("content-addressed");
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+        .await
+        .unwrap();
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    let receipt_path = journal.receipt_path(operation.operation_id());
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt.as_object_mut().unwrap().remove("cache");
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let error = inspect_recorded_build_plan(&operation, &build_plan, &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BuildPlanExecutionError::Receipt(BuildReceiptError::InvalidReceipt { .. })
+    ));
+}
+
+#[tokio::test]
 async fn live_operation_inspection_is_nonblocking_and_cancellation_is_one_state_transition() {
     let temporary = tempfile::tempdir().unwrap();
     let store_root = temporary.path().join("images");
     let operation = identity("cloud-build-live-supervision", 'a');
-    let build_plan = plan("disabled");
+    let build_plan = plan("content-addressed");
     let plan_digest = build_plan.canonical_digest().unwrap();
     let store = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
     let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
@@ -259,7 +522,10 @@ async fn live_operation_inspection_is_nonblocking_and_cancellation_is_one_state_
         .unwrap();
     std::fs::write(workspace.join("partial"), "uncommitted").unwrap();
     locked
-        .write_supervised(SupervisedBuildOperation::new(&operation, plan_digest.clone()).unwrap())
+        .write_supervised(
+            SupervisedBuildOperation::new(&operation, plan_digest.clone(), build_plan.cache())
+                .unwrap(),
+        )
         .await
         .unwrap();
     drop(locked);
@@ -319,8 +585,12 @@ async fn abandoned_operation_reclaims_workspace_and_becomes_failed() {
     let locked = journal.lock(operation.operation_id()).await.unwrap();
     locked
         .write_supervised(
-            SupervisedBuildOperation::new(&operation, build_plan.canonical_digest().unwrap())
-                .unwrap(),
+            SupervisedBuildOperation::new(
+                &operation,
+                build_plan.canonical_digest().unwrap(),
+                build_plan.cache(),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -348,6 +618,36 @@ async fn operation_workspace_rejects_a_symlink_without_touching_its_target() {
         .await
         .unwrap();
     std::os::unix::fs::symlink(&outside, journal.workspace_path(operation.operation_id())).unwrap();
+
+    let error = journal
+        .prepare_workspace(operation.operation_id())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, BuildReceiptError::UnsafeStore { .. }));
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep")).unwrap(),
+        "keep"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn operation_cache_export_rejects_a_symlink_without_touching_its_target() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store_root = temporary.path().join("images");
+    let outside = temporary.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), "keep").unwrap();
+    let operation = identity("cloud-build-cache-symlink", 'a');
+    let store = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(
+        &outside,
+        journal.cache_export_path(operation.operation_id()),
+    )
+    .unwrap();
 
     let error = journal
         .prepare_workspace(operation.operation_id())
@@ -413,7 +713,7 @@ async fn concurrent_retries_publish_once_and_replay_once() {
     write_source(&source);
 
     let operation = identity("cloud-build-run-concurrent", 'a');
-    let build_plan = plan("disabled");
+    let build_plan = plan("content-addressed");
     let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
     let first =
         execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store));
@@ -426,6 +726,14 @@ async fn concurrent_retries_publish_once_and_replay_once() {
     assert_ne!(first.replayed, second.replayed);
     assert_eq!(first.receipt, second.receipt);
     assert_eq!(first.output.descriptor, second.output.descriptor);
+    assert_eq!(
+        first.cache.as_ref().map(|cache| &cache.receipt),
+        second.cache.as_ref().map(|cache| &cache.receipt)
+    );
+    assert_eq!(
+        first.cache.as_ref().map(|cache| &cache.layout_directory),
+        second.cache.as_ref().map(|cache| &cache.layout_directory)
+    );
     assert_eq!(store.list().await.len(), 1);
 }
 
@@ -620,7 +928,7 @@ async fn recorded_build_cleanup_removes_receipt_and_internal_image_idempotently(
     write_source(&source);
 
     let operation = identity("cloud-build-run-4", 'a');
-    let build_plan = plan("disabled");
+    let build_plan = plan("content-addressed");
     let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
     let receipts = BuildOperationJournal::for_image_store(&store, operation.operation_id())
         .await
@@ -630,14 +938,17 @@ async fn recorded_build_cleanup_removes_receipt_and_internal_image_idempotently(
             .await
             .unwrap();
     let reference = built.receipt.output.reference.clone();
+    let cache_path = built.cache.unwrap().layout_directory;
     assert!(receipts.receipt_path(operation.operation_id()).is_file());
     assert!(store.get(&reference).await.is_some());
+    assert!(cache_path.is_dir());
 
     assert!(remove_recorded_build_plan(&operation, &build_plan, &store)
         .await
         .unwrap());
     assert!(!receipts.receipt_path(operation.operation_id()).exists());
     assert!(store.get(&reference).await.is_none());
+    assert!(!cache_path.exists());
 
     assert!(!remove_recorded_build_plan(&operation, &build_plan, &store)
         .await

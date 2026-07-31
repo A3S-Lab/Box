@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::cache::{
+    inspect_build_cache_export, BuildCacheExportIdentity, BuildCacheReceipt, RecordedBuildCache,
+};
 use super::output::inspect_stored_build_output;
-use super::{BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
+use super::{BuildCachePolicy, BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use crate::oci::image::canonical_sha256_digest_hex;
 use crate::oci::ImageStore;
 
@@ -161,6 +164,8 @@ impl PendingBuildOperation {
             && self.source_digest == receipt.source_digest
             && self.plan_digest == receipt.plan_digest
             && self.output_reference == receipt.output.reference
+            && receipt.schema == BuildOutputReceipt::LEGACY_SCHEMA
+            && receipt.cache.is_none()
     }
 }
 
@@ -212,6 +217,8 @@ pub(super) struct SupervisedBuildOperation {
     source_digest: String,
     plan_digest: String,
     output_reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_policy: Option<BuildCachePolicy>,
     pub(super) phase: PersistedBuildPhase,
     owner: BuildProcessIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,11 +230,13 @@ pub(super) struct SupervisedBuildOperation {
 }
 
 impl SupervisedBuildOperation {
-    pub(super) const SCHEMA: &'static str = "a3s.box.build-operation.v1";
+    pub(super) const SCHEMA: &'static str = "a3s.box.build-operation.v2";
+    const LEGACY_SCHEMA: &'static str = "a3s.box.build-operation.v1";
 
     pub(super) fn new(
         identity: &BuildOperationIdentity,
         plan_digest: String,
+        cache_policy: BuildCachePolicy,
     ) -> Result<Self, BuildReceiptError> {
         let now = Utc::now();
         let operation = Self {
@@ -236,6 +245,7 @@ impl SupervisedBuildOperation {
             source_digest: identity.source_digest.clone(),
             plan_digest,
             output_reference: identity.output_reference.clone(),
+            cache_policy: Some(cache_policy),
             phase: PersistedBuildPhase::Running,
             owner: BuildProcessIdentity::current(),
             run_process: None,
@@ -244,7 +254,7 @@ impl SupervisedBuildOperation {
             updated_at: now,
         };
         operation.validate()?;
-        operation.require_identity(identity, &operation.plan_digest)?;
+        operation.require_identity(identity, &operation.plan_digest, cache_policy)?;
         Ok(operation)
     }
 
@@ -252,13 +262,16 @@ impl SupervisedBuildOperation {
         pending: &PendingBuildOperation,
         identity: &BuildOperationIdentity,
         plan_digest: &str,
+        cache_policy: BuildCachePolicy,
     ) -> Result<Self, BuildReceiptError> {
         pending.require_identity(identity, plan_digest)?;
-        Self::new(identity, plan_digest.to_string())
+        Self::new(identity, plan_digest.to_string(), cache_policy)
     }
 
     fn validate(&self) -> Result<(), BuildReceiptError> {
-        if self.schema != Self::SCHEMA
+        let schema_is_valid = (self.schema == Self::SCHEMA && self.cache_policy.is_some())
+            || (self.schema == Self::LEGACY_SCHEMA && self.cache_policy.is_none());
+        if !schema_is_valid
             || !valid_operation_id(&self.operation_id)
             || canonical_sha256_digest_hex(&self.source_digest).is_err()
             || canonical_sha256_digest_hex(&self.plan_digest).is_err()
@@ -300,12 +313,16 @@ impl SupervisedBuildOperation {
         &self,
         identity: &BuildOperationIdentity,
         plan_digest: &str,
+        cache_policy: BuildCachePolicy,
     ) -> Result<(), BuildReceiptError> {
         self.validate()?;
         if self.operation_id != identity.operation_id
             || self.source_digest != identity.source_digest
             || self.plan_digest != plan_digest
             || self.output_reference != identity.output_reference
+            || self
+                .cache_policy
+                .is_some_and(|persisted| persisted != cache_policy)
         {
             return Err(BuildReceiptError::Conflict {
                 operation_id: identity.operation_id.to_string(),
@@ -313,6 +330,10 @@ impl SupervisedBuildOperation {
             });
         }
         Ok(())
+    }
+
+    pub(super) const fn cache_policy(&self) -> Option<BuildCachePolicy> {
+        self.cache_policy
     }
 
     pub(super) fn request_cancellation(&mut self) -> bool {
@@ -367,6 +388,15 @@ impl SupervisedBuildOperation {
             && self.source_digest == receipt.source_digest
             && self.plan_digest == receipt.plan_digest
             && self.output_reference == receipt.output.reference
+            && match self.cache_policy {
+                Some(policy) => {
+                    receipt.schema == BuildOutputReceipt::SCHEMA
+                        && receipt.matches_cache_policy(policy)
+                }
+                None => {
+                    receipt.schema == BuildOutputReceipt::LEGACY_SCHEMA && receipt.cache.is_none()
+                }
+            }
     }
 }
 
@@ -376,7 +406,7 @@ impl SupervisedBuildOperation {
 pub(super) enum PersistedBuildOperation {
     Supervised(SupervisedBuildOperation),
     Pending(PendingBuildOperation),
-    Succeeded(BuildOutputReceipt),
+    Succeeded(Box<BuildOutputReceipt>),
 }
 
 impl PersistedBuildOperation {
@@ -431,16 +461,22 @@ pub struct BuildOutputReceipt {
     pub plan_digest: String,
     /// Path-independent native OCI output evidence.
     pub output: BuildReceiptOutput,
+    /// Portable native cache evidence, present for new content-addressed plans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<BuildCacheReceipt>,
 }
 
 impl BuildOutputReceipt {
     /// Current closed receipt schema.
-    pub const SCHEMA: &'static str = "a3s.box.build-output-receipt.v1";
+    pub const SCHEMA: &'static str = "a3s.box.build-output-receipt.v2";
+    const LEGACY_SCHEMA: &'static str = "a3s.box.build-output-receipt.v1";
 
     pub(super) fn from_result(
         identity: &BuildOperationIdentity,
         plan_digest: String,
         result: &BuildResult,
+        cache_policy: BuildCachePolicy,
+        cache: Option<&RecordedBuildCache>,
     ) -> Result<Self, BuildReceiptError> {
         let layer_count =
             u64::try_from(result.layer_count).map_err(|_| BuildReceiptError::OutputInvalid {
@@ -466,18 +502,42 @@ impl BuildOutputReceipt {
                 blob_count,
                 blob_inventory_digest: result.blob_inventory_digest.clone(),
             },
+            cache: cache.map(|cache| cache.receipt.clone()),
         };
         receipt.validate()?;
-        receipt.require_identity(identity, &receipt.plan_digest)?;
+        receipt.require_identity(identity, &receipt.plan_digest, cache_policy)?;
+        Ok(receipt)
+    }
+
+    pub(super) fn from_legacy_result(
+        identity: &BuildOperationIdentity,
+        plan_digest: String,
+        result: &BuildResult,
+    ) -> Result<Self, BuildReceiptError> {
+        let mut receipt = Self::from_result(
+            identity,
+            plan_digest,
+            result,
+            BuildCachePolicy::Disabled,
+            None,
+        )?;
+        receipt.schema = Self::LEGACY_SCHEMA.to_string();
+        receipt.validate()?;
         Ok(receipt)
     }
 
     fn validate(&self) -> Result<(), BuildReceiptError> {
         let operation_id = self.operation_id.to_string();
-        if self.schema != Self::SCHEMA {
+        if self.schema != Self::SCHEMA && self.schema != Self::LEGACY_SCHEMA {
             return Err(BuildReceiptError::InvalidReceipt {
                 operation_id,
                 message: format!("unsupported schema {:?}", self.schema),
+            });
+        }
+        if self.schema == Self::LEGACY_SCHEMA && self.cache.is_some() {
+            return Err(BuildReceiptError::InvalidReceipt {
+                operation_id,
+                message: "legacy output receipt cannot contain cache evidence".to_string(),
             });
         }
         if !valid_operation_id(&self.operation_id) {
@@ -530,6 +590,23 @@ impl BuildOutputReceipt {
                 message: "output platform is outside the native build contract".to_string(),
             });
         }
+        if let Some(cache) = &self.cache {
+            cache
+                .validate()
+                .map_err(|error| BuildReceiptError::CacheInvalid {
+                    operation_id: self.operation_id.to_string(),
+                    message: error.to_string(),
+                })?;
+            if cache.source_digest != self.source_digest
+                || cache.plan_digest != self.plan_digest
+                || cache.platform != self.output.platform
+            {
+                return Err(BuildReceiptError::InvalidReceipt {
+                    operation_id: self.operation_id.to_string(),
+                    message: "cache and image receipts have different immutable intent".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -537,6 +614,7 @@ impl BuildOutputReceipt {
         &self,
         identity: &BuildOperationIdentity,
         plan_digest: &str,
+        cache_policy: BuildCachePolicy,
     ) -> Result<(), BuildReceiptError> {
         self.validate()?;
         if self.operation_id != identity.operation_id
@@ -549,7 +627,20 @@ impl BuildOutputReceipt {
                 message: "the persisted source, plan, or output identity differs".to_string(),
             });
         }
+        if self.schema == Self::SCHEMA && !self.matches_cache_policy(cache_policy) {
+            return Err(BuildReceiptError::InvalidReceipt {
+                operation_id: identity.operation_id.to_string(),
+                message: "cache evidence differs from the admitted build-plan policy".to_string(),
+            });
+        }
         Ok(())
+    }
+
+    fn matches_cache_policy(&self, cache_policy: BuildCachePolicy) -> bool {
+        match cache_policy {
+            BuildCachePolicy::ContentAddressed => self.cache.is_some(),
+            BuildCachePolicy::Disabled => self.cache.is_none(),
+        }
     }
 
     pub(super) async fn resolve(
@@ -576,6 +667,39 @@ impl BuildOutputReceipt {
             });
         }
         Ok(actual)
+    }
+
+    pub(super) async fn resolve_cache(
+        &self,
+        layout_directory: &std::path::Path,
+    ) -> Result<Option<RecordedBuildCache>, BuildReceiptError> {
+        let Some(expected) = self.cache.clone() else {
+            return Ok(None);
+        };
+        let identity = BuildCacheExportIdentity::new(
+            self.source_digest.clone(),
+            self.plan_digest.clone(),
+            expected.platform.clone(),
+        )
+        .map_err(|error| BuildReceiptError::CacheInvalid {
+            operation_id: self.operation_id.to_string(),
+            message: error.to_string(),
+        })?;
+        let root = layout_directory.to_path_buf();
+        let operation = self.operation_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            inspect_build_cache_export(&root, &identity, Some(&expected))
+        })
+        .await
+        .map_err(|error| BuildReceiptError::Task {
+            operation_id: self.operation_id.to_string(),
+            message: format!("cache receipt validation task failed: {error}"),
+        })?
+        .map(Some)
+        .map_err(|error| BuildReceiptError::CacheInvalid {
+            operation_id: operation,
+            message: error.to_string(),
+        })
     }
 }
 
@@ -619,6 +743,8 @@ pub struct RecordedBuildResult {
     pub receipt: BuildOutputReceipt,
     /// Revalidated store-owned OCI output.
     pub output: BuildResult,
+    /// Revalidated operation-owned portable cache artifact.
+    pub cache: Option<RecordedBuildCache>,
     /// Whether this call replayed an existing terminal receipt.
     pub replayed: bool,
 }
@@ -699,6 +825,12 @@ pub enum BuildReceiptError {
     /// Persisted output no longer proves the receipt.
     #[error("Box build output is invalid for {operation_id}: {message}")]
     OutputInvalid {
+        operation_id: String,
+        message: String,
+    },
+    /// Persisted cache evidence or its operation-owned OCI artifact is invalid.
+    #[error("Box build cache is invalid for {operation_id}: {message}")]
+    CacheInvalid {
         operation_id: String,
         message: String,
     },

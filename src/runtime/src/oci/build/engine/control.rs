@@ -10,6 +10,8 @@ use std::time::Duration;
 use a3s_box_core::error::{BoxError, Result};
 use async_trait::async_trait;
 
+use crate::oci::build::cache::RecordedBuildCache;
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -19,6 +21,15 @@ pub(in crate::oci::build) trait BuildExecutionObserver: Send + Sync {
     async fn cancellation_requested(&self) -> Result<bool>;
 
     async fn acquire_image_commit_permit(&self) -> Result<BuildImageCommitPermit>;
+
+    async fn publish_cache_export(
+        &self,
+        _staged: RecordedBuildCache,
+    ) -> Result<RecordedBuildCache> {
+        Err(BoxError::BuildError(
+            "recorded build cache export has no journal publisher".to_string(),
+        ))
+    }
 
     async fn run_process_started(&self, pid: u32, start_time: Option<u64>) -> Result<()>;
 
@@ -65,6 +76,13 @@ impl BuildExecutionControl {
 
     pub(super) async fn acquire_image_commit_permit(&self) -> Result<BuildImageCommitPermit> {
         self.observer.acquire_image_commit_permit().await
+    }
+
+    pub(super) async fn publish_cache_export(
+        &self,
+        staged: RecordedBuildCache,
+    ) -> Result<RecordedBuildCache> {
+        self.observer.publish_cache_export(staged).await
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

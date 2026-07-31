@@ -24,10 +24,15 @@ pub(crate) mod dockerignore;
 pub mod engine;
 mod execution;
 pub mod layer;
+mod layout;
 mod output;
 pub mod plan;
 mod receipt;
 
+pub use cache::{
+    BuildCacheReceipt, RecordedBuildCache, BUILD_CACHE_ARTIFACT_MEDIA_TYPE,
+    BUILD_CACHE_CONFIG_MEDIA_TYPE,
+};
 pub use dockerfile::{Dockerfile, Instruction};
 pub use engine::{build, BuildConfig, BuildNetworkPolicy, BuildRunPoolConfig};
 pub use execution::{

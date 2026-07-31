@@ -4,27 +4,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::error::{BoxError, Result as BoxResult};
-use async_trait::async_trait;
+use a3s_box_core::error::BoxError;
 use thiserror::Error;
 
-use super::engine::{
-    build_supervised, BuildExecutionControl, BuildExecutionObserver, BuildImageCommitPermit,
-};
+use super::cache::{inspect_build_cache_export, BuildCacheExportIdentity, RecordedBuildCache};
+use super::engine::{build_supervised, BuildExecutionControl};
 use super::receipt::{
-    inspect_stored_output, BuildExecutionLease, BuildOperationJournal, BuildProcessIdentity,
-    LockedBuildOperation, PersistedBuildOperation, PersistedBuildPhase, SupervisedBuildOperation,
+    inspect_stored_output, BuildExecutionLease, BuildOperationJournal, LockedBuildOperation,
+    PersistedBuildOperation, PersistedBuildPhase, SupervisedBuildOperation,
 };
 use super::{
-    build, BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCancellationOutcome,
-    BuildOperationIdentity, BuildOutputReceipt, BuildReceiptError, BuildResult,
-    RecordedBuildResult, RecordedBuildStatus,
+    build, BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy,
+    BuildCancellationOutcome, BuildOperationIdentity, BuildOutputReceipt, BuildReceiptError,
+    BuildResult, RecordedBuildResult, RecordedBuildStatus,
 };
 use crate::oci::ImageStore;
 
+mod supervision;
+
+use supervision::{fence_run_process, JournalBuildObserver};
+
 const EXECUTION_POLL_INTERVAL: Duration = Duration::from_millis(25);
-#[cfg(target_os = "linux")]
-const RUN_PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Successful native output bound to the canonical admitted build plan.
 #[derive(Debug)]
@@ -33,6 +33,8 @@ pub(super) struct PlannedBuildResult {
     pub plan_digest: String,
     /// Durable typed OCI output owned by the Box image store.
     pub output: BuildResult,
+    /// Portable native cache artifact committed with the image output.
+    pub cache: Option<RecordedBuildCache>,
 }
 
 /// Stable failure boundary for plan admission, compilation, and execution.
@@ -79,10 +81,12 @@ pub(super) async fn execute_build_plan(
     Ok(PlannedBuildResult {
         plan_digest,
         output,
+        cache: None,
     })
 }
 
 async fn execute_supervised_build_plan(
+    identity: &BuildOperationIdentity,
     plan: &BoxBuildPlan,
     source_root: &Path,
     options: BoxBuildOptions,
@@ -92,10 +96,20 @@ async fn execute_supervised_build_plan(
 ) -> Result<PlannedBuildResult, BuildPlanExecutionError> {
     let plan_digest = plan.canonical_digest()?;
     let config = plan.compile(source_root, options)?;
-    let output = build_supervised(config, store, workspace, control).await?;
+    let cache_identity = (plan.cache() == BuildCachePolicy::ContentAddressed)
+        .then(|| {
+            BuildCacheExportIdentity::new(
+                identity.source_digest(),
+                plan_digest.clone(),
+                plan.platform().clone(),
+            )
+        })
+        .transpose()?;
+    let result = build_supervised(config, store, workspace, control, cache_identity).await?;
     Ok(PlannedBuildResult {
         plan_digest,
-        output,
+        output: result.output,
+        cache: result.cache,
     })
 }
 
@@ -179,21 +193,27 @@ pub async fn inspect_recorded_build_status(
     store: &ImageStore,
 ) -> Result<Option<RecordedBuildStatus>, BuildPlanExecutionError> {
     let plan_digest = plan.canonical_digest()?;
+    let cache_policy = plan.cache();
     let journal = BuildOperationJournal::for_image_store(store, identity.operation_id()).await?;
     let locked = journal.lock(identity.operation_id()).await?;
     let Some(record) = locked.read().await? else {
         return Ok(None);
     };
     match record {
-        PersistedBuildOperation::Succeeded(receipt) => {
-            recover_recorded_build(identity, &plan_digest, receipt, store)
-                .await
-                .map(Box::new)
-                .map(RecordedBuildStatus::Succeeded)
-                .map(Some)
-        }
+        PersistedBuildOperation::Succeeded(receipt) => recover_recorded_build(
+            identity,
+            &plan_digest,
+            cache_policy,
+            *receipt,
+            store,
+            &journal,
+        )
+        .await
+        .map(Box::new)
+        .map(RecordedBuildStatus::Succeeded)
+        .map(Some),
         PersistedBuildOperation::Supervised(operation) => {
-            operation.require_identity(identity, &plan_digest)?;
+            operation.require_identity(identity, &plan_digest, cache_policy)?;
             match operation.phase {
                 PersistedBuildPhase::Cancelled | PersistedBuildPhase::Failed => {
                     Ok(Some(status_from_terminal_operation(&operation)?))
@@ -220,7 +240,8 @@ pub async fn inspect_recorded_build_status(
         PersistedBuildOperation::Pending(pending) => {
             pending.require_identity(identity, &plan_digest)?;
             if let Some(result) =
-                adopt_committed_output(identity, &plan_digest, store, &journal, &locked).await?
+                adopt_committed_output(identity, &plan_digest, None, store, &journal, &locked)
+                    .await?
             {
                 return Ok(Some(RecordedBuildStatus::Succeeded(Box::new(result))));
             }
@@ -228,8 +249,15 @@ pub async fn inspect_recorded_build_status(
                 return Ok(Some(RecordedBuildStatus::Running));
             };
             journal.cleanup_workspace(identity.operation_id()).await?;
-            let mut operation =
-                SupervisedBuildOperation::from_pending(&pending, identity, &plan_digest)?;
+            journal
+                .cleanup_cache_export(identity.operation_id())
+                .await?;
+            let mut operation = SupervisedBuildOperation::from_pending(
+                &pending,
+                identity,
+                &plan_digest,
+                cache_policy,
+            )?;
             operation.finish(
                 PersistedBuildPhase::Failed,
                 "legacy build intent has no live execution owner or committed output".to_string(),
@@ -270,6 +298,7 @@ pub async fn cancel_recorded_build_plan(
     store: &ImageStore,
 ) -> Result<BuildCancellationOutcome, BuildPlanExecutionError> {
     let plan_digest = plan.canonical_digest()?;
+    let cache_policy = plan.cache();
     let journal = BuildOperationJournal::for_image_store(store, identity.operation_id()).await?;
     let locked = journal.lock(identity.operation_id()).await?;
     let Some(record) = locked.read().await? else {
@@ -277,12 +306,12 @@ pub async fn cancel_recorded_build_plan(
     };
     match record {
         PersistedBuildOperation::Succeeded(receipt) => {
-            receipt.require_identity(identity, &plan_digest)?;
+            receipt.require_identity(identity, &plan_digest, cache_policy)?;
             Ok(BuildCancellationOutcome::AlreadyTerminal)
         }
         PersistedBuildOperation::Pending(pending) => {
             pending.require_identity(identity, &plan_digest)?;
-            if adopt_committed_output(identity, &plan_digest, store, &journal, &locked)
+            if adopt_committed_output(identity, &plan_digest, None, store, &journal, &locked)
                 .await?
                 .is_some()
             {
@@ -297,8 +326,15 @@ pub async fn cancel_recorded_build_plan(
                 .into());
             };
             journal.cleanup_workspace(identity.operation_id()).await?;
-            let mut operation =
-                SupervisedBuildOperation::from_pending(&pending, identity, &plan_digest)?;
+            journal
+                .cleanup_cache_export(identity.operation_id())
+                .await?;
+            let mut operation = SupervisedBuildOperation::from_pending(
+                &pending,
+                identity,
+                &plan_digest,
+                cache_policy,
+            )?;
             operation.request_cancellation();
             operation.finish(
                 PersistedBuildPhase::Cancelled,
@@ -308,7 +344,7 @@ pub async fn cancel_recorded_build_plan(
             Ok(BuildCancellationOutcome::Requested)
         }
         PersistedBuildOperation::Supervised(mut operation) => {
-            operation.require_identity(identity, &plan_digest)?;
+            operation.require_identity(identity, &plan_digest, cache_policy)?;
             match operation.phase {
                 PersistedBuildPhase::Cancelled => {
                     return Ok(BuildCancellationOutcome::AlreadyCancelled);
@@ -318,9 +354,16 @@ pub async fn cancel_recorded_build_plan(
                 }
                 PersistedBuildPhase::Running | PersistedBuildPhase::Cancelling => {}
             }
-            if adopt_committed_output(identity, &plan_digest, store, &journal, &locked)
-                .await?
-                .is_some()
+            if adopt_committed_output(
+                identity,
+                &plan_digest,
+                operation.cache_policy(),
+                store,
+                &journal,
+                &locked,
+            )
+            .await?
+            .is_some()
             {
                 return Ok(BuildCancellationOutcome::AlreadyTerminal);
             }
@@ -331,6 +374,9 @@ pub async fn cancel_recorded_build_plan(
             if let Some(lease) = journal.try_execution_lease(identity.operation_id()).await? {
                 fence_run_process(run_process, identity.operation_id()).await?;
                 journal.cleanup_workspace(identity.operation_id()).await?;
+                journal
+                    .cleanup_cache_export(identity.operation_id())
+                    .await?;
                 operation.finish(
                     PersistedBuildPhase::Cancelled,
                     "cancelled while recovering an abandoned native execution".to_string(),
@@ -365,6 +411,7 @@ pub async fn remove_recorded_build_plan(
     store: &ImageStore,
 ) -> Result<bool, BuildPlanExecutionError> {
     let plan_digest = plan.canonical_digest()?;
+    let cache_policy = plan.cache();
     let journal = BuildOperationJournal::for_image_store(store, identity.operation_id()).await?;
     let locked = journal.lock(identity.operation_id()).await?;
     let Some(record) = locked.read().await? else {
@@ -376,14 +423,15 @@ pub async fn remove_recorded_build_plan(
             (identity.output_reference().to_string(), None)
         }
         PersistedBuildOperation::Succeeded(receipt) => {
-            receipt.require_identity(identity, &plan_digest)?;
+            let receipt = *receipt;
+            receipt.require_identity(identity, &plan_digest, cache_policy)?;
             (
                 receipt.output.reference,
                 Some(receipt.output.descriptor.digest),
             )
         }
         PersistedBuildOperation::Supervised(operation) => {
-            operation.require_identity(identity, &plan_digest)?;
+            operation.require_identity(identity, &plan_digest, cache_policy)?;
             if matches!(
                 operation.phase,
                 PersistedBuildPhase::Running | PersistedBuildPhase::Cancelling
@@ -408,6 +456,9 @@ pub async fn remove_recorded_build_plan(
         store.remove(&reference).await?;
     }
     journal.cleanup_workspace(identity.operation_id()).await?;
+    journal
+        .cleanup_cache_export(identity.operation_id())
+        .await?;
     locked.delete().await?;
     Ok(true)
 }
@@ -425,20 +476,29 @@ async fn start_recorded_build_plan_internal(
     store: Arc<ImageStore>,
 ) -> Result<StartOutcome, BuildPlanExecutionError> {
     let plan_digest = plan.canonical_digest()?;
+    let cache_policy = plan.cache();
     let journal = BuildOperationJournal::for_image_store(&store, identity.operation_id()).await?;
     let locked = journal.lock(identity.operation_id()).await?;
     let record = locked.read().await?;
 
     match record {
         Some(PersistedBuildOperation::Succeeded(receipt)) => {
-            let result = recover_recorded_build(identity, &plan_digest, receipt, &store).await?;
+            let result = recover_recorded_build(
+                identity,
+                &plan_digest,
+                cache_policy,
+                *receipt,
+                &store,
+                &journal,
+            )
+            .await?;
             return Ok(StartOutcome {
                 status: RecordedBuildStatus::Succeeded(Box::new(result)),
                 started_here: false,
             });
         }
         Some(PersistedBuildOperation::Supervised(operation)) => {
-            operation.require_identity(identity, &plan_digest)?;
+            operation.require_identity(identity, &plan_digest, cache_policy)?;
             if matches!(
                 operation.phase,
                 PersistedBuildPhase::Cancelled | PersistedBuildPhase::Failed
@@ -472,7 +532,8 @@ async fn start_recorded_build_plan_internal(
         Some(PersistedBuildOperation::Pending(pending)) => {
             pending.require_identity(identity, &plan_digest)?;
             if let Some(result) =
-                adopt_committed_output(identity, &plan_digest, &store, &journal, &locked).await?
+                adopt_committed_output(identity, &plan_digest, None, &store, &journal, &locked)
+                    .await?
             {
                 return Ok(StartOutcome {
                     status: RecordedBuildStatus::Succeeded(Box::new(result)),
@@ -487,8 +548,12 @@ async fn start_recorded_build_plan_internal(
                     message: "pending intent has an unknown live execution owner".to_string(),
                 })?;
             let workspace = journal.prepare_workspace(identity.operation_id()).await?;
-            let operation =
-                SupervisedBuildOperation::from_pending(&pending, identity, &plan_digest)?;
+            let operation = SupervisedBuildOperation::from_pending(
+                &pending,
+                identity,
+                &plan_digest,
+                cache_policy,
+            )?;
             locked.write_supervised(operation).await?;
             drop(locked);
             spawn_supervised_build(SupervisedBuildTask {
@@ -529,7 +594,7 @@ async fn start_recorded_build_plan_internal(
             message: "execution lease exists without a persisted operation record".to_string(),
         })?;
     let workspace = journal.prepare_workspace(identity.operation_id()).await?;
-    let operation = SupervisedBuildOperation::new(identity, plan_digest.clone())?;
+    let operation = SupervisedBuildOperation::new(identity, plan_digest.clone(), cache_policy)?;
     locked.write_supervised(operation).await?;
     drop(locked);
     spawn_supervised_build(SupervisedBuildTask {
@@ -590,9 +655,11 @@ async fn run_supervised_build(task: SupervisedBuildTask) -> Result<(), BuildPlan
         journal: journal.clone(),
         identity: identity.clone(),
         plan_digest: plan_digest.clone(),
+        cache_policy: plan.cache(),
     });
     let control = BuildExecutionControl::new(observer);
     let result = execute_supervised_build_plan(
+        &identity,
         &plan,
         &source_root,
         BoxBuildOptions {
@@ -607,20 +674,34 @@ async fn run_supervised_build(task: SupervisedBuildTask) -> Result<(), BuildPlan
 
     if let Ok(planned) = result {
         journal.cleanup_workspace(identity.operation_id()).await?;
-        let receipt =
-            BuildOutputReceipt::from_result(&identity, planned.plan_digest, &planned.output)?;
+        let receipt = BuildOutputReceipt::from_result(
+            &identity,
+            planned.plan_digest,
+            &planned.output,
+            plan.cache(),
+            planned.cache.as_ref(),
+        )?;
         let locked = journal.lock(identity.operation_id()).await?;
         locked.write_succeeded(receipt).await?;
         return Ok(());
     }
 
     let error = result.unwrap_err();
-    finish_failed_execution(&identity, &plan_digest, &store, &journal, error.to_string()).await
+    finish_failed_execution(
+        &identity,
+        &plan_digest,
+        plan.cache(),
+        &store,
+        &journal,
+        error.to_string(),
+    )
+    .await
 }
 
 async fn finish_failed_execution(
     identity: &BuildOperationIdentity,
     plan_digest: &str,
+    cache_policy: BuildCachePolicy,
     store: &ImageStore,
     journal: &BuildOperationJournal,
     message: String,
@@ -636,8 +717,20 @@ async fn finish_failed_execution(
     if matches!(record, PersistedBuildOperation::Succeeded(_)) {
         return Ok(());
     }
-    if let Some(result) =
-        adopt_committed_output(identity, plan_digest, store, journal, &locked).await?
+    let persisted_cache_policy = match &record {
+        PersistedBuildOperation::Supervised(operation) => operation.cache_policy(),
+        PersistedBuildOperation::Pending(_) => None,
+        PersistedBuildOperation::Succeeded(_) => unreachable!(),
+    };
+    if let Some(result) = adopt_committed_output(
+        identity,
+        plan_digest,
+        persisted_cache_policy,
+        store,
+        journal,
+        &locked,
+    )
+    .await?
     {
         drop(result);
         return Ok(());
@@ -645,13 +738,16 @@ async fn finish_failed_execution(
     let mut operation = match record {
         PersistedBuildOperation::Supervised(operation) => operation,
         PersistedBuildOperation::Pending(pending) => {
-            SupervisedBuildOperation::from_pending(&pending, identity, plan_digest)?
+            SupervisedBuildOperation::from_pending(&pending, identity, plan_digest, cache_policy)?
         }
         PersistedBuildOperation::Succeeded(_) => unreachable!(),
     };
-    operation.require_identity(identity, plan_digest)?;
+    operation.require_identity(identity, plan_digest, cache_policy)?;
     fence_run_process(operation.run_process, identity.operation_id()).await?;
     journal.cleanup_workspace(identity.operation_id()).await?;
+    journal
+        .cleanup_cache_export(identity.operation_id())
+        .await?;
     let phase = if operation.phase == PersistedBuildPhase::Cancelling {
         PersistedBuildPhase::Cancelled
     } else {
@@ -671,13 +767,23 @@ async fn recover_stale_operation(
     locked: &LockedBuildOperation,
     _lease: BuildExecutionLease,
 ) -> Result<RecordedBuildStatus, BuildPlanExecutionError> {
-    if let Some(result) =
-        adopt_committed_output(identity, plan_digest, store, journal, locked).await?
+    if let Some(result) = adopt_committed_output(
+        identity,
+        plan_digest,
+        operation.cache_policy(),
+        store,
+        journal,
+        locked,
+    )
+    .await?
     {
         return Ok(RecordedBuildStatus::Succeeded(Box::new(result)));
     }
     fence_run_process(operation.run_process, identity.operation_id()).await?;
     journal.cleanup_workspace(identity.operation_id()).await?;
+    journal
+        .cleanup_cache_export(identity.operation_id())
+        .await?;
     let (phase, message) = if operation.phase == PersistedBuildPhase::Cancelling {
         (
             PersistedBuildPhase::Cancelled,
@@ -697,6 +803,7 @@ async fn recover_stale_operation(
 async fn adopt_committed_output(
     identity: &BuildOperationIdentity,
     plan_digest: &str,
+    cache_policy: Option<BuildCachePolicy>,
     store: &ImageStore,
     journal: &BuildOperationJournal,
     locked: &LockedBuildOperation,
@@ -707,13 +814,94 @@ async fn adopt_committed_output(
         return Ok(None);
     };
     journal.cleanup_workspace(identity.operation_id()).await?;
-    let receipt = BuildOutputReceipt::from_result(identity, plan_digest.to_string(), &output)?;
+    let cache =
+        inspect_committed_cache(identity, plan_digest, cache_policy, &output, journal).await?;
+    let receipt = match cache_policy {
+        Some(cache_policy) => BuildOutputReceipt::from_result(
+            identity,
+            plan_digest.to_string(),
+            &output,
+            cache_policy,
+            cache.as_ref(),
+        )?,
+        None => BuildOutputReceipt::from_legacy_result(identity, plan_digest.to_string(), &output)?,
+    };
     let receipt = locked.write_succeeded(receipt).await?;
     Ok(Some(RecordedBuildResult {
         receipt,
         output,
+        cache,
         replayed: true,
     }))
+}
+
+async fn inspect_committed_cache(
+    identity: &BuildOperationIdentity,
+    plan_digest: &str,
+    cache_policy: Option<BuildCachePolicy>,
+    output: &BuildResult,
+    journal: &BuildOperationJournal,
+) -> Result<Option<RecordedBuildCache>, BuildPlanExecutionError> {
+    let path = journal.cache_export_path(identity.operation_id());
+    let cache_exists = match tokio::fs::symlink_metadata(&path).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(BuildReceiptError::StoreIo {
+                message: format!(
+                    "failed to inspect cache export for operation {}",
+                    identity.operation_id()
+                ),
+                source: error,
+            }
+            .into())
+        }
+    };
+    match (cache_policy, cache_exists) {
+        (None, true) => {
+            journal
+                .cleanup_cache_export(identity.operation_id())
+                .await?;
+            return Ok(None);
+        }
+        (None | Some(BuildCachePolicy::Disabled), false) => return Ok(None),
+        (Some(BuildCachePolicy::Disabled), true) => {
+            return Err(BuildReceiptError::CacheInvalid {
+                operation_id: identity.operation_id().to_string(),
+                message: "cache export exists for a cache-disabled operation".to_string(),
+            }
+            .into())
+        }
+        (Some(BuildCachePolicy::ContentAddressed), false) => {
+            return Err(BuildReceiptError::CacheInvalid {
+                operation_id: identity.operation_id().to_string(),
+                message: "content-addressed operation committed an image without its cache export"
+                    .to_string(),
+            }
+            .into())
+        }
+        (Some(BuildCachePolicy::ContentAddressed), true) => {}
+    }
+    let cache_identity = BuildCacheExportIdentity::new(
+        identity.source_digest(),
+        plan_digest,
+        output.platform.clone(),
+    )?;
+    let operation = identity.operation_id().to_string();
+    tokio::task::spawn_blocking(move || inspect_build_cache_export(&path, &cache_identity, None))
+        .await
+        .map_err(|error| BuildReceiptError::Task {
+            operation_id: operation.clone(),
+            message: format!("cache export validation task failed: {error}"),
+        })?
+        .map(Some)
+        .map_err(|error| {
+            BuildReceiptError::CacheInvalid {
+                operation_id: operation,
+                message: error.to_string(),
+            }
+            .into()
+        })
 }
 
 fn status_from_live_operation(operation: &SupervisedBuildOperation) -> RecordedBuildStatus {
@@ -750,196 +938,21 @@ fn status_from_terminal_operation(
 async fn recover_recorded_build(
     identity: &BuildOperationIdentity,
     plan_digest: &str,
+    cache_policy: BuildCachePolicy,
     receipt: BuildOutputReceipt,
     store: &ImageStore,
+    journal: &BuildOperationJournal,
 ) -> Result<RecordedBuildResult, BuildPlanExecutionError> {
-    receipt.require_identity(identity, plan_digest)?;
+    receipt.require_identity(identity, plan_digest, cache_policy)?;
     let output = receipt.resolve(store).await?;
+    let cache = receipt
+        .resolve_cache(&journal.cache_export_path(identity.operation_id()))
+        .await?;
     Ok(RecordedBuildResult {
         receipt,
         output,
+        cache,
         replayed: true,
-    })
-}
-
-struct JournalBuildObserver {
-    journal: BuildOperationJournal,
-    identity: BuildOperationIdentity,
-    plan_digest: String,
-}
-
-#[async_trait]
-impl BuildExecutionObserver for JournalBuildObserver {
-    async fn cancellation_requested(&self) -> BoxResult<bool> {
-        let locked = self
-            .journal
-            .lock(self.identity.operation_id())
-            .await
-            .map_err(observer_error)?;
-        let record = locked.read().await.map_err(observer_error)?;
-        match record {
-            Some(PersistedBuildOperation::Supervised(operation)) => {
-                operation
-                    .require_identity(&self.identity, &self.plan_digest)
-                    .map_err(observer_error)?;
-                Ok(operation.phase != PersistedBuildPhase::Running)
-            }
-            Some(PersistedBuildOperation::Succeeded(_)) => Ok(true),
-            Some(PersistedBuildOperation::Pending(_)) | None => Err(BoxError::BuildError(
-                "supervised build lost its authoritative operation state".to_string(),
-            )),
-        }
-    }
-
-    async fn acquire_image_commit_permit(&self) -> BoxResult<BuildImageCommitPermit> {
-        let locked = self
-            .journal
-            .lock(self.identity.operation_id())
-            .await
-            .map_err(observer_error)?;
-        let Some(PersistedBuildOperation::Supervised(operation)) =
-            locked.read().await.map_err(observer_error)?
-        else {
-            return Err(BoxError::BuildError(
-                "supervised build lost its authoritative operation state before image commit"
-                    .to_string(),
-            ));
-        };
-        operation
-            .require_identity(&self.identity, &self.plan_digest)
-            .map_err(observer_error)?;
-        if operation.phase != PersistedBuildPhase::Running {
-            return Err(BoxError::BuildError(
-                "recorded build operation was cancelled before image commit".to_string(),
-            ));
-        }
-        Ok(BuildImageCommitPermit::new(locked))
-    }
-
-    async fn run_process_started(&self, pid: u32, start_time: Option<u64>) -> BoxResult<()> {
-        let locked = self
-            .journal
-            .lock(self.identity.operation_id())
-            .await
-            .map_err(observer_error)?;
-        let Some(PersistedBuildOperation::Supervised(mut operation)) =
-            locked.read().await.map_err(observer_error)?
-        else {
-            return Err(BoxError::BuildError(
-                "supervised RUN has no active operation record".to_string(),
-            ));
-        };
-        operation
-            .require_identity(&self.identity, &self.plan_digest)
-            .map_err(observer_error)?;
-        operation
-            .set_run_process(Some(BuildProcessIdentity { pid, start_time }))
-            .map_err(observer_error)?;
-        let cancelling = operation.phase == PersistedBuildPhase::Cancelling;
-        locked
-            .write_supervised(operation)
-            .await
-            .map_err(observer_error)?;
-        if cancelling {
-            return Err(BoxError::BuildError(
-                "recorded build cancellation raced Dockerfile RUN startup".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn run_process_finished(&self, pid: u32, start_time: Option<u64>) -> BoxResult<()> {
-        let locked = self
-            .journal
-            .lock(self.identity.operation_id())
-            .await
-            .map_err(observer_error)?;
-        let Some(PersistedBuildOperation::Supervised(mut operation)) =
-            locked.read().await.map_err(observer_error)?
-        else {
-            return Ok(());
-        };
-        operation
-            .require_identity(&self.identity, &self.plan_digest)
-            .map_err(observer_error)?;
-        if operation.run_process == Some(BuildProcessIdentity { pid, start_time }) {
-            operation.set_run_process(None).map_err(observer_error)?;
-            locked
-                .write_supervised(operation)
-                .await
-                .map_err(observer_error)?;
-        }
-        Ok(())
-    }
-}
-
-fn observer_error(error: BuildReceiptError) -> BoxError {
-    BoxError::BuildError(format!(
-        "build operation journal rejected native execution: {error}"
-    ))
-}
-
-async fn fence_run_process(
-    process: Option<BuildProcessIdentity>,
-    operation_id: &a3s_box_core::OperationId,
-) -> Result<(), BuildReceiptError> {
-    let Some(process) = process else {
-        return Ok(());
-    };
-    let operation = operation_id.to_string();
-    tokio::task::spawn_blocking(move || fence_run_process_blocking(process, &operation))
-        .await
-        .map_err(|error| BuildReceiptError::Task {
-            operation_id: operation_id.to_string(),
-            message: format!("RUN process fencing task failed: {error}"),
-        })?
-}
-
-#[cfg(target_os = "linux")]
-fn fence_run_process_blocking(
-    process: BuildProcessIdentity,
-    operation_id: &str,
-) -> Result<(), BuildReceiptError> {
-    if !crate::process::is_process_alive_with_identity(process.pid, process.start_time) {
-        return Ok(());
-    }
-    let pid = i32::try_from(process.pid).map_err(|_| BuildReceiptError::InvalidReceipt {
-        operation_id: operation_id.to_string(),
-        message: "RUN process PID exceeds the host signal range".to_string(),
-    })?;
-    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-        let source = std::io::Error::last_os_error();
-        if source.raw_os_error() != Some(libc::ESRCH) {
-            return Err(BuildReceiptError::StoreIo {
-                message: format!("failed to kill RUN process for operation {operation_id}"),
-                source,
-            });
-        }
-    }
-    let deadline = std::time::Instant::now() + RUN_PROCESS_STOP_TIMEOUT;
-    while crate::process::is_process_running_with_identity(process.pid, process.start_time) {
-        if std::time::Instant::now() >= deadline {
-            return Err(BuildReceiptError::Task {
-                operation_id: operation_id.to_string(),
-                message: format!(
-                    "RUN process {} did not stop within {:?}",
-                    process.pid, RUN_PROCESS_STOP_TIMEOUT
-                ),
-            });
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn fence_run_process_blocking(
-    _process: BuildProcessIdentity,
-    operation_id: &str,
-) -> Result<(), BuildReceiptError> {
-    Err(BuildReceiptError::Task {
-        operation_id: operation_id.to_string(),
-        message: "a recorded Linux RUN process cannot be fenced on this host".to_string(),
     })
 }
 
