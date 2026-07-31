@@ -19,8 +19,9 @@ use crate::sandbox::A3sOciController;
 use crate::sandbox::{
     compile_oci_spec, plan_id_mappings, prepare_managed_mount_source,
     prepare_managed_secret_mount_source, prepare_sandbox_path_access,
-    probe_sandbox_capabilities_for, validate_external_mount_access, write_bundle,
-    SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
+    probe_sandbox_capabilities_for, stage_read_only_mount_aliases, validate_external_mount_access,
+    write_bundle, SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources,
+    SandboxTmpfs,
 };
 
 use super::{BoxState, VmManager};
@@ -133,7 +134,7 @@ impl VmManager {
                 });
             }
 
-            let (mounts, tmpfs) = self.compile_sandbox_mounts(&layout, &instance_spec)?;
+            let (mut mounts, tmpfs) = self.compile_sandbox_mounts(&layout, &instance_spec)?;
             ensure_mount_destinations(&layout.rootfs_path, &mounts, &tmpfs)?;
 
             let rootfs_ids = inspect_rootfs_identity_requirements_with_preference(
@@ -152,7 +153,7 @@ impl VmManager {
             );
 
             let mount_sources_start = std::time::Instant::now();
-            self.prepare_sandbox_mount_sources(&layout, &mounts, &id_mappings)?;
+            self.prepare_sandbox_mount_sources(&layout, &mut mounts, &id_mappings)?;
             a3s_box_core::lifecycle_profile::record_lifecycle_phase(
                 "sandbox.mount_sources",
                 mount_sources_start.elapsed(),
@@ -198,6 +199,7 @@ impl VmManager {
                 &self.box_id,
                 &bundle_dir,
                 &layout.rootfs_path,
+                &bundle_spec.mounts,
                 &bundle_spec.id_mappings,
             )?;
             a3s_box_core::lifecycle_profile::record_lifecycle_phase(
@@ -365,12 +367,13 @@ impl VmManager {
     fn prepare_sandbox_mount_sources(
         &self,
         layout: &super::BoxLayout,
-        mounts: &[SandboxMount],
+        mounts: &mut [SandboxMount],
         id_mappings: &crate::sandbox::SandboxIdMappingPlan,
     ) -> Result<()> {
         let managed = self.managed_sandbox_mount_sources(&layout.workspace_path, mounts)?;
+        let mut read_only_external = Vec::new();
 
-        for mount in mounts {
+        for mount in mounts.iter() {
             if self
                 .managed_secret_root
                 .as_ref()
@@ -383,11 +386,41 @@ impl VmManager {
                     &mount.source,
                     id_mappings,
                     mount.read_only,
-                )?;
+                )
+                .map_err(|error| mount_source_error("prepare managed Secret", mount, error))?;
             } else if managed.contains(&mount.source) {
-                prepare_managed_mount_source(&mount.source, id_mappings)?;
+                prepare_managed_mount_source(&mount.source, id_mappings)
+                    .map_err(|error| mount_source_error("prepare managed source", mount, error))?;
+            } else if mount.read_only {
+                read_only_external.push(mount.source.clone());
             } else {
-                validate_external_mount_access(&mount.source, id_mappings, mount.read_only)?;
+                validate_external_mount_access(&mount.source, id_mappings, mount.read_only)
+                    .map_err(|error| {
+                        mount_source_error("validate external source", mount, error)
+                    })?;
+            }
+        }
+
+        let aliases = stage_read_only_mount_aliases(
+            &self.home_dir,
+            &self.box_id,
+            &read_only_external,
+            id_mappings,
+        )
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Failed to stage read-only Sandbox attachment aliases for [{}]: {error}",
+                read_only_external
+                    .iter()
+                    .map(|source| source.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            hint: None,
+        })?;
+        for mount in mounts {
+            if let Some(alias) = aliases.get(&mount.source) {
+                mount.source = alias.clone();
             }
         }
         Ok(())
@@ -436,6 +469,17 @@ impl VmManager {
         }
 
         Ok(managed)
+    }
+}
+
+fn mount_source_error(action: &str, mount: &SandboxMount, error: BoxError) -> BoxError {
+    BoxError::BoxBootError {
+        message: format!(
+            "Failed to {action} {} for {}: {error}",
+            mount.source.display(),
+            mount.destination.display()
+        ),
+        hint: None,
     }
 }
 

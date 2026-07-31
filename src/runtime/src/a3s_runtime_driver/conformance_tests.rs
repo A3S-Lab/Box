@@ -12,6 +12,7 @@ mod health_profile;
 mod logs_profile;
 mod mounts_profile;
 mod networking_profile;
+mod outputs_profile;
 mod private_registry_profile;
 mod recovery_profile;
 mod resources_profile;
@@ -98,6 +99,7 @@ async fn run_all_advertised_profiles() {
         RuntimeConformanceProfile::Logs,
         RuntimeConformanceProfile::Exec,
         RuntimeConformanceProfile::Security,
+        RuntimeConformanceProfile::Outputs,
     ]
     .into_iter()
     .collect();

@@ -13,10 +13,103 @@ pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
 ) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    private_read_only_artifact(fixture, client).await?;
     read_only_enforcement(fixture, client).await?;
     tmpfs_isolation(fixture, client).await?;
     persistent_volume_reuse(fixture, client).await?;
     mount_cleanup(fixture, client).await
+}
+
+#[cfg(target_os = "linux")]
+async fn private_read_only_artifact(
+    fixture: &BoxRuntimeConformanceFixture,
+    client: &dyn RuntimeClient,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    const TARGET: &str = "/mnt/r17-private-artifact";
+    let mut service = fixture.cases.service(
+        "mount-private-artifact",
+        "if printf forbidden > /mnt/r17-private-artifact/forbidden 2>/dev/null; then exit 76; fi; test \"$(cat /mnt/r17-private-artifact/payload.txt)\" = r17-private-artifact || exit 77; printf ready > /workspace/r17-private-artifact-ready; exec sleep 3600",
+    );
+    service.spec.mounts = vec![RuntimeMount {
+        name: "private-artifact".into(),
+        source: RuntimeMountSource::Artifact {
+            artifact: service.spec.artifact.clone(),
+        },
+        target: TARGET.into(),
+        read_only: true,
+    }];
+
+    let running = client.apply(&service).await?;
+    require(
+        running.state == RuntimeUnitState::Running,
+        "private Artifact attachment did not reach running",
+    )?;
+    let record = fixture.record_for(&service.spec).await?;
+    wait_for_file(
+        &record.box_dir.join("workspace/r17-private-artifact-ready"),
+        "Sandbox did not read the private Artifact attachment",
+    )
+    .await?;
+    require(
+        !fixture.private_artifact_source().join("forbidden").exists(),
+        "Sandbox wrote through the read-only private Artifact attachment",
+    )?;
+    require(
+        std::fs::metadata(fixture.private_artifact_root())
+            .map_err(|error| super::external("inspect private Artifact root", error))?
+            .permissions()
+            .mode()
+            & 0o7777
+            == 0o700,
+        "Box changed the caller-owned private Artifact root permissions",
+    )?;
+
+    let alias_root = crate::sandbox::sandbox_mount_alias_root(&fixture.home_dir, &record.id);
+    let bundle: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(record.box_dir.join("sandbox/bundle/config.json"))
+            .map_err(|error| super::external("read private Artifact OCI bundle", error))?,
+    )
+    .map_err(|error| super::external("decode private Artifact OCI bundle", error))?;
+    let alias = bundle["mounts"]
+        .as_array()
+        .and_then(|mounts| {
+            mounts
+                .iter()
+                .find(|mount| mount["destination"].as_str() == Some(TARGET))
+        })
+        .and_then(|mount| mount["source"].as_str())
+        .map(Path::new)
+        .ok_or_else(|| super::protocol("private Artifact OCI mount has no source"))?;
+    require(
+        alias.parent() == Some(alias_root.as_path()) && alias.is_dir(),
+        "private Artifact did not use its Box-owned attachment alias",
+    )?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| super::external("read private Artifact mountinfo", error))?;
+    require(
+        mountinfo.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.nth(4) == alias.to_str()
+                && fields
+                    .next()
+                    .is_some_and(|options| options.split(',').any(|option| option == "ro"))
+        }),
+        "Box-owned private Artifact alias is not a read-only host mount",
+    )?;
+
+    fixture
+        .remove_unit(client, &service.spec, "mount-private-artifact")
+        .await?;
+    require(
+        !alias_root.exists()
+            && !std::fs::read_to_string("/proc/self/mountinfo")
+                .map_err(|error| super::external("re-read private Artifact mountinfo", error))?
+                .contains(alias.to_string_lossy().as_ref()),
+        "private Artifact removal retained a Box attachment alias",
+    )
 }
 
 async fn persistent_volume_reuse(

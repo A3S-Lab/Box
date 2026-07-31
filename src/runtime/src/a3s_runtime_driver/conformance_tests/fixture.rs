@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_runtime::contract::{
-    RuntimeCapabilities, RuntimeInspection, RuntimeUnitSpec, RuntimeUnitState, SecretReference,
+    ArtifactRef, RuntimeCapabilities, RuntimeInspection, RuntimeOutputArtifact, RuntimeOutputSpec,
+    RuntimeUnitSpec, RuntimeUnitState, SecretReference,
 };
 use a3s_runtime::{
     runtime_profile_requirements, FileRuntimeStateStore, ManagedRuntimeClient, RuntimeClient,
@@ -13,11 +14,13 @@ use a3s_runtime::{
     RuntimeConformanceProfileEvidence, RuntimeError, RuntimeResult,
 };
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
-    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
-    BoxSecretMaterializationError, BoxSecretMaterializer,
+    BoxArtifactPort, BoxArtifactPortError, BoxRegistryCredential, BoxRuntimeDriver,
+    BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
+    BoxSecretMaterializer,
 };
 use super::cases::CaseFactory;
 use super::{
@@ -90,6 +93,120 @@ impl BoxSecretMaterializer for ConformanceSecretMaterializer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConformanceOutputCapture {
+    pub(super) spec_digest: String,
+    pub(super) name: String,
+    pub(super) files: BTreeMap<String, Vec<u8>>,
+    pub(super) artifact: RuntimeOutputArtifact,
+}
+
+struct ConformanceArtifactPort {
+    source: PathBuf,
+    captures: Mutex<Vec<ConformanceOutputCapture>>,
+    cleanups: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl BoxArtifactPort for ConformanceArtifactPort {
+    async fn mount_path(
+        &self,
+        _spec: &RuntimeUnitSpec,
+        _mount: &a3s_runtime::contract::RuntimeMount,
+    ) -> std::result::Result<PathBuf, BoxArtifactPortError> {
+        Ok(self.source.clone())
+    }
+
+    async fn capture_output(
+        &self,
+        spec: &RuntimeUnitSpec,
+        output: &RuntimeOutputSpec,
+        source: &Path,
+    ) -> std::result::Result<RuntimeOutputArtifact, BoxArtifactPortError> {
+        let mut files = BTreeMap::new();
+        let entries = std::fs::read_dir(source).map_err(|error| {
+            BoxArtifactPortError::Unavailable(format!(
+                "R17 output directory could not be read: {error}"
+            ))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output entry could not be read: {error}"
+                ))
+            })?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output metadata could not be read: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(BoxArtifactPortError::Rejected(
+                    "R17 output fixture accepts only regular root-level files".into(),
+                ));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                BoxArtifactPortError::Rejected("R17 output name is not UTF-8".into())
+            })?;
+            let value = std::fs::read(entry.path()).map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output content could not be read: {error}"
+                ))
+            })?;
+            files.insert(name, value);
+        }
+        let size_bytes = files.values().try_fold(0_u64, |total, value| {
+            total
+                .checked_add(value.len() as u64)
+                .ok_or_else(|| BoxArtifactPortError::Rejected("R17 output size overflowed".into()))
+        })?;
+        if size_bytes == 0 || size_bytes > output.max_bytes {
+            return Err(BoxArtifactPortError::Rejected(
+                "R17 output violates its declared bound".into(),
+            ));
+        }
+        let digest = output_digest(&files);
+        let artifact = RuntimeOutputArtifact {
+            name: output.name.clone(),
+            artifact: ArtifactRef {
+                uri: format!("https://artifacts.example/a3s/r17/{digest}"),
+                digest,
+                media_type: output.media_type.clone(),
+            },
+            size_bytes,
+        };
+        self.captures
+            .lock()
+            .unwrap()
+            .push(ConformanceOutputCapture {
+                spec_digest: spec.digest().map_err(BoxArtifactPortError::Rejected)?,
+                name: output.name.clone(),
+                files,
+                artifact: artifact.clone(),
+            });
+        Ok(artifact)
+    }
+
+    async fn cleanup_spec(
+        &self,
+        spec_digest: &str,
+    ) -> std::result::Result<(), BoxArtifactPortError> {
+        self.cleanups.lock().unwrap().push(spec_digest.into());
+        Ok(())
+    }
+}
+
+pub(super) fn output_digest(files: &BTreeMap<String, Vec<u8>>) -> String {
+    let mut digest = Sha256::new();
+    for (name, value) in files {
+        digest.update((name.len() as u64).to_be_bytes());
+        digest.update(name.as_bytes());
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
 #[derive(Debug, Clone, Default)]
 struct SeenResource {
     pid: Option<u32>,
@@ -108,9 +225,12 @@ pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) cases: CaseFactory,
     base_case: a3s_runtime::RuntimeBaseConformanceCase,
     secret_materializer: Arc<ConformanceSecretMaterializer>,
+    artifact_port: Arc<ConformanceArtifactPort>,
+    private_artifact_root: PathBuf,
     drivers: Mutex<Vec<Arc<BoxRuntimeDriver>>>,
     state_roots: Mutex<BTreeSet<PathBuf>>,
-    removable_homes: Mutex<BTreeSet<PathBuf>>,
+    provider_homes: Mutex<BTreeSet<PathBuf>>,
+    fixture_roots: Mutex<BTreeSet<PathBuf>>,
     seen: Mutex<BTreeMap<(PathBuf, String), SeenResource>>,
 }
 
@@ -157,12 +277,36 @@ impl BoxRuntimeConformanceFixture {
         )?;
         let config = driver_config(home_dir.clone());
         let secret_materializer = Arc::new(ConformanceSecretMaterializer::default());
+        let private_artifact_root = home_dir
+            .parent()
+            .ok_or_else(|| failure("R17 home has no parent for private Artifact storage"))?
+            .join(format!(
+                ".a3s-r17-artifacts-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+        let private_artifact_source = private_artifact_root.join("mount");
+        std::fs::create_dir(&private_artifact_root)
+            .map_err(|error| external("create private Artifact root", error))?;
+        std::fs::create_dir(&private_artifact_source)
+            .map_err(|error| external("create private Artifact mount", error))?;
+        set_private_artifact_modes(&private_artifact_root, &private_artifact_source)?;
+        std::fs::write(
+            private_artifact_source.join("payload.txt"),
+            b"r17-private-artifact",
+        )
+        .map_err(|error| external("write private Artifact payload", error))?;
+        let artifact_port = Arc::new(ConformanceArtifactPort {
+            source: private_artifact_source,
+            captures: Mutex::new(Vec::new()),
+            cleanups: Mutex::new(Vec::new()),
+        });
         let driver = Arc::new(
             BoxRuntimeDriver::new_with_isolation(
                 config,
                 a3s_box_core::ExecutionIsolation::Sandbox,
             )?
-            .with_secret_materializer(secret_materializer.clone()),
+            .with_secret_materializer(secret_materializer.clone())
+            .with_artifact_port(artifact_port.clone()),
         );
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
@@ -172,9 +316,12 @@ impl BoxRuntimeConformanceFixture {
             cases,
             base_case,
             secret_materializer,
+            artifact_port,
+            private_artifact_root: private_artifact_root.clone(),
             drivers: Mutex::new(vec![driver]),
             state_roots: Mutex::new(BTreeSet::from([state_root])),
-            removable_homes: Mutex::new(BTreeSet::new()),
+            provider_homes: Mutex::new(BTreeSet::new()),
+            fixture_roots: Mutex::new(BTreeSet::from([private_artifact_root])),
             seen: Mutex::new(BTreeMap::new()),
         })
     }
@@ -197,7 +344,8 @@ impl BoxRuntimeConformanceFixture {
                 driver_config(self.home_dir.clone()),
                 a3s_box_core::ExecutionIsolation::Sandbox,
             )?
-            .with_secret_materializer(self.secret_materializer.clone()),
+            .with_secret_materializer(self.secret_materializer.clone())
+            .with_artifact_port(self.artifact_port.clone()),
         );
         self.register_driver(driver.clone());
         Ok(driver)
@@ -213,6 +361,22 @@ impl BoxRuntimeConformanceFixture {
             .store(authorized, Ordering::SeqCst);
     }
 
+    pub(super) fn private_artifact_source(&self) -> &Path {
+        &self.artifact_port.source
+    }
+
+    pub(super) fn private_artifact_root(&self) -> &Path {
+        &self.private_artifact_root
+    }
+
+    pub(super) fn output_captures(&self) -> Vec<ConformanceOutputCapture> {
+        self.artifact_port.captures.lock().unwrap().clone()
+    }
+
+    pub(super) fn artifact_cleanup_calls(&self) -> Vec<String> {
+        self.artifact_port.cleanups.lock().unwrap().clone()
+    }
+
     pub(super) fn register_driver(&self, driver: Arc<BoxRuntimeDriver>) {
         self.drivers.lock().unwrap().push(driver);
     }
@@ -221,8 +385,8 @@ impl BoxRuntimeConformanceFixture {
         self.state_roots.lock().unwrap().insert(root);
     }
 
-    pub(super) fn register_removable_home(&self, home: PathBuf) {
-        self.removable_homes.lock().unwrap().insert(home);
+    pub(super) fn register_provider_home(&self, home: PathBuf) {
+        self.provider_homes.lock().unwrap().insert(home);
     }
 
     pub(super) fn private_registry_driver(
@@ -418,7 +582,7 @@ impl BoxRuntimeConformanceFixture {
                 );
             }
         }
-        for home in self.removable_homes.lock().unwrap().iter() {
+        for home in self.provider_homes.lock().unwrap().iter() {
             if home.exists() {
                 entries.insert(
                     format!("provider-home:{}", home.display()),
@@ -464,9 +628,17 @@ impl BoxRuntimeConformanceFixture {
                 failures.push(format!("remove Runtime state {}: {error}", root.display()));
             }
         }
-        for home in self.removable_homes.lock().unwrap().iter() {
+        for home in self.provider_homes.lock().unwrap().iter() {
             if let Err(error) = remove_tree(home) {
                 failures.push(format!("remove provider home {}: {error}", home.display()));
+            }
+        }
+        for root in self.fixture_roots.lock().unwrap().iter() {
+            if let Err(error) = remove_tree(root) {
+                failures.push(format!(
+                    "remove external fixture root {}: {error}",
+                    root.display()
+                ));
             }
         }
         for path in [
@@ -536,6 +708,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
             RuntimeConformanceProfile::Security,
+            RuntimeConformanceProfile::Outputs,
         ])
     }
 
@@ -549,30 +722,33 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
         capabilities: &RuntimeCapabilities,
         profile: RuntimeConformanceProfile,
     ) -> RuntimeResult<RuntimeConformanceProfileEvidence> {
-        match profile {
-            RuntimeConformanceProfile::Recovery => {
-                super::recovery_profile::run(self, client).await?
-            }
+        let result = match profile {
+            RuntimeConformanceProfile::Recovery => super::recovery_profile::run(self, client).await,
             RuntimeConformanceProfile::Networking => {
-                super::networking_profile::run(self, client).await?
+                super::networking_profile::run(self, client).await
             }
-            RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await?,
+            RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await,
+            RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await,
             RuntimeConformanceProfile::Resources => {
-                super::resources_profile::run(self, client).await?
+                super::resources_profile::run(self, client).await
             }
-            RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Security => {
-                super::security_profile::run(self, client).await?
-            }
+            RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await,
+            RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await,
+            RuntimeConformanceProfile::Security => super::security_profile::run(self, client).await,
+            RuntimeConformanceProfile::Outputs => super::outputs_profile::run(self, client).await,
             unsupported => {
                 return Err(RuntimeError::Protocol(format!(
                     "Box R17 fixture cannot execute unexpected {} profile",
                     unsupported.as_str()
                 )))
             }
-        }
+        };
+        result.map_err(|error| {
+            RuntimeError::Protocol(format!(
+                "Box R17 {} profile failed: {error}",
+                profile.as_str()
+            ))
+        })?;
         self.evidence(capabilities, profile)
     }
 
@@ -588,6 +764,23 @@ fn driver_config(home_dir: PathBuf) -> BoxRuntimeDriverConfig {
         control_timeout: Duration::from_secs(120),
         task_poll_interval: Duration::from_millis(25),
     }
+}
+
+#[cfg(unix)]
+fn set_private_artifact_modes(root: &Path, source: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| external("protect private Artifact root", error))?;
+    std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| external("make private Artifact mount readable", error))
+}
+
+#[cfg(not(unix))]
+fn set_private_artifact_modes(_root: &Path, _source: &Path) -> Result<()> {
+    Err(failure(
+        "R17 private Artifact attachment certification requires Unix permissions",
+    ))
 }
 
 fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
@@ -660,8 +853,14 @@ fn remove_empty_directory(path: &Path) {
 }
 
 fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
+    let unit_id = record.labels.get(UNIT_LABEL).map(String::as_str);
+    let volumes = record
+        .managed_execution
+        .as_ref()
+        .map(|metadata| metadata.request.config.volumes.as_slice())
+        .unwrap_or_default();
     eprintln!(
-        "R17 missing-exit diagnostics: id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?}",
+        "R17 missing-exit diagnostics: unit_id={unit_id:?} id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?} volumes={volumes:?}",
         record.id,
         record.status,
         record.pid,

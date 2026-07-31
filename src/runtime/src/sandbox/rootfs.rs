@@ -131,26 +131,58 @@ pub fn prepare_managed_mount_source(_path: &Path, _plan: &SandboxIdMappingPlan) 
     ))
 }
 
-/// Verify that an external bind source's root is usable by the mapped root
-/// identity. The runtime refuses to chown external host data implicitly.
+/// Verify that an external bind source and every parent needed to resolve it
+/// are usable by the mapped root identity. The runtime refuses to chown
+/// external host data implicitly.
 #[cfg(unix)]
 pub fn validate_external_mount_access(
     path: &Path,
     plan: &SandboxIdMappingPlan,
     read_only: bool,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).map_err(BoxError::IoError)?;
+    validate_external_mount_root_metadata(path, &metadata, plan, read_only)?;
 
     let (uid, gid) = mapped_root_ids(plan)?;
-    let metadata = std::fs::metadata(path).map_err(BoxError::IoError)?;
-    let mode = metadata.mode();
-    let permission_bits = if metadata.uid() == uid {
-        (mode >> 6) & 0o7
-    } else if metadata.gid() == gid {
-        (mode >> 3) & 0o7
-    } else {
-        mode & 0o7
-    };
+    for parent in path.ancestors().skip(1) {
+        let metadata = std::fs::metadata(parent).map_err(|error| {
+            BoxError::ConfigError(format!(
+                "External Sandbox mount {} cannot resolve parent {} for mapped container root {uid}:{gid}: {error}",
+                path.display(),
+                parent.display()
+            ))
+        })?;
+        if !metadata.is_dir() || identity_permission_bits(&metadata, uid, gid) & 0o1 == 0 {
+            return Err(BoxError::ConfigError(format!(
+                "External Sandbox mount {} has a parent {} that is not searchable by mapped container root {uid}:{gid}; use a read-only Box attachment or grant execute-only traversal",
+                path.display(),
+                parent.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Verify only the mounted object's own access bits.
+///
+/// Read-only attachment aliases call this with metadata obtained from an open
+/// file descriptor. Their caller-owned parents deliberately remain private;
+/// the Box-owned alias supplies the separately validated resolution path.
+#[cfg(unix)]
+pub(crate) fn validate_external_mount_root_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    plan: &SandboxIdMappingPlan,
+    read_only: bool,
+) -> Result<()> {
+    let (uid, gid) = mapped_root_ids(plan)?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err(BoxError::ConfigError(format!(
+            "External Sandbox mount {} must be a regular file or directory",
+            path.display()
+        )));
+    }
+    let permission_bits = identity_permission_bits(metadata, uid, gid);
     let required = if metadata.is_dir() {
         if read_only {
             0o5
@@ -170,6 +202,20 @@ pub fn validate_external_mount_access(
         )));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn identity_permission_bits(metadata: &std::fs::Metadata, uid: u32, gid: u32) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+
+    let mode = metadata.mode();
+    if metadata.uid() == uid {
+        (mode >> 6) & 0o7
+    } else if metadata.gid() == gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    }
 }
 
 /// Validate and prepare one Runtime-owned Secret file without granting Box
@@ -260,7 +306,8 @@ pub fn prepare_managed_secret_mount_source(
     prepare_secret_directory_traversal(root, root_uid, root_gid)?;
     prepare_secret_directory_traversal(materialization_directory, root_uid, root_gid)?;
     prepare_managed_mount_source(path, plan)?;
-    validate_external_mount_access(path, plan, true)
+    let prepared = std::fs::metadata(path).map_err(BoxError::IoError)?;
+    validate_external_mount_root_metadata(path, &prepared, plan, true)
 }
 
 #[cfg(target_os = "linux")]
@@ -1025,6 +1072,43 @@ mod tests {
         assert_eq!(map_container_id(&mappings, 0, "UID").unwrap(), 100_000);
         assert_eq!(map_container_id(&mappings, 12, "UID").unwrap(), 200_002);
         assert!(map_container_id(&mappings, 16, "UID").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_mount_validation_rejects_an_unsearchable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let private = fixture.path().join("private");
+        let source = private.join("artifact");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plan = SandboxIdMappingPlan {
+            uid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: unsafe { libc::geteuid() }.saturating_add(100_000),
+                size: 1,
+            }],
+            gid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: unsafe { libc::getegid() }.saturating_add(100_000),
+                size: 1,
+            }],
+            maximum_container_uid: 0,
+            maximum_container_gid: 0,
+        };
+
+        let metadata = std::fs::metadata(&source).unwrap();
+        validate_external_mount_root_metadata(&source, &metadata, &plan, true).unwrap();
+        let error = validate_external_mount_access(&source, &plan, true).unwrap_err();
+        assert!(error.to_string().contains("not searchable"));
+        assert_eq!(
+            std::fs::metadata(private).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
     }
 
     #[test]

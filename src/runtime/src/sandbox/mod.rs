@@ -14,6 +14,7 @@ pub(crate) mod a3s_oci_handler;
 pub(crate) mod a3s_oci_owner;
 pub mod capability;
 pub mod controller;
+mod mount_alias;
 pub mod oci;
 pub mod path_access;
 pub mod rootfs;
@@ -89,6 +90,9 @@ pub use capability::{
     SandboxCapabilitySnapshot, SandboxIdMappingPlan, UserNamespaceEvidence,
 };
 pub use controller::{write_bundle, SandboxLaunchSpec};
+#[cfg(target_os = "linux")]
+pub(crate) use mount_alias::sandbox_mount_alias_root;
+pub(crate) use mount_alias::{cleanup_sandbox_mount_aliases, stage_read_only_mount_aliases};
 #[cfg(not(target_os = "linux"))]
 pub struct A3sOciController;
 #[cfg(not(target_os = "linux"))]

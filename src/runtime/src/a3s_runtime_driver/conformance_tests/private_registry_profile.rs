@@ -238,7 +238,7 @@ async fn run_inner(fixture: &BoxRuntimeConformanceFixture) -> Result<()> {
         ));
     std::fs::create_dir(&private_home)
         .map_err(|error| external("create private-registry provider home", error))?;
-    fixture.register_removable_home(private_home.clone());
+    fixture.register_provider_home(private_home.clone());
     let state_root = private_home.join("runtime-state");
     fixture.register_state_root(state_root.clone());
     let driver = fixture.private_registry_driver(private_home.clone())?;
