@@ -4,8 +4,8 @@ use a3s_box_core::OperationId;
 
 use super::*;
 use crate::oci::build::{
-    execute_recorded_build_plan, inspect_recorded_build_plan, remove_recorded_build_plan,
-    BoxBuildPlan, BuildPlanExecutionError,
+    execute_recorded_build_plan, inspect_recorded_build_plan, inspect_recorded_build_status,
+    remove_recorded_build_plan, BoxBuildPlan, BuildPlanExecutionError,
 };
 use crate::oci::ImageStore;
 
@@ -190,6 +190,177 @@ async fn pending_intent_adopts_output_committed_before_terminal_receipt() {
 }
 
 #[tokio::test]
+async fn supervised_recovery_adopts_the_image_store_commit_gap() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let store_root = temporary.path().join("images");
+    write_source(&source);
+
+    let operation = identity("cloud-build-supervised-output-gap", 'a');
+    let build_plan = plan("disabled");
+    let plan_digest = build_plan.canonical_digest().unwrap();
+    let store = Arc::new(ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap());
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    let built =
+        execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
+            .await
+            .unwrap();
+    let expected_descriptor = built.output.descriptor.clone();
+    let workspace = journal
+        .prepare_workspace(operation.operation_id())
+        .await
+        .unwrap();
+    std::fs::write(workspace.join("uncommitted"), "partial").unwrap();
+    let active = SupervisedBuildOperation::new(&operation, plan_digest).unwrap();
+    let mut active_bytes = serde_json::to_vec_pretty(&active).unwrap();
+    active_bytes.push(b'\n');
+    std::fs::write(journal.receipt_path(operation.operation_id()), active_bytes).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    drop(store);
+
+    let reopened = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
+    let recovered = inspect_recorded_build_status(&operation, &build_plan, &reopened)
+        .await
+        .unwrap()
+        .expect("committed output is terminal");
+    let RecordedBuildStatus::Succeeded(recovered) = recovered else {
+        panic!("committed ImageStore output must win the receipt gap");
+    };
+    assert_eq!(recovered.output.descriptor, expected_descriptor);
+    assert!(!journal.workspace_path(operation.operation_id()).exists());
+    let committed =
+        std::fs::read_to_string(journal.receipt_path(operation.operation_id())).unwrap();
+    assert!(committed.contains(BuildOutputReceipt::SCHEMA));
+    assert!(!committed.contains(SupervisedBuildOperation::SCHEMA));
+}
+
+#[tokio::test]
+async fn live_operation_inspection_is_nonblocking_and_cancellation_is_one_state_transition() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store_root = temporary.path().join("images");
+    let operation = identity("cloud-build-live-supervision", 'a');
+    let build_plan = plan("disabled");
+    let plan_digest = build_plan.canonical_digest().unwrap();
+    let store = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    let locked = journal.lock(operation.operation_id()).await.unwrap();
+    let lease = journal
+        .try_execution_lease(operation.operation_id())
+        .await
+        .unwrap()
+        .expect("test owns the execution lease");
+    let workspace = journal
+        .prepare_workspace(operation.operation_id())
+        .await
+        .unwrap();
+    std::fs::write(workspace.join("partial"), "uncommitted").unwrap();
+    locked
+        .write_supervised(SupervisedBuildOperation::new(&operation, plan_digest.clone()).unwrap())
+        .await
+        .unwrap();
+    drop(locked);
+
+    let inspected = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        inspect_recorded_build_status(&operation, &build_plan, &store),
+    )
+    .await
+    .expect("inspection must not wait for the live execution lease")
+    .unwrap();
+    assert!(matches!(inspected, Some(RecordedBuildStatus::Running)));
+
+    assert_eq!(
+        crate::oci::build::cancel_recorded_build_plan(&operation, &build_plan, &store)
+            .await
+            .unwrap(),
+        BuildCancellationOutcome::Requested
+    );
+    assert!(matches!(
+        inspect_recorded_build_status(&operation, &build_plan, &store)
+            .await
+            .unwrap(),
+        Some(RecordedBuildStatus::Cancelling)
+    ));
+
+    drop(lease);
+    assert!(matches!(
+        inspect_recorded_build_status(&operation, &build_plan, &store)
+            .await
+            .unwrap(),
+        Some(RecordedBuildStatus::Cancelled { .. })
+    ));
+    assert!(!journal.workspace_path(operation.operation_id()).exists());
+    let persisted =
+        std::fs::read_to_string(journal.receipt_path(operation.operation_id())).unwrap();
+    assert!(persisted.contains(SupervisedBuildOperation::SCHEMA));
+    assert!(!persisted.contains(PendingBuildOperation::SCHEMA));
+}
+
+#[tokio::test]
+async fn abandoned_operation_reclaims_workspace_and_becomes_failed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store_root = temporary.path().join("images");
+    let operation = identity("cloud-build-abandoned-supervision", 'a');
+    let build_plan = plan("disabled");
+    let store = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    let workspace = journal
+        .prepare_workspace(operation.operation_id())
+        .await
+        .unwrap();
+    std::fs::create_dir_all(workspace.join("rootfs_0")).unwrap();
+    std::fs::write(workspace.join("rootfs_0/partial"), "partial").unwrap();
+    let locked = journal.lock(operation.operation_id()).await.unwrap();
+    locked
+        .write_supervised(
+            SupervisedBuildOperation::new(&operation, build_plan.canonical_digest().unwrap())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    drop(locked);
+
+    let status = inspect_recorded_build_status(&operation, &build_plan, &store)
+        .await
+        .unwrap();
+    assert!(matches!(status, Some(RecordedBuildStatus::Failed { .. })));
+    assert!(!journal.workspace_path(operation.operation_id()).exists());
+    assert!(store.get(operation.output_reference()).await.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn operation_workspace_rejects_a_symlink_without_touching_its_target() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store_root = temporary.path().join("images");
+    let outside = temporary.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), "keep").unwrap();
+    let operation = identity("cloud-build-workspace-symlink", 'a');
+    let store = ImageStore::new(&store_root, 64 * 1024 * 1024).unwrap();
+    let journal = BuildOperationJournal::for_image_store(&store, operation.operation_id())
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&outside, journal.workspace_path(operation.operation_id())).unwrap();
+
+    let error = journal
+        .prepare_workspace(operation.operation_id())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, BuildReceiptError::UnsafeStore { .. }));
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep")).unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test]
 async fn recorded_build_rejects_operation_identity_drift_before_source_access() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source");
@@ -292,7 +463,7 @@ async fn replay_refreshes_the_single_image_store_authority_across_instances() {
 }
 
 #[tokio::test]
-async fn failed_build_keeps_immutable_intent_until_idempotent_cleanup() {
+async fn failed_build_persists_one_terminal_state_until_idempotent_cleanup() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source");
     let store_root = temporary.path().join("images");
@@ -313,11 +484,19 @@ async fn failed_build_keeps_immutable_intent_until_idempotent_cleanup() {
         execute_recorded_build_plan(&operation, &build_plan, &source, true, Arc::clone(&store))
             .await
             .unwrap_err();
-    assert!(matches!(failure, BuildPlanExecutionError::Build(_)));
+    assert!(matches!(failure, BuildPlanExecutionError::Failed { .. }));
 
     let persisted =
         std::fs::read_to_string(receipts.receipt_path(operation.operation_id())).unwrap();
-    assert!(persisted.contains(PendingBuildOperation::SCHEMA));
+    assert!(persisted.contains(SupervisedBuildOperation::SCHEMA));
+    assert!(persisted.contains("\"phase\": \"failed\""));
+    assert!(!receipts.workspace_path(operation.operation_id()).exists());
+    assert!(matches!(
+        inspect_recorded_build_status(&operation, &build_plan, &store)
+            .await
+            .unwrap(),
+        Some(RecordedBuildStatus::Failed { .. })
+    ));
     assert!(inspect_recorded_build_plan(&operation, &build_plan, &store)
         .await
         .unwrap()

@@ -91,8 +91,10 @@ the workload and therefore never become log-redaction inputs.
 build intent. It validates one `build "oci"` block, produces canonical ACL
 bytes and a stable SHA-256 digest through `a3s-acl`, confines both the context
 and build file to one canonical source root, and compiles into the existing
-`BuildConfig`. It does not introduce another build engine, cache, scheduler, or
-lifecycle store. Content-changing build arguments are deliberately absent from
+`BuildConfig`. The recorded-build API adds supervision by extending the same
+native engine, receipt journal, and `ImageStore`; it does not introduce another
+build backend, cache, queue, scheduler, lifecycle store, workspace registry, or
+image authority. Content-changing build arguments are deliberately absent from
 version 1; adding them requires a new closed schema so they cannot alter output
 behind an unchanged plan digest.
 
@@ -117,19 +119,43 @@ equivalent isolated network boundary.
 
 ```rust
 use std::path::Path;
+use std::sync::Arc;
 
-use a3s_box_runtime::{BoxBuildOptions, BoxBuildPlan};
+use a3s_box_core::OperationId;
+use a3s_box_runtime::{
+    execute_recorded_build_plan, BoxBuildPlan, BuildOperationIdentity,
+};
 
 let plan = BoxBuildPlan::parse_acl(plan_acl)?;
-let digest = plan.canonical_digest()?;
-let config = plan.compile(Path::new("/srv/a3s/source"), BoxBuildOptions::default())?;
-let result = a3s_box_runtime::oci::build::build(config, image_store).await?;
+let identity = BuildOperationIdentity::new(
+    OperationId::new("cloud-build-018f")?,
+    source_artifact_digest,
+)?;
+let result = execute_recorded_build_plan(
+    &identity,
+    &plan,
+    Path::new("/srv/a3s/source"),
+    true,
+    Arc::clone(&image_store),
+)
+.await?;
 ```
 
-This contract is the Box-owned `BX0.4` foundation. Cloud integration must still
-preserve publication, content-addressed cache evidence, SPDX/SLSA evidence,
-signing, cancellation, process-death recovery, and cleanup before the gate can
-be called complete.
+`start_recorded_build_plan` starts without blocking;
+`inspect_recorded_build_status` returns running, cancelling, cancelled, failed,
+or a revalidated successful output; and `cancel_recorded_build_plan` durably
+requests cancellation through that same journal. A crash-released execution
+lease is liveness evidence, not a second state store. Linux `RUN` uses one
+asynchronous subprocess boundary with kill-on-drop, a parent-death signal, a
+private PID namespace, and a journaled PID/start-time identity. Recovery fences
+that process tree before removing the hash-derived operation workspace.
+ImageStore publication is the commit point, so recovery adopts and validates an
+output written in the output-to-receipt crash gap instead of publishing it
+again.
+
+This completes the Box-owned `BX0.4` supervision slice. Content-addressed cache
+receipts, multi-platform OCI assembly, Cloud Node Agent consumption,
+publication, and end-to-end SPDX/SLSA signing evidence remain separate gates.
 
 ## Components
 

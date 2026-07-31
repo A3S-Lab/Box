@@ -22,7 +22,10 @@ use crate::oci::layers::extract_layer;
 use crate::oci::store::ImageStore;
 use crate::oci::{ImagePuller, RegistryAuth};
 
+mod control;
 mod handlers;
+#[cfg(target_os = "linux")]
+mod run_process;
 mod stages;
 mod utils;
 
@@ -35,6 +38,8 @@ use handlers::{
 };
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
+
+pub(super) use control::{BuildExecutionControl, BuildExecutionObserver};
 
 /// Network access available to Dockerfile execution instructions.
 ///
@@ -481,6 +486,29 @@ impl BuildState {
 pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildResult> {
     validate_build_config(&config)?;
 
+    let build_dir = tempfile::TempDir::new()
+        .map_err(|e| BoxError::BuildError(format!("Failed to create build directory: {}", e)))?;
+    build_in_workspace(config, store, build_dir.path(), None).await
+}
+
+/// Execute the same native engine in one journal-owned workspace.
+pub(super) async fn build_supervised(
+    config: BuildConfig,
+    store: Arc<ImageStore>,
+    workspace: &Path,
+    control: BuildExecutionControl,
+) -> Result<BuildResult> {
+    validate_build_config(&config)?;
+    control.ensure_active().await?;
+    build_in_workspace(config, store, workspace, Some(control)).await
+}
+
+async fn build_in_workspace(
+    config: BuildConfig,
+    store: Arc<ImageStore>,
+    build_dir: &Path,
+    control: Option<BuildExecutionControl>,
+) -> Result<BuildResult> {
     // Parse Dockerfile
     let dockerfile = Dockerfile::from_file(&config.dockerfile_path)?;
 
@@ -522,10 +550,6 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     // and RUN mount `from=<image>` sources so repeated references pull once.
     let mut external_from_rootfs: HashMap<String, PathBuf> = HashMap::new();
 
-    // Create temp directory for build workspace
-    let build_dir = tempfile::TempDir::new()
-        .map_err(|e| BoxError::BuildError(format!("Failed to create build directory: {}", e)))?;
-
     let mut final_state = BuildState::new(config.build_args.clone());
     let mut final_base_layers: Vec<LayerInfo> = Vec::new();
     let mut final_base_diff_ids: Vec<String> = Vec::new();
@@ -534,10 +558,13 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     let mut global_step = 0;
 
     for (stage_idx, stage) in stages.iter().enumerate() {
+        if let Some(control) = &control {
+            control.ensure_active().await?;
+        }
         let is_final_stage = stage_idx == output_stage_idx;
 
-        let rootfs_dir = build_dir.path().join(format!("rootfs_{}", stage_idx));
-        let layers_dir = build_dir.path().join(format!("layers_{}", stage_idx));
+        let rootfs_dir = build_dir.join(format!("rootfs_{}", stage_idx));
+        let layers_dir = build_dir.join(format!("layers_{}", stage_idx));
         std::fs::create_dir_all(&rootfs_dir).map_err(|e| {
             BoxError::BuildError(format!("Failed to create rootfs directory: {}", e))
         })?;
@@ -568,6 +595,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         let mut cache_valid = true;
 
         for instruction in &stage.instructions {
+            if let Some(control) = &control {
+                control.ensure_active().await?;
+            }
             global_step += 1;
             let step = global_step;
             validate_instruction_network(instruction, config.network)?;
@@ -582,7 +612,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     bind_mounts,
                     cache_mounts,
                     &store,
-                    build_dir.path(),
+                    build_dir,
                     &mut external_from_rootfs,
                 )
                 .await?
@@ -786,7 +816,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                                         from_ref,
                                         "COPY --from",
                                         &store,
-                                        build_dir.path(),
+                                        build_dir,
                                         &mut external_from_rootfs,
                                     )
                                     .await?
@@ -992,7 +1022,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                             state.layers.len() + base_layers.len(),
                             config.quiet,
                             Some(&dockerignore),
-                        )?
+                            control.as_ref(),
+                        )
+                        .await?
                     };
                     if let Some(layer_info) = layer_opt {
                         let diff_id = compute_diff_id(&layer_info.path)?;
@@ -1255,9 +1287,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         .clone()
         .unwrap_or_else(|| "a3s-build:latest".to_string());
 
-    let final_layers_dir = build_dir
-        .path()
-        .join(format!("layers_{}", output_stage_idx));
+    let final_layers_dir = build_dir.join(format!("layers_{}", output_stage_idx));
 
     // Determine target platform (use first platform or host default)
     let target_platform = config
@@ -1266,6 +1296,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         .cloned()
         .unwrap_or_else(default_target_platform);
 
+    if let Some(control) = &control {
+        control.ensure_active().await?;
+    }
     let result = assemble_image(
         &reference,
         &final_state,

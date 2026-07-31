@@ -374,22 +374,27 @@ Current notes:
   total content bytes, layer count, and blob count. Callers no longer have to
   infer a publishable build result from a temporary workspace or reparse CLI
   output.
-- Recorded plan execution is the sole public plan-bound execution boundary. It
-  serializes each bounded operation identity across processes, durably records
-  immutable source and canonical plan intent before native build side effects,
-  and commits one path-independent `a3s.box.build-output-receipt.v1` before
-  returning success. Its internal journal is always derived from the existing
-  ImageStore; callers cannot configure another receipt root or output store.
-  The native build and replay paths share one output validator for the root
-  descriptor, platform, complete referenced blob set, blob-inventory digest,
-  exact content bytes, and layer count. A restarted caller refreshes the
-  authoritative cross-process ImageStore index, adopts output committed in the
-  ImageStore-to-terminal-receipt crash gap, and replays without reopening the
-  source tree. Cleanup removes the receipt and operation-specific image
-  reference idempotently. This terminal boundary does not supervise a build
-  that is still running: cache import/export receipts, explicit cancellation,
-  deterministic temporary-workspace and child-process reclamation after caller
-  death, and multi-platform assembly remain separate release gates.
+- Recorded plan execution is the sole public plan-bound execution boundary. Its
+  ImageStore-derived receipt journal is now the complete operation state
+  machine for typed start, nonblocking inspect, durable cancellation, failure,
+  success, exact replay, and cleanup. The crash-released execution lease proves
+  task liveness but stores no second copy of state. Every running operation
+  owns one hash-derived workspace below the journal. Linux `RUN` executes
+  asynchronously with kill-on-drop, a parent-death signal, a private PID
+  namespace, and a journaled PID/start-time fence; cancellation and stale-owner
+  recovery stop that process tree before reclaiming the workspace. The legacy
+  pending intent and successful receipt remain compatible states in this same
+  journal rather than a parallel supervisor.
+- The native build, immediate publication, recovery, and replay paths share one
+  output validator for the root descriptor, platform, complete referenced blob
+  set, blob-inventory digest, exact content bytes, and layer count. ImageStore
+  publication is the commit point: a restarted caller refreshes its
+  authoritative cross-process index, adopts output committed in the
+  output-to-terminal-receipt crash gap, and replays without reopening the
+  source tree. Cleanup removes the workspace, receipt, and operation-specific
+  image reference idempotently. Cache import/export receipts and multi-platform
+  assembly remain the Box build release gates; Cloud consumption, publication,
+  and SPDX/SLSA evidence remain integration gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build
