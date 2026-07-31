@@ -146,16 +146,61 @@ fn create_alias_root(root: &Path) -> Result<()> {
             root.display()
         ))
     })?;
-    let metadata = std::fs::symlink_metadata(sandbox_dir).map_err(BoxError::IoError)?;
+    let box_dir = sandbox_dir.parent().ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Sandbox attachment parent has no managed box directory: {}",
+            sandbox_dir.display()
+        ))
+    })?;
+    require_plain_managed_directory(box_dir, "box")?;
+    match std::fs::create_dir(sandbox_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Failed to create Sandbox attachment parent {}: {error}",
+                    sandbox_dir.display()
+                ),
+                hint: None,
+            })
+        }
+    }
+    require_plain_managed_directory(sandbox_dir, "attachment parent")?;
+    std::fs::create_dir(root).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "Failed to create Sandbox attachment root {}: {error}",
+            root.display()
+        ),
+        hint: None,
+    })?;
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o711)).map_err(|error| {
+        BoxError::BoxBootError {
+            message: format!(
+                "Failed to secure Sandbox attachment root {}: {error}",
+                root.display()
+            ),
+            hint: None,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn require_plain_managed_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "Failed to inspect Sandbox {label} directory {}: {error}",
+            path.display()
+        ),
+        hint: None,
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(BoxError::StateError(format!(
-            "Sandbox attachment parent is not a managed directory: {}",
-            sandbox_dir.display()
+            "Sandbox {label} is not a managed directory: {}",
+            path.display()
         )));
     }
-    std::fs::create_dir(root).map_err(BoxError::IoError)?;
-    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o711))
-        .map_err(BoxError::IoError)
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -378,6 +423,40 @@ mod tests {
 
     fn set_mode(path: &Path, mode: u32) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn alias_root_creates_its_missing_managed_sandbox_parent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("a3s");
+        std::fs::create_dir_all(home.join("boxes/execution-1")).unwrap();
+        let root = sandbox_mount_alias_root(&home, "execution-1");
+
+        create_alias_root(&root).unwrap();
+
+        assert!(root.is_dir());
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o711
+        );
+        require_plain_managed_directory(root.parent().unwrap(), "attachment parent").unwrap();
+    }
+
+    #[test]
+    fn alias_root_rejects_a_symlinked_sandbox_parent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("a3s");
+        let box_dir = home.join("boxes/execution-1");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, box_dir.join("sandbox")).unwrap();
+        let root = sandbox_mount_alias_root(&home, "execution-1");
+
+        let error = create_alias_root(&root).unwrap_err();
+
+        assert!(error.to_string().contains("not a managed directory"));
+        assert!(!outside.join("attachments").exists());
     }
 
     #[test]
