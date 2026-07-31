@@ -11,6 +11,13 @@ All notable changes to A3S Box will be documented in this file.
   tenant-scoped finite execution now belongs to A3S Cloud, which dispatches
   provider-neutral A3S Runtime Tasks through Fleet; Box retains only node-local
   Runtime provider mechanics.
+- **Parallel image-build backends and Docker execution dependencies.** The
+  `buildkit-vm` CLI backend, automatic backend selector, helper settings,
+  direct-build push path, dedicated smoke coverage, and external Docker
+  commands in obsolete developer image recipes, benchmarks, and firmware
+  maintenance are removed. `a3s-box build` now has one native engine and
+  ImageStore; isolated macOS `RUN` uses its warm-pool path, while publication
+  uses the existing `a3s-box push` command.
 
 ### Added
 

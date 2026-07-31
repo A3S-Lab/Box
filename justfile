@@ -666,32 +666,6 @@ clean:
     cd src && cargo clean
 
 # ============================================================================
-# Docker / OCI Image
-# ============================================================================
-
-# Build Docker image for agent
-docker-build tag="a3s-box-agent:latest":
-    docker build -t {{tag}} .
-
-# Build Docker image with specific platform
-docker-build-linux tag="a3s-box-agent:latest":
-    docker build --platform linux/amd64 -t {{tag}} .
-
-# Push Docker image to registry
-docker-push tag="a3s-box-agent:latest" registry="ghcr.io/a3s-lab":
-    docker tag {{tag}} {{registry}}/{{tag}}
-    docker push {{registry}}/{{tag}}
-
-# Export Docker image as OCI tarball
-docker-export tag="a3s-box-agent:latest" output="a3s-box-agent.tar":
-    docker save {{tag}} -o {{output}}
-
-# Build and export OCI image
-oci-build tag="a3s-box-agent:latest" output="a3s-box-agent.tar":
-    just docker-build-linux {{tag}}
-    just docker-export {{tag}} {{output}}
-
-# ============================================================================
 # Publish
 # ============================================================================
 

@@ -39,19 +39,11 @@ cd crates/box
 # Optional but recommended for offline/reproducible runs.
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
 export A3S_BOX_SMOKE_IMAGE_TAR="$A3S_BOX_TEST_ALPINE_TAR"
-export A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-arm64-oci.tar
 export A3S_BOX_SMOKE_SKIP_PULL=1
 export A3S_BOX_SMOKE_TIMEOUT_SECS=300
 
 scripts/host-integration-smoke.sh --core
 ```
-
-The BuildKit archive must contain the Linux arm64 image selected by
-`A3S_BOX_BUILDKIT_IMAGE` (default: `moby/buildkit:latest`). The core suite loads
-it into each isolated test home before running the macOS BuildKit cases. This
-avoids repeatedly downloading the large helper image. Cross-architecture
-Dockerfile base images must still be reachable by BuildKit through their image
-references, such as a local registry or a configured registry mirror.
 
 If you do not have an offline archive and want to pull from the registry during
 the run, add:
@@ -195,51 +187,31 @@ sudo -E env A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar \
   scripts/host-integration-smoke.sh --linux-run --no-pure
 ```
 
-macOS does not run Dockerfile `RUN` on the host. The first supported local path
-runs BuildKit inside an A3S Linux VM and loads the resulting OCI archive back
-into the A3S image store:
-
-```bash
-a3s-box build --builder=buildkit-vm \
-  --platform linux/arm64 \
-  -f docker/Dockerfile.web \
-  -t a3s/web:v1 \
-  .
-```
-
-On Apple Silicon, `linux/amd64` builds run through the BuildKit Linux builder
-path and may use emulation, so expect them to be slower than native
-`linux/arm64`. For release builds, push directly from the BuildKit VM:
-
-```bash
-a3s-box build --builder=buildkit-vm \
-  --platform linux/arm64 \
-  --push --plain-http \
-  -f docker/Dockerfile.web \
-  -t 10.0.0.2:5000/a3s/web:v1 \
-  .
-```
-
-BuildKit VM push uses the same credential lookup as `a3s-box push`: the A3S
-credential store, Docker config or helpers, then `REGISTRY_USERNAME` /
-`REGISTRY_PASSWORD`. Only the target registry auth is written to a temporary
-Docker config and mounted into the BuildKit VM.
-
-The built-in build engine also has an isolated VM path for Dockerfile `RUN`:
-start a warm-pool daemon, then pass `--run-pool` (or set
+macOS does not run Dockerfile `RUN` on the host. The native build engine uses
+its isolated warm-pool path instead: start a pool daemon, then pass `--run-pool`
+(or set
 `A3S_BOX_BUILD_RUN_POOL_SOCKET`). The build stage rootfs is mounted into a
 leased pool VM and each shell/exec-form `RUN` executes through the guest exec
 server with the current Dockerfile `WORKDIR`, `ENV`, and `USER`:
 
 ```bash
 a3s-box pool start --image alpine:latest --size 1 --socket /tmp/a3s-build-pool.sock
-a3s-box build --builder=host --run-pool --run-pool-socket /tmp/a3s-build-pool.sock \
+a3s-box build --run-pool --run-pool-socket /tmp/a3s-build-pool.sock \
   -t a3s/web:v1 .
 
 # Or let the build command start the helper daemon explicitly.
-a3s-box build --builder=host --run-pool-autostart \
+a3s-box build --run-pool-autostart \
   --run-pool-image alpine:latest \
   -t a3s/web:v1 .
+```
+
+The target platform must match the helper VM architecture until the native
+engine advertises an explicit emulation capability. Publish only after the
+local build succeeds:
+
+```bash
+a3s-box tag a3s/web:v1 10.0.0.2:5000/a3s/web:v1
+a3s-box push --plain-http 10.0.0.2:5000/a3s/web:v1
 ```
 
 `RUN --mount=type=cache` is available on this path as a persistent overlay:

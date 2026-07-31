@@ -6,8 +6,14 @@ firmware_dir="$root/deps/libkrun-sys/firmware"
 work_dir=${A3S_LIBKRUNFW_WORK_DIR:-"$root/target/libkrunfw-a3s"}
 source_dir="$work_dir/source"
 builder_image=${A3S_LIBKRUNFW_BUILDER_IMAGE:-fedora:42}
+a3s_box=${A3S_BOX:-a3s-box}
 upstream=https://github.com/boxlite-ai/libkrunfw.git
 revision=v5.3.0
+
+command -v "$a3s_box" >/dev/null 2>&1 || {
+    echo "a3s-box is required to build the patched firmware" >&2
+    exit 1
+}
 
 mkdir -p "$work_dir"
 if [ ! -d "$source_dir/.git" ]; then
@@ -15,9 +21,9 @@ if [ ! -d "$source_dir/.git" ]; then
 fi
 
 if [ ! -d "$source_dir/linux-6.12.76" ]; then
-    docker run --rm --platform linux/arm64 \
+    "$a3s_box" run --rm --no-stdin --platform linux/arm64 \
         -v "$source_dir:/src" -w /src "$builder_image" \
-        /bin/bash -lc 'dnf install -y make patch curl xz && make linux-6.12.76'
+        -- /bin/bash -lc 'dnf install -y make patch curl xz && make linux-6.12.76'
 fi
 
 patch_file="$firmware_dir/patches/0001-tsi-nonblocking-accept-probe-local-vsock-first.patch"
@@ -29,9 +35,9 @@ elif ! patch --dry-run -R -p1 -d "$source_dir/linux-6.12.76" < "$patch_file" >/d
 fi
 rm -f "$source_dir/kernel.c" "$source_dir/linux-6.12.76/arch/arm64/boot/Image"
 
-docker run --rm --platform linux/arm64 \
+"$a3s_box" run --rm --no-stdin --platform linux/arm64 \
     -v "$source_dir:/src" -w /src "$builder_image" \
-    /bin/bash -lc 'dnf install -y make gcc bc bison flex elfutils-libelf-devel openssl-devel python3 python3-pyelftools cpio diffutils perl && make -j"$(nproc)" kernel.c'
+    -- /bin/bash -lc 'dnf install -y make gcc bc bison flex elfutils-libelf-devel openssl-devel python3 python3-pyelftools cpio diffutils perl && make -j"$(nproc)" kernel.c'
 
 make -C "$source_dir" libkrunfw.5.dylib
 cp "$source_dir/libkrunfw.5.dylib" "$work_dir/libkrunfw.5.dylib"

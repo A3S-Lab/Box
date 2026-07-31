@@ -72,8 +72,6 @@ Options:
 
 Common environment:
   A3S_BOX_SMOKE_IMAGE_TAR=/path/to/alpine-oci.tar   Offline core_smoke image.
-  A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-oci.tar
-                                                    Preloaded macOS BuildKit helper image.
   A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar   Offline host/core image.
   A3S_BOX_SMOKE_SKIP_PULL=1                         Reuse preloaded core image.
   A3S_BOX_ALLOW_REGISTRY_PULL=1                     Allow live registry pulls.

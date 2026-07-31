@@ -61,8 +61,7 @@ that PR branch to run the same gate before merge.
 3. `core_smoke` — boots a real microVM and execs over virtio-fs.
 4. **Foreground latency gate** (`bench/bench.sh foreground`) — warms the cached
    agent image once, records 10 real KVM no-op runs, and fails when p50 exceeds
-   `KVM_CI_FOREGROUND_MAX_P50_MS`. Docker comparison is intentionally disabled
-   on this runner; the macOS/HVF ratio remains a separate hardware check.
+   `KVM_CI_FOREGROUND_MAX_P50_MS`.
 5. `crictl_smoke` (`A3S_BOX_CRI_SMOKE=1`) — the full CRI pod/container lifecycle
    (`RunPodSandbox → CreateContainer → StartContainer → exec → Stop → Remove`)
    driven by real `crictl`.

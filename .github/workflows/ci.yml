@@ -68,7 +68,7 @@ jobs:
           )
           found=0
           for pattern in "${removed_patterns[@]}"; do
-            if git grep -n -I -F "$pattern" -- \
+            if git grep -n -I -F -e "$pattern" -- \
               .github compat deploy docs scripts sdk src README.md \
               ':(exclude)src/Cargo.lock'; then
               found=1
@@ -76,6 +76,51 @@ jobs:
           done
           if ((found != 0)); then
             echo 'The removed remote compatibility service was reintroduced'
+            exit 1
+          fi
+      - name: Reject removed external build and Docker execution paths
+        run: |
+          removed_patterns=(
+            'buildkit-'"vm"
+            'build_'"buildkit_vm"
+            'A3S_BOX_BUILD'"KIT"
+            'Build'"Backend"
+            '--buildkit-'"image"
+            '--buildkit-'"cpus"
+            '--buildkit-'"memory"
+            'build'"ctl"
+            'moby/build'"kit"
+            'boll'"ard"
+          )
+          found=0
+          for pattern in "${removed_patterns[@]}"; do
+            if git grep -n -I -F -e "$pattern" -- \
+              .github docs scripts src README.md justfile \
+              ':(exclude)src/Cargo.lock'; then
+              found=1
+            fi
+          done
+          removed_commands=(
+            'docker '"build"
+            'docker '"run"
+            'docker '"pull"
+            'docker '"push"
+            'docker '"tag"
+            'docker '"save"
+            'docker '"load"
+            'docker '"volume"
+            'docker '"info"
+            'command -v '"docker"
+          )
+          for pattern in "${removed_commands[@]}"; do
+            if git grep -n -I -F -e "$pattern" -- \
+              .github bench scripts src/deps justfile \
+              ':(exclude)src/Cargo.lock'; then
+              found=1
+            fi
+          done
+          if ((found != 0)); then
+            echo 'A removed external build or Docker execution path was reintroduced'
             exit 1
           fi
 
@@ -550,15 +595,12 @@ jobs:
               local_sandbox_exercises_real_runtime \
               -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
-      # Docker is intentionally unavailable on this runner; the original
-      # macOS/HVF Docker ratio remains a separate hardware-specific comparison.
       - name: Foreground latency — cached no-op p50 regression gate
         env:
           A3S_BOX: ${{ github.workspace }}/src/target/release/a3s-box
           IMAGE: ${{ vars.KVM_CI_AGENT_IMAGE || 'docker.m.daocloud.io/library/alpine:latest' }}
           FOREGROUND_RUNS: "10"
           FOREGROUND_WARMUPS: "1"
-          FOREGROUND_DOCKER: "0"
           # Default includes headroom for normal runner noise; dedicated
           # runners can tighten it with the repository variable.
           FOREGROUND_MAX_P50_MS: ${{ vars.KVM_CI_FOREGROUND_MAX_P50_MS || '3200' }}
