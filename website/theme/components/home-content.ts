@@ -51,6 +51,13 @@ export const homeContent = {
           detail: '20 次完整运行',
         },
         {
+          id: 'warm-pool-fill',
+          value: '1.325',
+          unit: 'VM/s',
+          label: 'snapshot-fork 暖池填充',
+          detail: '4 台 / 3.020 秒 p50 · 实验路径',
+        },
+        {
           id: 'persistent-exec',
           value: '113.943',
           unit: 'ms',
@@ -205,6 +212,13 @@ export const homeContent = {
           unit: 's',
           label: 'Cached cold lifecycle',
           detail: '20 complete runs',
+        },
+        {
+          id: 'warm-pool-fill',
+          value: '1.325',
+          unit: 'VM/s',
+          label: 'Snapshot-fork warm-pool fill',
+          detail: '4 VMs / 3.020 s p50 · experimental',
         },
         {
           id: 'persistent-exec',
