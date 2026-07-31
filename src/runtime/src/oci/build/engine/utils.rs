@@ -6,6 +6,7 @@ use std::path::Path;
 use a3s_box_core::error::{BoxError, Result};
 
 use super::super::dockerignore::DockerIgnore;
+#[cfg(test)]
 use super::super::layer::sha256_bytes;
 
 /// Check if a filename looks like a tar archive.
@@ -226,22 +227,48 @@ pub(super) fn expand_args(s: &str, args: &HashMap<String, String>) -> String {
 
 /// Compute the diff_id (SHA256 of uncompressed layer content).
 pub(super) fn compute_diff_id(layer_path: &Path) -> Result<String> {
-    let data = std::fs::read(layer_path)
-        .map_err(|e| BoxError::BuildError(format!("Failed to read layer for diff_id: {}", e)))?;
-
-    // Decompress gzip to get raw tar
     use flate2::read::GzDecoder;
-    use std::io::Read;
+    use sha2::{Digest, Sha256};
+    use std::io::{BufRead, BufReader, Read};
 
-    let decoder = GzDecoder::new(&data[..]);
-    let mut uncompressed = Vec::new();
-    std::io::BufReader::new(decoder)
-        .read_to_end(&mut uncompressed)
-        .map_err(|e| {
-            BoxError::BuildError(format!("Failed to decompress layer for diff_id: {}", e))
+    let file = std::fs::File::open(layer_path)
+        .map_err(|e| BoxError::BuildError(format!("Failed to read layer for diff_id: {}", e)))?;
+    let mut buffered = BufReader::new(file);
+    let prefix = buffered.fill_buf().map_err(|error| {
+        BoxError::BuildError(format!("Failed to inspect layer for diff_id: {error}"))
+    })?;
+    let is_gzip = prefix.starts_with(&[0x1f, 0x8b]);
+    let is_zstd = prefix.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
+
+    fn hash_reader(mut reader: impl Read, format: &str) -> Result<String> {
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = reader.read(&mut buffer).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to read {format} layer for diff_id: {error}"
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    if is_gzip {
+        hash_reader(GzDecoder::new(buffered), "gzip-compressed")
+    } else if is_zstd {
+        let decoder = zstd::stream::read::Decoder::new(buffered).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to initialize zstd layer decoder for diff_id: {error}"
+            ))
         })?;
-
-    Ok(sha256_bytes(&uncompressed))
+        hash_reader(decoder, "zstd-compressed")
+    } else {
+        hash_reader(buffered, "uncompressed")
+    }
 }
 
 /// Recursively copy a directory.
@@ -424,6 +451,42 @@ pub(super) fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compute_diff_id_accepts_an_uncompressed_oci_layer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layer = temporary.path().join("layer.tar");
+        let contents = b"uncompressed OCI layer bytes";
+        std::fs::write(&layer, contents).unwrap();
+
+        assert_eq!(compute_diff_id(&layer).unwrap(), sha256_bytes(contents));
+    }
+
+    #[test]
+    fn compute_diff_id_accepts_a_gzip_oci_layer() {
+        use std::io::Write;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let layer = temporary.path().join("layer.tar.gz");
+        let contents = b"gzip OCI layer bytes";
+        let file = std::fs::File::create(&layer).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(contents).unwrap();
+        encoder.finish().unwrap();
+
+        assert_eq!(compute_diff_id(&layer).unwrap(), sha256_bytes(contents));
+    }
+
+    #[test]
+    fn compute_diff_id_accepts_a_zstd_oci_layer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layer = temporary.path().join("layer.tar.zst");
+        let contents = b"zstd OCI layer bytes";
+        let encoded = zstd::stream::encode_all(&contents[..], 1).unwrap();
+        std::fs::write(&layer, encoded).unwrap();
+
+        assert_eq!(compute_diff_id(&layer).unwrap(), sha256_bytes(contents));
+    }
 
     #[test]
     fn test_expand_args_no_prefix_collision() {
