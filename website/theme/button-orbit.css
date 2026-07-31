@@ -1,0 +1,70 @@
+.box-button--primary {
+  position: relative;
+  overflow: visible;
+  isolation: isolate;
+}
+
+.box-button-orbit {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 2px;
+  border-radius: 9px;
+  filter: drop-shadow(0 0 3px rgba(69, 221, 255, 0.62))
+    drop-shadow(0 0 6px rgba(98, 215, 139, 0.48));
+  inset: -2px;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.box-button-orbit-gradient {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 220%;
+  aspect-ratio: 1;
+  background: conic-gradient(
+    from 0deg,
+    #ffffff 0deg,
+    #45ddff 25deg,
+    #62d78b 88deg,
+    #f5b95f 164deg,
+    #8b6cff 250deg,
+    #45ddff 332deg,
+    #ffffff 360deg
+  );
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+  will-change: transform;
+}
+
+.box-button--primary:hover .box-button-orbit-gradient,
+.box-button--primary:focus-visible .box-button-orbit-gradient {
+  animation: box-button-full-border-orbit 2.2s linear infinite;
+}
+
+.box-button--primary:focus-visible {
+  outline: 2px solid #e8fff0;
+  outline-offset: 4px;
+}
+
+@keyframes box-button-full-border-orbit {
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .box-button--primary:hover .box-button-orbit-gradient,
+  .box-button--primary:focus-visible .box-button-orbit-gradient {
+    animation: none;
+  }
+}

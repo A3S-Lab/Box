@@ -27,6 +27,7 @@ const routeFiles = [
   'sdk/go.html',
   'reference/index.html',
   'reference/platforms.html',
+  'reference/performance.html',
   'reference/troubleshooting.html',
 ];
 
@@ -99,6 +100,12 @@ for (const [homepagePath, html] of [
     'id="copy-on-write"',
     'id="warm-pool"',
     'id="confidential-computing"',
+    'id="performance-benchmarks"',
+    'data-performance-metric="cached-lifecycle"',
+    'data-performance-metric="persistent-exec"',
+    'data-performance-metric="tmpfs-write"',
+    'data-performance-metric="cow-write"',
+    'box-button-orbit',
     'id="platform-support"',
     'id="runtime-capabilities"',
     'id="native-sdks"',
@@ -123,6 +130,10 @@ for (const [homepagePath, html] of [
     'SEV-SNP',
     'RA-TLS',
     '--snapshot-fork',
+    '2.219',
+    '113.943',
+    '1,194.372',
+    '357.750',
   ]) {
     if (!html.includes(marker)) {
       throw new Error(
@@ -133,6 +144,7 @@ for (const [homepagePath, html] of [
 
   const narrativeSequence = [
     'id="runtime-features"',
+    'id="performance-benchmarks"',
     'id="platform-support"',
     'id="runtime-capabilities"',
     'id="native-sdks"',
@@ -324,5 +336,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Bilingual runtime features, Agent Skill, Tabs, line-focus tutorials, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual runtime features, real-host metrics, animated quick-start border, Agent Skill, Tabs, line-focus tutorials, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );
