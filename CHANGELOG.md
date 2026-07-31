@@ -21,6 +21,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Recorded multi-platform OCI assembly.** The typed
+  `assemble_recorded_build_outputs` boundary deterministically combines two to
+  eight revalidated single-platform plan receipts into one OCI image index.
+  Inputs must share the exact source and non-platform build intent, manifests
+  are sorted by platform, shared blobs are copied once, and invalid input fails
+  before publication. Assembly reuses the native output graph validator and
+  the sole `ImageStore` commit boundary; it adds no build engine, cache,
+  scheduler, queue, journal, manifest store, or publisher.
 - **Portable native build-cache hydration.** The typed
   `hydrate_recorded_build_cache` boundary revalidates a Box-native OCI cache
   artifact and imports it through the existing `BuildCache` lock and blob/key

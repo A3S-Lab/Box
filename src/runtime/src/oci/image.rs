@@ -3,6 +3,7 @@
 //! Handles parsing of OCI image layout including manifest and configuration.
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::platform::Platform as BoxPlatform;
 use oci_spec::image::{Descriptor, ImageConfiguration, ImageIndex, ImageManifest};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -61,7 +62,7 @@ pub(crate) fn validate_plain_directory(path: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn open_regular_file_no_follow(path: &Path, what: &str) -> Result<File> {
+pub(crate) fn open_regular_file_no_follow(path: &Path, what: &str) -> Result<File> {
     #[cfg(windows)]
     let opened = a3s_box_core::windows_file::open_regular_file(path, None).map(|(file, _)| file);
 
@@ -325,11 +326,14 @@ pub struct OciImage {
     /// Exact root manifest descriptor selected from the OCI index.
     manifest_descriptor: Descriptor,
 
-    /// Number of root descriptors in the OCI index.
-    index_manifest_count: usize,
+    /// Authenticated image manifest selected from the OCI index.
+    manifest: ImageManifest,
 
     /// Complete descriptor set whose bytes were verified while loading.
     content_descriptors: Vec<Descriptor>,
+
+    /// Platform declared by the verified image configuration.
+    platform: BoxPlatform,
 
     /// Image configuration
     config: OciImageConfig,
@@ -410,11 +414,29 @@ impl OciImage {
             .cloned()
             .ok_or_else(|| BoxError::OciImageError("No manifests in index.json".to_string()))?;
 
+        Self::from_validated_manifest_descriptor(root_dir, manifest_descriptor)
+    }
+
+    /// Load one exact manifest descriptor from an already materialized OCI
+    /// layout through the same config and layer verification as [`Self::from_path`].
+    pub(crate) fn from_manifest_descriptor(
+        path: impl AsRef<Path>,
+        manifest_descriptor: Descriptor,
+    ) -> Result<Self> {
+        let root_dir = path.as_ref().to_path_buf();
+        Self::validate_oci_layout(&root_dir)?;
+        Self::from_validated_manifest_descriptor(root_dir, manifest_descriptor)
+    }
+
+    fn from_validated_manifest_descriptor(
+        root_dir: PathBuf,
+        manifest_descriptor: Descriptor,
+    ) -> Result<Self> {
         // Load manifest
         let manifest = Self::load_manifest(&root_dir, &manifest_descriptor)?;
 
         // Load config
-        let config = Self::load_config(&root_dir, manifest.config())?;
+        let (config, platform) = Self::load_config(&root_dir, manifest.config())?;
 
         // Verify every layer through a no-follow handle before exposing paths
         // that extraction will subsequently consume.
@@ -441,8 +463,9 @@ impl OciImage {
         Ok(Self {
             root_dir,
             manifest_descriptor,
-            index_manifest_count: index.manifests().len(),
+            manifest,
             content_descriptors,
+            platform,
             config,
             layer_paths,
         })
@@ -473,14 +496,19 @@ impl OciImage {
         &self.manifest_descriptor
     }
 
-    /// Number of root descriptors declared by the OCI index.
-    pub(crate) const fn index_manifest_count(&self) -> usize {
-        self.index_manifest_count
+    /// Authenticated manifest selected from the OCI index.
+    pub(crate) fn manifest(&self) -> &ImageManifest {
+        &self.manifest
     }
 
     /// Complete descriptor set whose bytes were verified while loading.
     pub(crate) fn content_descriptors(&self) -> &[Descriptor] {
         &self.content_descriptors
+    }
+
+    /// Exact platform declared by the verified image configuration.
+    pub(crate) fn platform(&self) -> &BoxPlatform {
+        &self.platform
     }
 
     /// Get the entrypoint command.
@@ -530,12 +558,27 @@ impl OciImage {
     }
 
     /// Load the image index from index.json.
-    fn load_index(root_dir: &Path) -> Result<ImageIndex> {
+    pub(crate) fn load_index(root_dir: &Path) -> Result<ImageIndex> {
         let index_path = root_dir.join("index.json");
         let content = read_regular_file_bounded(&index_path, MAX_OCI_INDEX_BYTES, "index.json")?;
 
         serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse index.json: {}", e)))
+    }
+
+    /// Load and authenticate an image-index blob referenced by a descriptor.
+    pub(crate) fn load_index_blob(root_dir: &Path, descriptor: &Descriptor) -> Result<ImageIndex> {
+        let (digest, size) = typed_descriptor_contract(descriptor, "image-index blob")?;
+        let content = read_verified_oci_blob(
+            root_dir,
+            &digest,
+            size,
+            MAX_OCI_INDEX_BYTES,
+            "image-index blob",
+        )?;
+        serde_json::from_slice(&content).map_err(|error| {
+            BoxError::OciImageError(format!("Failed to parse image-index blob: {error}"))
+        })
     }
 
     /// Load the image manifest from blobs.
@@ -554,7 +597,10 @@ impl OciImage {
     }
 
     /// Load the image configuration from blobs.
-    fn load_config(root_dir: &Path, descriptor: &Descriptor) -> Result<OciImageConfig> {
+    fn load_config(
+        root_dir: &Path,
+        descriptor: &Descriptor,
+    ) -> Result<(OciImageConfig, BoxPlatform)> {
         let (digest, size) = typed_descriptor_contract(descriptor, "config blob")?;
         let content =
             read_verified_oci_blob(root_dir, &digest, size, MAX_OCI_CONFIG_BYTES, "config blob")?;
@@ -575,9 +621,14 @@ impl OciImage {
             .unwrap_or_default();
         let health_check = Self::parse_health_check_from_raw(&raw_config);
 
+        let platform = BoxPlatform {
+            os: oci_config.os().to_string(),
+            architecture: oci_config.architecture().to_string(),
+            variant: oci_config.variant().clone(),
+        };
         let mut config = OciImageConfig::from_oci_config(&oci_config, onbuild);
         config.health_check = health_check;
-        Ok(config)
+        Ok((config, platform))
     }
 
     /// Parse Docker-compatible Healthcheck metadata from raw image config JSON.

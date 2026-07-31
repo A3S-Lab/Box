@@ -335,8 +335,8 @@ Acceptance criteria:
 - Supported instructions are listed explicitly in docs and CLI help.
 - Unsupported instructions fail with contextual errors.
 - `RUN` executes in an isolated Linux environment, not directly on the macOS host.
-- `--platform` supports one target platform; multi-platform OCI indexes are added
-  only after per-platform builds are real.
+- `--platform` supports one target platform; multi-platform OCI indexes are
+  assembled only from real recorded per-platform outputs.
 
 Current notes:
 
@@ -413,9 +413,16 @@ Current notes:
   retains the complete imported set while applying the configured cache cap,
   and returns the revalidated receipt. CI rejects a second cache importer,
   service, store, queue, validator, or write boundary.
-- Multi-platform OCI assembly remains the Box build release gate; Cloud
-  consumption through Fleet, publication, and SPDX/SLSA evidence remain
-  integration gates.
+- Typed multi-platform OCI assembly now accepts two to eight exact
+  single-platform plans and their durable output receipts. All inputs must
+  share the admitted source and every non-platform plan field. The stateless
+  assembler sorts unique platforms, copies each shared blob once, emits one
+  deterministic OCI image index, and runs every input plus the staged and
+  stored result through the existing output validator. Both direct builds and
+  assembly enter one ImageStore commit function. CI rejects another assembly
+  engine, queue, scheduler, journal, store, validator, or publisher. Cloud
+  remains responsible for per-platform native scheduling through Fleet and
+  Artifact publication; SPDX/SLSA evidence remains an integration gate.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

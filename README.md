@@ -192,10 +192,15 @@ runtime state changes instead of being silently stored or weakened.
   cancellation, and ImageStore publication, so restarted callers can adopt
   both artifacts committed before the terminal receipt. The journal, native
   engine, `BuildCache`, and ImageStore remain the only lifecycle, execution,
-  cache, and image authorities. The CLI exposes only this native engine: Linux
-  `RUN` uses the isolated local path and macOS uses the same engine through
-  `--run-pool`; publication remains the separate `a3s-box push` image
-  operation.
+  cache, and image authorities. Recorded single-platform receipts can be
+  combined with `assemble_recorded_build_outputs` into one deterministic OCI
+  image index only when their source and non-platform plan intent match.
+  Assembly sorts unique platforms, deduplicates shared blobs, and reuses the
+  same output validator and sole ImageStore commit boundary; it owns no
+  scheduler, queue, journal, manifest store, or publisher. The CLI exposes only
+  this native engine: Linux `RUN` uses the isolated local path and macOS uses
+  the same engine through `--run-pool`; publication remains the separate
+  `a3s-box push` image operation.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

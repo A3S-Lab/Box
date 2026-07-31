@@ -18,7 +18,7 @@ use super::cache::{
 use super::dockerfile::{Dockerfile, Instruction, RunBindMount, RunCacheMount};
 use super::dockerignore::DockerIgnore;
 use super::layer::{sha256_bytes, sha256_file, LayerInfo};
-use super::output::inspect_stored_build_output;
+use super::output::publish_single_build_output;
 pub use super::output::{BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 use crate::oci::image::OciImageConfig;
 use crate::oci::layers::extract_layer;
@@ -1718,6 +1718,9 @@ async fn assemble_image(
             entry
         }).collect::<Vec<_>>()
     });
+    if let Some(variant) = &target_platform.variant {
+        config_obj["variant"] = serde_json::json!(variant);
+    }
 
     // Populate config section
     let config_section = config_obj["config"].as_object_mut().unwrap();
@@ -1853,8 +1856,9 @@ async fn assemble_image(
         }
         None => None,
     };
-    let stored = store.put(reference, &digest_str, &output_dir).await?;
-    let output = inspect_stored_build_output(reference, stored, store.store_dir())?;
+    let output =
+        publish_single_build_output(reference, &digest_str, &output_dir, store, target_platform)
+            .await?;
     Ok(SupervisedBuildResult { output, cache })
 }
 
