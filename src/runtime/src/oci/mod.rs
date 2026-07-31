@@ -39,14 +39,16 @@ pub mod store;
 
 #[cfg(feature = "build")]
 pub use build::{
-    cancel_recorded_build_plan, execute_recorded_build_plan, hydrate_recorded_build_cache,
-    inspect_recorded_build_plan, inspect_recorded_build_status, remove_recorded_build_plan,
-    start_recorded_build_plan, BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy,
-    BuildCacheReceipt, BuildCancellationOutcome, BuildConfig, BuildNetworkPolicy,
-    BuildOperationIdentity, BuildOutputDescriptor, BuildOutputReceipt, BuildPlanExecutionError,
-    BuildReceiptError, BuildReceiptOutput, BuildResult, BuildRunPoolConfig, Dockerfile,
-    Instruction, RecordedBuildCache, RecordedBuildResult, RecordedBuildStatus,
-    BUILD_CACHE_ARTIFACT_MEDIA_TYPE, BUILD_CACHE_CONFIG_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    assemble_recorded_build_outputs, cancel_recorded_build_plan, execute_recorded_build_plan,
+    hydrate_recorded_build_cache, inspect_recorded_build_plan, inspect_recorded_build_status,
+    remove_recorded_build_plan, start_recorded_build_plan, BoxBuildOptions, BoxBuildPlan,
+    BoxBuildPlanError, BuildAssemblyError, BuildCachePolicy, BuildCacheReceipt,
+    BuildCancellationOutcome, BuildConfig, BuildNetworkPolicy, BuildOperationIdentity,
+    BuildOutputAssembly, BuildOutputAssemblyInput, BuildOutputDescriptor, BuildOutputReceipt,
+    BuildPlanExecutionError, BuildReceiptError, BuildReceiptOutput, BuildResult,
+    BuildRunPoolConfig, Dockerfile, Instruction, MultiPlatformBuildResult, RecordedBuildCache,
+    RecordedBuildResult, RecordedBuildStatus, BUILD_CACHE_ARTIFACT_MEDIA_TYPE,
+    BUILD_CACHE_CONFIG_MEDIA_TYPE, OCI_IMAGE_INDEX_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 pub use credentials::CredentialStore;
 pub use image::{OciHealthCheck, OciImage, OciImageConfig};

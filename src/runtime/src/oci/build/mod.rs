@@ -18,6 +18,7 @@
 //! Unsupported Dockerfile flags and instructions fail with contextual errors
 //! instead of being silently ignored.
 
+mod assembly;
 pub(crate) mod cache;
 pub mod dockerfile;
 pub(crate) mod dockerignore;
@@ -29,6 +30,10 @@ mod output;
 pub mod plan;
 mod receipt;
 
+pub use assembly::{
+    assemble_recorded_build_outputs, BuildAssemblyError, BuildOutputAssembly,
+    BuildOutputAssemblyInput,
+};
 pub use cache::{
     hydrate_recorded_build_cache, BuildCacheReceipt, RecordedBuildCache,
     BUILD_CACHE_ARTIFACT_MEDIA_TYPE, BUILD_CACHE_CONFIG_MEDIA_TYPE,
@@ -41,7 +46,10 @@ pub use execution::{
     BuildPlanExecutionError,
 };
 pub use layer::{DirSnapshot, LayerInfo};
-pub use output::{BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
+pub use output::{
+    BuildOutputDescriptor, BuildResult, MultiPlatformBuildResult, OCI_IMAGE_INDEX_MEDIA_TYPE,
+    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+};
 pub use plan::{BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy};
 pub use receipt::{
     BuildCancellationOutcome, BuildOperationIdentity, BuildOutputReceipt, BuildReceiptError,

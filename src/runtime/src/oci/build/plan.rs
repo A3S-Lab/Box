@@ -219,6 +219,16 @@ impl BoxBuildPlan {
         self.cache
     }
 
+    /// Whether two per-platform plans represent the same build intent once
+    /// their target platform is deliberately excluded.
+    pub(in crate::oci::build) fn has_same_non_platform_intent(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.file == other.file
+            && self.target == other.target
+            && self.network == other.network
+            && self.cache == other.cache
+    }
+
     fn document(&self) -> Document {
         let mut attributes = HashMap::from([
             (

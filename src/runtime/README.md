@@ -174,10 +174,39 @@ is written; repeated imports are idempotent. Imported layers are copied, the
 complete imported set is retained while unrelated old blobs are pruned, and a
 successful return carries the exact revalidated receipt.
 
-This completes the Box-owned `BX0.4` supervision, portable cache-export
-receipt, and typed cache-hydration slices. Multi-platform OCI assembly, Cloud
-Node Agent consumption, publication, and end-to-end SPDX/SLSA signing evidence
-remain separate gates.
+`assemble_recorded_build_outputs` accepts two to eight
+`BuildOutputAssemblyInput` values after their single-platform native builds
+complete. `BuildOutputAssembly` requires one source digest, identical context,
+build file, target, network, and cache intent, and one unique plan-bound receipt
+per platform. It sorts the inputs before constructing the OCI image index,
+copies shared content-addressed blobs once, revalidates every input and the
+complete assembled graph, then enters the same ImageStore commit boundary as a
+direct build. It has no execution backend, queue, scheduler, receipt journal,
+manifest store, or publisher.
+
+```rust
+use std::sync::Arc;
+
+use a3s_box_runtime::{
+    assemble_recorded_build_outputs, BuildOutputAssembly, BuildOutputAssemblyInput,
+};
+
+let assembly = BuildOutputAssembly::new(
+    "registry.example/a3s/service:build-018f",
+    source_artifact_digest,
+    vec![
+        BuildOutputAssemblyInput::new(amd64_plan, amd64_result.receipt),
+        BuildOutputAssemblyInput::new(arm64_plan, arm64_result.receipt),
+    ],
+)?;
+let image_index =
+    assemble_recorded_build_outputs(&assembly, Arc::clone(&image_store)).await?;
+```
+
+This completes the Box-owned `BX0.4` supervision, portable cache receipt,
+typed cache hydration, and multi-platform OCI assembly slices. Cloud Node Agent
+consumption through its existing Fleet queue, Artifact publication, and
+end-to-end SPDX/SLSA signing evidence remain separate integration gates.
 
 ## Components
 
