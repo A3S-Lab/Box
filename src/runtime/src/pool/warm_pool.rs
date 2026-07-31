@@ -89,6 +89,7 @@ pub struct WarmPool {
 struct PoolTemplate {
     mem_file: String,
     state_file: String,
+    rootfs_cache_key: Option<String>,
 }
 
 /// How many consecutive template-build failures are tolerated before the
@@ -483,10 +484,23 @@ impl WarmPool {
                     cfg.restore_from = Some(tpl.state_file.clone());
                     cfg.snapshot_sock = None;
                     let mut vm = VmManager::new(cfg, event_emitter.clone());
-                    vm.boot().await?;
-                    vm.wait_for_exec_available(std::time::Duration::from_secs(120))
-                        .await?;
-                    return Ok(vm);
+                    vm.restore_rootfs_cache_key = tpl.rootfs_cache_key.clone();
+                    let restored = async {
+                        vm.boot().await?;
+                        vm.wait_for_exec_available(std::time::Duration::from_secs(120))
+                            .await
+                    }
+                    .await;
+                    match restored {
+                        Ok(()) => return Ok(vm),
+                        Err(error) => {
+                            let _ = vm.destroy_with_timeout(2000).await;
+                            tracing::warn!(
+                                %error,
+                                "snapshot-fork restore failed; cold-booting this pool VM"
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     tracing::debug!(%error, "snapshot-fork unavailable; cold-booting this pool VM");
@@ -599,6 +613,7 @@ impl WarmPool {
         cfg.restore_from = None;
         let mut src = VmManager::new(cfg, event_emitter.clone());
         src.boot().await?;
+        let rootfs_cache_key = src.current_rootfs_cache_key()?;
 
         // Trigger the snapshot over libkrun's socket, then tear down the source (it is
         // left paused by the snapshot; the RAM + state files are the template).
@@ -615,6 +630,7 @@ impl WarmPool {
         Ok(PoolTemplate {
             mem_file: mem_file.to_string_lossy().into_owned(),
             state_file: state_file.to_string_lossy().into_owned(),
+            rootfs_cache_key,
         })
     }
 

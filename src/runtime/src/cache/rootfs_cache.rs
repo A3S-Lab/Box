@@ -107,6 +107,16 @@ impl RootfsCache {
         hex::encode(hasher.finalize())
     }
 
+    /// Compute the rootfs key for one resolved OCI image.
+    ///
+    /// A tag such as `latest` is mutable, while the manifest digest commits to
+    /// the image config and every layer descriptor. Including both keeps cache
+    /// diagnostics human-readable without allowing a moved tag to reuse stale
+    /// filesystem content.
+    pub fn compute_image_key(image_ref: &str, manifest_digest: &str) -> String {
+        Self::compute_key(image_ref, &[manifest_digest.to_string()], &[], &[])
+    }
+
     /// Get the path to a cached rootfs by key.
     ///
     /// Returns `None` if the rootfs is not cached or the cache entry is invalid.
@@ -814,6 +824,14 @@ mod tests {
         let key1 = RootfsCache::compute_key("nginx:latest", &[], &[], &[]);
         let key2 = RootfsCache::compute_key("nginx:1.25", &[], &[], &[]);
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_image_key_changes_when_a_mutable_tag_resolves_to_new_content() {
+        let first = RootfsCache::compute_image_key("example/app:latest", "sha256:first-manifest");
+        let second = RootfsCache::compute_image_key("example/app:latest", "sha256:second-manifest");
+
+        assert_ne!(first, second);
     }
 
     #[test]
