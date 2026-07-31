@@ -64,6 +64,8 @@ export interface Script {
 }
 
 export interface SandboxCreateOptions {
+  command?: readonly string[]
+  entrypoint?: readonly string[]
   timeoutMs?: number
   envs?: Readonly<Record<string, string>>
   metadata?: Readonly<Record<string, string>>
@@ -174,9 +176,13 @@ export class Sandbox {
     )
     const timeoutMs = options.timeoutMs ?? 3_600_000
     if (timeoutMs <= 0) throw new Error('timeoutMs must be greater than zero')
+    const command = initialArgv('initial command', options.command)
+    const entrypoint = initialArgv('initial entrypoint', options.entrypoint)
     const result = await runtime.request({
       operation: 'sandbox_create',
       image: template,
+      ...(command === undefined ? {} : { command }),
+      ...(entrypoint === undefined ? {} : { entrypoint }),
       timeout_seconds: Math.ceil(timeoutMs / 1000),
       env: { ...(options.envs ?? {}) },
       labels: { ...(options.metadata ?? {}) },
@@ -702,6 +708,21 @@ function bridgeVolumeMount(
         target: mount.target,
         read_only: mount.readOnly ?? false,
       }
+}
+
+function initialArgv(
+  name: string,
+  value: readonly string[] | undefined
+): readonly string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((part) => typeof part !== 'string')) {
+    throw new Error(`${name} must be an array of strings`)
+  }
+  if (value.length === 0) throw new Error(`${name} cannot be empty`)
+  if (value[0].trim().length === 0) {
+    throw new Error(`${name} first element cannot be blank`)
+  }
+  return [...value]
 }
 
 function isScript(value: string | Uint8Array | Script): value is Script {

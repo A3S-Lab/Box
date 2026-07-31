@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from .exceptions import A3SBoxError, A3SBoxNotInstalledError
 
-BRIDGE_PROTOCOL_VERSION = 2
+BRIDGE_PROTOCOL_VERSION = 3
 SUPPORTED_BRIDGE_OPERATIONS = (
     "sdk_capabilities",
     "runtime_diagnostics",

@@ -10,6 +10,10 @@ import (
 type SandboxBuilder struct {
 	client               *Client
 	image                string
+	command              []string
+	commandSet           bool
+	entrypoint           []string
+	entrypointSet        bool
 	timeout              time.Duration
 	env                  map[string]string
 	labels               map[string]string
@@ -52,6 +56,21 @@ func (client *Client) Sandbox(image string) *SandboxBuilder {
 
 func (builder *SandboxBuilder) Timeout(timeout time.Duration) *SandboxBuilder {
 	builder.timeout = timeout
+	return builder
+}
+
+// Command overrides the OCI image command for the Sandbox's initial process.
+// When unset, A3S Box starts its long-running keepalive command.
+func (builder *SandboxBuilder) Command(argv ...string) *SandboxBuilder {
+	builder.command = append([]string{}, argv...)
+	builder.commandSet = true
+	return builder
+}
+
+// Entrypoint overrides the OCI image entrypoint for the Sandbox's initial process.
+func (builder *SandboxBuilder) Entrypoint(argv ...string) *SandboxBuilder {
+	builder.entrypoint = append([]string{}, argv...)
+	builder.entrypointSet = true
 	return builder
 }
 
@@ -211,6 +230,12 @@ func (builder *SandboxBuilder) Start(ctx context.Context) (*Sandbox, error) {
 	if builder.hostname != "" {
 		fields["hostname"] = builder.hostname
 	}
+	if builder.commandSet {
+		fields["command"] = append([]string{}, builder.command...)
+	}
+	if builder.entrypointSet {
+		fields["entrypoint"] = append([]string{}, builder.entrypoint...)
+	}
 	var info SandboxInfo
 	if err := builder.client.request(ctx, op, fields, &info); err != nil {
 		return nil, err
@@ -234,6 +259,12 @@ func (builder *SandboxBuilder) validate() error {
 	}
 	if builder.memoryMiB != nil && *builder.memoryMiB == 0 {
 		return invalid(op, "memory must be greater than zero")
+	}
+	if err := validateInitialArgv(op, "initial command", builder.command, builder.commandSet); err != nil {
+		return err
+	}
+	if err := validateInitialArgv(op, "initial entrypoint", builder.entrypoint, builder.entrypointSet); err != nil {
+		return err
 	}
 	if builder.isolation != IsolationMicroVM && builder.isolation != IsolationSandbox {
 		return invalid(op, "isolation must be microvm or sandbox")
@@ -295,6 +326,19 @@ func (builder *SandboxBuilder) validate() error {
 		if strings.TrimSpace(host) == "" || net.ParseIP(address) == nil {
 			return invalid(op, "host aliases require a host name and IP address")
 		}
+	}
+	return nil
+}
+
+func validateInitialArgv(op, name string, argv []string, set bool) error {
+	if !set {
+		return nil
+	}
+	if len(argv) == 0 {
+		return invalid(op, name+" cannot be empty")
+	}
+	if strings.TrimSpace(argv[0]) == "" {
+		return invalid(op, name+" first element cannot be blank")
 	}
 	return nil
 }

@@ -702,6 +702,8 @@ _SandboxBuilderT = TypeVar("_SandboxBuilderT", bound="_SandboxBuilderBase")
 class _SandboxBuilderBase:
     def __init__(self, image: str) -> None:
         self._image = image
+        self._command: tuple[str, ...] | None = None
+        self._entrypoint: tuple[str, ...] | None = None
         self._timeout = 3600
         self._envs: dict[str, str] = {}
         self._metadata: dict[str, str] = {}
@@ -726,6 +728,20 @@ class _SandboxBuilderBase:
 
     def timeout(self: _SandboxBuilderT, seconds: int) -> _SandboxBuilderT:
         self._timeout = seconds
+        return self
+
+    def command(
+        self: _SandboxBuilderT,
+        *argv: str,
+    ) -> _SandboxBuilderT:
+        self._command = argv
+        return self
+
+    def entrypoint(
+        self: _SandboxBuilderT,
+        *argv: str,
+    ) -> _SandboxBuilderT:
+        self._entrypoint = argv
         return self
 
     def env(
@@ -886,6 +902,8 @@ class SandboxBuilder(_SandboxBuilderBase):
     def start(self) -> Sandbox:
         return Sandbox.create(
             self._image,
+            command=self._command,
+            entrypoint=self._entrypoint,
             timeout=self._timeout,
             envs=self._envs,
             metadata=self._metadata,
@@ -919,6 +937,8 @@ class AsyncSandboxBuilder(_SandboxBuilderBase):
     async def start(self) -> AsyncSandbox:
         return await AsyncSandbox.create(
             self._image,
+            command=self._command,
+            entrypoint=self._entrypoint,
             timeout=self._timeout,
             envs=self._envs,
             metadata=self._metadata,

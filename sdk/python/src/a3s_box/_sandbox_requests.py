@@ -23,6 +23,8 @@ class SandboxIdentity(Protocol):
 
 def create_request(
     template: str | None,
+    command: Sequence[str] | None,
+    entrypoint: Sequence[str] | None,
     timeout: int,
     envs: Mapping[str, str] | None,
     metadata: Mapping[str, str] | None,
@@ -47,6 +49,8 @@ def create_request(
 ) -> dict[str, object]:
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
+    initial_command = _initial_argv("initial command", command)
+    initial_entrypoint = _initial_argv("initial entrypoint", entrypoint)
     request: dict[str, object] = {
         "operation": "sandbox_create",
         "image": template or DEFAULT_IMAGE,
@@ -64,6 +68,10 @@ def create_request(
         "persistent": persistent,
         "auto_remove": auto_remove,
     }
+    if initial_command is not None:
+        request["command"] = initial_command
+    if initial_entrypoint is not None:
+        request["entrypoint"] = initial_entrypoint
     if name is not None:
         request["name"] = name
     if cpus is not None:
@@ -81,6 +89,24 @@ def create_request(
     if hostname is not None:
         request["hostname"] = hostname
     return request
+
+
+def _initial_argv(
+    name: str,
+    value: Sequence[str] | None,
+) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not all(
+        isinstance(part, str) for part in value
+    ):
+        raise ValueError(f"{name} must be a sequence of strings")
+    argv = list(value)
+    if not argv:
+        raise ValueError(f"{name} cannot be empty")
+    if not argv[0].strip():
+        raise ValueError(f"{name} first element cannot be blank")
+    return argv
 
 
 def command_request(

@@ -90,6 +90,8 @@ class Sandbox:
         cls,
         template: str | None = None,
         *,
+        command: Sequence[str] | None = None,
+        entrypoint: Sequence[str] | None = None,
         timeout: int = 3600,
         envs: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
@@ -117,6 +119,8 @@ class Sandbox:
         result = local_runtime.request(
             _create_request(
                 template,
+                command,
+                entrypoint,
                 timeout,
                 envs,
                 metadata,
@@ -540,6 +544,8 @@ class AsyncSandbox:
         cls,
         template: str | None = None,
         *,
+        command: Sequence[str] | None = None,
+        entrypoint: Sequence[str] | None = None,
         timeout: int = 3600,
         envs: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
@@ -569,6 +575,8 @@ class AsyncSandbox:
         result = await local_runtime.request(
             _create_request(
                 template,
+                command,
+                entrypoint,
                 timeout,
                 envs,
                 metadata,

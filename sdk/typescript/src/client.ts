@@ -642,6 +642,16 @@ export class SandboxBuilder {
     return this
   }
 
+  command(...argv: string[]): this {
+    this.options.command = [...argv]
+    return this
+  }
+
+  entrypoint(...argv: string[]): this {
+    this.options.entrypoint = [...argv]
+    return this
+  }
+
   env(key: string, value: string): this {
     this.options.envs = { ...(this.options.envs ?? {}), [key]: value }
     return this

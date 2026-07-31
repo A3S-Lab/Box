@@ -107,7 +107,7 @@ class FakeRuntime {
         }
       case 'sdk_capabilities':
         return {
-          protocol_version: 2,
+          protocol_version: BRIDGE_PROTOCOL_VERSION,
           operations: [...SUPPORTED_BRIDGE_OPERATIONS],
         }
       case 'sandbox_list':
@@ -259,7 +259,7 @@ class CapabilityRuntime {
   requests = []
 
   constructor({
-    protocolVersion = 2,
+    protocolVersion = BRIDGE_PROTOCOL_VERSION,
     operations = SUPPORTED_BRIDGE_OPERATIONS,
   } = {}) {
     this.protocolVersion = protocolVersion
@@ -432,7 +432,9 @@ assert.deepEqual(
   ['sdk_capabilities']
 )
 
-const mismatchedRuntime = new CapabilityRuntime({ protocolVersion: 3 })
+const mismatchedRuntime = new CapabilityRuntime({
+  protocolVersion: BRIDGE_PROTOCOL_VERSION + 1,
+})
 await assert.rejects(
   new A3SBoxClient(mismatchedRuntime).listImages(),
   (error) =>
@@ -767,6 +769,8 @@ const builderSandbox = await client
   .isolation('sandbox')
   .filesystemSnapshot('base-snapshot')
   .workspace('/workspace')
+  .entrypoint('/usr/bin/env', 'sh')
+  .command('-c', 'npm test && sleep 3600')
   .mountNamed(cacheVolume.name, '/cache', { readOnly: true })
   .mountBind('./src', '/workspace/src')
   .tmpfs('/scratch', { sizeBytes: 1024, readOnly: true })
@@ -804,6 +808,11 @@ assert.equal(builderRuntime.requests[3].memory_mb, 4096)
 assert.equal(builderRuntime.requests[3].isolation, 'sandbox')
 assert.equal(builderRuntime.requests[3].filesystem_snapshot_id, 'base-snapshot')
 assert.equal(builderRuntime.requests[3].workspace, '/workspace')
+assert.deepEqual(builderRuntime.requests[3].entrypoint, ['/usr/bin/env', 'sh'])
+assert.deepEqual(builderRuntime.requests[3].command, [
+  '-c',
+  'npm test && sleep 3600',
+])
 assert.equal(builderRuntime.requests[3].workdir, '/workspace/src')
 assert.equal(builderRuntime.requests[3].user, '1000:1000')
 assert.equal(builderRuntime.requests[3].hostname, 'typescript-ci')
@@ -846,6 +855,30 @@ assert.equal(
 await client.removeNetwork(ciNetwork.name)
 await client.removeVolume(cacheVolume.name)
 await client.removeImage(builtImage.reference)
+
+const invalidInitialProcessRuntime = new FakeRuntime()
+await assert.rejects(
+  Sandbox.create('alpine:3.20', {
+    command: [],
+    runtime: invalidInitialProcessRuntime,
+  }),
+  /initial command cannot be empty/
+)
+await assert.rejects(
+  Sandbox.create('alpine:3.20', {
+    entrypoint: [' '],
+    runtime: invalidInitialProcessRuntime,
+  }),
+  /initial entrypoint.*blank/
+)
+await assert.rejects(
+  Sandbox.create('alpine:3.20', {
+    command: 'echo split-into-characters',
+    runtime: invalidInitialProcessRuntime,
+  }),
+  /initial command must be an array of strings/
+)
+assert.deepEqual(invalidInitialProcessRuntime.requests, [])
 
 const managementRuntime = new FakeRuntime()
 const management = new A3SBoxClient(managementRuntime)

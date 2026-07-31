@@ -48,6 +48,24 @@ sandbox.kill().await?;
 # Ok(()) }
 ```
 
+Creation uses a long-running keepalive command by default. Override the
+initial OCI process explicitly when the workload must start at boot, including
+on Windows/WHPX where post-boot command execution is unavailable:
+
+```rust
+use a3s_box_sdk::{Sandbox, SandboxCreateOptions};
+
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let sandbox = Sandbox::create_with_options(
+    SandboxCreateOptions::new("alpine:3.20")
+        .entrypoint(["/bin/sh", "-c"])
+        .command(["echo ready; exec httpd -f -p 8080"]),
+)
+.await?;
+sandbox.kill().await?;
+# Ok(()) }
+```
+
 The facade also provides `connect`, `pause`, `resume`, generation-fenced
 `stop`, idempotent `restart`, explicit terminal `remove`, `is_running`, bounded
 structured logs, current stats, command environment/working-directory/stdin
@@ -139,8 +157,9 @@ Scripts are sent through standard input to the selected interpreter and are
 not interpolated into a host shell command. Typed bind mounts, named-volume
 mounts, tmpfs, TSI/disabled/bridge networking, TCP publications, DNS, host
 aliases, workdir/user/hostname, read-only root filesystems, persistence,
-automatic cleanup, and filesystem-snapshot restore are available on
-`SandboxBuilder` and `SandboxCreateOptions`.
+automatic cleanup, initial command and entrypoint overrides, and
+filesystem-snapshot restore are available on `SandboxBuilder` and
+`SandboxCreateOptions`.
 
 Named bridge networks and published ports are currently MicroVM-only. The
 shared-kernel Sandbox resolver rejects either before runtime mutation.
