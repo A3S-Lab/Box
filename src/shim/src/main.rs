@@ -838,7 +838,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // listener. The worker exposes a local exec pipe and tunnels the unchanged
     // exec protocol over the long-lived guest-initiated 4093 channel.
     #[cfg(target_os = "windows")]
-    let windows_port_forward_pipe = {
+    let windows_port_forward_manager = {
         // Note: PTY and attestation channels are not yet implemented on Windows.
         // The 4093 channel also carries lifecycle signals, so it must exist even
         // when the box has no published ports.
@@ -853,20 +853,20 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                 hint: None,
             })?;
         let stop_request = socket_dir.join(WINDOWS_STOP_REQUEST_FILE);
-        let port_fwd_pipe = windows_port_forward::spawn_port_forward_manager(
+        let port_forward_manager = windows_port_forward::spawn_port_forward_manager(
             &spec.box_id,
             &spec.port_map,
             &stop_request,
         )?;
         tracing::info!(
             port_map = ?spec.port_map,
-            pipe_name = %port_fwd_pipe,
+            pipe_name = %port_forward_manager.pipe_name(),
             guest_port = PORT_FWD_VSOCK_PORT,
             stop_request = %stop_request.display(),
             "Configuring Windows host-control channel"
         );
-        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
-        port_fwd_pipe
+        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, port_forward_manager.pipe_name())?;
+        port_forward_manager
     };
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env
@@ -1246,7 +1246,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     }
 
     #[cfg(target_os = "windows")]
-    drop(windows_port_forward_pipe);
+    drop(windows_port_forward_manager);
 
     // `std::process::exit` below skips Rust destructors. On Windows,
     // `start_enter` returns after guest shutdown and the KrunContext owns the
