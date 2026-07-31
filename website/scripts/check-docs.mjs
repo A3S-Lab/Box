@@ -345,9 +345,14 @@ for (const marker of [
 for (const marker of [
   'id="performance-benchmarks"',
   'data-performance-metric={metric.id}',
+  'data-metric-value={value}',
   'className="box-performance-grid"',
   'className="box-performance-context"',
   'className="box-performance-footer"',
+  'new IntersectionObserver(',
+  'window.requestAnimationFrame(renderFrame)',
+  "element.dataset.animationState = 'complete'",
+  "'(prefers-reduced-motion: reduce)'",
   'href={reportHref}',
 ]) {
   if (!performanceComponent.includes(marker)) {
@@ -360,6 +365,8 @@ for (const marker of [
 for (const marker of [
   "id: 'cached-lifecycle'",
   "value: '2.219'",
+  "id: 'warm-pool-fill'",
+  "value: '1.325'",
   "id: 'persistent-exec'",
   "value: '113.943'",
   "id: 'tmpfs-write'",
@@ -367,6 +374,8 @@ for (const marker of [
   "id: 'cow-write'",
   "value: '357.750'",
   'cached Alpine 3.22',
+  '4 台 / 3.020 秒 p50',
+  '4 VMs / 3.020 s p50',
   '不是跨平台保证',
   'not a cross-platform guarantee',
 ]) {
@@ -380,6 +389,8 @@ for (const marker of [
 for (const marker of [
   '.box-performance-grid',
   '.box-performance-metric',
+  '.box-performance-value-number',
+  '.box-performance-value-animated',
   '.box-performance-context',
   '.box-performance-footer',
   '@media (max-width: 640px)',
@@ -399,11 +410,21 @@ for (const marker of [
   '@keyframes box-button-full-border-orbit',
   '.box-button--primary:hover .box-button-orbit-gradient',
   '.box-button--primary:focus-visible .box-button-orbit-gradient',
+  '#62d78b',
+  '#5be5c2',
   '@media (prefers-reduced-motion: reduce)',
 ]) {
   if (!buttonStyles.includes(marker)) {
     experienceFailures.push(
       `button-orbit.css: missing animated border contract ${marker}`,
+    );
+  }
+}
+
+for (const color of ['#f5b95f', '#8b6cff', '#45ddff']) {
+  if (buttonStyles.includes(color)) {
+    experienceFailures.push(
+      `button-orbit.css: off-palette color remains in green primary button ${color}`,
     );
   }
 }

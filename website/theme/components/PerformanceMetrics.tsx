@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 type PerformanceMetric = {
   id: string;
   value: string;
@@ -24,6 +26,95 @@ function ExternalArrowIcon() {
     <svg aria-hidden="true" viewBox="0 0 16 16">
       <path d="M4 12 12 4M6 4h6v6" />
     </svg>
+  );
+}
+
+function AnimatedMetricValue({ value }: { value: string }) {
+  const valueRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const element = valueRef.current;
+    const numericValue = Number(value.replace(/,/g, ''));
+
+    if (!element || !Number.isFinite(numericValue)) {
+      return;
+    }
+
+    const reducedMotion = window.matchMedia(
+      '(prefers-reduced-motion: reduce)',
+    ).matches;
+    if (reducedMotion || typeof IntersectionObserver === 'undefined') {
+      element.dataset.animationState = 'complete';
+      return;
+    }
+
+    const fractionDigits = value.split('.')[1]?.length ?? 0;
+    const formatter = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    });
+    let animationFrame = 0;
+    let hasStarted = false;
+
+    element.textContent = formatter.format(0);
+    element.dataset.animationState = 'pending';
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting || hasStarted) {
+          return;
+        }
+
+        hasStarted = true;
+        element.dataset.animationState = 'running';
+        observer.disconnect();
+        const startedAt = performance.now();
+        const duration = 1200;
+
+        const renderFrame = (now: number) => {
+          const progress = Math.min((now - startedAt) / duration, 1);
+          const easedProgress = 1 - Math.pow(1 - progress, 4);
+          element.textContent = formatter.format(numericValue * easedProgress);
+
+          if (progress < 1) {
+            animationFrame = window.requestAnimationFrame(renderFrame);
+            return;
+          }
+
+          element.textContent = value;
+          element.dataset.animationState = 'complete';
+        };
+
+        animationFrame = window.requestAnimationFrame(renderFrame);
+      },
+      { threshold: 0.35 },
+    );
+
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, [value]);
+
+  return (
+    <strong
+      aria-label={value}
+      className="box-performance-value-number"
+      data-metric-value={value}
+    >
+      <span aria-hidden="true" className="box-performance-value-measure">
+        {value}
+      </span>
+      <span
+        aria-hidden="true"
+        className="box-performance-value-animated"
+        ref={valueRef}
+      >
+        {value}
+      </span>
+    </strong>
   );
 }
 
@@ -69,7 +160,7 @@ export function PerformanceMetrics({
               <span>{copy.percentile}</span>
             </header>
             <p className="box-performance-value">
-              <strong>{metric.value}</strong>
+              <AnimatedMetricValue value={metric.value} />
               <span>{metric.unit}</span>
             </p>
             <h3>{metric.label}</h3>

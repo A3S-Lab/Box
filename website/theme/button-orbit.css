@@ -11,8 +11,8 @@
   overflow: hidden;
   padding: 2px;
   border-radius: 9px;
-  filter: drop-shadow(0 0 3px rgba(69, 221, 255, 0.62))
-    drop-shadow(0 0 6px rgba(98, 215, 139, 0.48));
+  filter: drop-shadow(0 0 3px rgba(91, 229, 194, 0.56))
+    drop-shadow(0 0 7px rgba(98, 215, 139, 0.52));
   inset: -2px;
   pointer-events: none;
   -webkit-mask:
@@ -33,13 +33,13 @@
   aspect-ratio: 1;
   background: conic-gradient(
     from 0deg,
-    #ffffff 0deg,
-    #45ddff 25deg,
-    #62d78b 88deg,
-    #f5b95f 164deg,
-    #8b6cff 250deg,
-    #45ddff 332deg,
-    #ffffff 360deg
+    #effff4 0deg,
+    #9aefb7 28deg,
+    #62d78b 92deg,
+    #2fba70 164deg,
+    #5be5c2 244deg,
+    #82dda2 326deg,
+    #effff4 360deg
   );
   transform: translate(-50%, -50%);
   transform-origin: center;

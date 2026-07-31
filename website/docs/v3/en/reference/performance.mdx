@@ -95,15 +95,19 @@ raw guest CPU or memory-bandwidth measurements.
 
 ## Networking, warm pools, and TEE
 
-| Metric                              |          Linux/KVM |          macOS/HVF |
-| ----------------------------------- | -----------------: | -----------------: |
-| TSI host HTTP, 50 requests          | 5/5; 159.064 req/s |                0/5 |
-| TSI repeated 64 KiB downloads       |  5/5; 12.995 MiB/s |  4/5; 21.381 MiB/s |
-| Cold pool fill, 4 VMs               |           6,829 ms |           6,809 ms |
-| Warm acquire p50 / p95              |   2,068 / 2,268 ms |   1,953 / 2,097 ms |
-| Snapshot-fork fill p50 / p95, 4 VMs |   3,020 / 3,120 ms | 29,131 / 29,162 ms |
-| Snapshot-fork versus cold fill      |       2.26× faster |       4.28× slower |
-| Simulated TEE lifecycle p50 / p95   |   2,320 / 2,874 ms |   2,167 / 2,305 ms |
+| Metric                                  |          Linux/KVM |          macOS/HVF |
+| --------------------------------------- | -----------------: | -----------------: |
+| TSI host HTTP, 50 requests              | 5/5; 159.064 req/s |                0/5 |
+| TSI repeated 64 KiB downloads           |  5/5; 12.995 MiB/s |  4/5; 21.381 MiB/s |
+| Cold pool fill, 4 VMs                   |           6,829 ms |           6,809 ms |
+| Warm acquire p50 / p95                  |   2,068 / 2,268 ms |   1,953 / 2,097 ms |
+| Snapshot-fork fill p50 / p95, 4 VMs     |   3,020 / 3,120 ms | 29,131 / 29,162 ms |
+| Snapshot-fork pool fill rate (from p50) |         1.325 VM/s |         0.137 VM/s |
+| Snapshot-fork versus cold fill          |       2.26× faster |       4.28× slower |
+| Simulated TEE lifecycle p50 / p95       |   2,320 / 2,874 ms |   2,167 / 2,305 ms |
+
+The homepage's `1.325 VM/s` is derived as `4 VMs ÷ 3.020 seconds`. It is a
+pool-fill rate, not request-serving capacity or unbounded concurrent throughput.
 
 Warm-pool steady state did not preserve the low latency of the first three
 acquisitions, and snapshot-fork leaked resources on both hosts. The `2.26×`
