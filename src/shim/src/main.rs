@@ -832,7 +832,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
     // Configure exec communication channel on Windows (Named Pipe bridged to vsock)
     #[cfg(target_os = "windows")]
-    {
+    let windows_port_forward_manager = {
         // On Windows, libkrun uses Named Pipes instead of Unix sockets
         // The pipe name format is: \\.\pipe\<name>
         let pipe_name = format!(
@@ -860,20 +860,21 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                 hint: None,
             })?;
         let stop_request = socket_dir.join(WINDOWS_STOP_REQUEST_FILE);
-        let port_fwd_pipe = windows_port_forward::spawn_port_forward_manager(
+        let port_forward_manager = windows_port_forward::spawn_port_forward_manager(
             &spec.box_id,
             &spec.port_map,
             &stop_request,
         )?;
         tracing::info!(
             port_map = ?spec.port_map,
-            pipe_name = %port_fwd_pipe,
+            pipe_name = %port_forward_manager.pipe_name(),
             guest_port = PORT_FWD_VSOCK_PORT,
             stop_request = %stop_request.display(),
             "Configuring Windows host-control channel"
         );
-        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
-    }
+        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, port_forward_manager.pipe_name())?;
+        port_forward_manager
+    };
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env
     // (added by vm.rs when simulate mode is on) and passed to the guest init
@@ -1225,6 +1226,9 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             },
         )?;
     }
+
+    #[cfg(target_os = "windows")]
+    drop(windows_port_forward_manager);
 
     // If we reach here, either:
     // 1. VM failed to start (negative status)

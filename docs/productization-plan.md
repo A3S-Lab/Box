@@ -727,7 +727,9 @@ Current notes:
 - Native WHPX bridge networking is not implemented. Standard Compose services
   create a bridge network by default, so Compose workload startup is outside
   the current Windows support boundary along with interactive PTY, post-boot
-  `exec`, memory snapshot-fork, TEE, and CRI.
+  `exec`, memory snapshot-fork, TEE, and CRI. Bridge-network SDK requests and
+  `compose up` now fail with explicit platform diagnostics before runtime state
+  is mutated.
 - [`windows-whpx.md`](./windows-whpx.md) records the package layout, source
   build, command support matrix, smoke commands, and current platform limits.
 - Winget metadata advertises native WHPX support and declares
@@ -753,6 +755,6 @@ Current notes:
    verifies one-container and multi-container CRI lifecycle paths through a fake
    ready VM and exec server, and `src/cri/tests/crictl_smoke.rs` provides the
    real CRI socket harness.
-5. Add explicit Windows diagnostics for bridge-network/Compose requests and
-   continue closing the documented interactive PTY and post-boot `exec`
-   support gaps.
+5. Continue closing the documented interactive PTY and post-boot `exec`
+   support gaps; bridge-network and Compose requests now have explicit
+   fail-before-mutation Windows diagnostics.

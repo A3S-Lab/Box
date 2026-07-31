@@ -230,6 +230,9 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    std::fs::create_dir_all(record.box_dir.join("rootfs")).unwrap();
+    #[cfg(windows)]
+    std::fs::write(record.box_dir.join("rootfs/.a3s_exit_code"), b"0\n").unwrap();
     let exit_polls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
@@ -337,6 +340,22 @@ async fn filesystem_only_pause_fails_before_starting_a_runtime() {
         .to_string()
         .contains("pause without memory retention"));
     assert!(backend.managers.is_empty());
+}
+
+#[test]
+fn unsupported_backend_capabilities_are_unavailable() {
+    let temporary = tempfile::tempdir().unwrap();
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+
+    let error = unsupported(&record, "pause", "the test backend");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("pause")
+                && message.contains("the test backend")
+                && message.contains(&record.id)
+    ));
 }
 
 #[tokio::test]

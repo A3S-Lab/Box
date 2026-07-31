@@ -342,6 +342,82 @@ fn operation(value: &str) -> OperationId {
     OperationId::new(value).unwrap()
 }
 
+#[test]
+fn managed_record_rejects_invalid_microvm_vcpu_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("invalid-vcpu-count").unwrap();
+    let mut request = request("invalid-vcpu-count");
+    request.config.isolation = ExecutionIsolation::Microvm;
+    request.config.resources.vcpus = 0;
+
+    let error = build_managed_record(
+        directory.path(),
+        &execution_id,
+        operation("invalid-vcpu-count"),
+        request,
+        Utc::now(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("virtual CPU count must be at least 1")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_record_rejects_multiple_whpx_vcpus() {
+    let directory = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("invalid-whpx-vcpu-count").unwrap();
+    let mut request = request("invalid-whpx-vcpu-count");
+    request.config.isolation = ExecutionIsolation::Microvm;
+    request.config.resources.vcpus = 2;
+
+    let error = build_managed_record(
+        directory.path(),
+        &execution_id,
+        operation("invalid-whpx-vcpu-count"),
+        request,
+        Utc::now(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("Windows WHPX")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_record_rejects_bridge_networking_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("invalid-windows-bridge").unwrap();
+    let mut request = request("invalid-windows-bridge");
+    request.config.isolation = ExecutionIsolation::Microvm;
+    request.config.network = NetworkMode::Bridge {
+        network: "unsupported".to_string(),
+    };
+
+    let error = build_managed_record(
+        directory.path(),
+        &execution_id,
+        operation("invalid-windows-bridge"),
+        request,
+        Utc::now(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("bridge networking") && message.contains("Windows")
+    ));
+}
+
 fn persisted(manager: &LocalExecutionManager, execution_id: &ExecutionId) -> BoxRecord {
     ManagedExecutionStore::new(manager.state_path().to_path_buf())
         .get(execution_id)
@@ -1478,9 +1554,12 @@ async fn inspection_releases_resources_after_an_external_terminal_observation() 
 
     let mut create_request = request("sandbox-1");
     create_request.config.isolation = ExecutionIsolation::Microvm;
-    create_request.config.network = NetworkMode::Bridge {
-        network: "dev".to_string(),
-    };
+    #[cfg(not(windows))]
+    {
+        create_request.config.network = NetworkMode::Bridge {
+            network: "dev".to_string(),
+        };
+    }
     create_request.policy.name = Some("terminal-resources".to_string());
     create_request.policy.volume_names = vec!["workspace".to_string()];
     let running = manager
@@ -1492,16 +1571,19 @@ async fn inspection_releases_resources_after_an_external_terminal_observation() 
             volume.attach(running.execution_id.as_str())
         })
         .unwrap();
-    networks
-        .with_write_lock(|entries| -> Result<(), a3s_box_core::BoxError> {
-            entries
-                .get_mut("dev")
-                .unwrap()
-                .connect(running.execution_id.as_str(), "terminal-resources")
-                .map_err(a3s_box_core::BoxError::NetworkError)?;
-            Ok(())
-        })
-        .unwrap();
+    #[cfg(not(windows))]
+    {
+        networks
+            .with_write_lock(|entries| -> Result<(), a3s_box_core::BoxError> {
+                entries
+                    .get_mut("dev")
+                    .unwrap()
+                    .connect(running.execution_id.as_str(), "terminal-resources")
+                    .map_err(a3s_box_core::BoxError::NetworkError)?;
+                Ok(())
+            })
+            .unwrap();
+    }
 
     backend.stop_externally(&running.execution_id, 0);
     manager.inspect(&running.execution_id).await.unwrap();
@@ -1512,12 +1594,15 @@ async fn inspection_releases_resources_after_an_external_terminal_observation() 
         .unwrap()
         .in_use_by
         .is_empty());
-    assert!(!networks
-        .get("dev")
-        .unwrap()
-        .unwrap()
-        .endpoints
-        .contains_key(running.execution_id.as_str()));
+    #[cfg(not(windows))]
+    {
+        assert!(!networks
+            .get("dev")
+            .unwrap()
+            .unwrap()
+            .endpoints
+            .contains_key(running.execution_id.as_str()));
+    }
 }
 
 #[tokio::test]

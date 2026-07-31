@@ -8,7 +8,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -18,14 +18,14 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::exec::WINDOWS_CONTROL_SIGNAL_FRAME;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
-    INVALID_HANDLE_VALUE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::OpenProcess;
+use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, INFINITE};
 
 const FRAME_OPEN: u8 = 1;
 const FRAME_OPEN_ACK: u8 = 2;
@@ -35,6 +35,8 @@ const OPEN_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(60);
 const OPEN_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const PORT_FWD_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const PORT_REBIND_TIMEOUT: Duration = Duration::from_secs(2);
+const PORT_REBIND_BACKOFF: Duration = Duration::from_millis(25);
 const STOP_CONTROL_WAIT: Duration = Duration::from_secs(1);
 const STOP_REQUEST_POLL: Duration = Duration::from_millis(50);
 const MAX_STOP_REQUEST_BYTES: u64 = 16;
@@ -55,11 +57,43 @@ struct SharedControlState {
 
 type SharedControl = Arc<SharedControlState>;
 
+pub struct PortForwardManager {
+    pipe_base_name: String,
+    child: Child,
+}
+
+impl PortForwardManager {
+    pub fn pipe_name(&self) -> &str {
+        &self.pipe_base_name
+    }
+}
+
+impl Drop for PortForwardManager {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            if let Err(error) = self.child.kill() {
+                tracing::warn!(
+                    worker_pid = self.child.id(),
+                    error = %error,
+                    "Failed to terminate Windows port-forward worker"
+                );
+            }
+        }
+        if let Err(error) = self.child.wait() {
+            tracing::warn!(
+                worker_pid = self.child.id(),
+                error = %error,
+                "Failed to wait for Windows port-forward worker"
+            );
+        }
+    }
+}
+
 pub fn spawn_port_forward_manager(
     box_id: &str,
     port_map: &[String],
     stop_request: &Path,
-) -> Result<String> {
+) -> Result<PortForwardManager> {
     parse_port_map(port_map)?;
     let pipe_base_name = format!("a3s-box-portfwd-{}", box_id.replace('-', ""));
     let ready_file = std::env::temp_dir().join(format!(
@@ -112,7 +146,10 @@ pub fn spawn_port_forward_manager(
                     worker_pid = child.id(),
                     "Windows port-forward worker ready"
                 );
-                return Ok(pipe_base_name);
+                return Ok(PortForwardManager {
+                    pipe_base_name,
+                    child,
+                });
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -182,7 +219,7 @@ pub fn run_port_forward_worker(
     tracing::info!(pipe = %pipe_path, "Windows published-port control pipe ready");
 
     for mapping in mappings {
-        let listener = match TcpListener::bind(("0.0.0.0", mapping.host_port)) {
+        let listener = match bind_published_port(mapping, PORT_REBIND_TIMEOUT) {
             Ok(listener) => listener,
             Err(err) => {
                 write_ready_file(
@@ -211,6 +248,21 @@ pub fn run_port_forward_worker(
     write_ready_file(ready_file, "ok");
     pipe_server_loop(initial_server, pipe_path, shared_control);
     Ok(())
+}
+
+fn bind_published_port(mapping: PortMapping, timeout: Duration) -> io::Result<TcpListener> {
+    let started = Instant::now();
+    loop {
+        match TcpListener::bind(("0.0.0.0", mapping.host_port)) {
+            Ok(listener) => return Ok(listener),
+            Err(error)
+                if error.kind() == io::ErrorKind::AddrInUse && started.elapsed() < timeout =>
+            {
+                thread::sleep(PORT_REBIND_BACKOFF.min(timeout.saturating_sub(started.elapsed())));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn decode_stop_signal(bytes: &[u8]) -> io::Result<i32> {
@@ -313,27 +365,33 @@ fn write_ready_file(path: &Path, contents: &str) {
 }
 
 fn spawn_parent_watchdog(parent_pid: u32) {
-    thread::spawn(move || loop {
-        if !process_exists(parent_pid) {
+    thread::spawn(move || {
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, parent_pid) };
+        if handle == 0 {
             tracing::info!(
                 parent_pid,
-                "Windows port-forward worker exiting because shim parent is gone"
+                "Windows port-forward worker exiting because shim parent is unavailable"
             );
             std::process::exit(0);
         }
-        thread::sleep(Duration::from_millis(500));
-    });
-}
 
-fn process_exists(pid: u32) -> bool {
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
-    if handle == 0 {
-        return false;
-    }
-    unsafe {
-        CloseHandle(handle);
-    }
-    true
+        let wait_status = unsafe { WaitForSingleObject(handle, INFINITE) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if wait_status != WAIT_OBJECT_0 {
+            tracing::warn!(
+                parent_pid,
+                wait_status,
+                "Windows port-forward worker parent wait returned an unexpected status"
+            );
+        }
+        tracing::info!(
+            parent_pid,
+            "Windows port-forward worker exiting because shim parent is gone"
+        );
+        std::process::exit(0);
+    });
 }
 
 fn parse_port_map(port_map: &[String]) -> Result<Vec<PortMapping>> {
@@ -919,5 +977,44 @@ mod tests {
             read_stop_signal(&request).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn published_port_bind_retries_until_the_previous_listener_exits() {
+        let previous = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let host_port = previous.local_addr().unwrap().port();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(previous);
+        });
+
+        let listener = bind_published_port(
+            PortMapping {
+                host_port,
+                guest_port: 8080,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        release.join().unwrap();
+        assert_eq!(listener.local_addr().unwrap().port(), host_port);
+    }
+
+    #[test]
+    fn published_port_bind_reports_a_persistent_conflict() {
+        let previous = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let host_port = previous.local_addr().unwrap().port();
+
+        let error = bind_published_port(
+            PortMapping {
+                host_port,
+                guest_port: 8080,
+            },
+            Duration::from_millis(75),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     }
 }

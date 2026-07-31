@@ -134,7 +134,8 @@ restarted a named volume, and restored and restarted a filesystem snapshot.
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains
 outside the current Windows support boundary even when a Compose file contains
-only one service.
+only one service. `compose up` rejects this platform combination before image
+resolution, network creation, box-directory creation, or VM startup.
 
 ## WHPX soak validation
 

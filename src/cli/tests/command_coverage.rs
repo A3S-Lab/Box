@@ -718,7 +718,7 @@ fn test_windows_health_checks_fail_before_run_create_or_start() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn test_windows_compose_health_fails_before_runtime_side_effects() {
+fn test_windows_compose_up_fails_before_runtime_side_effects() {
     let cli = CliTest::new();
     let project = cli.home_path().join("compose-health-rejected");
     std::fs::create_dir_all(&project).expect("create Compose project directory");
@@ -739,7 +739,7 @@ networks:
 
     cli.fails(
         &["compose", "--file", &compose_arg, "up"],
-        "health checks are not supported on Windows",
+        "'compose up' is not supported",
     );
 
     assert!(!cli.home_path().join("boxes.json").exists());
