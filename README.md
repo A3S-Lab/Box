@@ -171,7 +171,13 @@ runtime state changes instead of being silently stored or weakened.
   caching. Closed A3S ACL build plans add canonical identities, source-root
   path confinement, an enforced network-none Linux `RUN` policy, and
   plan-bound typed OCI descriptors with durable image-layout paths over the
-  same native build engine.
+  same native build engine. The sole recorded-plan boundary persists immutable
+  operation, source, and plan intent before build side effects, then commits a
+  path-independent terminal receipt over the same ImageStore. Restarted callers
+  adopt an output committed before the terminal receipt and revalidate the
+  complete OCI graph, platform, blob inventory, and byte count before replay.
+  The internal operation journal is derived from the ImageStore and is not a
+  second caller-configurable output store or build engine.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

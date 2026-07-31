@@ -67,36 +67,57 @@ impl ImageStore {
 
     /// Get a stored image by reference.
     pub async fn get(&self, reference: &str) -> Option<StoredImage> {
-        let mut index = self.index.write().await;
-        if let Some(image) = index.get_mut(reference) {
-            image.last_used = Utc::now();
-            let updated = image.clone();
-            drop(index);
-            // Best-effort save of updated last_used; log on failure so staleness is visible.
-            if let Err(e) = self.save_index_inner().await {
-                tracing::warn!(error = %e, "Failed to persist image store index (last_used may be stale)");
+        match self.get_checked(reference).await {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(
+                    reference,
+                    %error,
+                    "Failed to read the authoritative image store index"
+                );
+                None
             }
-            Some(updated)
-        } else {
-            None
         }
+    }
+
+    /// Get a stored image through the authoritative cross-process index.
+    pub(crate) async fn get_checked(&self, reference: &str) -> Result<Option<StoredImage>> {
+        let reference = reference.to_string();
+        self.with_index_lock(move |index| {
+            let Some(image) = index.get_mut(&reference) else {
+                return Ok(None);
+            };
+            image.last_used = Utc::now();
+            Ok(Some(image.clone()))
+        })
+        .await
     }
 
     /// Get a stored image by digest.
     pub async fn get_by_digest(&self, digest: &str) -> Option<StoredImage> {
-        let mut index = self.index.write().await;
-        let found = index.values_mut().find(|img| img.digest == digest);
-        if let Some(image) = found {
-            image.last_used = Utc::now();
-            let updated = image.clone();
-            drop(index);
-            if let Err(e) = self.save_index_inner().await {
-                tracing::warn!(error = %e, "Failed to persist image store index (last_used may be stale)");
+        match self.get_by_digest_checked(digest).await {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(
+                    digest,
+                    %error,
+                    "Failed to read the authoritative image store index"
+                );
+                None
             }
-            Some(updated)
-        } else {
-            None
         }
+    }
+
+    async fn get_by_digest_checked(&self, digest: &str) -> Result<Option<StoredImage>> {
+        let digest = digest.to_string();
+        self.with_index_lock(move |index| {
+            let Some(image) = index.values_mut().find(|image| image.digest == digest) else {
+                return Ok(None);
+            };
+            image.last_used = Utc::now();
+            Ok(Some(image.clone()))
+        })
+        .await
     }
 
     /// Resolve an image reference to a stored image.
@@ -506,31 +527,27 @@ impl ImageStore {
         };
         drop(index);
 
-        let data = serde_json::to_string_pretty(&store_index)?;
+        let data = serde_json::to_vec_pretty(&store_index)?;
         let index_path = self.store_dir.join("index.json");
-        // Write atomically (tmp + rename) so a concurrent reader (e.g. another
-        // process running `create`/`run`) never observes a truncated/empty
-        // index.json mid-write — which previously surfaced as
-        // "Failed to parse image store index: EOF".
         let tmp_path = self.store_dir.join("index.json.tmp");
-        tokio::fs::write(&tmp_path, data).await.map_err(|e| {
+        let display_path = index_path.clone();
+        tokio::task::spawn_blocking(move || {
+            a3s_box_core::fs_atomic::write_durable(&tmp_path, &index_path, &data)
+        })
+        .await
+        .map_err(|error| {
             BoxError::OciImageError(format!(
-                "Failed to write image store index {}: {}. {}",
-                tmp_path.display(),
-                e,
+                "Image store index persistence task failed for {}: {error}",
+                display_path.display()
+            ))
+        })?
+        .map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to durably commit image store index {}: {error}. {}",
+                display_path.display(),
                 state_dir_hint()
             ))
         })?;
-        tokio::fs::rename(&tmp_path, &index_path)
-            .await
-            .map_err(|e| {
-                BoxError::OciImageError(format!(
-                    "Failed to commit image store index {}: {}. {}",
-                    index_path.display(),
-                    e,
-                    state_dir_hint()
-                ))
-            })?;
 
         Ok(())
     }
@@ -1283,6 +1300,37 @@ mod tests {
         let refs: HashSet<String> = s3.list().await.into_iter().map(|i| i.reference).collect();
         assert!(refs.contains("img:a"), "img:a lost: {refs:?}");
         assert!(refs.contains("img:b"), "img:b lost: {refs:?}");
+    }
+
+    #[tokio::test]
+    async fn cross_instance_get_refreshes_the_authoritative_index() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let writer = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        let reader = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        writer
+            .put(
+                "img:fresh",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        let observed = reader
+            .get("img:fresh")
+            .await
+            .expect("reader created before put must refresh the shared index");
+        assert_eq!(
+            observed.digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let reopened = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        assert!(reopened.get("img:fresh").await.is_some());
     }
 
     #[tokio::test]
