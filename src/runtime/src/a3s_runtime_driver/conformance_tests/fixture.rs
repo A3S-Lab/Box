@@ -722,31 +722,33 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
         capabilities: &RuntimeCapabilities,
         profile: RuntimeConformanceProfile,
     ) -> RuntimeResult<RuntimeConformanceProfileEvidence> {
-        match profile {
-            RuntimeConformanceProfile::Recovery => {
-                super::recovery_profile::run(self, client).await?
-            }
+        let result = match profile {
+            RuntimeConformanceProfile::Recovery => super::recovery_profile::run(self, client).await,
             RuntimeConformanceProfile::Networking => {
-                super::networking_profile::run(self, client).await?
+                super::networking_profile::run(self, client).await
             }
-            RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await?,
+            RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await,
+            RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await,
             RuntimeConformanceProfile::Resources => {
-                super::resources_profile::run(self, client).await?
+                super::resources_profile::run(self, client).await
             }
-            RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await?,
-            RuntimeConformanceProfile::Security => {
-                super::security_profile::run(self, client).await?
-            }
-            RuntimeConformanceProfile::Outputs => super::outputs_profile::run(self, client).await?,
+            RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await,
+            RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await,
+            RuntimeConformanceProfile::Security => super::security_profile::run(self, client).await,
+            RuntimeConformanceProfile::Outputs => super::outputs_profile::run(self, client).await,
             unsupported => {
                 return Err(RuntimeError::Protocol(format!(
                     "Box R17 fixture cannot execute unexpected {} profile",
                     unsupported.as_str()
                 )))
             }
-        }
+        };
+        result.map_err(|error| {
+            RuntimeError::Protocol(format!(
+                "Box R17 {} profile failed: {error}",
+                profile.as_str()
+            ))
+        })?;
         self.evidence(capabilities, profile)
     }
 
@@ -851,8 +853,14 @@ fn remove_empty_directory(path: &Path) {
 }
 
 fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
+    let unit_id = record.labels.get(UNIT_LABEL).map(String::as_str);
+    let volumes = record
+        .managed_execution
+        .as_ref()
+        .map(|metadata| metadata.request.config.volumes.as_slice())
+        .unwrap_or_default();
     eprintln!(
-        "R17 missing-exit diagnostics: id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?}",
+        "R17 missing-exit diagnostics: unit_id={unit_id:?} id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?} volumes={volumes:?}",
         record.id,
         record.status,
         record.pid,

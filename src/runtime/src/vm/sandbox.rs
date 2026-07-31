@@ -386,13 +386,18 @@ impl VmManager {
                     &mount.source,
                     id_mappings,
                     mount.read_only,
-                )?;
+                )
+                .map_err(|error| mount_source_error("prepare managed Secret", mount, error))?;
             } else if managed.contains(&mount.source) {
-                prepare_managed_mount_source(&mount.source, id_mappings)?;
+                prepare_managed_mount_source(&mount.source, id_mappings)
+                    .map_err(|error| mount_source_error("prepare managed source", mount, error))?;
             } else if mount.read_only {
                 read_only_external.push(mount.source.clone());
             } else {
-                validate_external_mount_access(&mount.source, id_mappings, mount.read_only)?;
+                validate_external_mount_access(&mount.source, id_mappings, mount.read_only)
+                    .map_err(|error| {
+                        mount_source_error("validate external source", mount, error)
+                    })?;
             }
         }
 
@@ -401,7 +406,18 @@ impl VmManager {
             &self.box_id,
             &read_only_external,
             id_mappings,
-        )?;
+        )
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Failed to stage read-only Sandbox attachment aliases for [{}]: {error}",
+                read_only_external
+                    .iter()
+                    .map(|source| source.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            hint: None,
+        })?;
         for mount in mounts {
             if let Some(alias) = aliases.get(&mount.source) {
                 mount.source = alias.clone();
@@ -453,6 +469,17 @@ impl VmManager {
         }
 
         Ok(managed)
+    }
+}
+
+fn mount_source_error(action: &str, mount: &SandboxMount, error: BoxError) -> BoxError {
+    BoxError::BoxBootError {
+        message: format!(
+            "Failed to {action} {} for {}: {error}",
+            mount.source.display(),
+            mount.destination.display()
+        ),
+        hint: None,
     }
 }
 
