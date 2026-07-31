@@ -369,6 +369,12 @@ Current notes:
   `network = "none"` rejects remote URL `ADD`, changes the native `RUN` cache
   identity, and adds a private network namespace on Linux. It rejects the warm
   RUN pool until that path has equivalent isolation evidence.
+- Plan execution now returns one plan-bound typed native output containing the
+  exact OCI manifest descriptor, platform, durable image-store layout path,
+  total content bytes, layer count, and blob count. Callers no longer have to
+  infer a publishable build result from a temporary workspace or reparse CLI
+  output; cache export/import receipts and multi-platform assembly remain
+  separate release gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   Linux uses isolated `chroot`; the built-in engine also has an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build
