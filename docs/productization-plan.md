@@ -373,8 +373,23 @@ Current notes:
   exact OCI manifest descriptor, platform, durable image-store layout path,
   total content bytes, layer count, and blob count. Callers no longer have to
   infer a publishable build result from a temporary workspace or reparse CLI
-  output; cache export/import receipts and multi-platform assembly remain
-  separate release gates.
+  output.
+- Recorded plan execution is the sole public plan-bound execution boundary. It
+  serializes each bounded operation identity across processes, durably records
+  immutable source and canonical plan intent before native build side effects,
+  and commits one path-independent `a3s.box.build-output-receipt.v1` before
+  returning success. Its internal journal is always derived from the existing
+  ImageStore; callers cannot configure another receipt root or output store.
+  The native build and replay paths share one output validator for the root
+  descriptor, platform, complete referenced blob set, blob-inventory digest,
+  exact content bytes, and layer count. A restarted caller refreshes the
+  authoritative cross-process ImageStore index, adopts output committed in the
+  ImageStore-to-terminal-receipt crash gap, and replays without reopening the
+  source tree. Cleanup removes the receipt and operation-specific image
+  reference idempotently. This terminal boundary does not supervise a build
+  that is still running: cache import/export receipts, explicit cancellation,
+  deterministic temporary-workspace and child-process reclamation after caller
+  death, and multi-platform assembly remain separate release gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   Linux uses isolated `chroot`; the built-in engine also has an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

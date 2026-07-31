@@ -322,8 +322,14 @@ pub struct OciImage {
     /// Root directory of the OCI image layout
     root_dir: PathBuf,
 
-    /// Manifest digest (e.g. "sha256:abc123...")
-    manifest_digest: String,
+    /// Exact root manifest descriptor selected from the OCI index.
+    manifest_descriptor: Descriptor,
+
+    /// Number of root descriptors in the OCI index.
+    index_manifest_count: usize,
+
+    /// Complete descriptor set whose bytes were verified while loading.
+    content_descriptors: Vec<Descriptor>,
 
     /// Image configuration
     config: OciImageConfig,
@@ -401,11 +407,11 @@ impl OciImage {
         let manifest_descriptor = index
             .manifests()
             .first()
+            .cloned()
             .ok_or_else(|| BoxError::OciImageError("No manifests in index.json".to_string()))?;
-        let manifest_digest = manifest_descriptor.digest().to_string();
 
         // Load manifest
-        let manifest = Self::load_manifest(&root_dir, manifest_descriptor)?;
+        let manifest = Self::load_manifest(&root_dir, &manifest_descriptor)?;
 
         // Load config
         let config = Self::load_config(&root_dir, manifest.config())?;
@@ -427,9 +433,16 @@ impl OciImage {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let mut content_descriptors = Vec::with_capacity(manifest.layers().len() + 2);
+        content_descriptors.push(manifest_descriptor.clone());
+        content_descriptors.push(manifest.config().clone());
+        content_descriptors.extend(manifest.layers().iter().cloned());
+
         Ok(Self {
             root_dir,
-            manifest_digest,
+            manifest_descriptor,
+            index_manifest_count: index.manifests().len(),
+            content_descriptors,
             config,
             layer_paths,
         })
@@ -452,7 +465,22 @@ impl OciImage {
 
     /// Get the manifest digest (e.g. `"sha256:abc123..."`).
     pub fn manifest_digest(&self) -> &str {
-        &self.manifest_digest
+        self.manifest_descriptor.digest().as_ref()
+    }
+
+    /// Exact root manifest descriptor selected from the OCI index.
+    pub(crate) fn manifest_descriptor(&self) -> &Descriptor {
+        &self.manifest_descriptor
+    }
+
+    /// Number of root descriptors declared by the OCI index.
+    pub(crate) const fn index_manifest_count(&self) -> usize {
+        self.index_manifest_count
+    }
+
+    /// Complete descriptor set whose bytes were verified while loading.
+    pub(crate) fn content_descriptors(&self) -> &[Descriptor] {
+        &self.content_descriptors
     }
 
     /// Get the entrypoint command.
