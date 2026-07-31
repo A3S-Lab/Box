@@ -34,6 +34,9 @@ use handlers::{
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
 
+/// OCI media type emitted for the root descriptor of a native build.
+pub const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
 /// Network access available to Dockerfile execution instructions.
 ///
 /// Base-image and external-stage resolution remain trusted host-side OCI
@@ -125,6 +128,33 @@ pub struct BuildResult {
     pub size: u64,
     /// Number of layers
     pub layer_count: usize,
+    /// Typed root descriptor published by the OCI layout.
+    pub descriptor: BuildOutputDescriptor,
+    /// Exact platform represented by the single-platform output.
+    pub platform: Platform,
+    /// Durable local OCI image-layout directory owned by the image store.
+    pub layout_directory: PathBuf,
+    /// Number of content-addressed blobs in the output layout.
+    pub blob_count: usize,
+}
+
+impl BuildResult {
+    /// Total bytes occupied by the durable OCI layout.
+    pub const fn content_bytes(&self) -> u64 {
+        self.size
+    }
+}
+
+/// Typed root descriptor for a native Box build output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildOutputDescriptor {
+    /// OCI descriptor media type.
+    pub media_type: String,
+    /// Canonical lowercase SHA-256 content digest.
+    pub digest: String,
+    /// Exact descriptor payload size.
+    pub size: u64,
 }
 
 #[cfg_attr(not(feature = "pool"), allow(dead_code))]
@@ -1685,7 +1715,7 @@ async fn assemble_image(
     // Build manifest
     let manifest = serde_json::json!({
         "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE,
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
             "digest": format!("sha256:{}", config_digest),
@@ -1712,7 +1742,7 @@ async fn assemble_image(
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.index.v1+json",
         "manifests": [{
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE,
             "digest": format!("sha256:{}", manifest_digest),
             "size": manifest_bytes.len(),
             "platform": platform_obj
@@ -1734,15 +1764,67 @@ async fn assemble_image(
     // Store in image store
     let digest_str = format!("sha256:{}", manifest_digest);
     let stored = store.put(reference, &digest_str, &output_dir).await?;
+    let layout_directory = stored.path.canonicalize().map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to canonicalize stored OCI build output {}: {error}",
+            stored.path.display()
+        ))
+    })?;
+    let blob_count = count_output_blobs(&layout_directory)?;
+    let descriptor_size = u64::try_from(manifest_bytes.len())
+        .map_err(|_| BoxError::BuildError("OCI build descriptor size overflowed".to_string()))?;
 
     let total_layers = base_layers.len() + state.layers.len();
 
     Ok(BuildResult {
         reference: reference.to_string(),
-        digest: digest_str,
+        digest: digest_str.clone(),
         size: stored.size_bytes,
         layer_count: total_layers,
+        descriptor: BuildOutputDescriptor {
+            media_type: OCI_IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+            digest: digest_str,
+            size: descriptor_size,
+        },
+        platform: target_platform.clone(),
+        layout_directory,
+        blob_count,
     })
+}
+
+fn count_output_blobs(layout: &Path) -> Result<usize> {
+    let blobs = layout.join("blobs").join("sha256");
+    let entries = std::fs::read_dir(&blobs).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to inspect stored OCI build blobs {}: {error}",
+            blobs.display()
+        ))
+    })?;
+    let mut count = 0_usize;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to inspect an OCI build blob in {}: {error}",
+                blobs.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to inspect OCI build blob {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            return Err(BoxError::BuildError(format!(
+                "Stored OCI build blob {} is not a regular file",
+                entry.path().display()
+            )));
+        }
+        count = count.checked_add(1).ok_or_else(|| {
+            BoxError::BuildError("Stored OCI build blob count overflowed".to_string())
+        })?;
+    }
+    Ok(count)
 }
 
 fn copy_layer_blob(layer: &LayerInfo, blob_path: &Path, label: &str) -> Result<()> {

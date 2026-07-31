@@ -39,8 +39,9 @@ pub mod store;
 
 #[cfg(feature = "build")]
 pub use build::{
-    BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy, BuildConfig,
-    BuildNetworkPolicy, BuildResult, BuildRunPoolConfig, Dockerfile, Instruction,
+    execute_build_plan, BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy,
+    BuildConfig, BuildNetworkPolicy, BuildOutputDescriptor, BuildPlanExecutionError, BuildResult,
+    BuildRunPoolConfig, Dockerfile, Instruction, PlannedBuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 pub use credentials::CredentialStore;
 pub use image::{OciHealthCheck, OciImage, OciImageConfig};

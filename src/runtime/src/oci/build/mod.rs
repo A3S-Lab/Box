@@ -22,10 +22,15 @@ pub(crate) mod cache;
 pub mod dockerfile;
 pub(crate) mod dockerignore;
 pub mod engine;
+mod execution;
 pub mod layer;
 pub mod plan;
 
 pub use dockerfile::{Dockerfile, Instruction};
-pub use engine::{build, BuildConfig, BuildNetworkPolicy, BuildResult, BuildRunPoolConfig};
+pub use engine::{
+    build, BuildConfig, BuildNetworkPolicy, BuildOutputDescriptor, BuildResult, BuildRunPoolConfig,
+    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+};
+pub use execution::{execute_build_plan, BuildPlanExecutionError, PlannedBuildResult};
 pub use layer::{DirSnapshot, LayerInfo};
 pub use plan::{BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy};
