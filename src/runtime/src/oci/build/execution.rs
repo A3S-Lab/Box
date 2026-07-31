@@ -8,7 +8,9 @@ use a3s_box_core::error::{BoxError, Result as BoxResult};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use super::engine::{build_supervised, BuildExecutionControl, BuildExecutionObserver};
+use super::engine::{
+    build_supervised, BuildExecutionControl, BuildExecutionObserver, BuildImageCommitPermit,
+};
 use super::receipt::{
     inspect_stored_output, BuildExecutionLease, BuildOperationJournal, BuildProcessIdentity,
     LockedBuildOperation, PersistedBuildOperation, PersistedBuildPhase, SupervisedBuildOperation,
@@ -786,6 +788,31 @@ impl BuildExecutionObserver for JournalBuildObserver {
                 "supervised build lost its authoritative operation state".to_string(),
             )),
         }
+    }
+
+    async fn acquire_image_commit_permit(&self) -> BoxResult<BuildImageCommitPermit> {
+        let locked = self
+            .journal
+            .lock(self.identity.operation_id())
+            .await
+            .map_err(observer_error)?;
+        let Some(PersistedBuildOperation::Supervised(operation)) =
+            locked.read().await.map_err(observer_error)?
+        else {
+            return Err(BoxError::BuildError(
+                "supervised build lost its authoritative operation state before image commit"
+                    .to_string(),
+            ));
+        };
+        operation
+            .require_identity(&self.identity, &self.plan_digest)
+            .map_err(observer_error)?;
+        if operation.phase != PersistedBuildPhase::Running {
+            return Err(BoxError::BuildError(
+                "recorded build operation was cancelled before image commit".to_string(),
+            ));
+        }
+        Ok(BuildImageCommitPermit::new(locked))
     }
 
     async fn run_process_started(&self, pid: u32, start_time: Option<u64>) -> BoxResult<()> {

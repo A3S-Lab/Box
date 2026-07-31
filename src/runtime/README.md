@@ -149,9 +149,9 @@ lease is liveness evidence, not a second state store. Linux `RUN` uses one
 asynchronous subprocess boundary with kill-on-drop, a parent-death signal, a
 private PID namespace, and a journaled PID/start-time identity. Recovery fences
 that process tree before removing the hash-derived operation workspace.
-ImageStore publication is the commit point, so recovery adopts and validates an
-output written in the output-to-receipt crash gap instead of publishing it
-again.
+The existing journal lock serializes cancellation with ImageStore publication;
+publication is the commit point, so recovery adopts and validates an output
+written in the output-to-receipt crash gap instead of publishing it again.
 
 This completes the Box-owned `BX0.4` supervision slice. Content-addressed cache
 receipts, multi-platform OCI assembly, Cloud Node Agent consumption,

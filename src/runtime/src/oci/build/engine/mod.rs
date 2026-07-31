@@ -39,7 +39,7 @@ use handlers::{
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
 
-pub(super) use control::{BuildExecutionControl, BuildExecutionObserver};
+pub(super) use control::{BuildExecutionControl, BuildExecutionObserver, BuildImageCommitPermit};
 
 /// Network access available to Dockerfile execution instructions.
 ///
@@ -1307,6 +1307,7 @@ async fn build_in_workspace(
         &final_layers_dir,
         &store,
         &target_platform,
+        control.as_ref(),
     )
     .await?;
 
@@ -1555,6 +1556,7 @@ fn scratch_config() -> OciImageConfig {
 }
 
 /// Assemble the final OCI image layout and store it.
+#[allow(clippy::too_many_arguments)]
 async fn assemble_image(
     reference: &str,
     state: &BuildState,
@@ -1563,6 +1565,7 @@ async fn assemble_image(
     layers_dir: &Path,
     store: &Arc<ImageStore>,
     target_platform: &Platform,
+    control: Option<&BuildExecutionControl>,
 ) -> Result<BuildResult> {
     // Create output directory
     let output_dir = layers_dir.join("_output");
@@ -1755,6 +1758,10 @@ async fn assemble_image(
 
     // Store in image store
     let digest_str = format!("sha256:{}", manifest_digest);
+    let _commit_permit = match control {
+        Some(control) => Some(control.acquire_image_commit_permit().await?),
+        None => None,
+    };
     let stored = store.put(reference, &digest_str, &output_dir).await?;
     inspect_stored_build_output(reference, stored, store.store_dir())
 }

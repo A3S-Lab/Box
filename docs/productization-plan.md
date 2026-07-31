@@ -388,13 +388,14 @@ Current notes:
 - The native build, immediate publication, recovery, and replay paths share one
   output validator for the root descriptor, platform, complete referenced blob
   set, blob-inventory digest, exact content bytes, and layer count. ImageStore
-  publication is the commit point: a restarted caller refreshes its
-  authoritative cross-process index, adopts output committed in the
-  output-to-terminal-receipt crash gap, and replays without reopening the
-  source tree. Cleanup removes the workspace, receipt, and operation-specific
-  image reference idempotently. Cache import/export receipts and multi-platform
-  assembly remain the Box build release gates; Cloud consumption, publication,
-  and SPDX/SLSA evidence remain integration gates.
+  publication is serialized with cancellation by the existing journal lock and
+  is the commit point: a restarted caller refreshes its authoritative
+  cross-process index, adopts output committed in the output-to-terminal-receipt
+  crash gap, and replays without reopening the source tree. Cleanup removes the
+  workspace, receipt, and operation-specific image reference idempotently.
+  Cache import/export receipts and multi-platform assembly remain the Box build
+  release gates; Cloud consumption, publication, and SPDX/SLSA evidence remain
+  integration gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

@@ -18,9 +18,31 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub(in crate::oci::build) trait BuildExecutionObserver: Send + Sync {
     async fn cancellation_requested(&self) -> Result<bool>;
 
+    async fn acquire_image_commit_permit(&self) -> Result<BuildImageCommitPermit>;
+
     async fn run_process_started(&self, pid: u32, start_time: Option<u64>) -> Result<()>;
 
     async fn run_process_finished(&self, pid: u32, start_time: Option<u64>) -> Result<()>;
+}
+
+trait SendGuard: Send {}
+
+impl<T: Send> SendGuard for T {}
+
+/// RAII permit that serializes ImageStore publication with cancellation.
+///
+/// The concrete guard is supplied by the existing operation journal. This
+/// wrapper owns no lock implementation or state of its own.
+pub(in crate::oci::build) struct BuildImageCommitPermit {
+    _guard: Box<dyn SendGuard>,
+}
+
+impl BuildImageCommitPermit {
+    pub(in crate::oci::build) fn new(guard: impl Send + 'static) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
 }
 
 /// Native-engine view of the one durable operation journal.
@@ -39,6 +61,10 @@ impl BuildExecutionControl {
             return Err(cancelled_error());
         }
         Ok(())
+    }
+
+    pub(super) async fn acquire_image_commit_permit(&self) -> Result<BuildImageCommitPermit> {
+        self.observer.acquire_image_commit_permit().await
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

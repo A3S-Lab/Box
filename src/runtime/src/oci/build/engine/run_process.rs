@@ -124,7 +124,7 @@ mod tests {
     use tokio::sync::Semaphore;
 
     use super::*;
-    use crate::oci::build::engine::BuildExecutionObserver;
+    use crate::oci::build::engine::{BuildExecutionObserver, BuildImageCommitPermit};
 
     struct TestObserver {
         cancelled: AtomicBool,
@@ -148,6 +148,10 @@ mod tests {
     impl BuildExecutionObserver for TestObserver {
         async fn cancellation_requested(&self) -> Result<bool> {
             Ok(self.cancelled.load(Ordering::SeqCst))
+        }
+
+        async fn acquire_image_commit_permit(&self) -> Result<BuildImageCommitPermit> {
+            Ok(BuildImageCommitPermit::new(()))
         }
 
         async fn run_process_started(&self, pid: u32, start_time: Option<u64>) -> Result<()> {
