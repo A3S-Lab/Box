@@ -5,20 +5,14 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-#[cfg(not(windows))]
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-#[cfg(not(windows))]
 use a3s_box_runtime::ExecClient;
 
-#[cfg(not(windows))]
 use crate::resolve;
-#[cfg(not(windows))]
 use crate::state::StateFile;
 
 /// Default ps arguments when none are specified.
-#[cfg(not(windows))]
 const DEFAULT_PS_ARGS: &[&str] = &["aux"];
-#[cfg(not(windows))]
 const JSON_PS_ARGS: &[&str] = &["-eo", "pid,ppid,pcpu,pmem,etime,args"];
 
 #[derive(Args)]
@@ -41,7 +35,6 @@ pub enum TopFormat {
     Json,
 }
 
-#[cfg(not(windows))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct TopProcess {
     pid: String,
@@ -52,15 +45,6 @@ struct TopProcess {
     command: String,
 }
 
-#[cfg(windows)]
-pub async fn execute(_args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "top",
-        "guest exec channel support",
-    ))
-}
-
-#[cfg(not(windows))]
 pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
@@ -72,16 +56,7 @@ pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let client = ExecClient::connect(&exec_socket_path).await?;
 
-    let ps_args = if args.ps_args.is_empty() && args.format == TopFormat::Json {
-        JSON_PS_ARGS.iter().map(|s| s.to_string()).collect()
-    } else if args.ps_args.is_empty() {
-        DEFAULT_PS_ARGS.iter().map(|s| s.to_string()).collect()
-    } else {
-        args.ps_args
-    };
-
-    let mut cmd = vec!["ps".to_string()];
-    cmd.extend(ps_args);
+    let cmd = build_ps_command(args.format, &args.ps_args);
 
     let request = ExecRequest {
         request_id: None,
@@ -116,14 +91,12 @@ pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn print_top_json(stdout: &str) -> Result<(), serde_json::Error> {
     let rows = parse_ps_table(stdout);
     println!("{}", serde_json::to_string(&rows)?);
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn parse_ps_table(text: &str) -> Vec<TopProcess> {
     let mut lines = text.lines().filter(|line| !line.trim().is_empty());
     let Some(header) = lines.next() else {
@@ -163,7 +136,6 @@ fn parse_ps_table(text: &str) -> Vec<TopProcess> {
         .collect()
 }
 
-#[cfg(not(windows))]
 fn parse_ps_line(
     line: &str,
     pid_idx: usize,
@@ -195,13 +167,11 @@ fn parse_ps_line(
     })
 }
 
-#[cfg(not(windows))]
 fn parse_percent(value: &str) -> Option<f32> {
     value.trim_end_matches('%').parse().ok()
 }
 
 /// Build the ps command from user-provided arguments or defaults.
-#[cfg(all(test, not(windows)))]
 fn build_ps_command(format: TopFormat, ps_args: &[String]) -> Vec<String> {
     let mut cmd = vec!["ps".to_string()];
     if ps_args.is_empty() && format == TopFormat::Json {
@@ -214,7 +184,7 @@ fn build_ps_command(format: TopFormat, ps_args: &[String]) -> Vec<String> {
     cmd
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

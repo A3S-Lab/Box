@@ -1,8 +1,7 @@
 //! `a3s-box cp` command — Copy files or directories between host and a running box.
 //!
-//! Uses the exec channel to transfer content via base64 encoding.
-//! Single files are transferred as raw base64. Directories are archived
-//! with `tar` before transfer.
+//! Uses the exec channel's native file protocol for single files. Directories
+//! are archived with `tar` before transfer.
 //!
 //! Syntax:
 //!   a3s-box cp <box>:/path/in/box /host/path   (box → host)
@@ -10,18 +9,17 @@
 
 use clap::Args;
 
-#[cfg(not(windows))]
-use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-#[cfg(not(windows))]
+#[cfg(unix)]
+use a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS;
+use a3s_box_core::exec::{
+    ExecRequest, FileOp, FileRequest, FilesystemEntryKind, FilesystemOp, FilesystemRequest,
+};
 use a3s_box_runtime::ExecClient;
 
-#[cfg(not(windows))]
 use crate::resolve;
-#[cfg(not(windows))]
 use crate::state::StateFile;
 
 /// Timeout for directory transfers (60 seconds).
-#[cfg(not(windows))]
 const DIR_TRANSFER_TIMEOUT_NS: u64 = 60_000_000_000;
 
 #[derive(Args)]
@@ -34,13 +32,11 @@ pub struct CpArgs {
 }
 
 /// Parsed copy endpoint — either a host path or a box:path pair.
-#[cfg(not(windows))]
 enum Endpoint {
     Host(String),
     Box { name: String, path: String },
 }
 
-#[cfg(not(windows))]
 fn parse_endpoint(s: &str) -> Endpoint {
     // Docker convention: "container:/path" means container path
     // A bare path (no colon, or colon after drive letter on Windows) means host
@@ -57,40 +53,27 @@ fn parse_endpoint(s: &str) -> Endpoint {
 }
 
 pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(windows)]
-    {
-        let _ = args;
-        return Err(crate::platform::unsupported_command(
-            "cp",
-            "guest exec channel support",
-        ));
-    }
+    let src = parse_endpoint(&args.src);
+    let dst = parse_endpoint(&args.dst);
 
-    #[cfg(not(windows))]
-    {
-        let src = parse_endpoint(&args.src);
-        let dst = parse_endpoint(&args.dst);
-
-        match (src, dst) {
-            (Endpoint::Box { name, path }, Endpoint::Host(host_path)) => {
-                copy_from_box(&name, &path, &host_path).await
-            }
-            (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
-                copy_to_box(&host_path, &name, &path).await
-            }
-            (Endpoint::Host(_), Endpoint::Host(_)) => Err(
-                "Both source and destination are host paths. One must be a box path (BOX:/path)."
-                    .into(),
-            ),
-            (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
-                Err("Copying between two boxes is not supported. Copy to host first.".into())
-            }
+    match (src, dst) {
+        (Endpoint::Box { name, path }, Endpoint::Host(host_path)) => {
+            copy_from_box(&name, &path, &host_path).await
         }
-    } // #[cfg(not(windows))]
+        (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
+            copy_to_box(&host_path, &name, &path).await
+        }
+        (Endpoint::Host(_), Endpoint::Host(_)) => Err(
+            "Both source and destination are host paths. One must be a box path (BOX:/path)."
+                .into(),
+        ),
+        (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
+            Err("Copying between two boxes is not supported. Copy to host first.".into())
+        }
+    }
 }
 
 /// Copy a file or directory from a box to the host.
-#[cfg(not(windows))]
 async fn copy_from_box(
     box_name: &str,
     box_path: &str,
@@ -106,7 +89,6 @@ async fn copy_from_box(
 }
 
 /// Copy a file or directory from the host to a box.
-#[cfg(not(windows))]
 async fn copy_to_box(
     host_path: &str,
     box_name: &str,
@@ -125,46 +107,52 @@ async fn copy_to_box(
 }
 
 /// Check if a path is a directory inside the box.
-#[cfg(not(windows))]
 async fn is_directory_in_box(
     client: &ExecClient,
     box_path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let request = ExecRequest {
-        request_id: None,
-        cmd: vec!["test".to_string(), "-d".to_string(), box_path.to_string()],
-        timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
-        env: vec![],
-        working_dir: None,
-        rootfs: None,
-        stdin: None,
-        stdin_streaming: false,
-        user: None,
-        streaming: false,
-    };
-
-    let output = client.exec_command(&request).await?;
-    Ok(output.exit_code == 0)
+    let response = client
+        .filesystem(&FilesystemRequest {
+            op: FilesystemOp::Stat,
+            path: box_path.to_string(),
+            destination: None,
+            depth: 0,
+            user: None,
+        })
+        .await?;
+    if !response.success {
+        return Err(format!(
+            "Failed to stat {box_path} in box: {}",
+            response
+                .error
+                .unwrap_or_else(|| "guest returned an unspecified error".to_string())
+        )
+        .into());
+    }
+    let entry = response
+        .entry
+        .ok_or_else(|| format!("Guest stat response for {box_path} did not include metadata"))?;
+    match entry.kind {
+        FilesystemEntryKind::Directory => Ok(true),
+        FilesystemEntryKind::File => Ok(false),
+        FilesystemEntryKind::Unspecified => {
+            Err(format!("Unsupported file type in box: {box_path}").into())
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Single-file transfers
-// ---------------------------------------------------------------------------
-
-/// Copy a single file from a box to the host.
-#[cfg(not(windows))]
-async fn copy_file_from_box(
+#[cfg(unix)]
+async fn restore_file_mode_in_box(
     client: &ExecClient,
-    box_name: &str,
     box_path: &str,
-    host_path: &str,
+    mode: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = ExecRequest {
         request_id: None,
         cmd: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("base64 < {}", shell_escape(box_path)),
+            "chmod".to_string(),
+            format!("{mode:o}"),
+            box_path.to_string(),
         ],
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
@@ -177,18 +165,57 @@ async fn copy_file_from_box(
     };
 
     let output = client.exec_command(&request).await?;
-
     if output.exit_code != 0 {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to read {box_path} in box: {stderr}").into());
+        return Err(format!(
+            "Failed to set permissions on {box_path} in box: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Single-file transfers
+// ---------------------------------------------------------------------------
+
+/// Copy a single file from a box to the host.
+async fn copy_file_from_box(
+    client: &ExecClient,
+    box_name: &str,
+    box_path: &str,
+    host_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let response = client
+        .file_transfer(&FileRequest {
+            op: FileOp::Download,
+            guest_path: box_path.to_string(),
+            data: None,
+            user: None,
+        })
+        .await?;
+    if !response.success {
+        return Err(format!(
+            "Failed to read {box_path} in box: {}",
+            response
+                .error
+                .unwrap_or_else(|| "guest returned an unspecified error".to_string())
+        )
+        .into());
     }
 
-    use base64::Engine;
-    let encoded = String::from_utf8_lossy(&output.stdout);
-    let clean: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&clean)
-        .map_err(|e| format!("Failed to decode file content: {e}"))?;
+        .decode(response.data.unwrap_or_default())
+        .map_err(|e| format!("Guest returned invalid file content for {box_path}: {e}"))?;
+    if response.size != decoded.len() as u64 {
+        return Err(format!(
+            "Guest returned {} bytes for {box_path}, expected {}",
+            decoded.len(),
+            response.size
+        )
+        .into());
+    }
 
     std::fs::write(host_path, &decoded)
         .map_err(|e| format!("Failed to write to {host_path}: {e}"))?;
@@ -201,7 +228,6 @@ async fn copy_file_from_box(
 }
 
 /// Copy a single file from the host to a box.
-#[cfg(not(windows))]
 async fn copy_file_to_box(
     client: &ExecClient,
     host_path: &str,
@@ -211,55 +237,47 @@ async fn copy_file_to_box(
     let content =
         std::fs::read(host_path).map_err(|e| format!("Failed to read {host_path}: {e}"))?;
     let len = content.len();
-    let mode = host_file_mode(host_path);
 
-    // Stream the raw bytes over the exec channel's stdin (not the command line)
-    // so large files do not exceed ARG_MAX, and restore the source file's mode
-    // (Docker `cp` preserves permissions).
-    let dst = shell_escape(box_path);
-    let request = ExecRequest {
-        request_id: None,
-        cmd: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("cat > {dst} && chmod {mode:o} {dst}"),
-        ],
-        timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
-        env: vec![],
-        working_dir: None,
-        rootfs: None,
-        stdin: Some(content),
-        stdin_streaming: false,
-        user: None,
-        streaming: false,
-    };
-
-    let output = client.exec_command(&request).await?;
-
-    if output.exit_code != 0 {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to write {box_path} in box: {stderr}").into());
+    use base64::Engine;
+    let response = client
+        .file_transfer(&FileRequest {
+            op: FileOp::Upload,
+            guest_path: box_path.to_string(),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(&content)),
+            user: None,
+        })
+        .await?;
+    if !response.success {
+        return Err(format!(
+            "Failed to write {box_path} in box: {}",
+            response
+                .error
+                .unwrap_or_else(|| "guest returned an unspecified error".to_string())
+        )
+        .into());
     }
+    if response.size != len as u64 {
+        return Err(format!(
+            "Guest wrote {} bytes to {box_path}, expected {len}",
+            response.size
+        )
+        .into());
+    }
+
+    #[cfg(unix)]
+    restore_file_mode_in_box(client, box_path, host_file_mode(host_path)).await?;
 
     println!("{host_path} → {box_name}:{box_path} ({len} bytes)");
     Ok(())
 }
 
-/// Source file's permission bits (lower 12) for `cp` to restore in the box;
-/// defaults to 0o644 off-Unix or on stat failure.
+/// Source file's permission bits (lower 12) for `cp` to restore in the box.
+#[cfg(unix)]
 fn host_file_mode(host_path: &str) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(host_path)
-            .map(|m| m.permissions().mode() & 0o7777)
-            .unwrap_or(0o644)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = host_path;
-        0o644
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(host_path)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644)
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +285,6 @@ fn host_file_mode(host_path: &str) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Copy a directory from a box to the host using tar.
-#[cfg(not(windows))]
 async fn copy_dir_from_box(
     client: &ExecClient,
     box_name: &str,
@@ -327,7 +344,6 @@ async fn copy_dir_from_box(
 }
 
 /// Copy a directory from the host to a box using tar.
-#[cfg(not(windows))]
 async fn copy_dir_to_box(
     client: &ExecClient,
     host_path: &str,
@@ -379,7 +395,6 @@ async fn copy_dir_to_box(
 }
 
 /// Create a tar archive from a host directory using the `tar` command.
-#[cfg(not(windows))]
 fn create_tar_from_dir(dir_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let output = std::process::Command::new("tar")
         .args(["-cf", "-", "-C", dir_path, "."])
@@ -395,7 +410,6 @@ fn create_tar_from_dir(dir_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Er
 }
 
 /// Extract a tar archive to a host directory using the `tar` command.
-#[cfg(not(windows))]
 fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     use std::process::Stdio;
@@ -429,7 +443,6 @@ fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), Box<dyn std
 }
 
 /// Connect to a box's exec server.
-#[cfg(not(windows))]
 async fn connect_exec(box_name: &str) -> Result<ExecClient, Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, box_name)?;
@@ -445,12 +458,11 @@ async fn connect_exec(box_name: &str) -> Result<ExecClient, Box<dyn std::error::
 }
 
 /// Minimal shell escaping for a file path.
-#[cfg(not(windows))]
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

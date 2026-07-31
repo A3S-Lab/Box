@@ -21,6 +21,7 @@ pub mod operator;
 pub mod platform;
 pub mod port;
 pub mod pty;
+pub mod rootfs_diff;
 pub mod rootfs_metadata;
 pub mod scale;
 pub mod security;

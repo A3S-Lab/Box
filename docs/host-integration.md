@@ -467,9 +467,11 @@ boundaries. Run it on an otherwise idle host:
 ```
 
 The twelve-test default matrix contains only Windows-supported real tests,
-including a 4,096-byte workload argument, a read-only volume-provided init
-script with success and exact failure paths, POSIX ownership and mode replay
-through restart and commit, and the full 2,048-file, five-pass virtio-fs stress.
+including non-interactive post-boot exec, bidirectional single-file copy,
+`top`, guest PID-aware stats, a 4,096-byte workload argument, a read-only
+volume-provided init script with success and exact failure paths, POSIX
+ownership and mode replay through restart and commit, and the full 2,048-file,
+five-pass virtio-fs stress.
 It writes per-test logs plus `summary.json`, operation/resource TSVs,
 start/final process inventories, and `verify.out` beneath
 `src/target/a3s-box-whpx-soak/`. It fails on count drift, resource guardrails,

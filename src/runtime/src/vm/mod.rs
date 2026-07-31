@@ -1227,6 +1227,28 @@ impl VmManager {
             spec.network = Some(net_config);
         }
 
+        // Establish `diff`'s immutable baseline after every runtime-owned
+        // rootfs mutation (guest init/config, DNS, hostname, hosts) but before
+        // the shim can start user code. The CLI's former post-readiness capture
+        // raced fast guests and could record their first writes as baseline.
+        let baseline_path = self
+            .home_dir
+            .join("boxes")
+            .join(&self.box_id)
+            .join("rootfs_snapshot.json");
+        if !baseline_path.exists() {
+            if let Err(error) =
+                a3s_box_core::rootfs_diff::create_snapshot(&layout.rootfs_path, &baseline_path)
+            {
+                tracing::warn!(
+                    box_id = %self.box_id,
+                    path = %baseline_path.display(),
+                    error = %error,
+                    "Failed to create pre-boot rootfs diff baseline"
+                );
+            }
+        }
+
         #[cfg(target_os = "macos")]
         if spec.network.is_none()
             && matches!(self.config.network, a3s_box_core::NetworkMode::Tsi)
@@ -1319,6 +1341,8 @@ impl VmManager {
                 } else {
                     self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 }
+                #[cfg(windows)]
+                self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 Ok::<(), BoxError>(())
             }
             .instrument(wait_span)

@@ -4,8 +4,9 @@
 //! added, changed, and deleted files, similar to `docker diff`.
 
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::Path;
 
+use a3s_box_core::rootfs_diff::FileInfo;
 use clap::Args;
 
 use crate::resolve;
@@ -117,78 +118,9 @@ pub(crate) fn create_box_baseline_snapshot(
     Ok(())
 }
 
-/// Minimal file metadata for comparison.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FileInfo {
-    pub size: u64,
-    pub mode: u32,
-    pub is_dir: bool,
-}
-
 /// Walk a directory tree and collect file metadata, keyed by relative path.
 pub fn walk_dir(root: &Path) -> Result<HashMap<String, FileInfo>, Box<dyn std::error::Error>> {
-    let mut map = HashMap::new();
-    walk_recursive(root, root, &mut map)?;
-    Ok(map)
-}
-
-fn walk_recursive(
-    root: &Path,
-    current: &Path,
-    map: &mut HashMap<String, FileInfo>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let entries = match std::fs::read_dir(current) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map(rootfs_path_string)
-            .unwrap_or_default();
-
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::MetadataExt;
-            meta.mode()
-        };
-        #[cfg(not(unix))]
-        let mode = 0u32;
-
-        map.insert(
-            rel,
-            FileInfo {
-                size: meta.len(),
-                mode,
-                is_dir: meta.is_dir(),
-            },
-        );
-
-        if meta.is_dir() {
-            walk_recursive(root, &path, map)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn rootfs_path_string(relative: &Path) -> String {
-    let segments = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(segment) => Some(segment.to_string_lossy()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    format!("/{}", segments.join("/"))
+    Ok(a3s_box_core::rootfs_diff::walk_dir(root)?)
 }
 
 /// Create a baseline snapshot of a rootfs directory.
@@ -198,9 +130,7 @@ pub fn create_snapshot(
     rootfs_dir: &Path,
     snapshot_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let map = walk_dir(rootfs_dir)?;
-    let json = serde_json::to_string(&map)?;
-    std::fs::write(snapshot_path, json)?;
+    a3s_box_core::rootfs_diff::create_snapshot(rootfs_dir, snapshot_path)?;
     Ok(())
 }
 

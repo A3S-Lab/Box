@@ -4,6 +4,32 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Windows post-boot command channel.** WHPX boxes expose non-interactive
+  `exec`, bidirectional single-file `cp`, `top`, and guest PID-aware
+  `stats --no-stream` through a shim-owned local named pipe tunneled over the
+  existing guest control connection. Interactive PTY sessions remain
+  unsupported on Windows.
+
+### Changed
+
+- **Stronger Windows qualification.** The WHPX runner precompiles its real
+  smoke executable, records that binary's checksum, applies an explicit
+  inter-test partition-release interval, and includes the command/copy/process
+  utility profile in its 12-test real-host matrix.
+
+### Fixed
+
+- **WHPX control readiness and response delivery.** Startup waits for the real
+  guest control/exec heartbeat before publishing `running`, short-lived
+  workloads recover their terminal status without a false boot failure, and
+  named-pipe responses are flushed before disconnect so final protocol frames
+  are not lost.
+- **Running-rootfs diff baseline.** The VM runtime captures its baseline after
+  host preparation and before guest entry, allowing Windows `diff` to report
+  post-boot changes without depending on a guest archive channel.
+
 ## [3.2.0] — 2026-07-28
 
 ### Added

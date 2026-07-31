@@ -9,9 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 use sysinfo::{Pid, System};
 
-#[cfg(not(windows))]
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-#[cfg(not(windows))]
 use a3s_box_runtime::ExecClient;
 
 use crate::output;
@@ -227,21 +225,12 @@ fn build_box_stats(sys: &mut System, record: &BoxRecord) -> Option<BoxStats> {
 }
 
 async fn collect_pids_current(record: &BoxRecord) -> Option<u64> {
-    #[cfg(not(windows))]
-    {
-        tokio::time::timeout(PIDS_CURRENT_TIMEOUT, collect_guest_process_count(record))
-            .await
-            .ok()
-            .flatten()
-    }
-    #[cfg(windows)]
-    {
-        let _ = record;
-        None
-    }
+    tokio::time::timeout(PIDS_CURRENT_TIMEOUT, collect_guest_process_count(record))
+        .await
+        .ok()
+        .flatten()
 }
 
-#[cfg(not(windows))]
 async fn collect_guest_process_count(record: &BoxRecord) -> Option<u64> {
     let exec_socket_path =
         crate::socket_paths::runtime_socket(record, crate::socket_paths::RuntimeSocket::Exec);
@@ -267,7 +256,6 @@ async fn collect_guest_process_count(record: &BoxRecord) -> Option<u64> {
     )))
 }
 
-#[cfg(not(windows))]
 fn count_guest_processes(text: &str) -> u64 {
     text.lines()
         .filter_map(parse_guest_process_command)
@@ -275,7 +263,6 @@ fn count_guest_processes(text: &str) -> u64 {
         .count() as u64
 }
 
-#[cfg(not(windows))]
 fn parse_guest_process_command(line: &str) -> Option<&str> {
     let line = line.trim();
     if line.is_empty() {
@@ -287,7 +274,6 @@ fn parse_guest_process_command(line: &str) -> Option<&str> {
     Some(parts.next().unwrap_or("").trim())
 }
 
-#[cfg(not(windows))]
 fn is_process_count_probe(command: &str) -> bool {
     let command = command.trim();
     command == "ps"
@@ -556,7 +542,6 @@ mod tests {
         assert_eq!(json["pids"]["current"], 7);
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn test_count_guest_processes_ignores_probe_process() {
         let count = count_guest_processes(

@@ -482,6 +482,18 @@ enum ForegroundStopReason {
     TimedOut,
 }
 
+fn recoverable_foreground_start_completion(
+    detach: bool,
+    tty: bool,
+    state: ExecutionState,
+    exit_code: Option<i32>,
+) -> bool {
+    !detach
+        && !tty
+        && matches!(state, ExecutionState::Stopped | ExecutionState::Failed)
+        && exit_code.is_some()
+}
+
 #[cfg(unix)]
 type ForegroundTerminateSignal = Option<tokio::signal::unix::Signal>;
 #[cfg(not(unix))]

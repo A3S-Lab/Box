@@ -205,6 +205,47 @@ fn test_validate_run_mode_allows_detached_without_tty() {
 }
 
 #[test]
+fn test_foreground_terminal_start_completion_is_recoverable_with_exact_status() {
+    assert!(recoverable_foreground_start_completion(
+        false,
+        false,
+        ExecutionState::Stopped,
+        Some(0),
+    ));
+    assert!(recoverable_foreground_start_completion(
+        false,
+        false,
+        ExecutionState::Failed,
+        Some(42),
+    ));
+
+    assert!(!recoverable_foreground_start_completion(
+        true,
+        false,
+        ExecutionState::Stopped,
+        Some(0),
+    ));
+    assert!(!recoverable_foreground_start_completion(
+        false,
+        true,
+        ExecutionState::Stopped,
+        Some(0),
+    ));
+    assert!(!recoverable_foreground_start_completion(
+        false,
+        false,
+        ExecutionState::Running,
+        Some(0),
+    ));
+    assert!(!recoverable_foreground_start_completion(
+        false,
+        false,
+        ExecutionState::Stopped,
+        None,
+    ));
+}
+
+#[test]
 fn test_validate_run_mode_rejects_no_stdin_with_interactive() {
     let mut args = default_run_args();
     args.interactive = true;

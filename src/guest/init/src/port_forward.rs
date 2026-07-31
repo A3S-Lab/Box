@@ -5,6 +5,8 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use std::thread;
@@ -12,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use a3s_box_core::exec::WINDOWS_CONTROL_SIGNAL_FRAME;
+use a3s_box_core::exec::{WINDOWS_CONTROL_EXEC_FRAME, WINDOWS_CONTROL_SIGNAL_FRAME};
 #[cfg(target_os = "linux")]
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(target_os = "linux")]
@@ -38,7 +40,57 @@ fn decode_stop_signal_payload(payload: &[u8]) -> Option<i32> {
 
 type SharedWriter = Arc<Mutex<std::fs::File>>;
 #[cfg(target_os = "linux")]
-type StreamMap = Arc<Mutex<HashMap<u32, TcpStream>>>;
+type StreamMap = Arc<Mutex<HashMap<u32, GuestTargetStream>>>;
+
+#[cfg(target_os = "linux")]
+enum GuestTargetStream {
+    Tcp(TcpStream),
+    Exec(UnixStream),
+}
+
+#[cfg(target_os = "linux")]
+impl GuestTargetStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            Self::Exec(stream) => stream.try_clone().map(Self::Exec),
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Self::Exec(stream) => stream.shutdown(Shutdown::Both),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Read for GuestTargetStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buf),
+            Self::Exec(stream) => stream.read(buf),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Write for GuestTargetStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buf),
+            Self::Exec(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            Self::Exec(stream) => stream.flush(),
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub fn run_port_forward_client(
@@ -194,12 +246,15 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                 match TcpStream::connect(("127.0.0.1", guest_port)) {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
+                        let peer = stream.peer_addr().ok();
+                        let local = stream.local_addr().ok();
+                        let stream = GuestTargetStream::Tcp(stream);
                         let read_stream = stream.try_clone()?;
                         debug!(
                             stream_id = frame.stream_id,
                             guest_port,
-                            peer = ?stream.peer_addr().ok(),
-                            local = ?stream.local_addr().ok(),
+                            peer = ?peer,
+                            local = ?local,
                             "pf: connected guest target, spawned reader"
                         );
                         streams.lock().unwrap().insert(frame.stream_id, stream);
@@ -217,6 +272,45 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                             stream_id = frame.stream_id,
                             guest_port,
                             "Failed to connect guest TCP target"
+                        );
+                        write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
+                    }
+                }
+            }
+            WINDOWS_CONTROL_EXEC_FRAME => {
+                if !frame.payload.is_empty() {
+                    write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
+                    continue;
+                }
+
+                match UnixStream::pair() {
+                    Ok((handler_stream, relay_stream)) => {
+                        let handler_fd: OwnedFd = handler_stream.into();
+                        thread::spawn(move || {
+                            if let Err(error) = crate::exec_server::handle_connection(handler_fd) {
+                                warn!(
+                                    error = %error,
+                                    "Windows tunneled exec handler failed"
+                                );
+                            }
+                        });
+
+                        let stream = GuestTargetStream::Exec(relay_stream);
+                        let read_stream = stream.try_clone()?;
+                        streams.lock().unwrap().insert(frame.stream_id, stream);
+                        spawn_guest_reader(
+                            frame.stream_id,
+                            read_stream,
+                            writer.clone(),
+                            streams.clone(),
+                        );
+                        write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[0])?;
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            stream_id = frame.stream_id,
+                            "Failed to create Windows tunneled exec session"
                         );
                         write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
                     }
@@ -287,7 +381,7 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
 #[cfg(target_os = "linux")]
 fn spawn_guest_reader(
     stream_id: u32,
-    mut stream: TcpStream,
+    mut stream: GuestTargetStream,
     writer: SharedWriter,
     streams: StreamMap,
 ) {
@@ -324,7 +418,7 @@ fn spawn_guest_reader(
 #[cfg(target_os = "linux")]
 fn close_stream(stream_id: u32, streams: &StreamMap) {
     if let Some(stream) = streams.lock().unwrap().remove(&stream_id) {
-        let _ = stream.shutdown(Shutdown::Both);
+        let _ = stream.shutdown();
     }
 }
 

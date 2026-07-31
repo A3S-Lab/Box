@@ -6,8 +6,12 @@ use std::sync::Arc;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::ExecutionProcessSignal;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 use tokio::sync::Mutex;
+
+#[cfg(unix)]
+type ExecStream = tokio::net::UnixStream;
+#[cfg(windows)]
+type ExecStream = tokio::net::windows::named_pipe::NamedPipeClient;
 
 const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
@@ -44,10 +48,41 @@ const EXEC_HOST_SLACK_SECS: u64 = 10;
 /// force-kill fallback.
 const SIGNAL_MAIN_ACK_TIMEOUT_SECS: u64 = 10;
 
-type ExecFrameReader = a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>;
-type ExecFrameWriter = a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>;
+type ExecFrameReader = a3s_transport::FrameReader<tokio::io::ReadHalf<ExecStream>>;
+type ExecFrameWriter = a3s_transport::FrameWriter<tokio::io::WriteHalf<ExecStream>>;
 
-/// Client for executing commands in the guest over Unix socket.
+async fn connect_exec_stream(path: &Path) -> std::io::Result<ExecStream> {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(path).await
+    }
+
+    #[cfg(windows)]
+    {
+        const ERROR_FILE_NOT_FOUND: i32 = 2;
+        const ERROR_PIPE_BUSY: i32 = 231;
+        const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+        loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(path) {
+                Ok(stream) => return Ok(stream),
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(ERROR_FILE_NOT_FOUND | ERROR_PIPE_BUSY)
+                    ) && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+/// Client for executing commands through the platform-local guest channel.
 ///
 /// Uses the Frame wire protocol: sends a Data frame with JSON ExecRequest,
 /// receives a Data frame with JSON ExecOutput.
@@ -63,7 +98,7 @@ impl ExecClient {
         }
     }
 
-    /// Connect to the exec server via Unix socket.
+    /// Connect to the exec server via a Unix socket or Windows named pipe.
     ///
     /// Verifies the socket is connectable.
     pub async fn connect(socket_path: &Path) -> Result<Self> {
@@ -77,8 +112,8 @@ impl ExecClient {
         &self.socket_path
     }
 
-    pub(crate) async fn open_stream(&self) -> Result<UnixStream> {
-        UnixStream::connect(&self.socket_path).await.map_err(|e| {
+    pub(crate) async fn open_stream(&self) -> Result<ExecStream> {
+        connect_exec_stream(&self.socket_path).await.map_err(|e| {
             BoxError::ExecError(format!(
                 "Exec connection failed to {}: {}",
                 self.socket_path.display(),
@@ -100,7 +135,7 @@ impl ExecClient {
 
     pub(crate) async fn exec_command_on_stream(
         &self,
-        mut stream: UnixStream,
+        mut stream: ExecStream,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
         let payload = serde_json::to_vec(request)
@@ -174,7 +209,7 @@ impl ExecClient {
 
     pub(crate) async fn exec_stream_on_stream(
         &self,
-        stream: UnixStream,
+        stream: ExecStream,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<StreamingExec> {
         let mut req = request.clone();
@@ -212,7 +247,7 @@ impl ExecClient {
     where
         W: tokio::io::AsyncWrite + Unpin,
     {
-        let mut stream = UnixStream::connect(&self.socket_path)
+        let mut stream = connect_exec_stream(&self.socket_path)
             .await
             .map_err(|error| {
                 BoxError::ExecError(format!(
@@ -293,7 +328,7 @@ impl ExecClient {
 
     pub(crate) async fn file_transfer_on_stream(
         &self,
-        mut stream: UnixStream,
+        mut stream: ExecStream,
         request: &a3s_box_core::exec::FileRequest,
     ) -> Result<a3s_box_core::exec::FileResponse> {
         let payload = serde_json::to_vec(&a3s_box_core::GuestSessionRequest::File(request.clone()))
@@ -348,7 +383,7 @@ impl ExecClient {
 
     pub(crate) async fn filesystem_on_stream(
         &self,
-        mut stream: UnixStream,
+        mut stream: ExecStream,
         request: &a3s_box_core::FilesystemRequest,
     ) -> Result<a3s_box_core::FilesystemResponse> {
         let payload = serde_json::to_vec(&a3s_box_core::GuestSessionRequest::Filesystem(
@@ -397,7 +432,7 @@ impl ExecClient {
     ///
     /// Returns `true` if the exec server responds, `false` otherwise.
     pub async fn heartbeat(&self) -> Result<bool> {
-        let mut stream = match UnixStream::connect(&self.socket_path).await {
+        let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
             Err(_) => return Ok(false),
         };
@@ -426,7 +461,7 @@ impl ExecClient {
     /// stops cleanly. Returns `Ok(true)` if the guest acknowledged, `Ok(false)`
     /// if it did not respond (caller should fall back to a hard stop).
     pub async fn signal_main(&self, signal: i32) -> Result<bool> {
-        let mut stream = match UnixStream::connect(&self.socket_path).await {
+        let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
             Err(_) => return Ok(false),
         };
@@ -469,7 +504,7 @@ impl ExecClient {
     /// The spawned main inherits the console (so its output reaches the json-file
     /// logs) and drives the VM lifecycle. Returns `Ok(true)` if acknowledged.
     pub async fn spawn_main(&self, spec_json: Option<&[u8]>) -> Result<bool> {
-        let mut stream = match UnixStream::connect(&self.socket_path).await {
+        let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
             Err(_) => return Ok(false),
         };
@@ -772,7 +807,7 @@ impl std::fmt::Debug for StreamingExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
@@ -1466,5 +1501,92 @@ mod tests {
         };
         let result = client.exec_command(&req).await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    use super::*;
+
+    static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
+
+    #[tokio::test]
+    async fn exec_command_round_trips_over_a_real_named_pipe() {
+        let pipe_path = format!(
+            r"\\.\pipe\a3s-box-exec-client-test-{}-{}",
+            std::process::id(),
+            NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+        );
+        let first_server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(254)
+            .create(&pipe_path)
+            .expect("create first exec pipe instance");
+        let server_path = pipe_path.clone();
+        let server = tokio::spawn(async move {
+            first_server
+                .connect()
+                .await
+                .expect("accept reachability connection");
+            let second_server = ServerOptions::new()
+                .max_instances(254)
+                .create(&server_path)
+                .expect("create request pipe instance");
+            drop(first_server);
+
+            second_server
+                .connect()
+                .await
+                .expect("accept exec request connection");
+            let (read, write) = tokio::io::split(second_server);
+            let mut reader = a3s_transport::FrameReader::new(read);
+            let mut writer = a3s_transport::FrameWriter::new(write);
+            let request = reader
+                .read_frame()
+                .await
+                .expect("read request frame")
+                .expect("request stream stays open");
+            let request: a3s_box_core::exec::ExecRequest =
+                serde_json::from_slice(&request.payload).expect("decode request");
+            assert_eq!(request.cmd, ["echo", "windows"]);
+
+            let output = a3s_box_core::exec::ExecOutput {
+                stdout: b"windows\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+                truncated: false,
+            };
+            writer
+                .write_data(&serde_json::to_vec(&output).expect("encode response"))
+                .await
+                .expect("write response");
+        });
+
+        let client = ExecClient::connect(Path::new(&pipe_path))
+            .await
+            .expect("connect exec client");
+        let output = client
+            .exec_command(&a3s_box_core::exec::ExecRequest {
+                request_id: None,
+                cmd: vec!["echo".to_string(), "windows".to_string()],
+                timeout_ns: 5_000_000_000,
+                env: Vec::new(),
+                working_dir: None,
+                rootfs: None,
+                stdin: None,
+                stdin_streaming: false,
+                user: None,
+                streaming: false,
+            })
+            .await
+            .expect("execute over named pipe");
+
+        assert_eq!(output.stdout, b"windows\n");
+        assert_eq!(output.exit_code, 0);
+        server.await.expect("server task joins");
     }
 }

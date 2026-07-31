@@ -9,6 +9,8 @@ param(
     [int]$CommandTimeoutSeconds = 300,
     [ValidateRange(1, 86400)]
     [int]$VirtiofsTimeoutSeconds = 900,
+    [ValidateRange(0, 60000)]
+    [int]$InterTestDelayMilliseconds = 1000,
     [ValidateRange(1, 16384)]
     [int]$MaxRuntimeWorkingSetMiB = 2048,
     [ValidateRange(1, 65536)]
@@ -72,6 +74,8 @@ if ($imageItem.PSObject.Properties.Name -contains 'LinkType' -and $imageItem.Lin
     throw "OCI image archive must not be a link: $resolvedImageTar"
 }
 $imageTarSha256 = (Get-FileHash -LiteralPath $resolvedImageTar -Algorithm SHA256).Hash.ToLowerInvariant()
+$coreSmokeBinary = $null
+$coreSmokeBinarySha256 = $null
 
 $runId = '{0}-{1}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'), $PID
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
@@ -287,17 +291,14 @@ function Invoke-SoakTest {
     )
 
     $arguments = @(
-        'test',
-        '-p', 'a3s-box-cli',
-        '--test', 'core_smoke',
         $Test,
-        '--',
+        '--exact',
         '--ignored',
         '--nocapture',
         '--test-threads=1'
     )
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = (Get-Command cargo.exe -ErrorAction Stop).Source
+    $startInfo.FileName = $script:coreSmokeBinary
     $startInfo.Arguments = (
         $arguments | ForEach-Object { ConvertTo-NativeArgument -Argument $_ }
     ) -join ' '
@@ -310,7 +311,7 @@ function Invoke-SoakTest {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) {
-        throw "Failed to start cargo test for $Test"
+        throw "Failed to start core smoke test for $Test"
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -588,6 +589,8 @@ function Write-Summary {
         worktree_dirty = $worktreeStatus.Count -gt 0
         image_tar = $resolvedImageTar
         image_tar_sha256 = $imageTarSha256
+        core_smoke_binary = $coreSmokeBinary
+        core_smoke_binary_sha256 = $coreSmokeBinarySha256
         started_at = $startedAt.ToString('o')
         soak_started_at = if ($null -eq $soakStartedAt) {
             $null
@@ -604,6 +607,7 @@ function Write-Summary {
         completed_tests = $completedTests
         command_timeout_seconds = $CommandTimeoutSeconds
         virtiofs_timeout_seconds = $VirtiofsTimeoutSeconds
+        inter_test_delay_milliseconds = $InterTestDelayMilliseconds
         start_inventory_processes = $startInventory.Count
         final_inventory_processes = $finalInventory.Count
         max_runtime_working_set_bytes = (
@@ -669,7 +673,26 @@ try {
             -LogPath (Join-Path $evidenceDirectory 'build-windows.log') `
             -FilePath 'cargo' `
             -Arguments @('build', '-p', 'a3s-box-cli', '-p', 'a3s-box-shim')
+        Invoke-LoggedNative -Label 'core smoke test build' `
+            -LogPath (Join-Path $evidenceDirectory 'build-core-smoke.log') `
+            -FilePath 'cargo' `
+            -Arguments @(
+                'test', '-p', 'a3s-box-cli', '--test', 'core_smoke', '--no-run'
+            )
     }
+
+    $coreSmokeBinaryItem = Get-ChildItem `
+        -LiteralPath (Join-Path $workspace 'target\debug\deps') `
+        -Filter 'core_smoke-*.exe' -File -ErrorAction Stop |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if ($null -eq $coreSmokeBinaryItem) {
+        throw 'The precompiled core smoke test executable is missing.'
+    }
+    $coreSmokeBinary = $coreSmokeBinaryItem.FullName
+    $coreSmokeBinarySha256 = (
+        Get-FileHash -LiteralPath $coreSmokeBinary -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
 
     $env:A3S_BOX_SMOKE_IMAGE_TAR = $resolvedImageTar
     $env:A3S_BOX_SMOKE_TIMEOUT_SECS = $CommandTimeoutSeconds.ToString()
@@ -687,6 +710,12 @@ try {
 
         $iteration = $completedIterations + 1
         foreach ($test in $tests) {
+            # A shim process can be gone before WHPX has finished releasing its
+            # partition. Keep this bounded, explicit settling interval in the
+            # evidence contract instead of hiding a failed test behind retries.
+            if ($completedTests -gt 0 -and $InterTestDelayMilliseconds -gt 0) {
+                Start-Sleep -Milliseconds $InterTestDelayMilliseconds
+            }
             $testStartedAt = [DateTime]::UtcNow
             $safeTest = $test -replace '[^A-Za-z0-9_.-]', '_'
             $logPath = Join-Path $evidenceDirectory (

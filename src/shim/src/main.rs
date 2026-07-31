@@ -20,6 +20,7 @@ use a3s_box_core::error::{BoxError, Result};
 #[cfg(target_os = "windows")]
 use a3s_box_core::exec::WINDOWS_STOP_REQUEST_FILE;
 use a3s_box_core::vmm::InstanceSpec;
+#[cfg(not(target_os = "windows"))]
 use a3s_box_core::EXEC_VSOCK_PORT;
 #[cfg(target_os = "windows")]
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
@@ -830,22 +831,12 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         }
     }
 
-    // Configure exec communication channel on Windows (Named Pipe bridged to vsock)
+    // Configure the Windows host-control worker. WHPX named-pipe mappings are
+    // guest-initiated, so host exec cannot directly bridge to the guest's 4089
+    // listener. The worker exposes a local exec pipe and tunnels the unchanged
+    // exec protocol over the long-lived guest-initiated 4093 channel.
     #[cfg(target_os = "windows")]
     let windows_port_forward_manager = {
-        // On Windows, libkrun uses Named Pipes instead of Unix sockets
-        // The pipe name format is: \\.\pipe\<name>
-        let pipe_name = format!(
-            "\\\\.\\pipe\\a3s-box-exec-{}",
-            spec.box_id.to_string().replace('-', "")
-        );
-        tracing::debug!(
-            pipe_name = %pipe_name,
-            guest_port = EXEC_VSOCK_PORT,
-            "Configuring vsock bridge for exec (Named Pipe)"
-        );
-        ctx.add_vsock_port_windows(EXEC_VSOCK_PORT, &pipe_name)?;
-
         // Note: PTY and attestation channels are not yet implemented on Windows.
         // The 4093 channel also carries lifecycle signals, so it must exist even
         // when the box has no published ports.
@@ -1229,6 +1220,14 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     drop(windows_port_forward_manager);
+
+    // `std::process::exit` below skips Rust destructors. On Windows,
+    // `start_enter` returns after guest shutdown and the KrunContext owns the
+    // WHPX partition until `krun_free_ctx` runs in Drop. Free it explicitly so
+    // a following restart/new VM cannot race Windows' asynchronous process-handle
+    // cleanup and boot into a live shim with no functioning guest channel.
+    #[cfg(target_os = "windows")]
+    drop(ctx);
 
     // If we reach here, either:
     // 1. VM failed to start (negative status)

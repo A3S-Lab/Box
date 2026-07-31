@@ -158,13 +158,41 @@ pub(super) async fn setup_and_boot(
         BoxRecord::make_short_id(&box_id)
     );
     let runtime_start = std::time::Instant::now();
-    let lease = match manager.start(&execution_id, reservation.generation).await {
-        Ok(lease) => lease,
-        Err(error) => {
-            cleanup_failed_managed_run(&box_id);
-            return Err(error.into());
-        }
-    };
+    let (generation, terminal_record) =
+        match manager.start(&execution_id, reservation.generation).await {
+            Ok(lease) => (lease.generation, None),
+            Err(error) => {
+                // A foreground one-shot can finish after the guest has started but
+                // before its exec readiness heartbeat wins the race. The runtime
+                // preserves the authoritative exit status and logs in that case.
+                // Continue through the ordinary foreground drain/cleanup path so
+                // callers receive the workload's output and exact exit code. A
+                // detached run (which promises a live lease), a PTY keepalive, or
+                // any failure without an exact terminal observation remains a real
+                // startup error.
+                let terminal_status = manager.inspect(&execution_id).await.ok();
+                let record = StateFile::load_readonly()?.find_by_id(&box_id).cloned();
+                if terminal_status.as_ref().is_some_and(|status| {
+                    status.generation == reservation.generation
+                        && recoverable_foreground_start_completion(
+                            args.detach,
+                            args.tty,
+                            status.state,
+                            record.as_ref().and_then(|record| record.exit_code),
+                        )
+                }) {
+                    tracing::debug!(
+                        box_id = %box_id,
+                        %error,
+                        "Foreground workload completed while startup was establishing readiness"
+                    );
+                    (reservation.generation, record)
+                } else {
+                    cleanup_failed_managed_run(&box_id);
+                    return Err(error.into());
+                }
+            }
+        };
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "cli.runtime_start",
         runtime_start.elapsed(),
@@ -172,10 +200,13 @@ pub(super) async fn setup_and_boot(
     // A short-lived command can exit between `start` and this reload. Use the
     // side-effect-free snapshot so legacy PID reconciliation cannot auto-remove
     // the just-created managed record before foreground cleanup observes it.
-    let record = StateFile::load_readonly()?
-        .find_by_id(&box_id)
-        .cloned()
-        .ok_or_else(|| format!("managed run {box_id} disappeared after startup"))?;
+    let record = match terminal_record {
+        Some(record) => record,
+        None => StateFile::load_readonly()?
+            .find_by_id(&box_id)
+            .cloned()
+            .ok_or_else(|| format!("managed run {box_id} disappeared after startup"))?,
+    };
     let box_dir = record.box_dir.clone();
     let exec_socket_path = record.exec_socket_path.clone();
     let pty_socket_path = exec_socket_path
@@ -202,7 +233,7 @@ pub(super) async fn setup_and_boot(
     let context = RunContext {
         manager,
         execution_id,
-        generation: lease.generation,
+        generation,
         box_id,
         box_dir,
         name,

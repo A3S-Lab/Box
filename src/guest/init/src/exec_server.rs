@@ -692,7 +692,9 @@ fn run_accept_loop(sock_fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::err
 /// 2. Execute the command
 /// 3. Send either a one-shot ExecOutput frame or streaming exec frames
 #[cfg(target_os = "linux")]
-fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_connection(
+    fd: std::os::fd::OwnedFd,
+) -> Result<(), Box<dyn std::error::Error>> {
     use tracing::debug;
 
     // Transfer ownership into File. Constructing a second owner with
