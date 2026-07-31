@@ -50,9 +50,16 @@ pub fn sibling(record: &BoxRecord, socket_name: &str) -> PathBuf {
 }
 
 pub fn exec(record: &BoxRecord) -> PathBuf {
+    #[cfg(windows)]
+    {
+        return PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&record.id));
+    }
+
+    #[cfg(not(windows))]
     if !record.exec_socket_path.as_os_str().is_empty() {
         return record.exec_socket_path.clone();
     }
+    #[cfg(not(windows))]
     record.box_dir.join("sockets").join("exec.sock")
 }
 
@@ -88,6 +95,12 @@ pub fn require_runtime_socket(
 ) -> Result<PathBuf, String> {
     require_running(record, socket.action())?;
     let path = runtime_socket(record, socket);
+    #[cfg(windows)]
+    if socket == RuntimeSocket::Exec {
+        // Named pipes are not regular filesystem entries. The exec client does
+        // the authoritative connect check against the shim-owned endpoint.
+        return Ok(path);
+    }
     if path.exists() {
         return Ok(path);
     }
@@ -106,6 +119,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::fixtures::make_record;
 
+    #[cfg(not(windows))]
     #[test]
     fn test_exec_uses_recorded_exec_socket_path() {
         let mut record = make_record("id", "box", "running", Some(1));
@@ -114,6 +128,18 @@ mod tests {
         assert_eq!(exec(&record), PathBuf::from("/tmp/a3s-custom/exec.sock"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_exec_uses_shim_owned_named_pipe() {
+        let record = make_record("1a2b-3c4d", "box", "running", Some(1));
+
+        assert_eq!(
+            exec(&record),
+            PathBuf::from(r"\\.\pipe\a3s-box-exec-1a2b3c4d")
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn test_pty_uses_exec_socket_sibling() {
         let mut record = make_record("id", "box", "running", Some(1));
@@ -132,6 +158,7 @@ mod tests {
         assert!(error.contains("a3s-box start box"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_require_runtime_socket_returns_actionable_missing_socket_error() {
         let record = make_record("id", "box", "running", Some(1));
@@ -143,6 +170,7 @@ mod tests {
         assert!(error.contains("a3s-box restart box"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_require_runtime_socket_accepts_existing_socket() {
         let tmp = tempfile::tempdir().unwrap();

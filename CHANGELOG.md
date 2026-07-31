@@ -48,6 +48,11 @@ All notable changes to A3S Box will be documented in this file.
   rematerializes Secrets. Log reads reauthorize and redact only material that
   can enter the workload. Plaintext is excluded from durable Box state,
   creation intent, OCI configuration, logs, cursors, and credential stores.
+- **Windows post-boot command channel.** WHPX boxes expose non-interactive
+  `exec`, bidirectional single-file `cp`, `top`, and guest PID-aware
+  `stats --no-stream` through a shim-owned local named pipe tunneled over the
+  existing guest control connection. Interactive PTY sessions remain
+  unsupported on Windows.
 
 ### Changed
 
@@ -57,6 +62,10 @@ All notable changes to A3S Box will be documented in this file.
   topology, performs atomic live updates, and removes both levels. Guest Init
   uses the SDK-defined membership descriptors with read-only cgroupfs, keeping
   long-lived services and control transports outside workload OOM selection.
+- **Stronger Windows qualification.** The WHPX runner precompiles its real
+  smoke executable, records that binary's checksum, applies an explicit
+  inter-test partition-release interval, and includes the command/copy/process
+  utility profile in its 12-test real-host matrix.
 
 ### Fixed
 
@@ -83,6 +92,14 @@ All notable changes to A3S Box will be documented in this file.
   one complete resource update through the exact-generation A3S OCI SDK.
   Guest-local `box-*` cgroup writes remain exclusive to MicroVMs, so Sandbox
   creation, updates, and cleanup no longer have competing ownership paths.
+- **WHPX control readiness and response delivery.** Startup waits for the real
+  guest control/exec heartbeat before publishing `running`, short-lived
+  workloads recover their terminal status without a false boot failure, and
+  named-pipe responses are flushed before disconnect so final protocol frames
+  are not lost.
+- **Running-rootfs diff baseline.** The VM runtime captures its baseline after
+  host preparation and before guest entry, allowing Windows `diff` to report
+  post-boot changes without depending on a guest archive channel.
 
 ## [3.2.0] — 2026-07-28
 

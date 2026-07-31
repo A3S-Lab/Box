@@ -20,11 +20,31 @@ pub const PORT_FWD_VSOCK_PORT: u32 = 4093;
 /// Linux signal number.
 pub const WINDOWS_CONTROL_SIGNAL_FRAME: u8 = 5;
 
+/// Host-control frame that opens a tunneled exec session on Windows.
+///
+/// WHPX named-pipe vsock mappings are guest-initiated, so the host cannot
+/// connect directly to the guest's port 4089 listener. The long-lived Windows
+/// control channel carries this request and relays the existing exec protocol.
+pub const WINDOWS_CONTROL_EXEC_FRAME: u8 = 6;
+
 /// Host-only request file watched by the Windows control worker.
 pub const WINDOWS_STOP_REQUEST_FILE: &str = "stop.signal";
 
 /// Temporary sibling used to publish a Windows stop request atomically.
 pub const WINDOWS_STOP_REQUEST_TEMP_FILE: &str = "stop.signal.tmp";
+
+/// Host marker published after guest init connects its Windows control channel.
+pub const WINDOWS_GUEST_CONTROL_READY_FILE: &str = "guest-control.ready";
+
+/// Stable local pipe basename owned by the Windows shim worker for host exec.
+pub fn windows_exec_pipe_name(box_id: &str) -> String {
+    format!("a3s-box-exec-{}", box_id.replace('-', ""))
+}
+
+/// Full local Windows named-pipe path used by host exec clients.
+pub fn windows_exec_pipe_path(box_id: &str) -> String {
+    format!(r"\\.\pipe\{}", windows_exec_pipe_name(box_id))
+}
 
 /// Default exec timeout: 5 seconds.
 pub const DEFAULT_EXEC_TIMEOUT_NS: u64 = 5_000_000_000;

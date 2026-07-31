@@ -740,7 +740,9 @@ fn run_accept_loop(sock_fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::err
 /// 2. Execute the command
 /// 3. Send either a one-shot ExecOutput frame or streaming exec frames
 #[cfg(target_os = "linux")]
-fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_connection(
+    fd: std::os::fd::OwnedFd,
+) -> Result<(), Box<dyn std::error::Error>> {
     use tracing::debug;
 
     // Transfer ownership into File. Constructing a second owner with
@@ -1810,7 +1812,7 @@ struct ExecCommandSpec<'a> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn build_command(
     spec: ExecCommandSpec<'_>,
-    cgroup_procs: Option<std::os::fd::RawFd>,
+    cgroup_procs: Option<i32>,
 ) -> Result<(std::process::Command, Duration), ExecOutput> {
     if spec.cmd.is_empty() {
         return Err(ExecOutput {

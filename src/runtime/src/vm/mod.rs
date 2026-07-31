@@ -1427,6 +1427,8 @@ impl VmManager {
                 } else {
                     self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 }
+                #[cfg(windows)]
+                self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 Ok::<(), BoxError>(())
             }
             .instrument(wait_span)

@@ -89,9 +89,9 @@ pub use process::{is_process_alive, is_process_alive_with_identity, pid_start_ti
 // gRPC clients
 #[cfg(unix)]
 pub use grpc::{
-    AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient, StreamingExec,
-    StreamingExecInput, StreamingPty, StreamingPtyInput,
+    AttestationClient, PtyClient, RaTlsAttestationClient, StreamingPty, StreamingPtyInput,
 };
+pub use grpc::{ExecClient, StreamingExec, StreamingExecInput};
 #[cfg(unix)]
 pub use grpc::{SealClient, SecretEntry, SecretInjector};
 

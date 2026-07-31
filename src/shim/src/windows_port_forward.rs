@@ -15,15 +15,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use a3s_box_core::error::{BoxError, Result};
-use a3s_box_core::exec::WINDOWS_CONTROL_SIGNAL_FRAME;
+use a3s_box_core::exec::{
+    windows_exec_pipe_path, WINDOWS_CONTROL_EXEC_FRAME, WINDOWS_CONTROL_SIGNAL_FRAME,
+    WINDOWS_GUEST_CONTROL_READY_FILE,
+};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
     INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
-    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::OpenProcess;
 
@@ -156,6 +161,9 @@ pub fn run_port_forward_worker(
 
     let pipe_base_name = format!("a3s-box-portfwd-{}", box_id.replace('-', ""));
     let pipe_path = format!(r"\\.\pipe\{}", pipe_base_name);
+    let exec_pipe_path = windows_exec_pipe_path(box_id);
+    let guest_control_ready_file = stop_request.with_file_name(WINDOWS_GUEST_CONTROL_READY_FILE);
+    let _ = fs::remove_file(&guest_control_ready_file);
     let shared_control: SharedControl = Arc::new(SharedControlState {
         control: Mutex::new(None),
         cvar: Condvar::new(),
@@ -163,7 +171,7 @@ pub fn run_port_forward_worker(
     });
     spawn_stop_request_forwarder(stop_request.to_path_buf(), shared_control.clone());
 
-    let initial_server = match NamedPipeServer::create(&pipe_path) {
+    let initial_server = match NamedPipeServer::create(&pipe_path, true) {
         Ok(server) => server,
         Err(err) => {
             write_ready_file(
@@ -180,6 +188,24 @@ pub fn run_port_forward_worker(
         }
     };
     tracing::info!(pipe = %pipe_path, "Windows published-port control pipe ready");
+
+    let initial_exec_server = match NamedPipeServer::create(&exec_pipe_path, true) {
+        Ok(server) => server,
+        Err(err) => {
+            write_ready_file(
+                ready_file,
+                &format!(
+                    "failed to create Windows exec pipe {}: {}",
+                    exec_pipe_path, err
+                ),
+            );
+            return Err(BoxError::NetworkError(format!(
+                "failed to create Windows exec pipe {}: {}",
+                exec_pipe_path, err
+            )));
+        }
+    };
+    tracing::info!(pipe = %exec_pipe_path, "Windows host exec pipe ready");
 
     for mapping in mappings {
         let listener = match TcpListener::bind(("0.0.0.0", mapping.host_port)) {
@@ -208,8 +234,16 @@ pub fn run_port_forward_worker(
         thread::spawn(move || listen_host_port_loop(listener, mapping, shared_control));
     }
 
+    let exec_control = shared_control.clone();
+    thread::spawn(move || exec_pipe_server_loop(initial_exec_server, exec_pipe_path, exec_control));
+
     write_ready_file(ready_file, "ok");
-    pipe_server_loop(initial_server, pipe_path, shared_control);
+    pipe_server_loop(
+        initial_server,
+        pipe_path,
+        guest_control_ready_file,
+        shared_control,
+    );
     Ok(())
 }
 
@@ -395,17 +429,89 @@ fn listen_host_port_loop(
     }
 }
 
+enum HostClient {
+    Tcp(TcpStream),
+    Pipe(Arc<NamedPipeServer>),
+}
+
+impl HostClient {
+    fn writer(&self) -> io::Result<HostWriter> {
+        match self {
+            Self::Tcp(stream) => stream.try_clone().map(HostWriter::Tcp),
+            Self::Pipe(stream) => Ok(HostWriter::Pipe(stream.clone())),
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buf),
+            Self::Pipe(stream) => stream.read(buf),
+        }
+    }
+}
+
+enum HostWriter {
+    Tcp(TcpStream),
+    Pipe(Arc<NamedPipeServer>),
+}
+
+impl HostWriter {
+    fn write_all(&mut self, payload: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.write_all(payload),
+            Self::Pipe(stream) => stream.write_all(payload),
+        }
+    }
+
+    fn shutdown(&self) {
+        match self {
+            Self::Tcp(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Self::Pipe(stream) => stream.disconnect(),
+        }
+    }
+}
+
 fn handle_host_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     guest_port: u16,
+    shared_control: SharedControl,
+) -> io::Result<()> {
+    handle_host_stream(
+        HostClient::Tcp(stream),
+        FRAME_OPEN,
+        guest_port.to_be_bytes().to_vec(),
+        format!("guest TCP port {guest_port}"),
+        shared_control,
+    )
+}
+
+fn handle_exec_pipe_client(
+    stream: NamedPipeServer,
+    shared_control: SharedControl,
+) -> io::Result<()> {
+    handle_host_stream(
+        HostClient::Pipe(Arc::new(stream)),
+        WINDOWS_CONTROL_EXEC_FRAME,
+        Vec::new(),
+        "guest exec service".to_string(),
+        shared_control,
+    )
+}
+
+fn handle_host_stream(
+    mut stream: HostClient,
+    open_frame: u8,
+    open_payload: Vec<u8>,
+    target: String,
     shared_control: SharedControl,
 ) -> io::Result<()> {
     let mut control = wait_for_control(&shared_control, Duration::from_secs(60))?;
     let stream_id = shared_control
         .next_stream_id
         .fetch_add(1, Ordering::Relaxed);
-    let writer_stream = stream.try_clone()?;
-    control.register_stream(stream_id, writer_stream);
+    control.register_stream(stream_id, stream.writer()?);
 
     let open_deadline = Instant::now() + OPEN_RETRY_WINDOW;
     let mut attempt = 0u32;
@@ -413,7 +519,7 @@ fn handle_host_client(
         attempt = attempt.saturating_add(1);
         let open_rx = control.register_open_waiter(stream_id);
 
-        match control.send_frame(FRAME_OPEN, stream_id, &guest_port.to_be_bytes()) {
+        match control.send_frame(open_frame, stream_id, &open_payload) {
             Ok(()) => {}
             Err(_) => {
                 let remaining = open_deadline.saturating_duration_since(Instant::now());
@@ -421,18 +527,14 @@ fn handle_host_client(
                     control.unregister_stream(stream_id);
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        format!(
-                            "timed out waiting for guest port-forward open ack for port {}",
-                            guest_port
-                        ),
+                        format!("timed out waiting for open ack from {target}"),
                     ));
                 }
 
                 match wait_for_control(&shared_control, remaining) {
                     Ok(new_control) if !Arc::ptr_eq(&control, &new_control) => {
-                        control.unregister_stream(stream_id);
-                        let writer_stream = stream.try_clone()?;
-                        new_control.register_stream(stream_id, writer_stream);
+                        control.detach_stream(stream_id);
+                        new_control.register_stream(stream_id, stream.writer()?);
                         control = new_control;
                     }
                     Ok(_) => {
@@ -448,18 +550,30 @@ fn handle_host_client(
         }
 
         match open_rx.recv_timeout(OPEN_ACK_TIMEOUT) {
-            Ok(true) => break,
-            Ok(false) | Err(_) => {}
+            Ok(true) => {
+                tracing::debug!(stream_id, attempt, target, "Guest tunnel opened");
+                break;
+            }
+            Ok(false) => tracing::debug!(
+                stream_id,
+                attempt,
+                target,
+                "Guest rejected tunnel open; retrying"
+            ),
+            Err(error) => tracing::debug!(
+                stream_id,
+                attempt,
+                target,
+                error = %error,
+                "Guest tunnel open acknowledgement timed out; retrying"
+            ),
         }
 
         if Instant::now() >= open_deadline {
             control.unregister_stream(stream_id);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!(
-                    "timed out waiting for guest port-forward open ack for port {}",
-                    guest_port
-                ),
+                format!("timed out waiting for open ack from {target}"),
             ));
         }
 
@@ -470,7 +584,14 @@ fn handle_host_client(
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => control.send_frame(FRAME_DATA, stream_id, &buf[..n])?,
+            Ok(n) => {
+                tracing::debug!(stream_id, len = n, target, "Forwarding host tunnel data");
+                control.send_frame(FRAME_DATA, stream_id, &buf[..n])?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => {
                 control.unregister_stream(stream_id);
@@ -483,6 +604,49 @@ fn handle_host_client(
     control.unregister_stream(stream_id);
     let _ = control.send_frame(FRAME_CLOSE, stream_id, &[]);
     Ok(())
+}
+
+fn exec_pipe_server_loop(
+    initial_server: NamedPipeServer,
+    pipe_path: String,
+    shared_control: SharedControl,
+) {
+    let mut next_server = Some(initial_server);
+    loop {
+        let server = match next_server.take() {
+            Some(server) => server,
+            None => match NamedPipeServer::create(&pipe_path, false) {
+                Ok(server) => server,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        pipe = %pipe_path,
+                        "Failed to create Windows exec pipe instance"
+                    );
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            },
+        };
+
+        if let Err(error) = server.connect() {
+            tracing::warn!(
+                error = %error,
+                pipe = %pipe_path,
+                "Failed to accept Windows exec pipe client"
+            );
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        next_server = NamedPipeServer::create(&pipe_path, false).ok();
+        let control = shared_control.clone();
+        thread::spawn(move || {
+            if let Err(error) = handle_exec_pipe_client(server, control) {
+                tracing::debug!(error = %error, "Windows tunneled exec session ended");
+            }
+        });
+    }
 }
 
 fn wait_for_control(
@@ -529,13 +693,14 @@ fn wait_for_control(
 fn pipe_server_loop(
     initial_server: NamedPipeServer,
     pipe_path: String,
+    guest_control_ready_file: PathBuf,
     shared_control: SharedControl,
 ) {
     let mut next_server = Some(initial_server);
     loop {
         let server = match next_server.take() {
             Some(server) => server,
-            None => match NamedPipeServer::create(&pipe_path) {
+            None => match NamedPipeServer::create(&pipe_path, false) {
                 Ok(server) => server,
                 Err(err) => {
                     tracing::error!(error = %err, pipe = %pipe_path, "Failed to create port-forward pipe");
@@ -559,8 +724,18 @@ fn pipe_server_loop(
         }
 
         tracing::info!(pipe = %pipe_path, "Windows guest port-forward control channel connected");
+        write_ready_file(&guest_control_ready_file, "ok");
         if let Err(err) = control.read_loop() {
             tracing::warn!(error = %err, pipe = %pipe_path, "Windows guest port-forward control channel closed");
+        }
+        if let Err(error) = fs::remove_file(&guest_control_ready_file) {
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %error,
+                    path = %guest_control_ready_file.display(),
+                    "Failed to remove Windows guest control readiness marker"
+                );
+            }
         }
         control.close_all_streams();
 
@@ -591,7 +766,7 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> 
 struct ControlConnection {
     pipe: Arc<NamedPipeServer>,
     write_lock: Mutex<()>,
-    streams: Mutex<HashMap<u32, TcpStream>>,
+    streams: Mutex<HashMap<u32, HostWriter>>,
     pending_open: Mutex<HashMap<u32, mpsc::Sender<bool>>>,
 }
 
@@ -605,15 +780,20 @@ impl ControlConnection {
         }
     }
 
-    fn register_stream(&self, stream_id: u32, stream: TcpStream) {
+    fn register_stream(&self, stream_id: u32, stream: HostWriter) {
         lock_or_recover(&self.streams, "port-forward streams").insert(stream_id, stream);
+    }
+
+    fn detach_stream(&self, stream_id: u32) {
+        lock_or_recover(&self.streams, "port-forward streams").remove(&stream_id);
+        lock_or_recover(&self.pending_open, "port-forward pending open").remove(&stream_id);
     }
 
     fn unregister_stream(&self, stream_id: u32) {
         if let Some(stream) =
             lock_or_recover(&self.streams, "port-forward streams").remove(&stream_id)
         {
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown();
         }
         lock_or_recover(&self.pending_open, "port-forward pending open").remove(&stream_id);
     }
@@ -648,6 +828,11 @@ impl ControlConnection {
             match frame.kind {
                 FRAME_OPEN_ACK => {
                     let ok = frame.payload.first().copied().unwrap_or(1) == 0;
+                    tracing::debug!(
+                        stream_id = frame.stream_id,
+                        ok,
+                        "Received guest tunnel open acknowledgement"
+                    );
                     if let Some(tx) =
                         lock_or_recover(&self.pending_open, "port-forward pending open")
                             .remove(&frame.stream_id)
@@ -656,6 +841,11 @@ impl ControlConnection {
                     }
                 }
                 FRAME_DATA => {
+                    tracing::debug!(
+                        stream_id = frame.stream_id,
+                        len = frame.payload.len(),
+                        "Forwarding guest tunnel data to host client"
+                    );
                     let mut remove = false;
                     {
                         let mut streams = lock_or_recover(&self.streams, "port-forward streams");
@@ -669,7 +859,10 @@ impl ControlConnection {
                         self.unregister_stream(frame.stream_id);
                     }
                 }
-                FRAME_CLOSE => self.unregister_stream(frame.stream_id),
+                FRAME_CLOSE => {
+                    tracing::debug!(stream_id = frame.stream_id, "Guest closed tunneled stream");
+                    self.unregister_stream(frame.stream_id)
+                }
                 _ => {
                     tracing::debug!(
                         kind = frame.kind,
@@ -683,7 +876,7 @@ impl ControlConnection {
     fn close_all_streams(&self) {
         let mut streams = lock_or_recover(&self.streams, "port-forward streams");
         for (_, stream) in streams.drain() {
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown();
         }
         let mut pending = lock_or_recover(&self.pending_open, "port-forward pending open");
         for (_, tx) in pending.drain() {
@@ -703,13 +896,19 @@ struct NamedPipeServer {
 }
 
 impl NamedPipeServer {
-    fn create(path: &str) -> io::Result<Self> {
+    fn create(path: &str, first_instance: bool) -> io::Result<Self> {
         let path_w = wide(path);
+        let open_mode = PIPE_ACCESS_DUPLEX
+            | if first_instance {
+                FILE_FLAG_FIRST_PIPE_INSTANCE
+            } else {
+                0
+            };
         let handle = unsafe {
             CreateNamedPipeW(
                 path_w.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 64 * 1024,
                 64 * 1024,
@@ -723,6 +922,19 @@ impl NamedPipeServer {
         }
 
         Ok(Self { handle })
+    }
+
+    fn disconnect(&self) {
+        unsafe {
+            // A guest response and FRAME_CLOSE commonly arrive back-to-back.
+            // Wait until the named-pipe client has consumed every byte already
+            // written before disconnecting, otherwise Windows may discard the
+            // final response and make the client fail with ERROR_PIPE_NOT_CONNECTED
+            // (233). A departed client makes FlushFileBuffers fail immediately;
+            // disconnect remains best-effort in either case.
+            FlushFileBuffers(self.handle);
+            DisconnectNamedPipe(self.handle);
+        }
     }
 
     fn connect(&self) -> io::Result<()> {
@@ -832,6 +1044,45 @@ impl NamedPipeServer {
         Ok(())
     }
 
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut bytes_available = 0u32;
+        let peek_ok = unsafe {
+            PeekNamedPipe(
+                self.handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut bytes_available,
+                std::ptr::null_mut(),
+            )
+        };
+        if peek_ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if bytes_available == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "named pipe has no client data available",
+            ));
+        }
+
+        let mut read = 0u32;
+        let read_len = buf.len().min(bytes_available as usize);
+        let ok = unsafe {
+            ReadFile(
+                self.handle,
+                buf.as_mut_ptr() as *mut _,
+                read_len as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(read as usize)
+    }
+
     fn write_all(&self, buf: &[u8]) -> io::Result<()> {
         let mut offset = 0usize;
         while offset < buf.len() {
@@ -877,6 +1128,8 @@ fn wide(s: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn empty_port_map_is_valid_for_lifecycle_only_control() {
@@ -919,5 +1172,36 @@ mod tests {
             read_stop_signal(&request).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+    #[test]
+    fn named_pipe_disconnect_flushes_the_complete_response() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!(
+            r"\\.\pipe\a3s-box-flush-test-{}-{nonce}",
+            std::process::id()
+        );
+        let server = NamedPipeServer::create(&path, true).unwrap();
+        let client_path = path.clone();
+        let payload = b"response-before-close";
+
+        let client = thread::spawn(move || {
+            let mut pipe = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(client_path)
+                .unwrap();
+            let mut received = vec![0u8; payload.len()];
+            pipe.read_exact(&mut received).unwrap();
+            received
+        });
+
+        server.connect().unwrap();
+        server.write_all(payload).unwrap();
+        server.disconnect();
+
+        assert_eq!(client.join().unwrap(), payload);
     }
 }

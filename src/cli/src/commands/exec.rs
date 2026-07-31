@@ -1,22 +1,18 @@
 //! `a3s-box exec` command — Execute a command in a running box.
 //!
-//! Connects to the exec server inside the guest VM via the exec Unix socket
-//! and runs the specified command, printing stdout/stderr and exiting with
-//! the command's exit code.
+//! Connects to the exec server inside the guest VM via the platform-local
+//! control channel and runs the specified command, printing stdout/stderr and
+//! exiting with the command's exit code.
 //!
 //! When `-t` (tty) is specified, allocates a PTY in the guest for interactive
 //! terminal sessions (e.g., `a3s-box exec -it mybox /bin/sh`).
 
 use clap::Args;
 
-#[cfg(not(windows))]
 use super::common;
-#[cfg(not(windows))]
 use crate::resolve;
-#[cfg(not(windows))]
 use crate::state::StateFile;
 
-#[cfg(not(windows))]
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 #[derive(Args)]
@@ -81,15 +77,6 @@ pub(crate) async fn connect_pty_with_retry(
     }
 }
 
-#[cfg(windows)]
-pub async fn execute(_args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "exec",
-        "guest exec channel support",
-    ))
-}
-
-#[cfg(not(windows))]
 pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::exec::ExecRequest;
     use a3s_box_runtime::ExecClient;
@@ -106,6 +93,13 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // If -t is specified, use interactive PTY mode
     if args.tty {
+        #[cfg(windows)]
+        return Err(crate::platform::unsupported_command(
+            "exec --tty",
+            "interactive PTY support",
+        ));
+
+        #[cfg(not(windows))]
         return execute_pty(args, record, user).await;
     }
 
@@ -175,7 +169,6 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(windows))]
 fn timeout_secs_to_ns(timeout_secs: u64) -> u64 {
     if timeout_secs == 0 {
         a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS

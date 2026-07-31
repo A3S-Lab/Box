@@ -6,7 +6,6 @@
 
 #[cfg(unix)]
 mod attestation;
-#[cfg(unix)]
 mod exec;
 #[cfg(unix)]
 mod pty;
@@ -16,7 +15,6 @@ pub use attestation::{
     AttestationClient, RaTlsAttestationClient, SealClient, SealResult, SecretEntry,
     SecretInjectionResult, SecretInjector, UnsealResult,
 };
-#[cfg(unix)]
 pub use exec::{ExecClient, StreamingExec, StreamingExecInput};
 #[cfg(unix)]
 pub use pty::{PtyClient, StreamingPty, StreamingPtyInput};

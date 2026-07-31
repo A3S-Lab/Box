@@ -315,6 +315,9 @@ async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_clea
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    let rootfs = record.box_dir.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
     let exit_polls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
@@ -383,6 +386,9 @@ async fn disappearing_live_handle_waits_for_delayed_terminal_status() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let mut record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    let rootfs = record.box_dir.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
     record.status = ManagedExecutionState::Running.as_status().to_string();
     let exit_polls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));

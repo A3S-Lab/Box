@@ -80,6 +80,8 @@ the Cargo target directory.
 | Pull and run Linux OCI images | Implemented; Alpine 3.20 validated on real WHPX |
 | Foreground and detached `run` | Validated |
 | `ps`, `logs`, `inspect`, and read-only `attach` | Validated, including separated stdout/stderr and structured JSON logs |
+| Non-interactive post-boot `exec` | Validated through the shim-owned local named pipe and guest control tunnel, including environment propagation and repeated commands |
+| `cp`, `top`, and `stats --no-stream` | Validated for bidirectional single-file copy, guest process listing, and guest PID accounting |
 | Workload exit codes | Validated for foreground and detached workloads |
 | Long workload arguments | Validated with a 4,096-byte argument staged outside the bounded guest kernel command line |
 | Graceful stop and cleanup | Validated through the guest control channel with configured signal delivery, bounded force termination, and no residual shim or forwarding worker |
@@ -90,10 +92,9 @@ the Cargo target directory.
 | Initialization scripts | Validated for a read-only host-provided script/config plus a named state volume, including exact success, exit 42 failure, and persisted evidence from both attempts |
 | POSIX ownership and modes | Validated for `chmod`, `chown`, and umask-created files and directories across clean stop, restart, and commit |
 | `diff`, `export`, stopped-box `commit`, and stopped-box filesystem snapshots | Validated through clean-stop metadata capture, committed-image re-run, snapshot restore, restart, and re-export. Running-box host-path capture remains unavailable because WHPX has no post-boot guest archive channel. |
-| `stats --no-stream` | Validated |
 | Container health checks | Not currently supported; `--health-*` requests and persisted health checks fail before workload start |
 | Bridge networks and Compose service networking | Not currently supported on Windows |
-| Interactive PTY (`attach -it`) and post-boot `exec` | Not currently supported on Windows |
+| Interactive PTY (`attach -it` and `exec -it`) | Not currently supported on Windows; non-interactive `exec` is supported |
 | Memory snapshot-fork, TEE, and CRI | Not supported on Windows |
 
 Requests such as `--cpus 2` or `--health-cmd ...` fail before image pull with
@@ -102,8 +103,9 @@ image-defined health check.
 
 ## Smoke test
 
-The following paths were validated on July 20–22, 2026, on Windows 11 Pro build
-26200 with an AMD Ryzen 7 9800X3D and `HypervisorPlatform` enabled:
+The following paths were validated on July 20–22 and again on August 1, 2026,
+on Windows build 26200 with an AMD Ryzen 7 9800X3D and
+`HypervisorPlatform` enabled:
 
 ```powershell
 # Success, stdout, and stderr
@@ -131,6 +133,14 @@ the same published TCP port, exercised Windows directory and single-file bind
 mounts, verified graceful and forced-stop cleanup without orphan processes,
 restarted a named volume, and restored and restarted a filesystem snapshot.
 
+The August 1 qualification additionally exercised repeated post-boot exec,
+bidirectional single-file `cp`, `top`, and guest PID-aware
+`stats --no-stream`. All 12 selected tests passed in 563.541 seconds against
+the OCI archive with SHA-256
+`45a567b46d75167f02a0a0042781fed3dfa5835b2b4c7c85fa1b8259f67aa27d`.
+Peak observed runtime usage was 170,004,480 bytes and 960 handles, and both
+the starting and final A3S process inventories were empty.
+
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains
 outside the current Windows support boundary even when a Compose file contains
@@ -140,11 +150,12 @@ only one service.
 
 Run the Windows-specific soak harness from the Box repository root on an
 otherwise idle WHPX host. It builds the current guest-init and Windows binaries,
-then repeatedly exercises the supported lifecycle, logs, exit-code, long-argv,
-stats, published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs
-paths. The initialization profile additionally combines a read-only script
-mount with a named state volume and requires both a successful run and an exact
-nonzero failure.
+then precompiles the real smoke executable and repeatedly exercises the
+supported lifecycle, logs, exit-code, long-argv, post-boot exec, bidirectional
+single-file copy, `top`, guest PID-aware stats, published-port, bind-mount,
+named-volume, commit, snapshot, and virtio-fs paths. The initialization profile
+additionally combines a read-only script mount with a named state volume and
+requires both a successful run and an exact nonzero failure.
 
 This runner supplies the `WIN-01` lane in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only

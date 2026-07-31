@@ -5,13 +5,13 @@
 //! - Linux: `PasstManager` (passt Unix stream socket)
 //! - macOS: `NetProxyManager` (pure-Rust vfkit server, no external binary)
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod passt;
 mod store;
 
 #[cfg(target_os = "macos")]
 pub use a3s_box_netproxy::NetProxyManager;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub use passt::{terminate_passt, PasstManager};
 pub use store::NetworkStore;
 
