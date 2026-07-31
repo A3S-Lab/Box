@@ -4,8 +4,12 @@ version = 4
 
 [[package]]
 name = "a3s-acl"
-version = "0.2.2"
-source = "git+https://github.com/A3S-Lab/ACL.git?rev=fc041758758eba89dd5d22a3414d884c158c9ac1#fc041758758eba89dd5d22a3414d884c158c9ac1"
+version = "0.3.0"
+source = "git+https://github.com/A3S-Lab/ACL.git?rev=5317e166222495585909d81f2caffdca90273c99#5317e166222495585909d81f2caffdca90273c99"
+dependencies = [
+ "ryu-js",
+ "sha2",
+]
 
 [[package]]
 name = "a3s-box-cli"
@@ -135,6 +139,7 @@ dependencies = [
 name = "a3s-box-runtime"
 version = "3.2.0"
 dependencies = [
+ "a3s-acl",
  "a3s-box-core",
  "a3s-box-netproxy",
  "a3s-common",
@@ -3115,6 +3120,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "scc"

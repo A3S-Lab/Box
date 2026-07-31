@@ -146,7 +146,10 @@ pub use volume::VolumeStore;
 // ── Feature-gated re-exports ──
 
 #[cfg(feature = "build")]
-pub use oci::{BuildConfig, BuildRunPoolConfig, Dockerfile, Instruction};
+pub use oci::{
+    BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy, BuildConfig,
+    BuildNetworkPolicy, BuildRunPoolConfig, Dockerfile, Instruction,
+};
 
 #[cfg(feature = "compose")]
 #[allow(deprecated)]

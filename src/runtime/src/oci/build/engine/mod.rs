@@ -34,6 +34,38 @@ use handlers::{
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
 
+/// Network access available to Dockerfile execution instructions.
+///
+/// Base-image and external-stage resolution remain trusted host-side OCI
+/// operations. `None` isolates every `RUN` network namespace and rejects
+/// remote-URL `ADD`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BuildNetworkPolicy {
+    /// Preserve the existing native engine's outbound network behavior.
+    #[default]
+    Outbound,
+    /// Deny network access from Dockerfile execution instructions.
+    None,
+}
+
+impl BuildNetworkPolicy {
+    /// Stable ACL representation.
+    pub const fn as_acl(self) -> &'static str {
+        match self {
+            Self::Outbound => "outbound",
+            Self::None => "none",
+        }
+    }
+
+    pub(crate) fn parse_acl(value: &str) -> Option<Self> {
+        match value {
+            "outbound" => Some(Self::Outbound),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for a build operation.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -55,6 +87,8 @@ pub struct BuildConfig {
     pub target: Option<String>,
     /// Disable the layer build cache (`--no-cache`): every layer is rebuilt.
     pub no_cache: bool,
+    /// Network policy for Dockerfile execution instructions.
+    pub network: BuildNetworkPolicy,
     /// Prometheus metrics (optional).
     pub metrics: Option<crate::prom::RuntimeMetrics>,
     /// Execute Dockerfile RUN instructions through a warm-pool daemon lease.
@@ -547,6 +581,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         for instruction in &stage.instructions {
             global_step += 1;
             let step = global_step;
+            validate_instruction_network(instruction, config.network)?;
             let run_mount_source_roots = if let Instruction::Run {
                 bind_mounts,
                 cache_mounts,
@@ -594,6 +629,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                             .or_else(|| default.clone())
                             .unwrap_or_default();
                         format!("ARG {}={}", name, effective)
+                    }
+                    Instruction::Run { .. } => {
+                        run_instruction_cache_repr(instruction, config.network)
                     }
                     other => instruction_to_string(other),
                 };
@@ -952,6 +990,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                             cache_mounts,
                             bind_mounts,
                             tmpfs_mounts,
+                            config.network,
                             &config.context_dir,
                             run_mount_source_roots
                                 .as_deref()
@@ -1433,7 +1472,43 @@ fn validate_build_config(config: &BuildConfig) -> Result<()> {
         }
     }
 
+    if config.network == BuildNetworkPolicy::None && config.run_pool.is_some() {
+        return Err(BoxError::BuildError(
+            "network-none builds cannot use a warm RUN pool until the pool provides a generation-bound isolated network namespace"
+                .to_string(),
+        ));
+    }
+
     Ok(())
+}
+
+fn validate_instruction_network(
+    instruction: &Instruction,
+    network: BuildNetworkPolicy,
+) -> Result<()> {
+    if network != BuildNetworkPolicy::None {
+        return Ok(());
+    }
+    if let Instruction::Add { src, .. } = instruction {
+        if src
+            .iter()
+            .any(|source| source.starts_with("http://") || source.starts_with("https://"))
+        {
+            return Err(BoxError::BuildError(
+                "network-none builds reject remote URL ADD; materialize the input as a content-addressed build-context artifact"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_instruction_cache_repr(instruction: &Instruction, network: BuildNetworkPolicy) -> String {
+    format!(
+        "{}\n#a3s.box.build.network={}",
+        instruction_to_string(instruction),
+        network.as_acl()
+    )
 }
 
 fn default_target_platform() -> Platform {

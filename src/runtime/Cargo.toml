@@ -23,7 +23,7 @@ pool = ["vm"]
 scale = []
 compose = ["vm"]
 operator = []
-build = []
+build = ["dep:a3s-acl"]
 
 [dependencies]
 a3s-box-core = { version = "3.2", path = "../core" }
@@ -86,6 +86,7 @@ zstd = "0.13"
 
 # Build support
 tempfile = { workspace = true }
+a3s-acl = { workspace = true, optional = true }
 
 # Metrics
 prometheus = { workspace = true }

@@ -205,6 +205,7 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
         platforms,
         target: args.target.clone(),
         no_cache: args.no_cache,
+        network: a3s_box_runtime::BuildNetworkPolicy::Outbound,
         metrics: None,
         run_pool,
     };

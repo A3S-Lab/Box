@@ -23,7 +23,9 @@ pub mod dockerfile;
 pub(crate) mod dockerignore;
 pub mod engine;
 pub mod layer;
+pub mod plan;
 
 pub use dockerfile::{Dockerfile, Instruction};
-pub use engine::{build, BuildConfig, BuildResult, BuildRunPoolConfig};
+pub use engine::{build, BuildConfig, BuildNetworkPolicy, BuildResult, BuildRunPoolConfig};
 pub use layer::{DirSnapshot, LayerInfo};
+pub use plan::{BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy};

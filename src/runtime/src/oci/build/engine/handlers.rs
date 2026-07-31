@@ -407,6 +407,7 @@ pub(super) fn handle_run(
     cache_mounts: &[RunCacheMount],
     bind_mounts: &[RunBindMount],
     tmpfs_mounts: &[RunTmpfsMount],
+    network: super::BuildNetworkPolicy,
     context_dir: &Path,
     completed_stages: &[(Option<String>, PathBuf)],
     rootfs_dir: &Path,
@@ -420,6 +421,11 @@ pub(super) fn handle_run(
 ) -> Result<Option<LayerInfo>> {
     #[cfg(target_os = "macos")]
     {
+        if network == super::BuildNetworkPolicy::None {
+            return Err(BoxError::BuildError(
+                "network-none Dockerfile RUN requires the isolated Linux build path".to_string(),
+            ));
+        }
         if !unsafe_host_run_enabled() {
             return Err(BoxError::BuildError(format!(
                 "Dockerfile RUN is not supported on macOS yet because isolated Linux build \
@@ -471,7 +477,7 @@ pub(super) fn handle_run(
         let run_mounts =
             run_mounts.with_cache_mounts(rootfs_dir, cache_mounts, completed_stages)?;
 
-        let output = execute_linux_run_command(rootfs_dir, command, workdir, env, shell)?;
+        let output = execute_linux_run_command(rootfs_dir, command, workdir, env, shell, network)?;
 
         if !output.status.success() {
             return Err(run_command_failed_error(
@@ -527,6 +533,7 @@ pub(super) fn handle_run(
             layer_index,
             quiet,
             ignore,
+            network,
         );
         Err(BoxError::BuildError(format!(
             "Dockerfile RUN is not supported on this platform yet because isolated Linux build execution is not implemented: {}",
@@ -890,9 +897,11 @@ fn execute_linux_run_command(
     workdir: &str,
     env: &[(String, String)],
     shell: &[String],
+    network: super::BuildNetworkPolicy,
 ) -> Result<std::process::Output> {
     let unshare = find_linux_run_unshare()?;
-    let mut cmd = isolated_linux_run_command(&unshare, rootfs_dir, command, workdir, env, shell);
+    let mut cmd =
+        isolated_linux_run_command(&unshare, rootfs_dir, command, workdir, env, shell, network);
     cmd.output().map_err(|error| {
         BoxError::BuildError(format!(
             "Failed to execute Dockerfile RUN in an isolated PID namespace with {}: {error}",
@@ -922,7 +931,7 @@ fn find_linux_run_unshare() -> Result<PathBuf> {
         })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn isolated_linux_run_command(
     unshare: &Path,
     rootfs_dir: &Path,
@@ -930,6 +939,7 @@ fn isolated_linux_run_command(
     workdir: &str,
     env: &[(String, String)],
     shell: &[String],
+    network: super::BuildNetworkPolicy,
 ) -> std::process::Command {
     // `--kill-child` plus a PID namespace makes the RUN command namespace PID 1.
     // When it exits, Linux kills every remaining namespace member before
@@ -937,9 +947,11 @@ fn isolated_linux_run_command(
     // from propagating to the host, while a fresh procfs exposes only the
     // namespace-local process tree. Layer capture begins only after return.
     let mut cmd = std::process::Command::new(unshare);
-    cmd.arg("--mount")
-        .arg("--pid")
-        .arg("--fork")
+    cmd.arg("--mount").arg("--pid");
+    if network == super::BuildNetworkPolicy::None {
+        cmd.arg("--net");
+    }
+    cmd.arg("--fork")
         .arg("--kill-child=SIGKILL")
         .arg("--mount-proc")
         .arg("--propagation=private")
@@ -974,7 +986,7 @@ fn isolated_linux_run_command(
     cmd
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn configure_run_command_env(cmd: &mut std::process::Command, env: &[(String, String)]) {
     cmd.env_clear();
     cmd.env(
@@ -2859,7 +2871,7 @@ mod tests {
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
         instruction_to_string, run_command_failed_error, shell_command_in_workdir,
     };
-    use crate::oci::build::engine::{BuildConfig, BuildState};
+    use crate::oci::build::engine::{BuildConfig, BuildNetworkPolicy, BuildState};
     use a3s_box_core::error::BoxError;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -3030,7 +3042,6 @@ mod tests {
         assert_eq!(cmd, vec!["/bin/bash", "-lc", "cd '/app' && echo hi"]);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn test_linux_run_command_uses_private_pid_and_mount_namespaces() {
         let command = super::isolated_linux_run_command(
@@ -3040,6 +3051,7 @@ mod tests {
             "/app",
             &[],
             &["/bin/bash".to_string(), "-lc".to_string()],
+            BuildNetworkPolicy::Outbound,
         );
         let args = command
             .get_args()
@@ -3070,6 +3082,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_linux_network_none_run_adds_a_private_network_namespace() {
+        let command = super::isolated_linux_run_command(
+            std::path::Path::new("/usr/bin/unshare"),
+            std::path::Path::new("/build/rootfs"),
+            &shell_run("echo hi"),
+            "/app",
+            &[],
+            &["/bin/sh".to_string(), "-c".to_string()],
+            BuildNetworkPolicy::None,
+        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&args[..4], ["--mount", "--pid", "--net", "--fork"]);
+        assert_eq!(
+            args.iter().filter(|argument| *argument == "--net").count(),
+            1
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn test_linux_run_waits_for_detached_descendants_to_be_killed() {
@@ -3085,6 +3120,7 @@ mod tests {
             workdir,
             &[],
             &[],
+            BuildNetworkPolicy::Outbound,
         )
         .expect("util-linux unshare must be installed for Linux RUN");
         if !probe.status.success() {
@@ -3105,6 +3141,7 @@ mod tests {
             workdir,
             &[],
             &[],
+            BuildNetworkPolicy::Outbound,
         )
         .unwrap();
         assert!(
@@ -4315,6 +4352,7 @@ mod tests {
             platforms: vec![],
             target: None,
             no_cache: false,
+            network: BuildNetworkPolicy::Outbound,
             metrics: None,
             run_pool: None,
         };
@@ -4484,6 +4522,7 @@ mod tests {
             &[],
             &[],
             &[],
+            BuildNetworkPolicy::Outbound,
             tmp.path(),
             &[],
             &rootfs,
