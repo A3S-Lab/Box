@@ -18,8 +18,8 @@ is the environment used by the original foreground-latency regression report.
 ```bash
 bench/bench.sh            # default Linux/KVM suite, including foreground latency
 bench/bench.sh cold       # cold-boot latency only
-bench/bench.sh foreground # cached foreground no-op, optionally versus Docker
-bench/bench.sh sandbox    # phased hot Sandbox lifecycle, optionally versus Docker
+bench/bench.sh foreground # cached foreground no-op
+bench/bench.sh sandbox    # phased hot Sandbox lifecycle
 bench/bench.sh warm       # warm-pool acquire latency
 bench/bench.sh fork       # snapshot-fork pool fill (cold-fill vs CoW restore)
 bench/bench.sh leak       # churn + leak assertion (exit != 0 on leak)
@@ -36,12 +36,9 @@ Tunables (env):
 | `RUNS` | `20` | samples per latency benchmark |
 | `FOREGROUND_RUNS` | `RUNS` | recorded cached foreground no-op samples per runtime |
 | `FOREGROUND_WARMUPS` | `1` | warm-up runs per runtime before foreground sampling |
-| `FOREGROUND_DOCKER` | `1` | compare Docker when its CLI and daemon are available |
 | `FOREGROUND_MAX_P50_MS` | `0` | optional absolute a3s-box p50 gate; `0` reports without gating |
-| `FOREGROUND_MAX_DOCKER_RATIO` | `0` | optional p50 ratio gate; `0` reports without gating |
 | `SANDBOX_RUNS` | `RUNS` | recorded hot Sandbox lifecycle samples |
 | `SANDBOX_WARMUPS` | `1` | unmeasured warm-up runs before Sandbox sampling |
-| `SANDBOX_DOCKER` | `1` | alternate matching Docker samples when its daemon is available |
 | `SANDBOX_RESULTS` | `/tmp/a3s-box-sandbox-lifecycle-<pid>.csv` | machine-readable per-sample output |
 | `SANDBOX_LOG_DIR` | `/tmp/a3s-box-sandbox-lifecycle-<pid>` | raw opt-in JSONL profile logs |
 | `POOL_SIZE` | `16` | warm-pool / fork fill size |
@@ -53,11 +50,10 @@ Tunables (env):
 | `PNPM_VERSION` | `10.30.3` | version passed to `corepack prepare` |
 | `PNPM_RUNS` | `3` | samples for the `pnpm` benchmark |
 | `PNPM_CACHE` | `1` | use `--package-cache pnpm`; set `0` for a cold store path |
-| `PNPM_CPUS` | `4` | CPUs assigned to pnpm boxes and Docker baselines |
-| `PNPM_MEMORY` | `4g` | memory assigned to pnpm boxes and Docker baselines |
+| `PNPM_CPUS` | `4` | CPUs assigned to pnpm boxes |
+| `PNPM_MEMORY` | `4g` | memory assigned to pnpm boxes |
 | `PNPM_NODE_MODULES` | `both` | benchmark `project`, `tmpfs`, or `both` `node_modules` targets |
 | `PNPM_TMPFS_SIZE` | `4g` | tmpfs size for `/work/node_modules` when tmpfs mode is enabled |
-| `PNPM_DOCKER` | `1` | compare Docker cold/hot baselines when Docker is available |
 | `PNPM_RESET_A3S_CACHE` | `0` | set `1` to remove `a3s-cache-pnpm` before cold A3S samples |
 
 ## What it measures
@@ -66,18 +62,14 @@ Tunables (env):
   over `RUNS` samples.
 - **foreground** — the latency-sensitive `run --rm --no-stdin --timeout 180
   IMAGE -- true` path with an explicit warm-up, exact samples, mean, p50, p95,
-  and minimum. When Docker is available, the harness runs the matching cached
-  Docker no-op and reports the p50 ratio. Set `FOREGROUND_MAX_DOCKER_RATIO` only
-  on a stable dedicated runner when the comparison should be a hard gate.
+  and minimum.
 - **sandbox** — explicitly selects `--isolation sandbox`, completes image pull
   and unpack before warm-up, then records the hot one-shot lifecycle as four
   non-cold measurements: create/start, command execution, reconciliation, and
   removal. The CSV also retains the create/start internals (capability probe,
   layout, instance preparation, managed mount preparation, rootfs ownership,
-  OCI bundle, A3S OCI owner launch, and readiness) for regression diagnosis. When
-  Docker is available, samples alternate runtime order and the matching hot
-  `docker run --rm IMAGE true` totals are written to the same CSV. Profiling is
-  opt-in and emits no workload arguments, paths, or credentials.
+  OCI bundle, A3S OCI owner launch, and readiness) for regression diagnosis.
+  Profiling is opt-in and emits no workload arguments, paths, or credentials.
 - **warm** — `pool start` then `pool run` acquire latency (p50 / p90 / min).
 - **fork** — `pool start --size N` fill time **without** vs **with**
   `--snapshot-fork`, as total + amortized-per-VM, so the CoW speedup is a
@@ -96,8 +88,7 @@ Tunables (env):
   `corepack + pnpm` setup, `pnpm fetch` (registry download plus extraction/import
   into the pnpm store),
   offline install to project-mounted `node_modules`, offline install to tmpfs
-  `node_modules`, and full `pnpm install --frozen-lockfile`. When Docker is
-  available it also reports Docker cold/hot baselines and A3S/Docker ratios.
+  `node_modules`, and full `pnpm install --frozen-lockfile`.
 
 The pnpm benchmark intentionally separates the two likely slow paths:
 
@@ -116,16 +107,14 @@ a3s-box run --rm --cpus 4 --memory 4g --package-cache pnpm \
 
 For a true cold A3S package-cache sample, run with `PNPM_RESET_A3S_CACHE=1`;
 this removes the shared `a3s-cache-pnpm` volume before cold samples, so do not
-use it while another box is relying on that cache. The Docker cold baseline uses
-only the benchmark-owned `a3s-bench-pnpm-store` volume.
+use it while another box is relying on that cache.
 
 ## Wiring into CI
 
 The self-hosted KVM job runs the foreground benchmark with an absolute p50 gate,
 the leak assertion, and the strict cross-process race gate (see
 [`../docs/ci-kvm-runner.md`](../docs/ci-kvm-runner.md)). Keep absolute latency
-limits on a stable dedicated runner; use the Docker ratio gate for manual
-macOS/HVF comparisons on the host class from issue #33.
+limits on a stable dedicated runner.
 
 ## Updating the published numbers
 

@@ -398,8 +398,8 @@ pub(super) fn handle_copy(
 
 /// Handle RUN: execute a command in the rootfs.
 ///
-/// On Linux, uses a private mount/PID namespace plus chroot. On macOS,
-/// isolated RUN execution is not implemented yet.
+/// On Linux, uses a private mount/PID namespace plus chroot. On macOS, callers
+/// must route isolated execution through the native engine's warm-pool path.
 /// Returns Some(LayerInfo) if a layer was created, None if skipped.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_run(
@@ -429,9 +429,10 @@ pub(super) fn handle_run(
         if !unsafe_host_run_enabled() {
             return Err(BoxError::BuildError(format!(
                 "Dockerfile RUN is not supported on macOS yet because isolated Linux build \
-                 execution is not implemented locally. Re-run on Linux, delegate with \
-                 `a3s-box build --builder=buildkit-vm`, or set {UNSAFE_HOST_RUN_ENV}=1 \
-                 to opt into unsafe host-side execution for local experiments."
+                 execution is not implemented locally. Re-run on Linux, use \
+                 `a3s-box build --run-pool` with an A3S warm-pool daemon, or set \
+                 {UNSAFE_HOST_RUN_ENV}=1 to opt into unsafe host-side execution for local \
+                 experiments."
             )));
         }
 
@@ -2352,7 +2353,8 @@ fn handle_run_on_host_unsafe(
 
     let RunCommand::Shell(command) = command else {
         return Err(BoxError::BuildError(
-            "Dockerfile RUN exec form requires isolated Linux execution; use --run-pool or --builder=buildkit-vm on macOS".to_string(),
+            "Dockerfile RUN exec form requires isolated Linux execution; use --run-pool on macOS"
+                .to_string(),
         ));
     };
 
@@ -4536,7 +4538,7 @@ mod tests {
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Dockerfile RUN is not supported on macOS yet"));
-        assert!(err.contains("--builder=buildkit-vm"));
+        assert!(err.contains("--run-pool"));
         assert!(err.contains(super::UNSAFE_HOST_RUN_ENV));
     }
 }

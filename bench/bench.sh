@@ -19,12 +19,9 @@
 #   RACE_WORKLOAD_SECS lifetime of each race workload before forced cleanup (default: 300)
 #   FOREGROUND_RUNS samples for the cached foreground no-op benchmark (default: RUNS)
 #   FOREGROUND_WARMUPS warm-up runs per runtime before sampling (default: 1)
-#   FOREGROUND_DOCKER 1 compares Docker when available, 0 skips it (default: 1)
 #   FOREGROUND_MAX_P50_MS optional a3s-box p50 gate; 0 only reports (default: 0)
-#   FOREGROUND_MAX_DOCKER_RATIO optional p50 ratio gate; 0 only reports (default: 0)
 #   SANDBOX_RUNS hot Sandbox lifecycle samples       (default: RUNS)
 #   SANDBOX_WARMUPS unmeasured Sandbox warm-ups      (default: 1)
-#   SANDBOX_DOCKER 1 alternates matching Docker samples, 0 skips (default: 1)
 #   SANDBOX_RESULTS machine-readable CSV output path (default: /tmp/...csv)
 #   SANDBOX_LOG_DIR per-sample profile logs           (default: /tmp/...)
 #   PNPM_PROJECT project dir with package.json + pnpm-lock.yaml (required for pnpm mode)
@@ -32,9 +29,8 @@
 #   PNPM_VERSION pnpm version for corepack prepare    (default: 10.30.3)
 #   PNPM_RUNS    pnpm install samples                 (default: 3)
 #   PNPM_CACHE   1 uses --package-cache pnpm, 0 disables it (default: 1)
-#   PNPM_CPUS    CPUs for pnpm boxes/containers       (default: 4)
-#   PNPM_MEMORY  memory for pnpm boxes/containers     (default: 4g)
-#   PNPM_DOCKER  1 compares Docker cold/hot baselines, 0 skips (default: 1)
+#   PNPM_CPUS    CPUs for pnpm boxes                  (default: 4)
+#   PNPM_MEMORY  memory for pnpm boxes                (default: 4g)
 #   PNPM_RESET_A3S_CACHE 1 removes a3s-cache-pnpm before cold A3S samples (default: 0)
 #
 # Exit code is non-zero if the leak assertion fails, so it is CI-gateable
@@ -50,12 +46,9 @@ RACE="${RACE:-8}"
 RACE_WORKLOAD_SECS="${RACE_WORKLOAD_SECS:-300}"
 FOREGROUND_RUNS="${FOREGROUND_RUNS:-$RUNS}"
 FOREGROUND_WARMUPS="${FOREGROUND_WARMUPS:-1}"
-FOREGROUND_DOCKER="${FOREGROUND_DOCKER:-1}"
 FOREGROUND_MAX_P50_MS="${FOREGROUND_MAX_P50_MS:-0}"
-FOREGROUND_MAX_DOCKER_RATIO="${FOREGROUND_MAX_DOCKER_RATIO:-0}"
 SANDBOX_RUNS="${SANDBOX_RUNS:-$RUNS}"
 SANDBOX_WARMUPS="${SANDBOX_WARMUPS:-1}"
-SANDBOX_DOCKER="${SANDBOX_DOCKER:-1}"
 SANDBOX_RESULTS="${SANDBOX_RESULTS:-/tmp/a3s-box-sandbox-lifecycle-$$.csv}"
 SANDBOX_LOG_DIR="${SANDBOX_LOG_DIR:-/tmp/a3s-box-sandbox-lifecycle-$$}"
 PNPM_PROJECT="${PNPM_PROJECT:-}"
@@ -65,11 +58,9 @@ PNPM_RUNS="${PNPM_RUNS:-3}"
 PNPM_CACHE="${PNPM_CACHE:-1}"
 PNPM_CPUS="${PNPM_CPUS:-4}"
 PNPM_MEMORY="${PNPM_MEMORY:-4g}"
-PNPM_DOCKER="${PNPM_DOCKER:-1}"
 PNPM_TMPFS_SIZE="${PNPM_TMPFS_SIZE:-4g}"
 PNPM_NODE_MODULES="${PNPM_NODE_MODULES:-both}"
 PNPM_LOG_DIR="${PNPM_LOG_DIR:-/tmp/a3s-bench-pnpm}"
-PNPM_DOCKER_STORE_VOLUME="${PNPM_DOCKER_STORE_VOLUME:-a3s-bench-pnpm-store}"
 PNPM_A3S_CACHE_VOLUME="${PNPM_A3S_CACHE_VOLUME:-a3s-cache-pnpm}"
 PNPM_RESET_A3S_CACHE="${PNPM_RESET_A3S_CACHE:-0}"
 MODE="${1:-all}"
@@ -91,10 +82,6 @@ pct() {
   local idx=$(( (count * $2 + 99) / 100 ))
   [ "$idx" -lt 1 ] && idx=1
   printf '%s\n' "$nums" | sed -n "${idx}p"
-}
-
-ratio() {
-  awk -v a="$1" -v b="$2" 'BEGIN { if (b <= 0) print "n/a"; else printf "%.2fx", a / b }'
 }
 
 mean_ms() {
@@ -141,12 +128,10 @@ bench_cold() {
 }
 
 # Reproduce the latency-sensitive foreground path from issue #33 with an
-# explicit warm-up and exact samples. Docker comparison is optional so this
-# also runs on a KVM/HVF host where Docker is intentionally unavailable.
+# explicit warm-up and exact samples.
 bench_foreground() {
   echo "## Cached foreground no-op ($FOREGROUND_RUNS runs, $FOREGROUND_WARMUPS warm-up, $IMAGE)"
   local a3s_log="/tmp/a3s-bench-foreground-a3s-$$.log"
-  local docker_log="/tmp/a3s-bench-foreground-docker-$$.log"
   local i s e status samples=""
 
   "$A3S_BOX" pull "$IMAGE" >/dev/null 2>&1 || true
@@ -154,7 +139,7 @@ bench_foreground() {
     if ! "$A3S_BOX" run --rm --no-stdin --timeout 180 "$IMAGE" -- true >"$a3s_log" 2>&1; then
       echo "  FAIL: a3s-box warm-up $i failed" >&2
       tail -80 "$a3s_log" >&2
-      rm -f "$a3s_log" "$docker_log"
+      rm -f "$a3s_log"
       return 1
     fi
   done
@@ -166,7 +151,7 @@ bench_foreground() {
     if [ "$status" -ne 0 ]; then
       echo "  FAIL: a3s-box sample $i failed" >&2
       tail -80 "$a3s_log" >&2
-      rm -f "$a3s_log" "$docker_log"
+      rm -f "$a3s_log"
       return "$status"
     fi
     samples="$samples $(( e - s ))"
@@ -180,57 +165,11 @@ bench_foreground() {
 
   if [ "$FOREGROUND_MAX_P50_MS" != "0" ] && [ "$a3s_p50" -gt "$FOREGROUND_MAX_P50_MS" ]; then
     echo "  FAIL: a3s-box p50 exceeds FOREGROUND_MAX_P50_MS=$FOREGROUND_MAX_P50_MS" >&2
-    rm -f "$a3s_log" "$docker_log"
+    rm -f "$a3s_log"
     return 1
   fi
 
-  if [ "$FOREGROUND_DOCKER" = "1" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    docker pull "$IMAGE" >/dev/null 2>&1 || true
-    for i in $(seq 1 "$FOREGROUND_WARMUPS"); do
-      if ! docker run --rm "$IMAGE" true >"$docker_log" 2>&1; then
-        echo "  FAIL: Docker warm-up $i failed" >&2
-        tail -80 "$docker_log" >&2
-        rm -f "$a3s_log" "$docker_log"
-        return 1
-      fi
-    done
-
-    local docker_samples=""
-    for i in $(seq 1 "$FOREGROUND_RUNS"); do
-      s=$(now_ms)
-      docker run --rm "$IMAGE" true >"$docker_log" 2>&1
-      status=$?
-      e=$(now_ms)
-      if [ "$status" -ne 0 ]; then
-        echo "  FAIL: Docker sample $i failed" >&2
-        tail -80 "$docker_log" >&2
-        rm -f "$a3s_log" "$docker_log"
-        return "$status"
-      fi
-      docker_samples="$docker_samples $(( e - s ))"
-    done
-
-    local docker_p50 docker_p95
-    docker_p50=$(pct "$docker_samples" 50)
-    docker_p95=$(pct "$docker_samples" 95)
-    echo "  Docker samples (ms):$docker_samples"
-    echo "  Docker:  mean=$(mean_ms "$docker_samples")ms p50=${docker_p50}ms p95=${docker_p95}ms min=$(pct "$docker_samples" 1)ms"
-    echo "  a3s-box/Docker p50 ratio: $(ratio "$a3s_p50" "$docker_p50")"
-
-    if [ "$FOREGROUND_MAX_DOCKER_RATIO" != "0" ] && awk \
-      -v a="$a3s_p50" \
-      -v d="$docker_p50" \
-      -v limit="$FOREGROUND_MAX_DOCKER_RATIO" \
-      'BEGIN { exit !(d > 0 && a / d > limit) }'; then
-      echo "  FAIL: p50 ratio exceeds FOREGROUND_MAX_DOCKER_RATIO=$FOREGROUND_MAX_DOCKER_RATIO" >&2
-      rm -f "$a3s_log" "$docker_log"
-      return 1
-    fi
-  elif [ "$FOREGROUND_DOCKER" = "1" ]; then
-    echo "  Docker comparison: skipped (docker CLI or daemon unavailable)"
-  fi
-
-  rm -f "$a3s_log" "$docker_log"
+  rm -f "$a3s_log"
 }
 
 # Parse the opt-in JSONL events produced by one profiled `a3s-box run`.
@@ -316,7 +255,6 @@ bench_sandbox_lifecycle() {
   printf '%s\n' "runtime,iteration,wall_ms,create_start_ms,command_execution_ms,reconciliation_ms,removal_ms,capability_ms,layout_ms,instance_prepare_ms,mount_sources_ms,rootfs_ownership_ms,bundle_ms,launch_ms,readiness_ms,exit_code" >"$SANDBOX_RESULTS"
 
   local a3s_log="$SANDBOX_LOG_DIR/a3s-warmup.log"
-  local docker_log="$SANDBOX_LOG_DIR/docker-warmup.log"
   local i status
   "$A3S_BOX" pull "$IMAGE" >"$SANDBOX_LOG_DIR/a3s-pull.log" 2>&1 || {
     echo "  FAIL: a3s-box image preparation failed" >&2
@@ -331,28 +269,7 @@ bench_sandbox_lifecycle() {
     fi
   done
 
-  local compare_docker="$SANDBOX_DOCKER"
-  if [ "$compare_docker" = "1" ]; then
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      docker pull "$IMAGE" >"$SANDBOX_LOG_DIR/docker-pull.log" 2>&1 || {
-        echo "  FAIL: Docker image preparation failed" >&2
-        tail -80 "$SANDBOX_LOG_DIR/docker-pull.log" >&2
-        return 1
-      }
-      for i in $(seq 1 "$SANDBOX_WARMUPS"); do
-        if ! docker run --rm "$IMAGE" true >"$docker_log" 2>&1; then
-          echo "  FAIL: Docker warm-up $i failed" >&2
-          tail -80 "$docker_log" >&2
-          return 1
-        fi
-      done
-    else
-      compare_docker=0
-      echo "  Docker comparison: skipped (docker CLI or daemon unavailable)"
-    fi
-  fi
-
-  local a3s_samples="" docker_samples=""
+  local a3s_samples=""
   local create_samples="" command_samples="" reconciliation_samples="" removal_samples=""
   local capability_samples="" layout_samples="" instance_samples="" mount_samples=""
   local ownership_samples="" bundle_samples="" launch_samples="" readiness_samples=""
@@ -397,34 +314,8 @@ EOF
     readiness_samples="$readiness_samples $readiness"
   }
 
-  measure_docker_sandbox_sample() {
-    local iteration="$1"
-    local log_file="$SANDBOX_LOG_DIR/docker-$iteration.log"
-    local s e wall
-    s=$(now_ms)
-    docker run --rm "$IMAGE" true >"$log_file" 2>&1
-    status=$?
-    e=$(now_ms)
-    wall=$(( e - s ))
-    printf 'docker,%s,%s,,,,,,,,,,,,,%s\n' "$iteration" "$wall" "$status" >>"$SANDBOX_RESULTS"
-    if [ "$status" -ne 0 ]; then
-      echo "  FAIL: Docker sample $iteration failed" >&2
-      tail -100 "$log_file" >&2
-      return "$status"
-    fi
-    docker_samples="$docker_samples $wall"
-  }
-
   for i in $(seq 1 "$SANDBOX_RUNS"); do
-    if [ "$compare_docker" = "1" ] && [ $(( i % 2 )) -eq 0 ]; then
-      measure_docker_sandbox_sample "$i" || return $?
-      measure_a3s_sandbox_sample "$i" || return $?
-    else
-      measure_a3s_sandbox_sample "$i" || return $?
-      if [ "$compare_docker" = "1" ]; then
-        measure_docker_sandbox_sample "$i" || return $?
-      fi
-    fi
+    measure_a3s_sandbox_sample "$i" || return $?
   done
 
   echo "  a3s-box total:       mean=$(mean_ms "$a3s_samples")ms p50=$(pct "$a3s_samples" 50)ms p95=$(pct "$a3s_samples" 95)ms"
@@ -433,13 +324,6 @@ EOF
   echo "  reconciliation:      p50=$(pct "$reconciliation_samples" 50)ms"
   echo "  removal:             p50=$(pct "$removal_samples" 50)ms"
   echo "  start internals p50: capability=$(pct "$capability_samples" 50)ms layout=$(pct "$layout_samples" 50)ms instance=$(pct "$instance_samples" 50)ms mounts=$(pct "$mount_samples" 50)ms ownership=$(pct "$ownership_samples" 50)ms bundle=$(pct "$bundle_samples" 50)ms launch=$(pct "$launch_samples" 50)ms readiness=$(pct "$readiness_samples" 50)ms"
-  if [ "$compare_docker" = "1" ]; then
-    local a3s_p50 docker_p50
-    a3s_p50=$(pct "$a3s_samples" 50)
-    docker_p50=$(pct "$docker_samples" 50)
-    echo "  Docker total:        mean=$(mean_ms "$docker_samples")ms p50=${docker_p50}ms p95=$(pct "$docker_samples" 95)ms"
-    echo "  a3s-box/Docker p50:  $(ratio "$a3s_p50" "$docker_p50")"
-  fi
   echo "  CSV: $SANDBOX_RESULTS"
   echo "  profile logs: $SANDBOX_LOG_DIR"
 }
@@ -641,16 +525,6 @@ bench_pnpm() {
     "$A3S_BOX" run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "${cache_args[@]}" "$@" "$PNPM_IMAGE" -- sh -lc "$guest_cmd" >"$log_file" 2>&1
   }
 
-  run_docker_pnpm() {
-    local log_file="$1"; shift
-    local guest_cmd="$1"; shift
-    docker run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" \
-      -v "$PNPM_DOCKER_STORE_VOLUME:/a3s-cache/pnpm" \
-      -e npm_config_store_dir=/a3s-cache/pnpm/store \
-      -e COREPACK_HOME=/a3s-cache/pnpm/corepack \
-      "$@" "$PNPM_IMAGE" sh -lc "$guest_cmd" >"$log_file" 2>&1
-  }
-
   MEASURED_SAMPLES=""
   measure_a3s_samples() {
     local label="$1"; shift
@@ -669,28 +543,6 @@ bench_pnpm() {
       e=$(now_ms); samples="$samples $(( e - s ))"
       if [ "$status" -ne 0 ]; then
         echo "  FAIL: A3S $label failed (see $log_file)" >&2
-        tail -80 "$log_file" >&2
-        return "$status"
-      fi
-    done
-    MEASURED_SAMPLES="$samples"
-  }
-
-  measure_docker_samples() {
-    local label="$1"; shift
-    local guest_cmd="$1"; shift
-    local samples="" i s e status log_file
-    for i in $(seq 1 "$PNPM_RUNS"); do
-      log_file="$PNPM_LOG_DIR/docker-$label-$i.log"
-      case "$label" in
-        cold-*) docker volume rm -f "$PNPM_DOCKER_STORE_VOLUME" >/dev/null 2>&1 || true ;;
-      esac
-      s=$(now_ms)
-      run_docker_pnpm "$log_file" "$guest_cmd" "$@"
-      status=$?
-      e=$(now_ms); samples="$samples $(( e - s ))"
-      if [ "$status" -ne 0 ]; then
-        echo "  FAIL: Docker $label failed (see $log_file)" >&2
         tail -80 "$log_file" >&2
         return "$status"
       fi
@@ -769,23 +621,6 @@ bench_pnpm() {
     echo "  frozen install total:   p50=${install_tmpfs_p50}ms p90=$(pct "$install_tmpfs_samples" 90)ms target=tmpfs cache=$PNPM_CACHE"
   fi
 
-  if [ "$PNPM_DOCKER" = "1" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    docker pull "$PNPM_IMAGE" >/dev/null 2>&1 || true
-    docker volume rm -f "$PNPM_DOCKER_STORE_VOLUME" >/dev/null 2>&1 || true
-    measure_docker_samples "cold-project" "$full_cmd" -v "$project:/work" -w /work || return $?
-    local docker_cold_samples="$MEASURED_SAMPLES"
-    measure_docker_samples "hot-project" "$full_cmd" -v "$project:/work" -w /work || return $?
-    local docker_hot_samples="$MEASURED_SAMPLES"
-    local docker_cold_p50 docker_hot_p50
-    docker_cold_p50=$(pct "$docker_cold_samples" 50)
-    docker_hot_p50=$(pct "$docker_hot_samples" 50)
-    echo "  Docker cold baseline:   p50=${docker_cold_p50}ms p90=$(pct "$docker_cold_samples" 90)ms target=project-mount"
-    echo "  Docker hot baseline:    p50=${docker_hot_p50}ms p90=$(pct "$docker_hot_samples" 90)ms target=project-mount"
-    [ "$install_project_p50" -gt 0 ] && echo "  A3S/Docker hot ratio:   $(ratio "$install_project_p50" "$docker_hot_p50") target=project-mount"
-    [ "$install_tmpfs_p50" -gt 0 ] && echo "  A3S tmpfs/Docker hot:   $(ratio "$install_tmpfs_p50" "$docker_hot_p50")"
-  elif [ "$PNPM_DOCKER" = "1" ]; then
-    echo "  Docker baseline:        skipped (docker CLI or daemon unavailable)"
-  fi
 }
 
 require_runtime

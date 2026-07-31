@@ -177,7 +177,10 @@ runtime state changes instead of being silently stored or weakened.
   adopt an output committed before the terminal receipt and revalidate the
   complete OCI graph, platform, blob inventory, and byte count before replay.
   The internal operation journal is derived from the ImageStore and is not a
-  second caller-configurable output store or build engine.
+  second caller-configurable output store or build engine. The CLI exposes
+  only this native engine: Linux `RUN` uses the isolated local path and macOS
+  uses the same engine through `--run-pool`; publication remains the separate
+  `a3s-box push` image operation.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

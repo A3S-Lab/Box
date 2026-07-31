@@ -391,17 +391,14 @@ Current notes:
   deterministic temporary-workspace and child-process reclamation after caller
   death, and multi-platform assembly remain separate release gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
-  Linux uses isolated `chroot`; the built-in engine also has an isolated
+  The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build
   stage rootfs into a leased helper VM and executes shell/exec-form `RUN`
-  through the guest exec server. macOS auto `RUN` builds still use
-  BuildKit-in-A3S-VM by default unless `--run-pool` is selected. The BuildKit
-  VM backend imports OCI output back into the A3S image store by default, with
-  `--push` / `--plain-http` for direct registry release output and targeted
-  credential injection into the BuildKit VM. On Apple Silicon, `linux/amd64`
-  builds are routed through BuildKit's Linux builder path and may use emulation,
-  so native `linux/arm64` remains faster. The unsafe host execution path still
-  requires `A3S_BOX_UNSAFE_HOST_RUN=1`.
+  through the guest exec server. This is one build engine and one ImageStore;
+  the former external VM backend, automatic backend selector, helper image,
+  direct-build push path, and their independent credential/configuration path
+  have been removed. macOS `RUN` requires the native `--run-pool` path. The
+  unsafe host execution path still requires `A3S_BOX_UNSAFE_HOST_RUN=1`.
 - Linux `RUN` now has explicit preflight diagnostics for the chroot path:
   non-root builders fail before execution with root-capable builder guidance,
   configured shells must be absolute and present in the rootfs, and the build
@@ -648,12 +645,9 @@ Current notes:
   generations on restart and detaches/removes ephemeral images during teardown;
   a real HVF regression verifies `/bin/sh` and `/BIN/SH` are distinct and that
   writable `Foo`/`foo` files retain distinct contents and inodes across restart.
-- BuildKit-in-VM writes its full `buildctl` invocation to an owner-private
-  script in the already-mounted output directory and gives guest init only the
-  fixed `/bin/sh /out/a3s-buildkit-build.sh` argv. This avoids truncation or
-  loss in the libkrun `BOX_EXEC_ARG_*` transport. Real HVF coverage verifies
-  multiple `--build-arg` values, including spaces, and BuildKit failures retain
-  bounded progress/stderr plus the helper command status.
+- CI rejects the removed external VM backend identifiers, CLI flags,
+  environment variables, and source module so another build engine cannot be
+  reintroduced as a compatibility fallback.
 
 ### Gate 5: Portable Networking
 
@@ -780,10 +774,10 @@ Current notes:
    root-capable Linux host with a local Alpine OCI tar. The Linux chroot path
    now has root/shell/workdir preflight checks, but still needs real Linux
    execution validation in this branch.
-3. After the warm-pool build smoke passes on both HVF and KVM, decide whether
-   macOS `build --builder=auto` should keep defaulting to BuildKit-in-A3S-VM for
-   `RUN` or promote the warm-pool lease path when a daemon/socket is configured.
-   Keep `A3S_BOX_UNSAFE_HOST_RUN=1` as an explicit experiment-only escape hatch.
+3. Run the sole native warm-pool build path on both HVF and KVM, including
+   explicit daemon and autostart modes, then promote that evidence without
+   adding another backend selector. Keep `A3S_BOX_UNSAFE_HOST_RUN=1` as an
+   explicit experiment-only escape hatch.
 4. Run and harden the opt-in kubelet/crictl CRI smoke suite on a host with
    `crictl`, image availability, and microVM support. Pure unit coverage now
    verifies one-container and multi-container CRI lifecycle paths through a fake

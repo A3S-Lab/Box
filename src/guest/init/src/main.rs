@@ -2298,8 +2298,8 @@ mod linux {
                 &decode_box_exec_value_if_valid("L2Jpbi9zaA").unwrap()
             ));
             assert_eq!(
-                decode_box_exec_value("YnVpbGRjdGwtZGFlbW9ubGVzcy5zaA".to_string(), true),
-                "buildctl-daemonless.sh"
+                decode_box_exec_value("cnVudGltZS1oZWxwZXIuc2g".to_string(), true),
+                "runtime-helper.sh"
             );
         }
 

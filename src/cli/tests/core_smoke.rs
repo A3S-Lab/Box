@@ -14,8 +14,6 @@
 //! - `A3S_BOX_SMOKE_IMAGE`: image to use (default: `docker.io/library/alpine:latest`)
 //! - `A3S_BOX_SMOKE_IMAGE_TAR`: load this OCI archive into the isolated `A3S_HOME`
 //!   before running, useful for offline HVF/KVM smoke tests
-//! - `A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR`: preload the BuildKit helper image from
-//!   this OCI archive for reproducible macOS BuildKit smoke tests
 //! - `A3S_BOX_TEST_ALPINE_TAR`: fallback OCI archive path shared with host smoke coverage
 //! - `A3S_BOX_SMOKE_SKIP_PULL=1`: skip the explicit `pull` step for cached images
 //! - `A3S_BOX_SMOKE_TIMEOUT_SECS`: command and polling timeout (default: 300)
@@ -741,26 +739,6 @@ fn smoke_image_tar() -> Option<String> {
         .ok()
         .or_else(|| std::env::var("A3S_BOX_TEST_ALPINE_TAR").ok())
         .filter(|path| !path.trim().is_empty())
-}
-
-#[cfg(target_os = "macos")]
-fn seed_optional_image_tar(smoke: &CoreSmoke, variable: &str, image: &str) {
-    let Ok(path) = std::env::var(variable) else {
-        return;
-    };
-    if path.trim().is_empty() {
-        return;
-    }
-    smoke.ok(&["load", "--input", &path, "--tag", image]);
-}
-
-#[cfg(target_os = "macos")]
-fn seed_buildkit_image(smoke: &CoreSmoke) {
-    let image = std::env::var("A3S_BOX_BUILDKIT_IMAGE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "moby/buildkit:latest".to_string());
-    seed_optional_image_tar(smoke, "A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR", &image);
 }
 
 fn skip_pull() -> bool {
@@ -2810,84 +2788,4 @@ fi"#;
             .unwrap_or(false),
         "macOS run did not persist a case-sensitive APFS rootfs cache image"
     );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore]
-fn real_core_buildkit_vm_preserves_multiple_build_args_with_spaces() {
-    let smoke = CoreSmoke::new();
-    let tag = format!("{}-build-args:latest", smoke.name);
-    let context = smoke.home_path().join("buildkit-context");
-    std::fs::create_dir_all(&context).unwrap();
-    std::fs::write(context.join("payload"), "buildkit-offline-smoke\n").unwrap();
-    std::fs::write(
-        context.join("Dockerfile"),
-        "FROM scratch AS chosen\n\
-         ARG FIRST=default\n\
-         ARG SECOND=none\n\
-         COPY payload /payload\n\
-         LABEL a3s.smoke.first=\"$FIRST\" a3s.smoke.second=\"$SECOND\" a3s.smoke.target=\"chosen\"\n\
-         \n\
-         FROM scratch AS default\n\
-         COPY payload /payload\n\
-         LABEL a3s.smoke.target=\"default\"\n",
-    )
-    .unwrap();
-    let context_arg = context.to_string_lossy().to_string();
-
-    seed_buildkit_image(&smoke);
-    smoke.ok(&[
-        "build",
-        "--builder",
-        "buildkit-vm",
-        "--platform",
-        "linux/arm64",
-        "--build-arg",
-        "FIRST=two words",
-        "--build-arg",
-        "SECOND=custom",
-        "--target",
-        "chosen",
-        "-f",
-        "Dockerfile",
-        "-t",
-        &tag,
-        &context_arg,
-    ]);
-    let result: serde_json::Value =
-        serde_json::from_str(&smoke.ok(&["image-inspect", &tag])).unwrap();
-    let labels = &result[0]["Config"]["Labels"];
-    assert_eq!(labels["a3s.smoke.first"], "two words");
-    assert_eq!(labels["a3s.smoke.second"], "custom");
-    assert_eq!(labels["a3s.smoke.target"], "chosen");
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore]
-fn real_core_buildkit_vm_executes_amd64_run_on_arm64_host() {
-    let smoke = CoreSmoke::new();
-    let base = smoke_image();
-    let tag = format!("{}-amd64-run:latest", smoke.name);
-    let context = smoke.home_path().join("buildkit-amd64-context");
-    std::fs::create_dir_all(&context).unwrap();
-    std::fs::write(
-        context.join("Dockerfile"),
-        format!("FROM {base}\nRUN test \"$(uname -m)\" = x86_64 && printf x86_64 >/arch\n"),
-    )
-    .unwrap();
-    let context_arg = context.to_string_lossy().to_string();
-
-    seed_buildkit_image(&smoke);
-    smoke.ok(&[
-        "build",
-        "--platform",
-        "linux/amd64",
-        "-f",
-        "Dockerfile",
-        "-t",
-        &tag,
-        &context_arg,
-    ]);
 }

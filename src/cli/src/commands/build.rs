@@ -7,24 +7,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Args, ValueEnum};
-
-#[path = "build_buildkit_vm.rs"]
-mod buildkit_vm;
+use clap::Args;
 
 const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
 const BUILD_RUN_CACHE_DIR_ENV: &str = "A3S_BOX_BUILD_RUN_CACHE_DIR";
 const DEFAULT_BUILD_RUN_POOL_GUEST_ROOTFS: &str = "/run/a3s/build-rootfs";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum BuildBackend {
-    /// Use the default backend for the host and Dockerfile.
-    Auto,
-    /// Use the built-in host-side A3S build engine.
-    Host,
-    /// Run BuildKit inside an A3S Linux VM and load its OCI output.
-    BuildkitVm,
-}
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -61,34 +48,6 @@ pub struct BuildArgs {
     /// Do not use the layer build cache; rebuild every layer.
     #[arg(long = "no-cache")]
     pub no_cache: bool,
-
-    /// Build backend: auto, host, or buildkit-vm.
-    ///
-    /// On macOS, auto delegates Dockerfiles containing RUN to BuildKit in an A3S VM.
-    #[arg(long, value_enum, default_value_t = BuildBackend::Auto)]
-    pub builder: BuildBackend,
-
-    /// BuildKit image to run when --builder=buildkit-vm is selected.
-    #[arg(long = "buildkit-image", value_name = "IMAGE")]
-    pub buildkit_image: Option<String>,
-
-    /// CPUs for the BuildKit VM helper box.
-    #[arg(long = "buildkit-cpus", value_name = "N")]
-    pub buildkit_cpus: Option<String>,
-
-    /// Memory for the BuildKit VM helper box.
-    #[arg(long = "buildkit-memory", value_name = "SIZE")]
-    pub buildkit_memory: Option<String>,
-
-    /// Push the built tag directly from the BuildKit VM.
-    ///
-    /// Currently supported only with --builder=buildkit-vm and requires --tag.
-    #[arg(long)]
-    pub push: bool,
-
-    /// Use plain HTTP when pushing from the BuildKit VM to a trusted registry.
-    #[arg(long, alias = "insecure")]
-    pub plain_http: bool,
 
     /// Execute Dockerfile RUN instructions through the warm-pool daemon.
     #[arg(long = "run-pool")]
@@ -146,51 +105,11 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
     let platforms = parse_platforms(args.platform.as_deref())?;
 
     let run_pool = resolve_run_pool_config(&args)?;
-    if run_pool.is_some() && args.builder == BuildBackend::BuildkitVm {
-        return Err("--run-pool cannot be combined with --builder=buildkit-vm".into());
-    }
     if args.run_pool_autostart {
         if let Some(config) = &run_pool {
             super::pool::ensure_pool_daemon_running(&pool_autostart_config_for_build(config)?)
                 .await?;
         }
-    }
-
-    let use_buildkit_vm = if run_pool.is_some() {
-        false
-    } else {
-        should_use_buildkit_vm(args.builder, &dockerfile_path)?
-    };
-    if args.push && !use_buildkit_vm {
-        return Err("--push is currently supported only with --builder=buildkit-vm".into());
-    }
-
-    if use_buildkit_vm {
-        return buildkit_vm::execute(buildkit_vm::Build {
-            context_dir,
-            dockerfile_path,
-            tag: args.tag.clone(),
-            build_args: args.build_arg.clone(),
-            quiet: args.quiet,
-            platform: args.platform.clone(),
-            target: args.target.clone(),
-            no_cache: args.no_cache,
-            push: args.push,
-            plain_http: args.plain_http,
-            image: args
-                .buildkit_image
-                .clone()
-                .unwrap_or_else(buildkit_vm::default_image),
-            cpus: args
-                .buildkit_cpus
-                .clone()
-                .unwrap_or_else(buildkit_vm::default_cpus),
-            memory: args
-                .buildkit_memory
-                .clone()
-                .unwrap_or_else(buildkit_vm::default_memory),
-        })
-        .await;
     }
 
     // Open image store
@@ -286,46 +205,6 @@ fn pool_autostart_config_for_build(
         size: super::pool::DEFAULT_AUTOSTART_POOL_SIZE,
         max: super::pool::DEFAULT_AUTOSTART_POOL_MAX,
     })
-}
-
-fn should_use_buildkit_vm(
-    backend: BuildBackend,
-    dockerfile_path: &std::path::Path,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    match backend {
-        BuildBackend::BuildkitVm => Ok(true),
-        BuildBackend::Host => Ok(false),
-        BuildBackend::Auto => {
-            #[cfg(target_os = "macos")]
-            {
-                Ok(dockerfile_has_run(dockerfile_path)? && !unsafe_host_run_enabled())
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = dockerfile_path;
-                Ok(false)
-            }
-        }
-    }
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn unsafe_host_run_enabled() -> bool {
-    std::env::var("A3S_BOX_UNSAFE_HOST_RUN")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn dockerfile_has_run(
-    dockerfile_path: &std::path::Path,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let dockerfile = a3s_box_runtime::Dockerfile::from_file(dockerfile_path)?;
-    Ok(dockerfile
-        .instructions
-        .iter()
-        .any(|instruction| matches!(instruction, a3s_box_runtime::Instruction::Run { .. })))
 }
 
 /// Parse KEY=VALUE pairs into a HashMap.
@@ -430,12 +309,6 @@ mod tests {
             platform: None,
             target: None,
             no_cache: false,
-            builder: BuildBackend::Auto,
-            buildkit_image: None,
-            buildkit_cpus: None,
-            buildkit_memory: None,
-            push: false,
-            plain_http: false,
             run_pool: false,
             run_pool_socket: None,
             run_pool_autostart: false,
@@ -475,16 +348,6 @@ mod tests {
             result.get("URL"),
             Some(&"http://example.com?a=1".to_string())
         );
-    }
-
-    #[test]
-    fn test_should_use_buildkit_vm_respects_explicit_backend() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dockerfile = tmp.path().join("Dockerfile");
-        std::fs::write(&dockerfile, "FROM scratch\nRUN echo hi\n").unwrap();
-
-        assert!(should_use_buildkit_vm(BuildBackend::BuildkitVm, &dockerfile).unwrap());
-        assert!(!should_use_buildkit_vm(BuildBackend::Host, &dockerfile).unwrap());
     }
 
     #[test]
@@ -566,18 +429,6 @@ mod tests {
 
         assert_eq!(config.socket, crate::commands::pool::DEFAULT_SOCKET);
         assert_eq!(config.run_cache_dir, cache_dir);
-    }
-
-    #[test]
-    fn test_dockerfile_has_run_detects_run_instruction() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dockerfile = tmp.path().join("Dockerfile");
-        std::fs::write(&dockerfile, "FROM scratch\nRUN echo hi\n").unwrap();
-
-        assert!(dockerfile_has_run(&dockerfile).unwrap());
-
-        std::fs::write(&dockerfile, "FROM scratch\nCOPY . /app\n").unwrap();
-        assert!(!dockerfile_has_run(&dockerfile).unwrap());
     }
 
     #[test]
