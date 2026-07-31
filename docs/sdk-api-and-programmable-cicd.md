@@ -17,7 +17,7 @@ versioned machine bridge and never parse human CLI output. Language differences
 are limited to normal conventions such as Python sync/async variants and
 JavaScript promises.
 
-Bridge protocol v2 has one checked 48-operation inventory shared by Rust,
+Bridge protocol v3 has one checked 48-operation inventory shared by Rust,
 Python, TypeScript, and Go. A language client must validate the complete
 capability response before a normal operation, reject duplicate or missing
 entries, and fail closed on malformed response values. Lifecycle responses
@@ -178,7 +178,7 @@ If retained, the composition layer must:
 | Area | Required operations | Current state |
 | --- | --- | --- |
 | Images and builds | list, inspect, history, pull, build, tag, push, remove, cache eviction, platform selection, credentials, and progress | List/get/inspect/history/pull/build/tag/push/remove/evict, platform selection, registry credentials, pull signature policy, and push protocol have Rust/Python/TypeScript/Go parity. The blocking real-Sandbox gate covers all local-store operations; authenticated registry push is covered by the opt-in host integration suite. Structured build and live pull/push progress remain pending. |
-| Typed box configuration | image, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript/Go options and fluent builders. The real MicroVM gate remains host-specific; the no-KVM Ubuntu gate uses A3S OCI Runtime as the sole Sandbox backend, while Linux/KVM remains host-gated. |
+| Typed box configuration | image, initial command/entrypoint, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript/Go options and fluent builders. Protocol v3 carries explicit initial-process argument vectors and retains the SDK keepalive default when they are absent. The real MicroVM gate remains host-specific; the no-KVM Ubuntu gate uses A3S OCI Runtime as the sole Sandbox backend, while Linux/KVM remains host-gated. |
 | Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have four-language parity. Direct content helpers remain pending. |
 | Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have four-language parity. Live hot-plug is intentionally unsupported. |
 | Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have four-language parity. Go preserves binary output as `[]byte`; the other SDKs expose their language-native byte/text conventions. Process handles, signals, wait, and streaming remain pending. |

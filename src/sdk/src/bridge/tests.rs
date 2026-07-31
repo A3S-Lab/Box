@@ -9,6 +9,8 @@ fn create_request_defaults_to_a_local_microvm() {
     assert_eq!(request.image, DEFAULT_SANDBOX_IMAGE);
     assert_eq!(request.timeout_seconds, DEFAULT_SANDBOX_TIMEOUT_SECONDS);
     assert_eq!(request.isolation, ExecutionIsolation::Microvm);
+    assert_eq!(request.command, None);
+    assert_eq!(request.entrypoint, None);
 }
 
 #[test]
@@ -41,6 +43,46 @@ fn create_request_maps_language_options_to_the_runtime_facade() {
     assert!(request.policy.auto_remove);
     assert_eq!(request.labels.get("suite").map(String::as_str), Some("sdk"));
     assert_eq!(request.rootfs_snapshot_id, Some(source_snapshot));
+}
+
+#[test]
+fn create_request_maps_explicit_initial_process_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(home.path());
+    let (request, _) = SandboxCreateOptions::new("alpine:3.20")
+        .entrypoint(["/usr/bin/env", "sh"])
+        .command(["-c", "printf ready; sleep 3600"])
+        .into_runtime_request(&client)
+        .unwrap();
+
+    assert_eq!(
+        request.config.entrypoint_override,
+        Some(vec!["/usr/bin/env".to_string(), "sh".to_string()])
+    );
+    assert_eq!(request.config.cmd, ["-c", "printf ready; sleep 3600"]);
+}
+
+#[test]
+fn create_request_rejects_empty_initial_process_configuration() {
+    let client = A3sBoxClient::new();
+
+    let empty_command = SandboxCreateOptions::new("alpine:3.20")
+        .command(Vec::<String>::new())
+        .into_runtime_request(&client)
+        .unwrap_err();
+    assert!(matches!(
+        empty_command,
+        ClientError::Validation(message) if message.contains("initial command")
+    ));
+
+    let blank_entrypoint = SandboxCreateOptions::new("alpine:3.20")
+        .entrypoint(["  "])
+        .into_runtime_request(&client)
+        .unwrap_err();
+    assert!(matches!(
+        blank_entrypoint,
+        ClientError::Validation(message) if message.contains("entrypoint")
+    ));
 }
 
 #[test]
@@ -91,6 +133,26 @@ async fn malformed_json_returns_a_versioned_error_envelope() {
     assert_eq!(response.protocol_version, BRIDGE_PROTOCOL_VERSION);
     assert!(!response.ok);
     assert_eq!(response.error.unwrap().code, "invalid_request");
+}
+
+#[test]
+fn runtime_configuration_errors_are_invalid_requests() {
+    let failure = BridgeFailure::from(ClientError::Runtime(
+        a3s_box_core::error::BoxError::ConfigError("invalid CPU count".to_string()),
+    ));
+
+    assert_eq!(failure.code, "invalid_request");
+    assert!(failure.message.contains("invalid CPU count"));
+}
+
+#[test]
+fn unsupported_runtime_capabilities_are_unavailable() {
+    let failure = BridgeFailure::from(ClientError::Runtime(
+        a3s_box_core::error::BoxError::TeeNotSupported("no TEE device".to_string()),
+    ));
+
+    assert_eq!(failure.code, "unavailable");
+    assert!(failure.message.contains("no TEE device"));
 }
 
 #[tokio::test]

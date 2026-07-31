@@ -156,6 +156,8 @@ impl SandboxNetwork {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxCreateOptions {
     pub image: String,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
     pub timeout_seconds: u64,
     pub envs: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
@@ -185,6 +187,30 @@ impl SandboxCreateOptions {
             image: image.into(),
             ..Self::default()
         }
+    }
+
+    /// Override the OCI image command for the Sandbox's initial process.
+    ///
+    /// When unset, the SDK uses its long-running keepalive command so callers
+    /// can execute commands after creation. An explicit command is useful on
+    /// hosts where post-boot exec is unavailable.
+    pub fn command<I, S>(mut self, command: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.command = Some(command.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Override the OCI image entrypoint for the Sandbox's initial process.
+    pub fn entrypoint<I, S>(mut self, entrypoint: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.entrypoint = Some(entrypoint.into_iter().map(Into::into).collect());
+        self
     }
 
     pub const fn timeout_seconds(mut self, timeout_seconds: u64) -> Self {
@@ -342,10 +368,13 @@ impl SandboxCreateOptions {
             image: self.image,
             workspace: self.workspace.unwrap_or_default(),
             resources,
-            cmd: KEEPALIVE_COMMAND
-                .iter()
-                .map(|part| (*part).to_string())
-                .collect(),
+            cmd: self.command.unwrap_or_else(|| {
+                KEEPALIVE_COMMAND
+                    .iter()
+                    .map(|part| (*part).to_string())
+                    .collect()
+            }),
+            entrypoint_override: self.entrypoint,
             user: self.user,
             workdir: self.workdir,
             hostname: self.hostname,
@@ -402,6 +431,8 @@ impl SandboxCreateOptions {
                 "sandbox memory must be greater than zero".to_string(),
             ));
         }
+        validate_initial_argv("initial command", self.command.as_deref())?;
+        validate_initial_argv("initial entrypoint", self.entrypoint.as_deref())?;
         if let Some(workdir) = &self.workdir {
             validate_guest_path("working directory", workdir)?;
         }
@@ -418,6 +449,8 @@ impl Default for SandboxCreateOptions {
     fn default() -> Self {
         Self {
             image: DEFAULT_SANDBOX_IMAGE.to_string(),
+            command: None,
+            entrypoint: None,
             timeout_seconds: DEFAULT_SANDBOX_TIMEOUT_SECONDS,
             envs: BTreeMap::new(),
             metadata: BTreeMap::new(),
@@ -441,6 +474,21 @@ impl Default for SandboxCreateOptions {
             auto_remove: true,
         }
     }
+}
+
+fn validate_initial_argv(label: &str, argv: Option<&[String]>) -> Result<()> {
+    let Some(argv) = argv else {
+        return Ok(());
+    };
+    if argv.is_empty() {
+        return Err(ClientError::Validation(format!("{label} cannot be empty")));
+    }
+    if argv[0].trim().is_empty() {
+        return Err(ClientError::Validation(format!(
+            "{label} executable cannot be blank"
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_mounts(

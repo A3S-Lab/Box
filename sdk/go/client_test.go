@@ -133,6 +133,12 @@ func TestBuildersValidateBeforeMutation(t *testing.T) {
 	if _, err := client.Sandbox("alpine:3.20").CPUs(0).Start(context.Background()); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected invalid sandbox builder, got %v", err)
 	}
+	if _, err := client.Sandbox("alpine:3.20").Command().Start(context.Background()); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected empty initial command to fail, got %v", err)
+	}
+	if _, err := client.Sandbox("alpine:3.20").Entrypoint(" ").Start(context.Background()); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected blank initial entrypoint to fail, got %v", err)
+	}
 	if got := len(runtime.Requests()); got != baseline {
 		t.Fatalf("validation issued %d unexpected requests", got-baseline)
 	}
@@ -206,6 +212,8 @@ func TestProgrammableBuildersEncodeTypedConfiguration(t *testing.T) {
 		Workdir("/workspace/src").
 		User("1000:1000").
 		Hostname("go-ci").
+		Entrypoint("/usr/bin/env", "sh").
+		Command("-c", "go test ./... && sleep 3600").
 		Mount(NamedVolume(volume.Name, "/go/pkg/mod").ReadOnly()).
 		Mount(BindMount("./src", "/workspace/src")).
 		Tmpfs(Tmpfs("/tmp").SizeBytes(1024)).
@@ -235,6 +243,14 @@ func TestProgrammableBuildersEncodeTypedConfiguration(t *testing.T) {
 	create := requestByOperation(t, requests, "sandbox_create")
 	if create["timeout_seconds"] != float64(90) || create["isolation"] != string(IsolationSandbox) {
 		t.Fatalf("unexpected sandbox request: %#v", create)
+	}
+	if entrypoint, ok := create["entrypoint"].([]any); !ok ||
+		!reflect.DeepEqual(entrypoint, []any{"/usr/bin/env", "sh"}) {
+		t.Fatalf("unexpected initial entrypoint: %#v", create["entrypoint"])
+	}
+	if command, ok := create["command"].([]any); !ok ||
+		!reflect.DeepEqual(command, []any{"-c", "go test ./... && sleep 3600"}) {
+		t.Fatalf("unexpected initial command: %#v", create["command"])
 	}
 	mounts, ok := create["mounts"].([]any)
 	if !ok || len(mounts) != 2 {

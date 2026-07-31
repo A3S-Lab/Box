@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
-    ExecutionState, FilesystemEntry, FilesystemEntryKind, OperationId, Platform, PortMapping,
+    error::BoxError, ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionState, FilesystemEntry, FilesystemEntryKind, OperationId,
+    Platform, PortMapping,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -31,12 +32,16 @@ pub use request::{
     BRIDGE_OPERATIONS,
 };
 
-pub const BRIDGE_PROTOCOL_VERSION: u8 = 2;
+pub const BRIDGE_PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct BridgeSandboxCreateRequest {
     #[serde(default = "default_image")]
     image: String,
+    #[serde(default)]
+    command: Option<Vec<String>>,
+    #[serde(default)]
+    entrypoint: Option<Vec<String>>,
     #[serde(default = "default_timeout_seconds")]
     timeout_seconds: u64,
     #[serde(default)]
@@ -369,6 +374,8 @@ async fn execute_request(
         BridgeRequest::SandboxCreate(request) => {
             let BridgeSandboxCreateRequest {
                 image,
+                command,
+                entrypoint,
                 timeout_seconds,
                 env,
                 labels,
@@ -416,6 +423,8 @@ async fn execute_request(
                 client.clone(),
                 SandboxCreateOptions {
                     image,
+                    command,
+                    entrypoint,
                     timeout_seconds,
                     envs: env,
                     metadata: labels,
@@ -866,6 +875,10 @@ impl From<ClientError> for BridgeFailure {
             ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(_)) => {
                 "unavailable"
             }
+            ClientError::Runtime(BoxError::ConfigError(_) | BoxError::TeeConfig(_)) => {
+                "invalid_request"
+            }
+            ClientError::Runtime(BoxError::TeeNotSupported(_)) => "unavailable",
             ClientError::Guest(message) => {
                 if message.to_ascii_lowercase().contains("not found") {
                     "not_found"

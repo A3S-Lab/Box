@@ -270,60 +270,19 @@ networks, snapshots, logs, and runtime state as the CLI. These packages expose
 no remote connection configuration: they require the installed runtime and do
 not read an endpoint, domain, or API key.
 
-| Language | Package | Runtime access |
-| --- | --- | --- |
-| Rust | [`a3s-box-sdk`](https://crates.io/crates/a3s-box-sdk) | Direct typed calls into the runtime and generation-fenced execution manager |
-| Python | [`a3s-box`](https://pypi.org/project/a3s-box/) | Sync and async APIs over the installed versioned machine bridge |
-| TypeScript | [`@a3s-lab/box`](https://www.npmjs.com/package/@a3s-lab/box) | Promise APIs over the installed versioned machine bridge; Node.js 20+ |
-| Go | [`github.com/A3S-Lab/Box/sdk/go/v3`](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3) | Context-aware, concurrency-safe APIs over the installed versioned machine bridge; Go 1.25+ |
+| Language | Package and install command | Runtime access | Guide |
+| --- | --- | --- | --- |
+| Rust | [`a3s-box-sdk`](https://crates.io/crates/a3s-box-sdk)<br>`cargo add a3s-box-sdk` | Direct typed calls into the runtime and generation-fenced execution manager | [Rust SDK](src/sdk/README.md) |
+| Python | [`a3s-box`](https://pypi.org/project/a3s-box/)<br>`python -m pip install a3s-box` | Sync and async APIs over the installed versioned machine bridge | [Python SDK](sdk/python/README.md) |
+| TypeScript | [`@a3s-lab/box`](https://www.npmjs.com/package/@a3s-lab/box)<br>`npm install @a3s-lab/box` | Promise APIs over the installed versioned machine bridge; Node.js 20+ | [TypeScript SDK](sdk/typescript/README.md) |
+| Go | [`github.com/A3S-Lab/Box/sdk/go/v3`](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3)<br>`go get github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware, concurrency-safe APIs over the installed versioned machine bridge; Go 1.25+ | [Go SDK](sdk/go/README.md) |
 
-```bash
-cargo add a3s-box-sdk
-python -m pip install a3s-box
-npm install @a3s-lab/box
-go get github.com/A3S-Lab/Box/sdk/go/v3
-```
-
-The high-level `Sandbox`, `commands`, and `files` namespaces are intentionally
-small:
-
-```python
-from a3s_box import Sandbox
-
-with Sandbox.create("python:3.12-alpine") as sandbox:
-    result = sandbox.commands.run("python -c 'print(6 * 7)'")
-    print(result.stdout)
-    sandbox.files.write("/workspace/note.txt", "hello")
-```
-
-The same clients expose fluent programmable CI/CD builders without adding a
-second workflow engine:
-
-```go
-client, err := box.NewClient(ctx)
-if err != nil { return err }
-
-image, err := client.Image("./ci").Tag("local/ci:latest").Build(ctx)
-if err != nil { return err }
-
-cache, err := client.Volume("go-cache").Create(ctx)
-if err != nil { return err }
-
-sandbox, err := client.Sandbox(image.Reference).
-    CPUs(4).
-    MemoryMiB(4096).
-    Mount(box.NamedVolume(cache.Name, "/go/pkg/mod")).
-    Start(ctx)
-if err != nil { return err }
-defer sandbox.Close(context.Background())
-
-result, err := sandbox.Script("go test ./...\n").Env("CI", "true").Run(ctx)
-if err != nil { return err }
-if result.ExitCode != 0 { return errors.New(result.StderrString()) }
-```
+Each package guide contains a complete, single-language quick start and
+programmable CI/CD example. The repository overview keeps the shared contract
+here instead of interleaving language-specific code.
 
 Python, TypeScript, and Go never parse human CLI output; they exchange one
-checked, structured request and response with `a3s-box sdk-bridge`. Protocol v2
+checked, structured request and response with `a3s-box sdk-bridge`. Protocol v3
 validates the exact 48-operation inventory before normal calls and fails closed
 on missing, duplicate, or malformed capabilities and typed results. Sandbox
 handles retain the effective `microvm` or `sandbox` isolation reported by the
@@ -331,11 +290,9 @@ runtime, and stale generations return the stable `conflict` code. Use runtime
 and SDK packages from the same release because incompatible protocol versions
 are rejected before mutation.
 
-Read the [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md)
-or go directly to the [Rust](src/sdk/README.md),
-[Python](sdk/python/README.md),
-[TypeScript](sdk/typescript/README.md), and
-[Go](sdk/go/README.md) package guides.
+Read the
+[cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md) for the
+shared API and compatibility rules.
 
 ## Platform boundaries
 

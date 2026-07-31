@@ -28,7 +28,7 @@ go get github.com/A3S-Lab/Box/sdk/go/v3
 ```
 
 Use the SDK and runtime from the same A3S Box release. `NewClient` performs a
-protocol v2 and exact 48-operation capability handshake before it permits any
+protocol v3 and exact 48-operation capability handshake before it permits any
 mutation. Missing or duplicate operations fail closed.
 
 ## Quick start
@@ -66,6 +66,25 @@ func main() {
 
 Use `box.Argv(...)` for direct execution. Use `box.Shell(...)` only when shell
 syntax is intentional.
+
+## Initial process configuration
+
+By default, `Sandbox(...).Start` replaces the image command with a long-running
+keepalive process so `Run`, `Script`, and file operations remain available.
+Use `Entrypoint` and `Command` to configure the initial OCI process explicitly:
+
+```go
+sandbox, err := client.
+	Sandbox("alpine:3.20").
+	Entrypoint("/bin/sh", "-c").
+	Command("echo ready; exec httpd -f -p 8080").
+	PublishTCP(8080, 8080).
+	Start(ctx)
+```
+
+This is also the supported way to launch application work on Windows/WHPX,
+where post-boot command execution is currently unavailable. Empty argument
+vectors and blank first elements fail locally before the runtime is invoked.
 
 ## Programmable CI/CD
 
@@ -134,8 +153,8 @@ if result.ExitCode != 0 {
 Use `box.NoNetwork()` for a network-disabled Sandbox and `box.TSINetwork()` for
 the default transparent socket interception mode. Bind mounts, named volumes,
 tmpfs, bridge networks, ports, DNS servers, host aliases, snapshot restore,
-read-only roots, persistence, and automatic cleanup are all typed builder
-values.
+initial command and entrypoint overrides, read-only roots, persistence, and
+automatic cleanup are all typed builder values.
 
 ## API surface
 
@@ -145,7 +164,7 @@ values.
 | Images | `Image(...).Build`, `PullImage`, `GetImage`, `ListImages`, `InspectImage`, `ImageHistory`, `TagImage`, `PushImage`, `RemoveImage`, `EvictImages` |
 | Volumes | `Volume(...).Create`, `GetVolume`, `ListVolumes`, `RemoveVolume`, `PruneVolumes` |
 | Networks | `Network(...).Create`, `GetNetwork`, `ListNetworks`, `RemoveNetwork`, `PruneNetworks` |
-| Sandbox | `Create`, `Connect`, `Sandbox(...).Start`, `Inspect`, `Stop`, `Restart`, `Pause`, `Resume`, `Kill`, `Remove`, `Close` |
+| Sandbox | `Create`, `Connect`, `Sandbox(...).Command(...).Entrypoint(...).Start`, `Inspect`, `Stop`, `Restart`, `Pause`, `Resume`, `Kill`, `Remove`, `Close` |
 | Execution | `Run`, `Commands().Run`, `Script`, `ScriptBytes` |
 | Files | `Write`, `WriteString`, `Read`, `ReadString`, `Stat`, `Exists`, `List`, `MakeDir`, `Move`, `Remove` |
 | Snapshots | `CreateFilesystemSnapshot`, `ListFilesystemSnapshots`, `GetFilesystemSnapshot`, `FilesystemSnapshotSize`, `DeleteFilesystemSnapshot` |

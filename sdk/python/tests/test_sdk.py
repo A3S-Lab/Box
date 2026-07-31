@@ -56,7 +56,7 @@ class CapabilityRuntime:
     def __init__(
         self,
         *,
-        protocol_version: int = 2,
+        protocol_version: int = BRIDGE_PROTOCOL_VERSION,
         operations: tuple[str, ...] = SUPPORTED_BRIDGE_OPERATIONS,
     ) -> None:
         self.protocol_version = protocol_version
@@ -84,7 +84,7 @@ class AsyncCapabilityRuntime:
         if payload["operation"] == "sdk_capabilities":
             await asyncio.sleep(0)
             return {
-                "protocol_version": 2,
+                "protocol_version": BRIDGE_PROTOCOL_VERSION,
                 "operations": list(SUPPORTED_BRIDGE_OPERATIONS),
             }
         if payload["operation"] == "image_list":
@@ -183,7 +183,7 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         }
     if operation == "sdk_capabilities":
         return {
-            "protocol_version": 2,
+            "protocol_version": BRIDGE_PROTOCOL_VERSION,
             "operations": list(SUPPORTED_BRIDGE_OPERATIONS),
         }
     if operation == "sandbox_list":
@@ -581,7 +581,11 @@ class SdkTests(unittest.TestCase):
 
     def test_protocol_mismatch_is_a_stable_sdk_error(self) -> None:
         envelope = json.dumps(
-            {"protocol_version": 3, "ok": True, "result": {}}
+            {
+                "protocol_version": BRIDGE_PROTOCOL_VERSION + 1,
+                "ok": True,
+                "result": {},
+            }
         )
 
         with self.assertRaises(A3SBoxError) as raised:
@@ -773,6 +777,8 @@ class SdkTests(unittest.TestCase):
             .isolation("sandbox")
             .filesystem_snapshot("base-snapshot")
             .workspace("/workspace")
+            .entrypoint("/usr/bin/env", "sh")
+            .command("-c", "python -m pytest && sleep 3600")
             .mount_named(volume.name, "/cache", read_only=True)
             .mount_bind("./src", "/workspace/src")
             .tmpfs("/scratch", size_bytes=1024, read_only=True)
@@ -818,6 +824,10 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(create["isolation"], "sandbox")
         self.assertEqual(create["filesystem_snapshot_id"], "base-snapshot")
         self.assertEqual(create["workspace"], "/workspace")
+        self.assertEqual(create["entrypoint"], ["/usr/bin/env", "sh"])
+        self.assertEqual(
+            create["command"], ["-c", "python -m pytest && sleep 3600"]
+        )
         self.assertEqual(create["workdir"], "/workspace/src")
         self.assertEqual(create["user"], "1000:1000")
         self.assertEqual(create["hostname"], "python-ci")
@@ -860,6 +870,25 @@ class SdkTests(unittest.TestCase):
             base64.b64decode(str(command["stdin_base64"])),
             b"print(6 * 7)\n",
         )
+
+    def test_initial_process_configuration_validates_before_runtime_access(
+        self,
+    ) -> None:
+        runtime = FakeRuntime()
+        client = A3SBoxClient(runtime)
+
+        with self.assertRaisesRegex(ValueError, "initial command cannot be empty"):
+            client.sandbox("alpine:3.20").command().start()
+        with self.assertRaisesRegex(ValueError, "initial entrypoint.*blank"):
+            client.sandbox("alpine:3.20").entrypoint(" ").start()
+        with self.assertRaisesRegex(ValueError, "sequence of strings"):
+            Sandbox.create(
+                "alpine:3.20",
+                command="echo split-into-characters",  # type: ignore[arg-type]
+                runtime=runtime,
+            )
+
+        self.assertEqual(runtime.requests, [])
 
     def test_complete_image_and_resource_management_surface(self) -> None:
         runtime = FakeRuntime()
@@ -1097,7 +1126,10 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evicted, ["local/old:latest"])
         self.assertEqual(volumes, ["old-cache"])
         self.assertEqual(networks, ["old-network"])
-        self.assertEqual(capabilities.protocol_version, 2)
+        self.assertEqual(
+            capabilities.protocol_version,
+            BRIDGE_PROTOCOL_VERSION,
+        )
 
     async def test_async_filesystem_snapshot_lifecycle(self) -> None:
         runtime = AsyncFakeRuntime()

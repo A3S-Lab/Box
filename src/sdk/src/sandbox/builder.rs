@@ -25,6 +25,26 @@ impl SandboxBuilder {
         self
     }
 
+    /// Override the OCI image command for the initial Sandbox process.
+    pub fn command<I, S>(mut self, command: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.options.command = Some(command.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Override the OCI image entrypoint for the initial Sandbox process.
+    pub fn entrypoint<I, S>(mut self, entrypoint: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.options.entrypoint = Some(entrypoint.into_iter().map(Into::into).collect());
+        self
+    }
+
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.options.envs.insert(key.into(), value.into());
         self

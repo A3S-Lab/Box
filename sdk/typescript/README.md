@@ -45,6 +45,17 @@ const sandbox = await Sandbox.create('python:3.12-alpine', {
 })
 ```
 
+By default, creation replaces the image command with a long-running keepalive
+process. Set `command` and `entrypoint` to configure the initial OCI process,
+including on Windows/WHPX where post-boot command execution is unavailable:
+
+```typescript
+const sandbox = await Sandbox.create('alpine:3.20', {
+  entrypoint: ['/bin/sh', '-c'],
+  command: ['echo ready; exec httpd -f -p 8080'],
+})
+```
+
 ## Lifecycle and inspection
 
 Local Sandbox lifecycle calls are generation-fenced. `stop()` preserves the
@@ -112,6 +123,8 @@ const box = await client
   .sandbox(image.reference)
   .cpus(4)
   .memoryMb(4096)
+  .entrypoint('/usr/bin/env', 'sh')
+  .command('-c', 'npm test && sleep 3600')
   .mountNamed(cache.name, '/root/.npm')
   .network(network.name)
   .publishTcp(8080, 8080)
@@ -133,6 +146,8 @@ try {
 Named volumes and networks must be created explicitly before they are mounted
 or selected. Builder scripts are sent through standard input to the selected
 interpreter, so their contents are not interpolated into a host shell command.
+Initial command and entrypoint argument vectors are validated before the
+runtime is invoked.
 
 Named bridge networks and published ports are currently MicroVM-only. A
 shared-kernel Sandbox request that selects either fails before runtime
@@ -140,7 +155,7 @@ mutation; use `.disableNetwork()` or the default TSI-compatible configuration
 for supported Sandbox workloads.
 
 The package invokes the versioned machine bridge built into the installed
-`a3s-box` executable. It does not parse human CLI output. Protocol v2 performs
+`a3s-box` executable. It does not parse human CLI output. Protocol v3 performs
 one shared, complete capability handshake before the first normal operation,
 including when callers start concurrently. Typed values, standard Base64, and
 Sandbox identity, generation, state, and isolation are validated fail-closed;
@@ -178,6 +193,6 @@ await client.pruneVolumes()
 await client.pruneNetworks()
 ```
 
-`client.capabilities()` returns bridge protocol version 2 and the exact 48
+`client.capabilities()` returns bridge protocol version 3 and the exact 48
 supported operation names. Registry passwords are passed only to the local
 runtime process.
