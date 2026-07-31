@@ -166,10 +166,18 @@ missing, symlinked, or changed cache entries and revalidates the manifest,
 config, layers, descriptor sizes, exact blob inventory, and byte count before
 returning the cache receipt.
 
-This completes the Box-owned `BX0.4` supervision and portable cache-export
-receipt slices. Typed cache import and hydration, multi-platform OCI assembly,
-Cloud Node Agent consumption, publication, and end-to-end SPDX/SLSA signing
-evidence remain separate gates.
+`hydrate_recorded_build_cache` accepts that existing `RecordedBuildCache`
+type, repeats the same complete artifact validation, and publishes entries
+through the sole `BuildCache` lock and blob/key write boundary. A valid local
+key with different content fails the entire preflight before an imported key
+is written; repeated imports are idempotent. Imported layers are copied, the
+complete imported set is retained while unrelated old blobs are pruned, and a
+successful return carries the exact revalidated receipt.
+
+This completes the Box-owned `BX0.4` supervision, portable cache-export
+receipt, and typed cache-hydration slices. Multi-platform OCI assembly, Cloud
+Node Agent consumption, publication, and end-to-end SPDX/SLSA signing evidence
+remain separate gates.
 
 ## Components
 

@@ -178,18 +178,24 @@ runtime state changes instead of being silently stored or weakened.
   cache artifact from the existing `BuildCache`; the cache key binds source,
   plan, platform, and cache-schema semantics. The operation record persists
   the admitted cache policy, and replay validates the exact cache manifest,
-  config, layers, blob inventory, and byte count. A crash-released execution
-  lease distinguishes live work from a dead caller without becoming another
-  state store. Every supervised build uses a hash-derived operation workspace
-  below that journal; cancellation, failure, and caller-death recovery fence
-  the current Linux `RUN` process tree before reclaiming it. The existing
-  journal lock orders cache publication, cancellation, and ImageStore
-  publication, so restarted callers can adopt both artifacts committed before
-  the terminal receipt. The journal, native engine, `BuildCache`, and
-  ImageStore remain the only lifecycle, execution, cache, and image
-  authorities. The CLI exposes only this native engine: Linux `RUN` uses the
-  isolated local path and macOS uses the same engine through `--run-pool`;
-  publication remains the separate `a3s-box push` image operation.
+  config, layers, blob inventory, and byte count.
+  `hydrate_recorded_build_cache` revalidates that same typed artifact and
+  imports it through the existing cache lock and blob/key publication
+  boundary. Hydration is idempotent, rejects a valid local key conflict before
+  publishing imported keys, copies rather than links layer data, and preserves
+  the imported layer set while enforcing the configured cache cap. A
+  crash-released execution lease distinguishes live work from a dead caller
+  without becoming another state store. Every supervised build uses a
+  hash-derived operation workspace below that journal; cancellation, failure,
+  and caller-death recovery fence the current Linux `RUN` process tree before
+  reclaiming it. The existing journal lock orders cache publication,
+  cancellation, and ImageStore publication, so restarted callers can adopt
+  both artifacts committed before the terminal receipt. The journal, native
+  engine, `BuildCache`, and ImageStore remain the only lifecycle, execution,
+  cache, and image authorities. The CLI exposes only this native engine: Linux
+  `RUN` uses the isolated local path and macOS uses the same engine through
+  `--run-pool`; publication remains the separate `a3s-box push` image
+  operation.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::cache::{
-    inspect_build_cache_export, BuildCacheExportIdentity, BuildCacheReceipt, RecordedBuildCache,
+    inspect_build_cache_artifact, BuildCacheExportIdentity, BuildCacheReceipt, RecordedBuildCache,
 };
 use super::output::inspect_stored_build_output;
 use super::{BuildCachePolicy, BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
@@ -688,7 +688,7 @@ impl BuildOutputReceipt {
         let root = layout_directory.to_path_buf();
         let operation = self.operation_id.to_string();
         tokio::task::spawn_blocking(move || {
-            inspect_build_cache_export(&root, &identity, Some(&expected))
+            inspect_build_cache_artifact(&root, &identity, Some(&expected))
         })
         .await
         .map_err(|error| BuildReceiptError::Task {

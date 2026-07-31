@@ -1,3 +1,4 @@
+use super::validation::{require_descriptor, validate_config};
 use super::*;
 
 fn payload_descriptor(platform: bool, artifact_type: bool) -> Descriptor {
@@ -71,5 +72,15 @@ fn cache_manifest_layers_are_unique_and_canonical() {
     };
 
     assert!(validate_config(&config, &identity, std::slice::from_ref(&layer)).is_ok());
-    assert!(validate_config(&config, &identity, &[layer.clone(), layer]).is_err());
+    assert!(validate_config(&config, &identity, &[layer.clone(), layer.clone()]).is_err());
+
+    let mut shared_layer = config.clone();
+    let mut second = shared_layer.entries[0].clone();
+    second.key = format!("sha256:{}", "6".repeat(64));
+    shared_layer.entries.push(second.clone());
+    assert!(validate_config(&shared_layer, &identity, std::slice::from_ref(&layer)).is_ok());
+
+    second.diff_id = format!("sha256:{}", "7".repeat(64));
+    shared_layer.entries[1] = second;
+    assert!(validate_config(&shared_layer, &identity, std::slice::from_ref(&layer)).is_err());
 }

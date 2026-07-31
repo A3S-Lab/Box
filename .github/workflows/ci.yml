@@ -140,6 +140,10 @@ jobs:
             'BuildCache'"Scheduler"
             'CacheExport'"Store"
             'CacheExport'"Publisher"
+            'CacheImport'"Store"
+            'CacheImport'"Service"
+            'CacheHydration'"Store"
+            'CacheHydration'"Queue"
             'build-operations.'"json"
             'build-jobs.'"json"
             'build-queue.'"json"
@@ -189,8 +193,17 @@ jobs:
             'pub(crate) struct BuildCache {' \
             'src/runtime/src/oci/build/cache.rs'
           require_single_authority \
+            'fn publish_entry_unlocked(' \
+            'src/runtime/src/oci/build/cache.rs'
+          require_single_authority \
             'pub(in crate::oci::build) fn stage_export(' \
             'src/runtime/src/oci/build/cache/export.rs'
+          require_single_authority \
+            'fn validate_build_cache_artifact(' \
+            'src/runtime/src/oci/build/cache/export/validation.rs'
+          require_single_authority \
+            'pub async fn hydrate_recorded_build_cache' \
+            'src/runtime/src/oci/build/cache/import.rs'
           require_single_authority \
             'pub(in crate::oci::build) async fn publish_cache_export(' \
             'src/runtime/src/oci/build/receipt/journal.rs'
@@ -214,6 +227,7 @@ jobs:
             '(tokio|std)::sync::(mpsc|broadcast|watch)|\b(VecDeque|BinaryHeap)\b' -- \
             src/runtime/src/oci/build/execution.rs \
             src/runtime/src/oci/build/execution/supervision.rs \
+            src/runtime/src/oci/build/cache/import.rs \
             src/runtime/src/oci/build/receipt.rs \
             src/runtime/src/oci/build/receipt/journal.rs \
             src/runtime/src/oci/build/engine/control.rs; then

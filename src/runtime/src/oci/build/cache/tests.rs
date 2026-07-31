@@ -197,6 +197,38 @@ fn test_prune_evicts_until_under_cap() {
 }
 
 #[test]
+fn hydration_prune_preserves_the_imported_layer_set() {
+    let tmp = TempDir::new().unwrap();
+    let cache_dir = tmp.path().join("buildcache");
+    let cache = open_at(&cache_dir);
+    let mut digests = Vec::new();
+
+    for i in 0..3 {
+        let payload = vec![b'a' + i as u8; 100];
+        let src = tmp.path().join(format!("protected-src-{i}"));
+        fs::write(&src, &payload).unwrap();
+        let layer = LayerInfo {
+            path: src,
+            digest: sha256_bytes(&payload),
+            size: payload.len() as u64,
+        };
+        cache.store(
+            &BuildCache::chain("", &format!("COPY protected {i}"), None),
+            &layer,
+            "d",
+        );
+        digests.push(layer.digest);
+    }
+
+    let preserved = BTreeSet::from([digests[0].clone()]);
+    let _lock = cache.lock().unwrap();
+    assert!(cache.prune_to_unlocked_preserving(100, &preserved));
+    assert!(cache_dir.join("blobs").join(&digests[0]).exists());
+    assert!(!cache_dir.join("blobs").join(&digests[1]).exists());
+    assert!(!cache_dir.join("blobs").join(&digests[2]).exists());
+}
+
+#[test]
 fn test_hash_context_sources_missing_source_is_none() {
     let ctx = TempDir::new().unwrap();
     let srcs = vec!["does-not-exist".to_string()];

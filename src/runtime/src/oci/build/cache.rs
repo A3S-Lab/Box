@@ -14,6 +14,7 @@
 //! All cache I/O is best-effort: any failure leaves the build uncached but does
 //! NOT fail the build.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,12 +24,14 @@ use serde::{Deserialize, Serialize};
 use super::layer::{sha256_bytes, sha256_file, LayerInfo};
 
 mod export;
+mod import;
 
-pub(super) use export::{inspect_build_cache_export, BuildCacheExportIdentity, BuildCacheTrace};
+pub(super) use export::{inspect_build_cache_artifact, BuildCacheExportIdentity, BuildCacheTrace};
 pub use export::{
     BuildCacheReceipt, RecordedBuildCache, BUILD_CACHE_ARTIFACT_MEDIA_TYPE,
     BUILD_CACHE_CONFIG_MEDIA_TYPE,
 };
+pub use import::hydrate_recorded_build_cache;
 
 /// Per-process counter for unique staging-file names in `store`.
 static STORE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -154,8 +157,16 @@ impl BuildCache {
     }
 
     fn store_unlocked(&self, key: &str, layer: &LayerInfo, diff_id: &str) {
+        if self.publish_entry_unlocked(key, layer, diff_id) {
+            self.prune_to_unlocked(configured_max_bytes());
+        }
+    }
+
+    /// Publish one entry through the native cache's sole blob/key write
+    /// boundary. The caller must hold the cache lock.
+    fn publish_entry_unlocked(&self, key: &str, layer: &LayerInfo, diff_id: &str) -> bool {
         if !cached_blob_is_valid(&layer.path, &layer.digest, layer.size) {
-            return;
+            return false;
         }
         let blob_path = self.dir.join("blobs").join(&layer.digest);
         if !cached_blob_is_valid(&blob_path, &layer.digest, layer.size) {
@@ -171,22 +182,22 @@ impl BuildCache {
             ));
             if std::fs::copy(&layer.path, &staging).is_err() {
                 let _ = std::fs::remove_file(&staging);
-                return;
+                return false;
             }
             if !cached_blob_is_valid(&staging, &layer.digest, layer.size) {
                 let _ = std::fs::remove_file(&staging);
-                return;
+                return false;
             }
             // Windows cannot rename over an existing file. Removing a corrupt
             // destination first is safe because readers independently validate
             // cache blobs and rebuild on a miss or race.
             if blob_path.exists() && std::fs::remove_file(&blob_path).is_err() {
                 let _ = std::fs::remove_file(&staging);
-                return;
+                return false;
             }
             if std::fs::rename(&staging, &blob_path).is_err() {
                 let _ = std::fs::remove_file(&staging);
-                return;
+                return false;
             }
         }
 
@@ -198,10 +209,11 @@ impl BuildCache {
         if let Ok(bytes) = serde_json::to_vec(&record) {
             let target = self.dir.join("keys").join(key);
             let temporary = target.with_extension("tmp");
-            let _ = a3s_box_core::fs_atomic::write_durable(&temporary, &target, &bytes);
+            if a3s_box_core::fs_atomic::write_durable(&temporary, &target, &bytes).is_ok() {
+                return true;
+            }
         }
-
-        self.prune_to_unlocked(configured_max_bytes());
+        false
     }
 
     /// Evict oldest layer blobs (by modification time) until the total blob
@@ -217,12 +229,21 @@ impl BuildCache {
     }
 
     fn prune_to_unlocked(&self, cap: u64) {
+        let _ = self.prune_to_unlocked_preserving(cap, &BTreeSet::new());
+    }
+
+    /// Prune through the native cache authority while retaining the exact
+    /// layer digests required by an in-progress hydration.
+    ///
+    /// Returns whether the configured cap could be reached. The caller must
+    /// hold the cache lock.
+    fn prune_to_unlocked_preserving(&self, cap: u64, preserved: &BTreeSet<String>) -> bool {
         let blobs_dir = self.dir.join("blobs");
         let Ok(read_dir) = std::fs::read_dir(&blobs_dir) else {
-            return;
+            return false;
         };
 
-        let mut blobs: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        let mut blobs: Vec<(std::time::SystemTime, u64, PathBuf, bool)> = Vec::new();
         let mut total: u64 = 0;
         for entry in read_dir.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
@@ -230,19 +251,27 @@ impl BuildCache {
                 continue;
             }
             let len = meta.len();
-            total += len;
+            total = total.saturating_add(len);
             let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-            blobs.push((mtime, len, entry.path()));
+            let path = entry.path();
+            let keep = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| preserved.contains(name));
+            blobs.push((mtime, len, path, keep));
         }
 
         if total <= cap {
-            return;
+            return true;
         }
 
-        blobs.sort_by_key(|(mtime, _, _)| *mtime); // oldest first
-        for (_, len, path) in blobs {
+        blobs.sort_by_key(|(mtime, _, _, _)| *mtime); // oldest first
+        for (_, len, path, keep) in blobs {
             if total <= cap {
                 break;
+            }
+            if keep {
+                continue;
             }
             if std::fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(len);
@@ -252,6 +281,7 @@ impl BuildCache {
         // Blobs were just evicted — drop key records that now point at nothing,
         // so the keys/ dir doesn't accumulate dangling pointers without bound.
         self.prune_orphan_keys();
+        total <= cap
     }
 
     /// Remove key records whose referenced blob no longer exists. Each key is a
