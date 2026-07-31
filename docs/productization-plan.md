@@ -406,9 +406,16 @@ Current notes:
   content bytes. The v2 operation record durably enforces that new
   `content-addressed` plans contain cache evidence and `disabled` plans do not;
   legacy v1 records remain readable without cache evidence.
-- Typed cache import and hydration plus multi-platform assembly remain the Box
-  build release gates; Cloud consumption, publication, and SPDX/SLSA evidence
-  remain integration gates.
+- Typed cache hydration now accepts the existing `RecordedBuildCache`, reuses
+  the exact OCI artifact validator, and writes only through the existing
+  `BuildCache` lock and blob/key publication boundary. It preflights valid
+  local key conflicts before mutation, is idempotent, copies layer bytes,
+  retains the complete imported set while applying the configured cache cap,
+  and returns the revalidated receipt. CI rejects a second cache importer,
+  service, store, queue, validator, or write boundary.
+- Multi-platform OCI assembly remains the Box build release gate; Cloud
+  consumption through Fleet, publication, and SPDX/SLSA evidence remain
+  integration gates.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   The native engine uses isolated `chroot` on Linux and an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

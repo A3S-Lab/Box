@@ -147,14 +147,14 @@ pub use volume::VolumeStore;
 
 #[cfg(feature = "build")]
 pub use oci::{
-    cancel_recorded_build_plan, execute_recorded_build_plan, inspect_recorded_build_plan,
-    inspect_recorded_build_status, remove_recorded_build_plan, start_recorded_build_plan,
-    BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy, BuildCacheReceipt,
-    BuildCancellationOutcome, BuildConfig, BuildNetworkPolicy, BuildOperationIdentity,
-    BuildOutputDescriptor, BuildOutputReceipt, BuildPlanExecutionError, BuildReceiptError,
-    BuildReceiptOutput, BuildResult, BuildRunPoolConfig, Dockerfile, Instruction,
-    RecordedBuildCache, RecordedBuildResult, RecordedBuildStatus, BUILD_CACHE_ARTIFACT_MEDIA_TYPE,
-    BUILD_CACHE_CONFIG_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    cancel_recorded_build_plan, execute_recorded_build_plan, hydrate_recorded_build_cache,
+    inspect_recorded_build_plan, inspect_recorded_build_status, remove_recorded_build_plan,
+    start_recorded_build_plan, BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy,
+    BuildCacheReceipt, BuildCancellationOutcome, BuildConfig, BuildNetworkPolicy,
+    BuildOperationIdentity, BuildOutputDescriptor, BuildOutputReceipt, BuildPlanExecutionError,
+    BuildReceiptError, BuildReceiptOutput, BuildResult, BuildRunPoolConfig, Dockerfile,
+    Instruction, RecordedBuildCache, RecordedBuildResult, RecordedBuildStatus,
+    BUILD_CACHE_ARTIFACT_MEDIA_TYPE, BUILD_CACHE_CONFIG_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 
 #[cfg(feature = "compose")]

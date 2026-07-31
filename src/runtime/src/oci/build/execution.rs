@@ -7,7 +7,7 @@ use std::time::Duration;
 use a3s_box_core::error::BoxError;
 use thiserror::Error;
 
-use super::cache::{inspect_build_cache_export, BuildCacheExportIdentity, RecordedBuildCache};
+use super::cache::{inspect_build_cache_artifact, BuildCacheExportIdentity, RecordedBuildCache};
 use super::engine::{build_supervised, BuildExecutionControl};
 use super::receipt::{
     inspect_stored_output, BuildExecutionLease, BuildOperationJournal, LockedBuildOperation,
@@ -888,7 +888,7 @@ async fn inspect_committed_cache(
         output.platform.clone(),
     )?;
     let operation = identity.operation_id().to_string();
-    tokio::task::spawn_blocking(move || inspect_build_cache_export(&path, &cache_identity, None))
+    tokio::task::spawn_blocking(move || inspect_build_cache_artifact(&path, &cache_identity, None))
         .await
         .map_err(|error| BuildReceiptError::Task {
             operation_id: operation.clone(),

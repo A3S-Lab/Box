@@ -21,6 +21,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Portable native build-cache hydration.** The typed
+  `hydrate_recorded_build_cache` boundary revalidates a Box-native OCI cache
+  artifact and imports it through the existing `BuildCache` lock and blob/key
+  writer. Repeated imports are idempotent, valid local key conflicts fail
+  before mutation, layer bytes are copied, and cache-cap pruning preserves the
+  complete imported layer set without adding another cache store, importer
+  service, queue, or validator.
 - **Caller-authorized Runtime Secret materialization.** The shared
   `BoxRuntimeDriver` can compose one `BoxSecretMaterializer` and advertise
   environment, file, and registry-credential `SecretReferences`. Environment
