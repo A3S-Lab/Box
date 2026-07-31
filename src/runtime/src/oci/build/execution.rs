@@ -23,6 +23,7 @@ use super::{
 use crate::oci::ImageStore;
 
 const EXECUTION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(target_os = "linux")]
 const RUN_PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Successful native output bound to the canonical admitted build plan.
@@ -894,7 +895,7 @@ async fn fence_run_process(
         })?
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fence_run_process_blocking(
     process: BuildProcessIdentity,
     operation_id: &str,
@@ -931,52 +932,14 @@ fn fence_run_process_blocking(
     Ok(())
 }
 
-#[cfg(windows)]
-fn fence_run_process_blocking(
-    process: BuildProcessIdentity,
-    operation_id: &str,
-) -> Result<(), BuildReceiptError> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
-    };
-
-    if !crate::process::is_process_alive_with_identity(process.pid, process.start_time) {
-        return Ok(());
-    }
-    unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE,
-            0,
-            process.pid,
-        );
-        if handle == 0 {
-            return Err(BuildReceiptError::StoreIo {
-                message: format!("failed to open RUN process for operation {operation_id}"),
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        let terminated = TerminateProcess(handle, 1);
-        let error = std::io::Error::last_os_error();
-        CloseHandle(handle);
-        if terminated == 0 {
-            return Err(BuildReceiptError::StoreIo {
-                message: format!("failed to terminate RUN process for operation {operation_id}"),
-                source: error,
-            });
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(target_os = "linux"))]
 fn fence_run_process_blocking(
     _process: BuildProcessIdentity,
     operation_id: &str,
 ) -> Result<(), BuildReceiptError> {
     Err(BuildReceiptError::Task {
         operation_id: operation_id.to_string(),
-        message: "this platform cannot fence a recorded RUN process".to_string(),
+        message: "a recorded Linux RUN process cannot be fenced on this host".to_string(),
     })
 }
 
