@@ -16,8 +16,16 @@ const homeComponent = await readFile(
   path.join(websiteRoot, 'theme', 'components', 'HomeLayout.tsx'),
   'utf8',
 );
+const homeContent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'home-content.ts'),
+  'utf8',
+);
 const featureComponent = await readFile(
   path.join(websiteRoot, 'theme', 'components', 'RuntimeFeatureShowcase.tsx'),
+  'utf8',
+);
+const performanceComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'PerformanceMetrics.tsx'),
   'utf8',
 );
 const installComponent = await readFile(
@@ -45,6 +53,14 @@ const featureStyles = (
     ].map((file) => readFile(path.join(websiteRoot, 'theme', file), 'utf8')),
   )
 ).join('\n');
+const performanceStyles = await readFile(
+  path.join(websiteRoot, 'theme', 'performance-metrics.css'),
+  'utf8',
+);
+const buttonStyles = await readFile(
+  path.join(websiteRoot, 'theme', 'button-orbit.css'),
+  'utf8',
+);
 const tutorialSteps = JSON.parse(
   await readFile(
     path.join(websiteRoot, 'theme', 'generated', 'runtime-tutorial.json'),
@@ -70,6 +86,7 @@ const requiredPages = [
   'sdk/go.mdx',
   'reference/index.mdx',
   'reference/platforms.mdx',
+  'reference/performance.mdx',
   'reference/troubleshooting.mdx',
 ];
 
@@ -234,6 +251,7 @@ for (const marker of [
 
 const homepageSequence = [
   '<RuntimeFeatureShowcase',
+  '<PerformanceMetrics',
   'id="platform-support"',
   'id="runtime-capabilities"',
   'id="native-sdks"',
@@ -310,13 +328,82 @@ for (const marker of [
 
 for (const marker of [
   "import { BoxInstallSwitcher } from './BoxInstallSwitcher'",
+  "import { PerformanceMetrics } from './PerformanceMetrics'",
   "import { RuntimeTerminalShowcase } from './RuntimeTerminalShowcase'",
+  '<AnimatedButtonBorder />',
   '<BoxInstallSwitcher',
+  '<PerformanceMetrics',
   '<RuntimeTerminalShowcase',
 ]) {
   if (!homeComponent.includes(marker)) {
     experienceFailures.push(
       `HomeLayout.tsx: missing A3S Code-aligned hero contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  'id="performance-benchmarks"',
+  'data-performance-metric={metric.id}',
+  'className="box-performance-grid"',
+  'className="box-performance-context"',
+  'className="box-performance-footer"',
+  'href={reportHref}',
+]) {
+  if (!performanceComponent.includes(marker)) {
+    experienceFailures.push(
+      `PerformanceMetrics.tsx: missing real-host metric contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  "id: 'cached-lifecycle'",
+  "value: '2.219'",
+  "id: 'persistent-exec'",
+  "value: '113.943'",
+  "id: 'tmpfs-write'",
+  "value: '1,194.372'",
+  "id: 'cow-write'",
+  "value: '357.750'",
+  'cached Alpine 3.22',
+  '不是跨平台保证',
+  'not a cross-platform guarantee',
+]) {
+  if (!homeContent.includes(marker)) {
+    experienceFailures.push(
+      `home-content.ts: missing measured-performance context ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  '.box-performance-grid',
+  '.box-performance-metric',
+  '.box-performance-context',
+  '.box-performance-footer',
+  '@media (max-width: 640px)',
+  '@media (prefers-reduced-motion: reduce)',
+]) {
+  if (!performanceStyles.includes(marker)) {
+    experienceFailures.push(
+      `performance-metrics.css: missing responsive metric contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  '.box-button-orbit',
+  '.box-button-orbit-gradient',
+  'conic-gradient(',
+  '@keyframes box-button-full-border-orbit',
+  '.box-button--primary:hover .box-button-orbit-gradient',
+  '.box-button--primary:focus-visible .box-button-orbit-gradient',
+  '@media (prefers-reduced-motion: reduce)',
+]) {
+  if (!buttonStyles.includes(marker)) {
+    experienceFailures.push(
+      `button-orbit.css: missing animated border contract ${marker}`,
     );
   }
 }

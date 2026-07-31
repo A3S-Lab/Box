@@ -7,6 +7,8 @@ import './runtime-features.css';
 import './runtime-isolation.css';
 import './runtime-tee.css';
 import './runtime-features-responsive.css';
+import './performance-metrics.css';
+import './button-orbit.css';
 
 export { HomeLayout } from './components/HomeLayout';
 export * from '@rspress/core/theme-original';

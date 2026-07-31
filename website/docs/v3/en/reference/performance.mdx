@@ -1,0 +1,127 @@
+---
+title: Performance tests
+description: Review the A3S Box real-host method, results, and known issues across Linux/KVM, Linux Sandbox, and macOS/HVF.
+---
+
+# Real-host performance report — 2026-07-31
+
+Status: **Performance data collected; release blockers found.**
+
+The matrix ran the real A3S Box `3.2.0` CLI against dedicated-kernel
+MicroVMs on Linux/KVM and macOS/HVF, plus the shared-kernel Sandbox backend
+on Linux. It covered lifecycle, exec, idle memory, compute, rootfs/CoW,
+tmpfs, bind mounts, named volumes, initialization, networking, concurrency,
+warm pools, snapshot-fork, and TEE simulation.
+
+This was not an all-green qualification:
+
+| Lane                                   | Sample outcome           | Cleanup outcome                                               | Decision                                       |
+| -------------------------------------- | ------------------------ | ------------------------------------------------------------- | ---------------------------------------------- |
+| Linux/KVM MicroVM + Sandbox preflight  | 181 pass, 1 fail         | Snapshot-fork left 3 shims, 13 mounts, and 13 box directories | MicroVM data usable; pool cleanup blocked      |
+| Linux persistent Sandbox               | 153 pass, 5 fail, 1 skip | Processes, mounts, and box directories returned to zero       | Compute/storage usable; bind metadata blocked  |
+| Linux foreground Sandbox qualification | 0 pass, 3 fail           | Every failed probe required recovery cleanup                  | No foreground Sandbox performance claim        |
+| macOS/HVF MicroVM                      | 163 pass, 7 fail         | Left 9 shims, 13 APFS mounts, and 13 box directories          | Core data usable; TSI and pool cleanup blocked |
+
+## Host conditions
+
+The Linux measurements came from a shared but lightly loaded A3S OS production
+host. The benchmark was pinned to CPUs 4–7 with reduced CPU and I/O priority.
+No global AppArmor or user-namespace security setting was changed.
+
+| Property     | Linux/KVM and Sandbox                    | macOS/HVF                |
+| ------------ | ---------------------------------------- | ------------------------ |
+| Host         | A3S OS production server                 | Shared local macOS host  |
+| OS           | Ubuntu 24.04.1, Linux `6.8.0-49-generic` | Darwin `25.3.0`          |
+| CPU          | 8 vCPU, Intel Xeon Ice Lake              | 10-core Apple M2 Pro     |
+| Memory       | 31.3 GiB                                 | 16 GiB                   |
+| Hypervisor   | KVM                                      | Hypervisor.framework     |
+| Placement    | CPUs 4–7                                 | No affinity API          |
+| Start load   | KVM `1.395 / 2.718 / 2.011`              | `5.371 / 9.294 / 10.723` |
+| Hardware TEE | No SEV/TDX device                        | Not measured             |
+
+The macOS lane ran on different hardware under materially higher background
+load. It is not a KVM-versus-HVF hardware ranking.
+
+## Method
+
+Alpine `3.22` was loaded before timed samples. A “cold lifecycle” starts a new
+execution from the local cached image; it does not include registry pull or
+image unpack time.
+
+| Workload         | Parameters                                         |
+| ---------------- | -------------------------------------------------- |
+| Lifecycle        | 20 samples                                         |
+| Persistent exec  | 30 samples                                         |
+| CPU SHA-256      | 256 MiB × 5                                        |
+| Memory zero-copy | 512 MiB × 5                                        |
+| Storage I/O      | 256 MiB × 5 per mechanism; writes use `conv=fsync` |
+| Metadata         | 2,000 create/delete operations × 5                 |
+| Host HTTP        | 50 requests × 5                                    |
+| Concurrency      | 4 concurrent executions × 5                        |
+| Warm pool        | Size 4, 20 acquisitions                            |
+| Snapshot-fork    | Pool size 4 × 3 fills                              |
+| TEE simulation   | 10 lifecycles                                      |
+
+Latency uses nearest-rank p50 and p95. Throughput uses p50. Failed samples are
+excluded from aggregates but retained in pass/fail counts.
+
+## Lifecycle and execution
+
+| Metric                          |    Linux/KVM MicroVM | Linux persistent Sandbox |    macOS/HVF MicroVM |
+| ------------------------------- | -------------------: | -----------------------: | -------------------: |
+| Cached cold lifecycle p50 / p95 |     2,219 / 2,374 ms | No valid foreground data |     2,199 / 2,322 ms |
+| Detached start p50 / p95        |                    — |         1,016 / 1,119 ms |                    — |
+| Persistent no-op exec p50 / p95 | 113.943 / 114.198 ms |     113.898 / 114.175 ms | 128.928 / 181.720 ms |
+| Four-way lifecycle p50 / p95    |     4,435 / 4,932 ms |   Start 1,575 / 1,774 ms |     3,188 / 3,332 ms |
+| Reported idle memory            |           77.625 MiB |                7.195 MiB |          129.313 MiB |
+
+Sandbox values describe a detached instance kept alive for exec and storage
+workloads. They must not be presented as a successful foreground `run --rm`
+lifecycle.
+
+## Compute and storage
+
+| p50 throughput                   | Linux/KVM MicroVM |   Linux Sandbox | macOS/HVF MicroVM |
+| -------------------------------- | ----------------: | --------------: | ----------------: |
+| SHA-256 stream                   |     163.420 MiB/s |   174.575 MiB/s |     147.764 MiB/s |
+| Memory zero-copy stream          |   4,491.726 MiB/s | 4,490.300 MiB/s |   4,029.118 MiB/s |
+| Synchronous rootfs/CoW write     |     357.750 MiB/s |   616.447 MiB/s |     566.902 MiB/s |
+| Synchronous explicit tmpfs write |   1,194.372 MiB/s | 1,193.970 MiB/s |   1,381.892 MiB/s |
+| Synchronous bind-mount write     |     384.751 MiB/s |   617.505 MiB/s |     761.056 MiB/s |
+| Synchronous named-volume write   |     333.392 MiB/s |   700.980 MiB/s |     744.501 MiB/s |
+
+Compute values include `a3s-box exec` setup in every timed sample. They are not
+raw guest CPU or memory-bandwidth measurements.
+
+## Networking, warm pools, and TEE
+
+| Metric                              |          Linux/KVM |          macOS/HVF |
+| ----------------------------------- | -----------------: | -----------------: |
+| TSI host HTTP, 50 requests          | 5/5; 159.064 req/s |                0/5 |
+| TSI repeated 64 KiB downloads       |  5/5; 12.995 MiB/s |  4/5; 21.381 MiB/s |
+| Cold pool fill, 4 VMs               |           6,829 ms |           6,809 ms |
+| Warm acquire p50 / p95              |   2,068 / 2,268 ms |   1,953 / 2,097 ms |
+| Snapshot-fork fill p50 / p95, 4 VMs |   3,020 / 3,120 ms | 29,131 / 29,162 ms |
+| Snapshot-fork versus cold fill      |       2.26× faster |       4.28× slower |
+| Simulated TEE lifecycle p50 / p95   |   2,320 / 2,874 ms |   2,167 / 2,305 ms |
+
+Warm-pool steady state did not preserve the low latency of the first three
+acquisitions, and snapshot-fork leaked resources on both hosts. The `2.26×`
+value is therefore not an unconditional product claim.
+
+TEE rows use `--tee-simulate`. The Linux host had no qualifying SEV-SNP or TDX
+device, so this data cannot prove hardware confidentiality, attestation, or
+real TEE overhead.
+
+## Known blockers
+
+1. Fix foreground Sandbox cgroup-mount and log-drain behavior, then rerun the
+   normal `run --rm` lifecycle matrix.
+2. Reclaim every shim, filesystem mount, socket, and box directory after
+   snapshot-fork shutdown on KVM and HVF.
+3. Fix premature TSI connection closure on macOS/HVF before publishing a
+   network-reliability conclusion.
+4. Run attestation, RA-TLS, seal/unseal, and secret injection on qualifying
+   SEV-SNP hardware. Simulation can never replace hardware evidence.
+
+Return to the [platform matrix](./platforms/) for backend support boundaries.

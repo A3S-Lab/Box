@@ -2,6 +2,7 @@ import { Content, useLang, withBase } from '@rspress/core/runtime';
 import { AgentSkillSection } from './AgentSkillSection';
 import { BoxInstallSwitcher } from './BoxInstallSwitcher';
 import { CanvasGridEffect } from './CanvasGridEffect';
+import { PerformanceMetrics } from './PerformanceMetrics';
 import { PremiumInteractions } from './PremiumInteractions';
 import { RuntimeFeatureShowcase } from './RuntimeFeatureShowcase';
 import { RuntimeTerminalShowcase } from './RuntimeTerminalShowcase';
@@ -12,6 +13,14 @@ function ArrowIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5 12h14M13 6l6 6-6 6" />
     </svg>
+  );
+}
+
+function AnimatedButtonBorder() {
+  return (
+    <span aria-hidden="true" className="box-button-orbit">
+      <span className="box-button-orbit-gradient" />
+    </span>
   );
 }
 
@@ -63,6 +72,7 @@ export function HomeLayout() {
               className="box-button box-button--primary"
               href={docLink('/guide/quick-start.html')}
             >
+              <AnimatedButtonBorder />
               {copy.getStarted}
               <ArrowIcon />
             </a>
@@ -99,6 +109,11 @@ export function HomeLayout() {
       <RuntimeFeatureShowcase
         locale={locale}
         platformHref={docLink('/reference/platforms.html')}
+      />
+
+      <PerformanceMetrics
+        copy={copy.performance}
+        reportHref={docLink('/reference/performance.html')}
       />
 
       <section
