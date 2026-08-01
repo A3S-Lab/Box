@@ -236,7 +236,7 @@ impl Default for PoolConfig {
 ///
 /// Tier 1 limits (rlimits, cpuset) work on all platforms.
 /// Tier 2 limits (cgroup-based) are Linux-only and best-effort.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLimits {
     /// PID limit inside the guest (--pids-limit).
     /// Maps to RLIMIT_NPROC in guest rlimits.

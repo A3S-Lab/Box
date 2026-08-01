@@ -1,6 +1,7 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionSnapshotId, KillExecutionOptions, OperationId, RestartExecutionOptions,
+    ExecutionResourceUpdate, ExecutionSnapshotId, KillExecutionOptions, OperationId,
+    RestartExecutionOptions,
 };
 
 use super::record::{
@@ -156,6 +157,18 @@ impl LocalExecutionManager {
                         });
                     }
                 }
+                RuntimeUpdate::ResourceUpdateClaim {
+                    operation_id,
+                    update,
+                } => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation =
+                            Some(ManagedExecutionOperation::UpdateResources {
+                                operation_id,
+                                update,
+                            });
+                    }
+                }
                 RuntimeUpdate::KillClaim(options) => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation = Some(ManagedExecutionOperation::Kill {
@@ -256,6 +269,16 @@ impl LocalExecutionManager {
             Err(error) => Err(error),
         }
     }
+
+    pub(super) async fn complete_resource_update(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        let store = self.store.clone();
+        let execution_id = execution_id(record)?;
+        let generation = generation(record, &execution_id)?;
+        run_store(move || store.finish_resource_update(&execution_id, generation)).await
+    }
 }
 
 pub(super) enum RuntimeUpdate {
@@ -270,6 +293,10 @@ pub(super) enum RuntimeUpdate {
         operation_id: OperationId,
     },
     ResumeClaim(OperationId),
+    ResourceUpdateClaim {
+        operation_id: OperationId,
+        update: ExecutionResourceUpdate,
+    },
     KillClaim(KillExecutionOptions),
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,

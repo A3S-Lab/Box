@@ -19,12 +19,15 @@ pub use cache::{CacheBackend, CacheEntry, CacheStats};
 pub use credential::CredentialProvider;
 pub use event::EventBus;
 pub use execution::{
-    CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
-    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
-    ExecutionPortIo, ExecutionPortStream, ExecutionRecordPolicy, ExecutionReservation,
-    ExecutionRestartPolicy, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
-    ExecutionStatus, KillExecutionOptions, KillOutcome, OperationId, ReconcileOutcome,
-    RestartExecutionOptions,
+    CreateExecutionRequest, ExecutionCpuStats, ExecutionEventBatch, ExecutionEventKind,
+    ExecutionEventsRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
+    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionMemoryStats,
+    ExecutionPortConnector, ExecutionPortIo, ExecutionPortStream, ExecutionProcessInfo,
+    ExecutionProcessInventory, ExecutionRecordPolicy, ExecutionReservation,
+    ExecutionResourceUpdate, ExecutionRestartPolicy, ExecutionRuntimeEvent, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionState, ExecutionStats, ExecutionStatus, KillExecutionOptions,
+    KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
+    MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};

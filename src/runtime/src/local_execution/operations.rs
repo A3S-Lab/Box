@@ -6,7 +6,8 @@ use a3s_box_core::{
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
 use super::support::{
-    paused_with_memory, pending_kill_options, pending_pause_policy, required_handle,
+    paused_with_memory, pending_kill_options, pending_pause_policy, pending_resource_update,
+    required_handle,
 };
 use super::{BoxRecord, LocalExecutionManager, ManagedExecutionState};
 
@@ -288,6 +289,51 @@ impl LocalExecutionManager {
             _ => {}
         }
         None
+    }
+
+    pub(super) async fn finish_resource_update(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let execution_id = execution_id(&record)?;
+        let (operation_id, update) = pending_resource_update(&record, &execution_id)?;
+        if let Err(error) = self
+            .backend
+            .update_resources(&record, &operation_id, &update)
+            .await
+        {
+            let terminal = match self.backend.inspect(&record).await {
+                Ok(observation)
+                    if matches!(
+                        observation.state,
+                        ExecutionState::Stopped | ExecutionState::Failed
+                    ) =>
+                {
+                    observation.validate(&execution_id)?;
+                    Some((observation.state, observation.exit_code))
+                }
+                Err(ExecutionManagerError::NotFound(_)) => Some((ExecutionState::Failed, None)),
+                _ => None,
+            };
+            if let Some((state, exit_code)) = terminal {
+                self.release_execution_resources(&record).await?;
+                let target = if state == ExecutionState::Stopped {
+                    ManagedExecutionState::Stopped
+                } else {
+                    ManagedExecutionState::Failed
+                };
+                self.transition(
+                    &record,
+                    ManagedExecutionState::UpdatingResources,
+                    target,
+                    RuntimeUpdate::Terminal(exit_code),
+                )
+                .await?;
+            }
+            return Err(error);
+        }
+        let running = self.complete_resource_update(&record).await?;
+        lease_from_record(&running)
     }
 
     pub(super) async fn finish_kill(

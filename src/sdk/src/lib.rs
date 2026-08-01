@@ -31,13 +31,16 @@ pub use sandbox::{
 };
 
 pub use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration,
+    BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionCpuStats,
+    ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
-    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStatus, FileOp, FileRequest,
-    FileResponse, FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest,
-    FilesystemResponse, KillOutcome, OperationId, Platform, PortMapping, PortProtocol,
-    ReconcileOutcome, RestartExecutionOptions,
+    ExecutionManagerError, ExecutionMemoryStats, ExecutionProcessInfo, ExecutionProcessInventory,
+    ExecutionRecordPolicy, ExecutionReservation, ExecutionResourceUpdate, ExecutionRestartPolicy,
+    ExecutionRuntimeEvent, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStats,
+    ExecutionStatus, FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind,
+    FilesystemOp, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId, Platform,
+    PortMapping, PortProtocol, ReconcileOutcome, RestartExecutionOptions,
+    MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
 pub use a3s_box_runtime::{RegistryAuth, RegistryProtocol, SignaturePolicy};
 

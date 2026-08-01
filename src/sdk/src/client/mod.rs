@@ -18,9 +18,10 @@ use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::vmm::parse_signal_name;
 use a3s_box_core::volume::VolumeConfig;
 use a3s_box_core::{
-    CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
-    ExecutionLease, ExecutionManager, ExecutionReservation, ExecutionSessionManager,
-    ExecutionSnapshot, ExecutionSnapshotId, ExecutionStatus, FileRequest, FileResponse,
+    CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionEventBatch, ExecutionEventsRequest,
+    ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager, ExecutionProcessInventory,
+    ExecutionReservation, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionStats, ExecutionStatus, FileRequest, FileResponse,
     FilesystemRequest, FilesystemResponse, KillOutcome, OperationId, ReconcileOutcome,
     RestartExecutionOptions, StoredImage,
 };

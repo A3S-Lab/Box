@@ -21,6 +21,19 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Exact-generation OCI observability and resource control.** The canonical
+  execution manager, Rust client, and local Sandbox facade now expose live
+  process inventory, normalized CPU/memory stats, bounded ordered-event polls,
+  and partial cgroup-backed resource updates through `OciLocalExecutionBackend`.
+  Every read binds and rechecks the exact Box/runtime generation; malformed
+  targets, counters, or cursors fail closed. Updates require advertised SDK
+  capability, compile one complete OCI resource contract, persist an
+  `updating_resources` claim before mutation, reuse the same runtime operation
+  after a lost response or backend recreation, and atomically update both
+  managed restart intent and compatibility state only after acknowledgement.
+  A separate immutable create-intent digest keeps the original create key
+  replayable after later resource changes, while changed update content under
+  one operation key is rejected.
 - **Exact-generation OCI process sessions.** The SDK-only backend now routes
   captured and streaming exec, initial and streaming stdin, cursor-checked
   stdout/stderr, process signals and wait, PTY input/resize, exact terminal

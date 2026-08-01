@@ -69,15 +69,17 @@ pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{
     AuditSink, CacheBackend, CacheEntry, CacheStats, CreateExecutionRequest, CredentialProvider,
-    EventBus, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
-    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
-    ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInput,
-    ExecutionProcessSignal, ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation,
-    ExecutionRestartPolicy, ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId,
-    ExecutionState, ExecutionStatus, ImageRegistry, ImageStoreBackend, KillExecutionOptions,
-    KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage,
-    ReconcileOutcome, RestartExecutionOptions, SnapshotStoreBackend, StoredImage,
-    VolumeStoreBackend,
+    EventBus, ExecutionCpuStats, ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest,
+    ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionMemoryStats, ExecutionPortConnector,
+    ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInfo,
+    ExecutionProcessInput, ExecutionProcessInventory, ExecutionProcessSignal,
+    ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionResourceUpdate,
+    ExecutionRestartPolicy, ExecutionRuntimeEvent, ExecutionSessionManager, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionState, ExecutionStats, ExecutionStatus, ImageRegistry,
+    ImageStoreBackend, KillExecutionOptions, KillOutcome, MetricsCollector, NetworkStoreBackend,
+    NoopMetrics, OperationId, PulledImage, ReconcileOutcome, RestartExecutionOptions,
+    SnapshotStoreBackend, StoredImage, VolumeStoreBackend, MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

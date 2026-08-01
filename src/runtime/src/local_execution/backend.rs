@@ -3,8 +3,10 @@
 use std::path::PathBuf;
 
 use a3s_box_core::{
-    pty::PtyRequest, ExecOutput, ExecRequest, ExecutionId, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionProcess, ExecutionState, KillOutcome,
+    pty::PtyRequest, ExecOutput, ExecRequest, ExecutionEventBatch, ExecutionEventsRequest,
+    ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
+    ExecutionProcessInventory, ExecutionResourceUpdate, ExecutionState, ExecutionStats,
+    KillOutcome, OperationId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -115,6 +117,57 @@ pub trait LocalExecutionBackend: Send + Sync {
     ) -> ExecutionManagerResult<LocalExecutionHandle>;
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
+
+    /// Validate a complete live resource contract before a durable mutation claim.
+    async fn preflight_resource_update(
+        &self,
+        _record: &BoxRecord,
+        _update: &ExecutionResourceUpdate,
+    ) -> ExecutionManagerResult<()> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not support live resource updates".to_string(),
+        ))
+    }
+
+    /// Apply the exact persisted resource update operation.
+    async fn update_resources(
+        &self,
+        _record: &BoxRecord,
+        _operation_id: &OperationId,
+        _update: &ExecutionResourceUpdate,
+    ) -> ExecutionManagerResult<()> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not support live resource updates".to_string(),
+        ))
+    }
+
+    /// Return live init and exec processes for the record's exact runtime target.
+    async fn list_processes(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<ExecutionProcessInventory> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose process inventory".to_string(),
+        ))
+    }
+
+    /// Return normalized counters for the record's exact runtime target.
+    async fn stats(&self, _record: &BoxRecord) -> ExecutionManagerResult<ExecutionStats> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose runtime stats".to_string(),
+        ))
+    }
+
+    /// Poll ordered events for the record's exact runtime target.
+    async fn events(
+        &self,
+        _record: &BoxRecord,
+        _request: ExecutionEventsRequest,
+    ) -> ExecutionManagerResult<ExecutionEventBatch> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose runtime events".to_string(),
+        ))
+    }
 
     /// Execute one captured process through a backend-owned, generation-fenced
     /// session boundary. The legacy VM backend retains its socket transport;

@@ -38,6 +38,23 @@ impl LocalExecutionManager {
                 return Ok((current, ExecutionState::Running));
             }
         }
+        if internal == ManagedExecutionState::UpdatingResources {
+            let id = execution_id(&record)?;
+            let update_result = self.finish_resource_update(record).await;
+            let current = self
+                .get(&id)
+                .await?
+                .ok_or_else(|| ExecutionManagerError::NotFound(id.clone()))?;
+            return match (update_result, managed_state(&current)?) {
+                (Ok(_), ManagedExecutionState::Running) => Ok((current, ExecutionState::Running)),
+                (Err(_), ManagedExecutionState::Stopped) => Ok((current, ExecutionState::Stopped)),
+                (Err(_), ManagedExecutionState::Failed) => Ok((current, ExecutionState::Failed)),
+                (Err(error), _) => Err(error),
+                (Ok(_), state) => Err(ExecutionManagerError::Internal(format!(
+                    "resource update for {id} completed into unexpected state {state}"
+                ))),
+            };
+        }
         if internal == ManagedExecutionState::Paused {
             let id = execution_id(&record)?;
             if !paused_with_memory(&record, &id)? {

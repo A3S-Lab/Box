@@ -6,11 +6,12 @@ use std::path::PathBuf;
 use a3s_box_core::config::ResourceLimits;
 use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
-    CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, ExecutionSnapshotId,
-    NetworkMode, OperationId, ResolvedExecutionPlan,
+    CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, ExecutionResourceUpdate,
+    ExecutionSnapshotId, NetworkMode, OperationId, ResolvedExecutionPlan,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub use a3s_box_core::ExecutionHealthCheck as HealthCheck;
 
@@ -255,6 +256,7 @@ pub enum ManagedExecutionState {
     Pausing,
     Paused,
     Resuming,
+    UpdatingResources,
     Snapshotting,
     Killing,
     RestartStopping,
@@ -275,6 +277,7 @@ impl ManagedExecutionState {
             Self::Pausing => "pausing",
             Self::Paused => "paused",
             Self::Resuming => "resuming",
+            Self::UpdatingResources => "updating_resources",
             Self::Snapshotting => "snapshotting",
             Self::Killing => "killing",
             Self::RestartStopping => "restart_stopping",
@@ -295,6 +298,7 @@ impl ManagedExecutionState {
             "pausing" => Ok(Self::Pausing),
             "paused" => Ok(Self::Paused),
             "resuming" => Ok(Self::Resuming),
+            "updating_resources" => Ok(Self::UpdatingResources),
             "snapshotting" => Ok(Self::Snapshotting),
             "killing" => Ok(Self::Killing),
             "restart_stopping" => Ok(Self::RestartStopping),
@@ -335,6 +339,13 @@ impl std::fmt::Display for ManagedExecutionState {
 pub struct ManagedExecutionMetadata {
     /// Idempotency key of the create operation.
     pub operation_id: OperationId,
+    /// Immutable digest of the original create request.
+    ///
+    /// Live resource updates change `request` because it is also the restart
+    /// source of truth. This separate identity keeps retries of the original
+    /// create operation idempotent after later mutable policy changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_intent_digest: Option<String>,
     /// Runtime generation used to reject stale lifecycle requests.
     pub generation: ExecutionGeneration,
     /// Full creation intent required to recover an interrupted launch.
@@ -351,6 +362,9 @@ pub struct ManagedExecutionMetadata {
     /// Most recent completed restart retained for idempotent response replay.
     #[serde(default)]
     pub last_restart: Option<ManagedRestartCompletion>,
+    /// Most recent completed live resource update retained for keyed replay.
+    #[serde(default)]
+    pub last_resource_update: Option<ManagedResourceUpdateCompletion>,
     /// Provider terminal timestamp retained for deterministic observation replay.
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
@@ -377,6 +391,10 @@ pub enum ManagedExecutionOperation {
         /// Stable backend mutation identity for this exact resume claim.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operation_id: Option<OperationId>,
+    },
+    UpdateResources {
+        operation_id: OperationId,
+        update: ExecutionResourceUpdate,
     },
     Snapshot {
         snapshot_id: ExecutionSnapshotId,
@@ -418,6 +436,14 @@ pub struct ManagedRestartCompletion {
     pub stop_timeout_secs: Option<u64>,
 }
 
+/// Completed resource mutation retained after its transitional claim clears.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedResourceUpdateCompletion {
+    pub operation_id: OperationId,
+    pub generation: ExecutionGeneration,
+    pub update: ExecutionResourceUpdate,
+}
+
 impl ManagedExecutionMetadata {
     /// Build validated recovery metadata from one creation request.
     pub fn new(
@@ -431,14 +457,17 @@ impl ManagedExecutionMetadata {
             ));
         }
         let plan = a3s_box_core::resolve_execution(&request.config)?;
+        let creation_intent_digest = Some(digest_creation_request(&request)?);
         Ok(Self {
             operation_id,
+            creation_intent_digest,
             generation,
             request,
             oci_runtime: None,
             plan,
             pending_operation: None,
             last_restart: None,
+            last_resource_update: None,
             finished_at: None,
             paused_with_memory: true,
         })
@@ -452,6 +481,9 @@ impl ManagedExecutionMetadata {
             ));
         }
         let resolved = a3s_box_core::resolve_execution(&self.request.config)?;
+        if let Some(digest) = self.creation_intent_digest.as_deref() {
+            validate_creation_intent_digest(digest)?;
+        }
         if !execution_plan_matches(&resolved, &self.plan) {
             return Err(a3s_box_core::BoxError::StateError(
                 "managed execution plan does not match its persisted creation request".to_string(),
@@ -480,7 +512,52 @@ impl ManagedExecutionMetadata {
             }
             validate_stop_timeout(completed.stop_timeout_secs)?;
         }
+        if let Some(completed) = &self.last_resource_update {
+            completed.update.validate().map_err(|error| {
+                a3s_box_core::BoxError::StateError(format!(
+                    "completed resource update {} is invalid: {error}",
+                    completed.operation_id
+                ))
+            })?;
+            if completed.generation > self.generation {
+                return Err(a3s_box_core::BoxError::StateError(format!(
+                    "completed resource update {} belongs to future generation {}",
+                    completed.operation_id,
+                    completed.generation.get()
+                )));
+            }
+        }
         Ok(())
+    }
+}
+
+fn digest_creation_request(request: &CreateExecutionRequest) -> a3s_box_core::Result<String> {
+    let value = serde_json::to_value(request).map_err(|error| {
+        a3s_box_core::BoxError::ConfigError(format!(
+            "failed to encode managed creation intent: {error}"
+        ))
+    })?;
+    let encoded = serde_json::to_vec(&value).map_err(|error| {
+        a3s_box_core::BoxError::ConfigError(format!(
+            "failed to canonicalize managed creation intent: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(encoded))))
+}
+
+fn validate_creation_intent_digest(digest: &str) -> a3s_box_core::Result<()> {
+    let valid = digest.strip_prefix("sha256:").is_some_and(|value| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(a3s_box_core::BoxError::StateError(
+            "managed creation intent digest is invalid".to_string(),
+        ))
     }
 }
 
@@ -507,6 +584,9 @@ fn validate_pending_operation(
         ) | (
             ManagedExecutionState::Resuming,
             Some(ManagedExecutionOperation::Resume { .. })
+        ) | (
+            ManagedExecutionState::UpdatingResources,
+            Some(ManagedExecutionOperation::UpdateResources { .. })
         ) | (
             ManagedExecutionState::Snapshotting,
             Some(ManagedExecutionOperation::Snapshot { .. })
@@ -583,6 +663,18 @@ fn validate_pending_operation(
                 "snapshot operation has an invalid source state".to_string(),
             ));
         }
+    }
+    if let Some(ManagedExecutionOperation::UpdateResources { update, .. }) = operation {
+        if state != ManagedExecutionState::UpdatingResources {
+            return Err(a3s_box_core::BoxError::StateError(
+                "resource update operation is attached to a non-update state".to_string(),
+            ));
+        }
+        update.validate().map_err(|error| {
+            a3s_box_core::BoxError::StateError(format!(
+                "persisted resource update is invalid: {error}"
+            ))
+        })?;
     }
     if let Some(ManagedExecutionOperation::Kill {
         signal,

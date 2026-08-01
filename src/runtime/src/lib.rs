@@ -70,7 +70,8 @@ pub use a3s_runtime_driver::{
 // Canonical local execution metadata
 pub use box_record::{
     BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionOperation,
-    ManagedExecutionState, ManagedRestartCompletion, ManagedRestartOutcome,
+    ManagedExecutionState, ManagedResourceUpdateCompletion, ManagedRestartCompletion,
+    ManagedRestartOutcome,
 };
 pub use box_state::BoxStateStore;
 #[cfg(feature = "vm")]

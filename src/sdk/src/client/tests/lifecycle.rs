@@ -12,6 +12,25 @@ enum LifecycleCall {
         request: serde_json::Value,
         operation_id: String,
     },
+    Processes {
+        execution_id: String,
+        generation: u64,
+    },
+    Stats {
+        execution_id: String,
+        generation: u64,
+    },
+    Events {
+        execution_id: String,
+        generation: u64,
+        request: a3s_box_core::ExecutionEventsRequest,
+    },
+    Update {
+        execution_id: String,
+        generation: u64,
+        operation_id: String,
+        update: a3s_box_core::ExecutionResourceUpdate,
+    },
 }
 
 struct RecordingExecutionManager {
@@ -65,6 +84,84 @@ impl a3s_box_core::ExecutionManager for RecordingExecutionManager {
         Err(a3s_box_core::ExecutionManagerError::NotFound(
             execution_id.clone(),
         ))
+    }
+
+    async fn list_processes(
+        &self,
+        execution_id: &a3s_box_core::ExecutionId,
+        generation: a3s_box_core::ExecutionGeneration,
+    ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionProcessInventory> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(LifecycleCall::Processes {
+                execution_id: execution_id.to_string(),
+                generation: generation.get(),
+            });
+        Ok(a3s_box_core::ExecutionProcessInventory {
+            execution_id: execution_id.clone(),
+            generation,
+            processes: vec![a3s_box_core::ExecutionProcessInfo {
+                process_id: "init".to_string(),
+                pid: Some(42),
+                terminal: false,
+            }],
+        })
+    }
+
+    async fn stats(
+        &self,
+        execution_id: &a3s_box_core::ExecutionId,
+        generation: a3s_box_core::ExecutionGeneration,
+    ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionStats> {
+        self.calls.lock().unwrap().push(LifecycleCall::Stats {
+            execution_id: execution_id.to_string(),
+            generation: generation.get(),
+        });
+        Ok(a3s_box_core::ExecutionStats {
+            execution_id: execution_id.clone(),
+            generation,
+            timestamp_unix_ns: 1,
+            cpu: Default::default(),
+            memory: Default::default(),
+            process_count: 1,
+            metrics: Default::default(),
+        })
+    }
+
+    async fn events(
+        &self,
+        execution_id: &a3s_box_core::ExecutionId,
+        generation: a3s_box_core::ExecutionGeneration,
+        request: a3s_box_core::ExecutionEventsRequest,
+    ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionEventBatch> {
+        self.calls.lock().unwrap().push(LifecycleCall::Events {
+            execution_id: execution_id.to_string(),
+            generation: generation.get(),
+            request: request.clone(),
+        });
+        Ok(a3s_box_core::ExecutionEventBatch {
+            execution_id: execution_id.clone(),
+            generation,
+            events: Vec::new(),
+            next_sequence: request.after_sequence,
+        })
+    }
+
+    async fn update_resources(
+        &self,
+        execution_id: &a3s_box_core::ExecutionId,
+        generation: a3s_box_core::ExecutionGeneration,
+        operation_id: &a3s_box_core::OperationId,
+        update: a3s_box_core::ExecutionResourceUpdate,
+    ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionLease> {
+        self.calls.lock().unwrap().push(LifecycleCall::Update {
+            execution_id: execution_id.to_string(),
+            generation: generation.get(),
+            operation_id: operation_id.to_string(),
+            update,
+        });
+        Ok(self.lease.clone())
     }
 
     async fn pause(
@@ -201,6 +298,44 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
     assert_eq!(started.execution_id, execution_id);
     let running = client.run_box(request, &operation_id).await.unwrap();
     assert_eq!(running.execution_id, execution_id);
+    let processes = client
+        .list_execution_processes(&execution_id, ExecutionGeneration::INITIAL)
+        .await
+        .unwrap();
+    assert_eq!(processes.processes[0].process_id, "init");
+    let stats = client
+        .execution_stats(&execution_id, ExecutionGeneration::INITIAL)
+        .await
+        .unwrap();
+    assert_eq!(stats.process_count, 1);
+    let events_request = a3s_box_core::ExecutionEventsRequest {
+        after_sequence: 9,
+        limit: 32,
+        wait_timeout_ms: Some(100),
+    };
+    let events = client
+        .execution_events(
+            &execution_id,
+            ExecutionGeneration::INITIAL,
+            events_request.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.next_sequence, 9);
+    let update_operation = OperationId::new("sdk-resource-update").unwrap();
+    let resource_update = a3s_box_core::ExecutionResourceUpdate {
+        pids_limit: Some(64),
+        ..Default::default()
+    };
+    client
+        .update_execution_resources(
+            &execution_id,
+            ExecutionGeneration::INITIAL,
+            &update_operation,
+            resource_update.clone(),
+        )
+        .await
+        .unwrap();
 
     let calls = manager.calls.lock().unwrap();
     assert!(matches!(
@@ -223,6 +358,39 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
             request,
             operation_id
         } if request == &request_json && operation_id == "sdk-operation-id"
+    ));
+    assert!(matches!(
+        &calls[3],
+        LifecycleCall::Processes {
+            execution_id,
+            generation: 1
+        } if execution_id == "sdk-execution-id"
+    ));
+    assert!(matches!(
+        &calls[4],
+        LifecycleCall::Stats {
+            execution_id,
+            generation: 1
+        } if execution_id == "sdk-execution-id"
+    ));
+    assert!(matches!(
+        &calls[5],
+        LifecycleCall::Events {
+            execution_id,
+            generation: 1,
+            request
+        } if execution_id == "sdk-execution-id" && request == &events_request
+    ));
+    assert!(matches!(
+        &calls[6],
+        LifecycleCall::Update {
+            execution_id,
+            generation: 1,
+            operation_id,
+            update
+        } if execution_id == "sdk-execution-id"
+            && operation_id == "sdk-resource-update"
+            && update == &resource_update
     ));
 }
 

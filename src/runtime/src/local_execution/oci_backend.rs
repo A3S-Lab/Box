@@ -1,20 +1,25 @@
 //! Public-SDK-only A3S OCI lifecycle boundary for managed local execution.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    pty::PtyRequest, ExecOutput, ExecRequest as BoxExecRequest, ExecutionGeneration, ExecutionId,
-    ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
-    ExecutionState, KillOutcome, OperationId as BoxOperationId,
+    pty::PtyRequest, ExecOutput, ExecRequest as BoxExecRequest, ExecutionCpuStats,
+    ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest, ExecutionGeneration,
+    ExecutionId, ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionMemoryStats, ExecutionProcess, ExecutionProcessInfo, ExecutionProcessInventory,
+    ExecutionResourceUpdate, ExecutionRuntimeEvent, ExecutionState, ExecutionStats, KillOutcome,
+    OperationId as BoxOperationId,
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
     ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, CreateAttachments,
-    CreateRequest, DeleteMode, DeleteRequest, DriverKind, ErrorCode, ExitStatus, IoMode,
-    IsolationClass, IsolationRequest, KillRequest, LocalIpcEndpoint, OciBundle, OperationContext,
-    OperationId as OciOperationId, ProcessIo, RuntimeClient, RuntimeInfo, RuntimeOperation, Signal,
-    StartRequest, StateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1,
+    CreateRequest, DeleteMode, DeleteRequest, DriverKind, ErrorCode, EventsRequest, ExitStatus,
+    IoMode, IsolationClass, IsolationRequest, KillRequest, LinuxResources, LocalIpcEndpoint,
+    OciBundle, OperationContext, OperationId as OciOperationId, ProcessIo, ProcessRecord,
+    ProcessesRequest, RuntimeClient, RuntimeEventKind, RuntimeInfo, RuntimeOperation, Signal,
+    StartRequest, StateRequest, StatsRequest, UpdateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -663,6 +668,130 @@ impl OciLifecycleAdapter {
         Ok(record)
     }
 
+    async fn update_resources(
+        &self,
+        execution_id: &ExecutionId,
+        execution_generation: ExecutionGeneration,
+        operation_seed: &BoxOperationId,
+        binding: &OciRuntimeBinding,
+        resources: LinuxResources,
+    ) -> ExecutionManagerResult<ContainerRecord> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::Update, "update")
+            .await?;
+        let updated = match self
+            .client
+            .update(UpdateRequest {
+                // The caller key and exact target define mutation identity.
+                // The runtime journals the full request and rejects reuse of
+                // this ID with changed resource content.
+                context: operation_context(
+                    operation_seed.as_str(),
+                    execution_generation,
+                    "update",
+                    &binding.target,
+                )?,
+                target: binding.target.clone(),
+                resources,
+            })
+            .await
+        {
+            Ok(record) => record,
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+            }
+            Err(error) => return Err(sdk_error("update", error)),
+        };
+        validate_updated_record(binding, &updated)?;
+        Ok(updated)
+    }
+
+    async fn processes(
+        &self,
+        execution_id: &ExecutionId,
+        binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<Vec<ProcessRecord>> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::Processes, "processes")
+            .await?;
+        let processes = match self
+            .client
+            .processes(ProcessesRequest {
+                target: binding.target.clone(),
+            })
+            .await
+        {
+            Ok(processes) => processes,
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+            }
+            Err(error) => return Err(sdk_error("processes", error)),
+        };
+        validate_process_records(binding, &processes)?;
+        Ok(processes)
+    }
+
+    async fn stats(
+        &self,
+        execution_id: &ExecutionId,
+        binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<a3s_oci_sdk::ContainerStats> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::Stats, "stats")
+            .await?;
+        let stats = match self
+            .client
+            .stats(StatsRequest {
+                target: binding.target.clone(),
+            })
+            .await
+        {
+            Ok(stats) => stats,
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+            }
+            Err(error) => return Err(sdk_error("stats", error)),
+        };
+        stats
+            .validate()
+            .map_err(|error| sdk_error("stats", error))?;
+        if stats.target != binding.target {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI stats returned a different target for {execution_id}"
+            )));
+        }
+        Ok(stats)
+    }
+
+    async fn events(
+        &self,
+        execution_id: &ExecutionId,
+        binding: &OciRuntimeBinding,
+        request: &ExecutionEventsRequest,
+    ) -> ExecutionManagerResult<a3s_oci_sdk::EventBatch> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::Events, "events")
+            .await?;
+        let batch = match self
+            .client
+            .events(EventsRequest {
+                container: Some(binding.target.clone()),
+                after_sequence: request.after_sequence,
+                limit: request.limit,
+                wait_timeout_ms: request.wait_timeout_ms,
+            })
+            .await
+        {
+            Ok(batch) => batch,
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+            }
+            Err(error) => return Err(sdk_error("events", error)),
+        };
+        validate_event_batch(binding, request.after_sequence, &batch)?;
+        Ok(batch)
+    }
+
     async fn kill(
         &self,
         execution_id: &ExecutionId,
@@ -1060,6 +1189,148 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         ))
     }
 
+    async fn preflight_resource_update(
+        &self,
+        record: &BoxRecord,
+        update: &ExecutionResourceUpdate,
+    ) -> ExecutionManagerResult<()> {
+        update.validate()?;
+        let execution_id = self.execution_id(record)?;
+        self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding to update"
+            ))
+        })?;
+        self.adapter
+            .require_operation(RuntimeOperation::Update, "update")
+            .await?;
+        compile_resource_update(record, update)?;
+        Ok(())
+    }
+
+    async fn update_resources(
+        &self,
+        record: &BoxRecord,
+        operation_id: &BoxOperationId,
+        update: &ExecutionResourceUpdate,
+    ) -> ExecutionManagerResult<()> {
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding to update"
+            ))
+        })?;
+        let resources = compile_resource_update(record, update)?;
+        self.adapter
+            .update_resources(&execution_id, generation, operation_id, &binding, resources)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_processes(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<ExecutionProcessInventory> {
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding for process inventory"
+            ))
+        })?;
+        let mut processes = self
+            .adapter
+            .processes(&execution_id, &binding)
+            .await?
+            .into_iter()
+            .map(|process| ExecutionProcessInfo {
+                process_id: process.target.process_id.to_string(),
+                pid: process.pid,
+                terminal: process.terminal,
+            })
+            .collect::<Vec<_>>();
+        processes.sort_by(|left, right| left.process_id.cmp(&right.process_id));
+        let inventory = ExecutionProcessInventory {
+            execution_id,
+            generation,
+            processes,
+        };
+        inventory.validate()?;
+        Ok(inventory)
+    }
+
+    async fn stats(&self, record: &BoxRecord) -> ExecutionManagerResult<ExecutionStats> {
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding for stats"
+            ))
+        })?;
+        let stats = self.adapter.stats(&execution_id, &binding).await?;
+        let stats = ExecutionStats {
+            execution_id,
+            generation,
+            timestamp_unix_ns: stats.timestamp_unix_ns,
+            cpu: ExecutionCpuStats {
+                usage_ns: stats.cpu.usage_ns,
+                user_ns: stats.cpu.user_ns,
+                system_ns: stats.cpu.system_ns,
+                throttled_ns: stats.cpu.throttled_ns,
+            },
+            memory: ExecutionMemoryStats {
+                usage_bytes: stats.memory.usage_bytes,
+                limit_bytes: stats.memory.limit_bytes,
+                peak_bytes: stats.memory.peak_bytes,
+            },
+            process_count: stats.process_count,
+            metrics: stats.metrics,
+        };
+        stats.validate()?;
+        Ok(stats)
+    }
+
+    async fn events(
+        &self,
+        record: &BoxRecord,
+        request: ExecutionEventsRequest,
+    ) -> ExecutionManagerResult<ExecutionEventBatch> {
+        request.validate()?;
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding for events"
+            ))
+        })?;
+        let batch = self
+            .adapter
+            .events(&execution_id, &binding, &request)
+            .await?;
+        let events = batch
+            .events
+            .into_iter()
+            .map(|event| {
+                Ok(ExecutionRuntimeEvent {
+                    sequence: event.sequence,
+                    timestamp_unix_ns: event.timestamp_unix_ns,
+                    process_id: event.process_id.map(|process_id| process_id.to_string()),
+                    kind: map_event_kind(event.kind)?,
+                    attributes: event.attributes,
+                })
+            })
+            .collect::<ExecutionManagerResult<Vec<_>>>()?;
+        let batch = ExecutionEventBatch {
+            execution_id,
+            generation,
+            events,
+            next_sequence: batch.next_sequence,
+        };
+        batch.validate_after(request.after_sequence)?;
+        Ok(batch)
+    }
+
     async fn execute(
         &self,
         record: &BoxRecord,
@@ -1315,6 +1586,133 @@ fn validate_freezer_record(
         )));
     }
     Ok(())
+}
+
+fn compile_resource_update(
+    record: &BoxRecord,
+    update: &ExecutionResourceUpdate,
+) -> ExecutionManagerResult<LinuxResources> {
+    update.validate()?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "execution {} has no managed resource intent",
+            record.id
+        ))
+    })?;
+    if record.resource_limits != metadata.request.config.resource_limits {
+        return Err(ExecutionManagerError::Internal(format!(
+            "execution {} has divergent compatibility and managed resource limits",
+            record.id
+        )));
+    }
+    let mut config = metadata.request.config.clone();
+    update.apply_to(&mut config.resource_limits);
+    let resources = crate::sandbox::oci::SandboxResources::from_box_config(&config)
+        .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
+    crate::sandbox::oci::compile_resources(&resources)
+        .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))
+}
+
+fn validate_updated_record(
+    binding: &OciRuntimeBinding,
+    record: &ContainerRecord,
+) -> ExecutionManagerResult<()> {
+    binding.validate_record(record)?;
+    if *record.state.status() != ContainerState::Running || record.is_paused() {
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI update returned an invalid running state for {} generation {:?}",
+            binding.target.id, binding.target.generation
+        )));
+    }
+    Ok(())
+}
+
+fn validate_process_records(
+    binding: &OciRuntimeBinding,
+    records: &[ProcessRecord],
+) -> ExecutionManagerResult<()> {
+    let mut process_ids = BTreeSet::new();
+    for record in records {
+        if record.target.container != binding.target {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI process inventory crossed the exact target for {}",
+                binding.target.id
+            )));
+        }
+        if record.pid == Some(0) {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI process {} returned PID zero",
+                record.target.process_id
+            )));
+        }
+        if !process_ids.insert(record.target.process_id.as_str()) {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI process inventory returned duplicate process {}",
+                record.target.process_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_event_batch(
+    binding: &OciRuntimeBinding,
+    after_sequence: u64,
+    batch: &a3s_oci_sdk::EventBatch,
+) -> ExecutionManagerResult<()> {
+    if batch.next_sequence < after_sequence {
+        return Err(ExecutionManagerError::Internal(
+            "A3S OCI event cursor regressed".to_string(),
+        ));
+    }
+    let mut previous = after_sequence;
+    for event in &batch.events {
+        if event.container != binding.target {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI events crossed the exact target for {}",
+                binding.target.id
+            )));
+        }
+        if event.sequence == 0 || event.sequence <= previous {
+            return Err(ExecutionManagerError::Internal(
+                "A3S OCI events are not strictly ordered after the requested cursor".to_string(),
+            ));
+        }
+        if event.timestamp_unix_ns == 0 {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI event {} has timestamp zero",
+                event.sequence
+            )));
+        }
+        previous = event.sequence;
+    }
+    if batch.next_sequence < previous {
+        return Err(ExecutionManagerError::Internal(
+            "A3S OCI event next cursor precedes the returned batch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn map_event_kind(kind: RuntimeEventKind) -> ExecutionManagerResult<ExecutionEventKind> {
+    match kind {
+        RuntimeEventKind::ContainerCreating => Ok(ExecutionEventKind::ContainerCreating),
+        RuntimeEventKind::ContainerCreated => Ok(ExecutionEventKind::ContainerCreated),
+        RuntimeEventKind::ContainerStarted => Ok(ExecutionEventKind::ContainerStarted),
+        RuntimeEventKind::ContainerStopped => Ok(ExecutionEventKind::ContainerStopped),
+        RuntimeEventKind::ContainerDeleted => Ok(ExecutionEventKind::ContainerDeleted),
+        RuntimeEventKind::ContainerPaused => Ok(ExecutionEventKind::ContainerPaused),
+        RuntimeEventKind::ContainerResumed => Ok(ExecutionEventKind::ContainerResumed),
+        RuntimeEventKind::ResourcesUpdated => Ok(ExecutionEventKind::ResourcesUpdated),
+        RuntimeEventKind::ProcessCreated => Ok(ExecutionEventKind::ProcessCreated),
+        RuntimeEventKind::ProcessStarted => Ok(ExecutionEventKind::ProcessStarted),
+        RuntimeEventKind::ProcessExited => Ok(ExecutionEventKind::ProcessExited),
+        RuntimeEventKind::OutputDropped => Ok(ExecutionEventKind::OutputDropped),
+        RuntimeEventKind::RuntimeWarning => Ok(ExecutionEventKind::RuntimeWarning),
+        _ => Err(ExecutionManagerError::Unavailable(
+            "A3S OCI Runtime returned an event kind unsupported by this Box build".to_string(),
+        )),
+    }
 }
 
 fn validate_selected_driver(

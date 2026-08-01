@@ -5,20 +5,23 @@ use std::sync::{Arc, Mutex};
 use a3s_box_core::exec::{ExecRequest as BoxExecRequest, StreamType};
 use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecEvent, ExecutionGeneration, ExecutionId,
-    ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionProcessSignal,
-    ExecutionSessionManager, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
-    OperationId as BoxOperationId, ReconcileOutcome,
+    BoxConfig, CreateExecutionRequest, ExecEvent, ExecutionEventsRequest, ExecutionGeneration,
+    ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
+    ExecutionProcessSignal, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionState,
+    KillExecutionOptions, KillOutcome, NetworkMode, OperationId as BoxOperationId,
+    ReconcileOutcome,
 };
 use a3s_oci_sdk::oci_spec::runtime::{ContainerState, StateBuilder};
 use a3s_oci_sdk::{
     async_trait, CloseStdinRequest, ContainerId, ContainerOperationRequest, ContainerRecord,
-    ContainerTarget, CreateRequest, DeleteMode, DeleteRequest, DriverKind, Error, ErrorCode,
-    ExecRequest as OciExecRequest, ExitStatus, Generation, IsolationClass, IsolationRequest,
-    KillRequest, OciBundle, OciRuntimeService, OutputChunk, OutputStream, ProcessRecord,
-    ProcessTarget, ReadOutputRequest, ResizeRequest, Result as OciResult, RuntimeClient,
-    RuntimeInfo, RuntimeOperation, SignalProcessRequest, StartRequest, StateRequest, TerminalSize,
-    WaitProcessRequest, WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION,
+    ContainerStats, ContainerTarget, CpuStats, CreateRequest, DeleteMode, DeleteRequest,
+    DriverKind, Error, ErrorCode, EventBatch, EventsRequest, ExecRequest as OciExecRequest,
+    ExitStatus, Generation, IsolationClass, IsolationRequest, KillRequest, MemoryStats, OciBundle,
+    OciRuntimeService, OutputChunk, OutputStream, ProcessId, ProcessRecord, ProcessTarget,
+    ProcessesRequest, ReadOutputRequest, ResizeRequest, Result as OciResult, RuntimeClient,
+    RuntimeEvent, RuntimeEventKind, RuntimeInfo, RuntimeOperation, SignalProcessRequest,
+    StartRequest, StateRequest, StatsRequest, TerminalSize, UpdateRequest, WaitProcessRequest,
+    WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -55,6 +58,12 @@ struct FakeRuntimeService {
     start_requests: Mutex<Vec<StartRequest>>,
     pause_requests: Mutex<Vec<ContainerOperationRequest>>,
     resume_requests: Mutex<Vec<ContainerOperationRequest>>,
+    update_requests: Mutex<Vec<UpdateRequest>>,
+    update_effects: Mutex<Vec<UpdateRequest>>,
+    update_journal: Mutex<HashMap<String, UpdateRequest>>,
+    processes_requests: Mutex<Vec<ProcessesRequest>>,
+    stats_requests: Mutex<Vec<StatsRequest>>,
+    events_requests: Mutex<Vec<EventsRequest>>,
     exec_requests: Mutex<Vec<OciExecRequest>>,
     output_requests: Mutex<Vec<ReadOutputRequest>>,
     stdin_requests: Mutex<Vec<WriteStdinRequest>>,
@@ -73,10 +82,14 @@ struct FakeRuntimeService {
     fail_pause_before_effect: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     fail_resume_after_effect: AtomicBool,
+    fail_update_after_effect: AtomicBool,
     fail_exec_after_effect: AtomicBool,
     fail_stdin_after_effect: AtomicBool,
     hold_next_process: AtomicBool,
     ignore_graceful_signal: AtomicBool,
+    drift_process_target: AtomicBool,
+    drift_stats_target: AtomicBool,
+    misorder_events: AtomicBool,
 }
 
 impl FakeRuntimeService {
@@ -111,6 +124,12 @@ impl FakeRuntimeService {
             start_requests: Mutex::new(Vec::new()),
             pause_requests: Mutex::new(Vec::new()),
             resume_requests: Mutex::new(Vec::new()),
+            update_requests: Mutex::new(Vec::new()),
+            update_effects: Mutex::new(Vec::new()),
+            update_journal: Mutex::new(HashMap::new()),
+            processes_requests: Mutex::new(Vec::new()),
+            stats_requests: Mutex::new(Vec::new()),
+            events_requests: Mutex::new(Vec::new()),
             exec_requests: Mutex::new(Vec::new()),
             output_requests: Mutex::new(Vec::new()),
             stdin_requests: Mutex::new(Vec::new()),
@@ -129,10 +148,14 @@ impl FakeRuntimeService {
             fail_pause_before_effect: AtomicBool::new(false),
             fail_pause_after_effect: AtomicBool::new(false),
             fail_resume_after_effect: AtomicBool::new(false),
+            fail_update_after_effect: AtomicBool::new(false),
             fail_exec_after_effect: AtomicBool::new(false),
             fail_stdin_after_effect: AtomicBool::new(false),
             hold_next_process: AtomicBool::new(false),
             ignore_graceful_signal: AtomicBool::new(false),
+            drift_process_target: AtomicBool::new(false),
+            drift_stats_target: AtomicBool::new(false),
+            misorder_events: AtomicBool::new(false),
         }
     }
 
@@ -194,6 +217,32 @@ impl FakeRuntimeService {
 
     fn resume_requests(&self) -> Vec<ContainerOperationRequest> {
         self.resume_requests.lock().expect("resume lock").clone()
+    }
+
+    fn update_requests(&self) -> Vec<UpdateRequest> {
+        self.update_requests.lock().expect("update lock").clone()
+    }
+
+    fn update_effects(&self) -> Vec<UpdateRequest> {
+        self.update_effects
+            .lock()
+            .expect("update effect lock")
+            .clone()
+    }
+
+    fn processes_requests(&self) -> Vec<ProcessesRequest> {
+        self.processes_requests
+            .lock()
+            .expect("processes lock")
+            .clone()
+    }
+
+    fn stats_requests(&self) -> Vec<StatsRequest> {
+        self.stats_requests.lock().expect("stats lock").clone()
+    }
+
+    fn events_requests(&self) -> Vec<EventsRequest> {
+        self.events_requests.lock().expect("events lock").clone()
     }
 
     fn exec_requests(&self) -> Vec<OciExecRequest> {
@@ -452,6 +501,196 @@ impl OciRuntimeService for FakeRuntimeService {
             );
         }
         Ok(record)
+    }
+
+    async fn update(&self, request: UpdateRequest) -> OciResult<ContainerRecord> {
+        self.update_requests
+            .lock()
+            .map_err(|error| lock_error("update", error))?
+            .push(request.clone());
+        let record = {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|error| lock_error("update", error))?;
+            let container = containers.get(request.target.id.as_str()).ok_or_else(|| {
+                oci_error(ErrorCode::NotFound, "update", "fake runtime is absent")
+            })?;
+            validate_target(&request.target, &container.record, "update")?;
+            if *container.record.state.status() != ContainerState::Running
+                || container.record.is_paused()
+            {
+                return Err(oci_error(
+                    ErrorCode::FailedPrecondition,
+                    "update",
+                    "fake runtime is not running",
+                ));
+            }
+            container.record.clone()
+        };
+        let operation_id = request.context.operation_id.to_string();
+        let mut journal = self
+            .update_journal
+            .lock()
+            .map_err(|error| lock_error("update", error))?;
+        if let Some(previous) = journal.get(&operation_id) {
+            if previous != &request {
+                return Err(oci_error(
+                    ErrorCode::Conflict,
+                    "update",
+                    "operation identity was reused with different resources",
+                ));
+            }
+            return Ok(record);
+        }
+        journal.insert(operation_id, request.clone());
+        self.update_effects
+            .lock()
+            .map_err(|error| lock_error("update", error))?
+            .push(request);
+        drop(journal);
+        if self.fail_update_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake update response was lost")
+                    .for_operation("update")
+                    .retryable(true),
+            );
+        }
+        Ok(record)
+    }
+
+    async fn processes(&self, request: ProcessesRequest) -> OciResult<Vec<ProcessRecord>> {
+        self.processes_requests
+            .lock()
+            .map_err(|error| lock_error("processes", error))?
+            .push(request.clone());
+        {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|error| lock_error("processes", error))?;
+            let container = containers.get(request.target.id.as_str()).ok_or_else(|| {
+                oci_error(ErrorCode::NotFound, "processes", "fake runtime is absent")
+            })?;
+            validate_target(&request.target, &container.record, "processes")?;
+        }
+        let target = if self.drift_process_target.load(Ordering::SeqCst) {
+            ContainerTarget::exact(
+                ContainerId::new("a3s-box-drift").expect("drift container ID"),
+                Generation(99),
+            )
+        } else {
+            request.target.clone()
+        };
+        let mut records = vec![ProcessRecord {
+            target: ProcessTarget {
+                container: target,
+                process_id: ProcessId::init(),
+            },
+            pid: Some(4_242),
+            terminal: false,
+        }];
+        records.extend(
+            self.processes
+                .lock()
+                .map_err(|error| lock_error("processes", error))?
+                .values()
+                .filter(|process| process.exit_status.is_none())
+                .map(|process| process.record.clone()),
+        );
+        Ok(records)
+    }
+
+    async fn stats(&self, request: StatsRequest) -> OciResult<ContainerStats> {
+        self.stats_requests
+            .lock()
+            .map_err(|error| lock_error("stats", error))?
+            .push(request.clone());
+        {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|error| lock_error("stats", error))?;
+            let container = containers
+                .get(request.target.id.as_str())
+                .ok_or_else(|| oci_error(ErrorCode::NotFound, "stats", "fake runtime is absent"))?;
+            validate_target(&request.target, &container.record, "stats")?;
+        }
+        let target = if self.drift_stats_target.load(Ordering::SeqCst) {
+            ContainerTarget::exact(
+                ContainerId::new("a3s-box-drift").expect("drift container ID"),
+                Generation(99),
+            )
+        } else {
+            request.target
+        };
+        Ok(ContainerStats {
+            target,
+            timestamp_unix_ns: 1_700_000_000_000_000_000,
+            cpu: CpuStats {
+                usage_ns: 100,
+                user_ns: 60,
+                system_ns: 30,
+                throttled_ns: 5,
+            },
+            memory: MemoryStats {
+                usage_bytes: 64 * 1024 * 1024,
+                limit_bytes: Some(128 * 1024 * 1024),
+                peak_bytes: Some(72 * 1024 * 1024),
+            },
+            process_count: 1,
+            metrics: BTreeMap::from([("io.read_bytes".to_string(), 4096)]),
+        })
+    }
+
+    async fn events(&self, request: EventsRequest) -> OciResult<EventBatch> {
+        self.events_requests
+            .lock()
+            .map_err(|error| lock_error("events", error))?
+            .push(request.clone());
+        let target = request.container.clone().ok_or_else(|| {
+            oci_error(
+                ErrorCode::InvalidArgument,
+                "events",
+                "fake events require a container filter",
+            )
+        })?;
+        {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|error| lock_error("events", error))?;
+            let container = containers.get(target.id.as_str()).ok_or_else(|| {
+                oci_error(ErrorCode::NotFound, "events", "fake runtime is absent")
+            })?;
+            validate_target(&target, &container.record, "events")?;
+        }
+        let sequences = if self.misorder_events.load(Ordering::SeqCst) {
+            vec![8, 7]
+        } else {
+            vec![5, 8]
+        };
+        let events = sequences
+            .into_iter()
+            .filter(|sequence| *sequence > request.after_sequence)
+            .take(request.limit as usize)
+            .map(|sequence| RuntimeEvent {
+                sequence,
+                timestamp_unix_ns: 1_700_000_000_000_000_000 + sequence,
+                container: target.clone(),
+                process_id: (sequence == 8).then(ProcessId::init),
+                kind: if sequence == 5 {
+                    RuntimeEventKind::ContainerStarted
+                } else {
+                    RuntimeEventKind::ProcessStarted
+                },
+                attributes: BTreeMap::new(),
+            })
+            .collect();
+        Ok(EventBatch {
+            events,
+            next_sequence: 8_u64.max(request.after_sequence),
+        })
     }
 
     async fn kill(&self, request: KillRequest) -> OciResult<ContainerRecord> {
@@ -2444,6 +2683,433 @@ async fn graceful_kill_timeout_escalates_through_a_distinct_sdk_signal() {
     assert_eq!(service.container_count(), 0);
 }
 
+#[tokio::test]
+async fn exact_generation_processes_stats_and_events_use_the_public_sdk() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("observable", ExecutionIsolation::Sandbox),
+            &box_operation("observable-create"),
+        )
+        .await
+        .expect("initial launch");
+    let binding = persisted(&manager, &lease.execution_id)
+        .managed_execution
+        .expect("managed metadata")
+        .oci_runtime
+        .expect("OCI binding");
+
+    let inventory = manager
+        .list_processes(&lease.execution_id, lease.generation)
+        .await
+        .expect("process inventory");
+    assert_eq!(inventory.execution_id, lease.execution_id);
+    assert_eq!(inventory.generation, lease.generation);
+    assert_eq!(inventory.processes.len(), 1);
+    assert_eq!(inventory.processes[0].process_id, "init");
+    assert_eq!(inventory.processes[0].pid, Some(4_242));
+    assert_eq!(service.processes_requests()[0].target, binding.target);
+
+    let stats = manager
+        .stats(&lease.execution_id, lease.generation)
+        .await
+        .expect("runtime stats");
+    assert_eq!(stats.execution_id, lease.execution_id);
+    assert_eq!(stats.cpu.usage_ns, 100);
+    assert_eq!(stats.memory.limit_bytes, Some(128 * 1024 * 1024));
+    assert_eq!(stats.metrics["io.read_bytes"], 4096);
+    assert_eq!(service.stats_requests()[0].target, binding.target);
+
+    let batch = manager
+        .events(
+            &lease.execution_id,
+            lease.generation,
+            ExecutionEventsRequest {
+                after_sequence: 0,
+                limit: 16,
+                wait_timeout_ms: Some(250),
+            },
+        )
+        .await
+        .expect("runtime events");
+    assert_eq!(batch.execution_id, lease.execution_id);
+    assert_eq!(batch.generation, lease.generation);
+    assert_eq!(
+        batch
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 8]
+    );
+    assert_eq!(batch.events[1].process_id.as_deref(), Some("init"));
+    assert_eq!(batch.next_sequence, 8);
+    let request = &service.events_requests()[0];
+    assert_eq!(request.container.as_ref(), Some(&binding.target));
+    assert_eq!(request.wait_timeout_ms, Some(250));
+}
+
+#[tokio::test]
+async fn resource_update_persists_complete_intent_and_replays_locally() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let create_operation = box_operation("resource-update-create");
+    let create_request = request("resource-update", ExecutionIsolation::Microvm);
+    let lease = manager
+        .create_and_start(create_request.clone(), &create_operation)
+        .await
+        .expect("initial launch");
+    let operation = box_operation("resource-update-live");
+    let update = ExecutionResourceUpdate {
+        memory_reservation: Some(64 * 1024 * 1024),
+        pids_limit: Some(64),
+        cpu_shares: Some(512),
+        cpu_quota: Some(50_000),
+        cpu_period: Some(100_000),
+        cpuset_cpus: Some("0-1".to_string()),
+        ..Default::default()
+    };
+
+    let updated = manager
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &operation,
+            update.clone(),
+        )
+        .await
+        .expect("resource update");
+    assert_eq!(updated.generation, lease.generation);
+    assert_eq!(service.update_requests().len(), 1);
+    assert_eq!(service.update_effects().len(), 1);
+    let runtime_request = &service.update_requests()[0];
+    let memory = runtime_request
+        .resources
+        .memory()
+        .as_ref()
+        .expect("memory resources");
+    let cpu = runtime_request
+        .resources
+        .cpu()
+        .as_ref()
+        .expect("CPU resources");
+    let pids = runtime_request
+        .resources
+        .pids()
+        .as_ref()
+        .expect("PID resources");
+    assert_eq!(memory.limit(), Some(128 * 1024 * 1024));
+    assert_eq!(memory.reservation(), Some(64 * 1024 * 1024));
+    assert_eq!(cpu.shares(), Some(512));
+    assert_eq!(cpu.quota(), Some(50_000));
+    assert_eq!(cpu.period(), Some(100_000));
+    assert_eq!(cpu.cpus().as_deref(), Some("0-1"));
+    assert_eq!(pids.limit(), 64);
+
+    let record = persisted(&manager, &lease.execution_id);
+    assert_eq!(record.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(record.resource_limits.cpu_shares, Some(512));
+    let metadata = record.managed_execution.as_ref().expect("managed metadata");
+    assert_eq!(
+        metadata.request.config.resource_limits,
+        record.resource_limits
+    );
+    let completed = metadata
+        .last_resource_update
+        .as_ref()
+        .expect("resource completion");
+    assert_eq!(completed.operation_id, operation);
+    assert_eq!(completed.update, update);
+
+    manager
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &operation,
+            update.clone(),
+        )
+        .await
+        .expect("local completion replay");
+    assert_eq!(service.update_requests().len(), 1);
+    let error = manager
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &operation,
+            ExecutionResourceUpdate {
+                cpu_shares: Some(1024),
+                ..update
+            },
+        )
+        .await
+        .expect_err("changed completed intent must fail");
+    assert!(matches!(error, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(service.update_requests().len(), 1);
+
+    let replayed_create = manager
+        .create_and_start(create_request, &create_operation)
+        .await
+        .expect("original create remains idempotent after mutable resource intent");
+    assert_eq!(replayed_create.execution_id, lease.execution_id);
+    assert_eq!(replayed_create.generation, lease.generation);
+    assert_eq!(service.create_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn lost_resource_update_response_recovers_with_the_same_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service
+        .fail_update_after_effect
+        .store(true, Ordering::SeqCst);
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let create_operation = box_operation("lost-update-create");
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let lease = first
+        .create_and_start(
+            request("lost-update", ExecutionIsolation::Sandbox),
+            &create_operation,
+        )
+        .await
+        .expect("initial launch");
+    let update = ExecutionResourceUpdate {
+        pids_limit: Some(72),
+        ..Default::default()
+    };
+
+    first
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &box_operation("lost-update-live"),
+            update.clone(),
+        )
+        .await
+        .expect_err("first response is lost");
+    let claimed = persisted(&first, &lease.execution_id);
+    assert_eq!(
+        claimed.status,
+        ManagedExecutionState::UpdatingResources.as_status()
+    );
+    assert_eq!(service.update_effects().len(), 1);
+    let conflict = first
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &box_operation("lost-update-live"),
+            ExecutionResourceUpdate {
+                pids_limit: Some(73),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("pending operation identity cannot change content");
+    assert!(matches!(conflict, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(service.update_requests().len(), 1);
+
+    let reopened = manager(&directory, endpoint, service.clone(), provider);
+    let outcome = reopened
+        .reconcile(&create_operation)
+        .await
+        .expect("resource update recovery");
+    assert!(matches!(outcome, ReconcileOutcome::Ready(_)));
+    let recovered = persisted(&reopened, &lease.execution_id);
+    assert_eq!(recovered.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(recovered.resource_limits.pids_limit, Some(72));
+    assert_eq!(service.update_requests().len(), 2);
+    assert_eq!(service.update_effects().len(), 1);
+    assert_eq!(
+        service.update_requests()[0].context.operation_id,
+        service.update_requests()[1].context.operation_id
+    );
+}
+
+#[tokio::test]
+async fn resource_update_racing_natural_exit_settles_the_terminal_record() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let create_operation = box_operation("terminal-update-create");
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("terminal-update", ExecutionIsolation::Sandbox),
+            &create_operation,
+        )
+        .await
+        .expect("initial launch");
+    service.mark_stopped(
+        &lease.execution_id,
+        ExitStatus::exited(17).expect("exit status"),
+    );
+
+    manager
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &box_operation("terminal-update-live"),
+            ExecutionResourceUpdate {
+                pids_limit: Some(44),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("stopped runtime cannot accept a live update");
+
+    let record = persisted(&manager, &lease.execution_id);
+    assert_eq!(record.status, ManagedExecutionState::Stopped.as_status());
+    assert_eq!(record.exit_code, Some(17));
+    assert!(record
+        .managed_execution
+        .as_ref()
+        .expect("managed metadata")
+        .pending_operation
+        .is_none());
+    assert!(matches!(
+        manager
+            .reconcile(&create_operation)
+            .await
+            .expect("terminal reconciliation"),
+        ReconcileOutcome::Failed
+    ));
+}
+
+#[tokio::test]
+async fn observability_rejects_runtime_target_and_event_order_drift() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("drift-observation", ExecutionIsolation::Sandbox),
+            &box_operation("drift-observation-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    service.drift_process_target.store(true, Ordering::SeqCst);
+    let process_error = manager
+        .list_processes(&lease.execution_id, lease.generation)
+        .await
+        .expect_err("process target drift must fail");
+    assert!(matches!(process_error, ExecutionManagerError::Internal(_)));
+    service.drift_process_target.store(false, Ordering::SeqCst);
+
+    service.drift_stats_target.store(true, Ordering::SeqCst);
+    let stats_error = manager
+        .stats(&lease.execution_id, lease.generation)
+        .await
+        .expect_err("stats target drift must fail");
+    assert!(matches!(stats_error, ExecutionManagerError::Internal(_)));
+    service.drift_stats_target.store(false, Ordering::SeqCst);
+
+    service.misorder_events.store(true, Ordering::SeqCst);
+    let events_error = manager
+        .events(
+            &lease.execution_id,
+            lease.generation,
+            ExecutionEventsRequest {
+                after_sequence: 0,
+                limit: 16,
+                wait_timeout_ms: None,
+            },
+        )
+        .await
+        .expect_err("event order drift must fail");
+    assert!(matches!(events_error, ExecutionManagerError::Internal(_)));
+}
+
+#[tokio::test]
+async fn new_runtime_operations_require_advertised_capabilities_before_dispatch() {
+    for operation in [
+        RuntimeOperation::Processes,
+        RuntimeOperation::Stats,
+        RuntimeOperation::Events,
+        RuntimeOperation::Update,
+    ] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let service = Arc::new(FakeRuntimeService::without_operation(operation));
+        let manager = manager(
+            &directory,
+            test_endpoint(),
+            service.clone(),
+            Arc::new(FakeBundleProvider::default()),
+        );
+        let create_operation = box_operation(&format!("missing-{operation:?}-create"));
+        let lease = manager
+            .create_and_start(
+                request("missing-observation", ExecutionIsolation::Sandbox),
+                &create_operation,
+            )
+            .await
+            .expect("initial launch");
+
+        let error = match operation {
+            RuntimeOperation::Processes => manager
+                .list_processes(&lease.execution_id, lease.generation)
+                .await
+                .map(|_| ()),
+            RuntimeOperation::Stats => manager
+                .stats(&lease.execution_id, lease.generation)
+                .await
+                .map(|_| ()),
+            RuntimeOperation::Events => manager
+                .events(
+                    &lease.execution_id,
+                    lease.generation,
+                    ExecutionEventsRequest {
+                        after_sequence: 0,
+                        limit: 1,
+                        wait_timeout_ms: None,
+                    },
+                )
+                .await
+                .map(|_| ()),
+            RuntimeOperation::Update => manager
+                .update_resources(
+                    &lease.execution_id,
+                    lease.generation,
+                    &box_operation("missing-update-live"),
+                    ExecutionResourceUpdate {
+                        pids_limit: Some(32),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ()),
+            _ => unreachable!(),
+        }
+        .expect_err("missing operation must fail closed");
+        assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+        let record = persisted(&manager, &lease.execution_id);
+        assert_eq!(record.status, ManagedExecutionState::Running.as_status());
+    }
+}
+
 fn manager(
     directory: &tempfile::TempDir,
     endpoint: OciRuntimeEndpoint,
@@ -2548,7 +3214,8 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
         "operations": [
             "features", "create", "state", "start", "kill", "delete", "wait",
             "pause", "resume", "exec", "read-output", "write-stdin", "close-stdin",
-            "resize", "signal-process", "wait-process"
+            "resize", "signal-process", "wait-process", "update", "processes", "stats",
+            "events"
         ],
         "attachments": {
             "schemas": ["a3s.oci.attachments.v1"],

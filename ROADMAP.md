@@ -163,7 +163,7 @@ evidence.
 - [x] Route captured and streaming exec, process signal/wait, stdin, captured
   output, PTY, and resize through exact-generation OCI SDK operations with
   capability preflight and replay-safe one-shot identities.
-- [ ] Route process inventory, resource update, stats, and ordered events
+- [x] Route process inventory, resource update, stats, and ordered events
   through the OCI SDK.
 - [x] Keep raw runtime output separate from Box log retention, indexing,
   cursor, search, and redaction policy.
@@ -183,8 +183,12 @@ runtime binding, and backend recreation after lost freezer responses. It also
 covers keyed exec replay after a lost response, exact normal and signaled
 status, generation and capability rejection before mutation, replay-safe stdin,
 PTY output/resize/signal, raw-log separation, second-rootfs rejection, timeout
-cleanup, and caller-cancellation cleanup. Native-driver and out-of-process
-restart evidence remains part of the exit gate.
+cleanup, and caller-cancellation cleanup. The same suite now validates exact
+process targets, normalized stats, strict ordered-event cursors, durable
+`updating_resources` claims, immutable create identity after mutable resource
+intent, local completion replay, lost-response recovery after backend
+recreation, and terminal-exit races. Native-driver and out-of-process restart
+evidence remains part of the exit gate.
 
 ### B3 - Storage And Networking Attachments
 

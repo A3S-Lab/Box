@@ -91,6 +91,54 @@ impl A3sBoxClient {
             .await?)
     }
 
+    /// List runtime-visible init and exec processes for one exact generation.
+    pub async fn list_execution_processes(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<ExecutionProcessInventory> {
+        Ok(self
+            .execution_manager
+            .list_processes(execution_id, generation)
+            .await?)
+    }
+
+    /// Read one normalized resource snapshot for an exact generation.
+    pub async fn execution_stats(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<ExecutionStats> {
+        Ok(self.execution_manager.stats(execution_id, generation).await?)
+    }
+
+    /// Poll ordered runtime events for an exact generation.
+    pub async fn execution_events(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: ExecutionEventsRequest,
+    ) -> Result<ExecutionEventBatch> {
+        Ok(self
+            .execution_manager
+            .events(execution_id, generation, request)
+            .await?)
+    }
+
+    /// Apply a replay-safe partial live resource update.
+    pub async fn update_execution_resources(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        operation_id: &OperationId,
+        update: ExecutionResourceUpdate,
+    ) -> Result<ExecutionLease> {
+        Ok(self
+            .execution_manager
+            .update_resources(execution_id, generation, operation_id, update)
+            .await?)
+    }
+
     /// Pause a managed execution through its resolved backend.
     pub async fn pause_execution(
         &self,

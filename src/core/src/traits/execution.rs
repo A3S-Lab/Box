@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::config::{BoxConfig, ResourceConfig};
+use crate::config::{BoxConfig, ResourceConfig, ResourceLimits};
 use crate::execution::ResolvedExecutionPlan;
 use crate::log::{LogConfig, LogEntry};
 
@@ -435,6 +435,348 @@ pub struct RestartExecutionOptions {
     pub stop_timeout_secs: Option<u64>,
 }
 
+/// Maximum number of ordered runtime events returned by one bounded poll.
+pub const MAX_EXECUTION_EVENT_BATCH_ITEMS: u32 = 4_096;
+
+/// Partial live update for cgroup-backed workload controls.
+///
+/// Every `None` field preserves the currently persisted value. Provisioned
+/// vCPU count, hard memory size, rlimits, and device policy are deliberately
+/// absent because changing them requires a new execution generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionResourceUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_reservation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_swap: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_shares: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_quota: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_period: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpuset_cpus: Option<String>,
+}
+
+impl ExecutionResourceUpdate {
+    /// Whether the request carries no resource mutation.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.memory_reservation.is_none()
+            && self.memory_swap.is_none()
+            && self.pids_limit.is_none()
+            && self.cpu_shares.is_none()
+            && self.cpu_quota.is_none()
+            && self.cpu_period.is_none()
+            && self.cpuset_cpus.is_none()
+    }
+
+    /// Validate backend-independent value constraints before a durable claim.
+    pub fn validate(&self) -> ExecutionManagerResult<()> {
+        if self.is_empty() {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "resource update must change at least one supported field".to_string(),
+            ));
+        }
+        if self.memory_swap.is_some_and(|value| value < -1) {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "memory swap must be -1 (unlimited) or non-negative".to_string(),
+            ));
+        }
+        if self.pids_limit == Some(0) {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "PID limit must be greater than zero".to_string(),
+            ));
+        }
+        if self
+            .cpu_shares
+            .is_some_and(|value| !(2..=262_144).contains(&value))
+        {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "CPU shares must be between 2 and 262144".to_string(),
+            ));
+        }
+        if self.cpu_quota.is_some_and(|value| value <= 0) {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "CPU quota must be greater than zero".to_string(),
+            ));
+        }
+        if self.cpu_period == Some(0) {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "CPU period must be greater than zero".to_string(),
+            ));
+        }
+        if self
+            .cpuset_cpus
+            .as_deref()
+            .is_some_and(|value| !valid_cpuset(value))
+        {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "CPU set must be a comma-separated list of indices or ascending ranges".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Merge this partial request into a complete persisted limit snapshot.
+    pub fn apply_to(&self, limits: &mut ResourceLimits) {
+        if let Some(value) = self.memory_reservation {
+            limits.memory_reservation = Some(value);
+        }
+        if let Some(value) = self.memory_swap {
+            limits.memory_swap = Some(value);
+        }
+        if let Some(value) = self.pids_limit {
+            limits.pids_limit = Some(value);
+        }
+        if let Some(value) = self.cpu_shares {
+            limits.cpu_shares = Some(value);
+        }
+        if let Some(value) = self.cpu_quota {
+            limits.cpu_quota = Some(value);
+        }
+        if let Some(value) = self.cpu_period {
+            limits.cpu_period = Some(value);
+        }
+        if let Some(value) = self.cpuset_cpus.as_ref() {
+            limits.cpuset_cpus = Some(value.clone());
+        }
+    }
+}
+
+/// One runtime-visible init or exec process in an exact Box generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionProcessInfo {
+    pub process_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub terminal: bool,
+}
+
+/// Exact-generation process inventory returned by the selected runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionProcessInventory {
+    pub execution_id: ExecutionId,
+    pub generation: ExecutionGeneration,
+    pub processes: Vec<ExecutionProcessInfo>,
+}
+
+impl ExecutionProcessInventory {
+    pub fn validate(&self) -> ExecutionManagerResult<()> {
+        let mut identifiers = std::collections::BTreeSet::new();
+        for process in &self.processes {
+            if process.process_id.trim().is_empty() {
+                return Err(ExecutionManagerError::Internal(
+                    "runtime process inventory contains an empty process ID".to_string(),
+                ));
+            }
+            if process.pid == Some(0) {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "runtime process {} contains PID zero",
+                    process.process_id
+                )));
+            }
+            if !identifiers.insert(process.process_id.as_str()) {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "runtime process inventory contains duplicate process ID {}",
+                    process.process_id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Normalized CPU counters from one exact runtime generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionCpuStats {
+    pub usage_ns: u64,
+    pub user_ns: u64,
+    pub system_ns: u64,
+    pub throttled_ns: u64,
+}
+
+/// Normalized memory counters from one exact runtime generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionMemoryStats {
+    pub usage_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_bytes: Option<u64>,
+}
+
+/// One typed, exact-generation runtime resource snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionStats {
+    pub execution_id: ExecutionId,
+    pub generation: ExecutionGeneration,
+    pub timestamp_unix_ns: u64,
+    pub cpu: ExecutionCpuStats,
+    pub memory: ExecutionMemoryStats,
+    pub process_count: u64,
+    pub metrics: BTreeMap<String, u64>,
+}
+
+impl ExecutionStats {
+    pub fn validate(&self) -> ExecutionManagerResult<()> {
+        if self.timestamp_unix_ns == 0 {
+            return Err(ExecutionManagerError::Internal(
+                "runtime stats timestamp must be positive".to_string(),
+            ));
+        }
+        let accounted = self
+            .cpu
+            .user_ns
+            .checked_add(self.cpu.system_ns)
+            .ok_or_else(|| {
+                ExecutionManagerError::Internal(
+                    "runtime CPU user and system counters overflow".to_string(),
+                )
+            })?;
+        if accounted > self.cpu.usage_ns {
+            return Err(ExecutionManagerError::Internal(
+                "runtime CPU user and system counters exceed total usage".to_string(),
+            ));
+        }
+        if self
+            .memory
+            .peak_bytes
+            .is_some_and(|peak| peak < self.memory.usage_bytes)
+        {
+            return Err(ExecutionManagerError::Internal(
+                "runtime memory peak is below current usage".to_string(),
+            ));
+        }
+        if let Some(name) = self.metrics.keys().find(|name| {
+            name.is_empty()
+                || name.len() > 256
+                || name
+                    .chars()
+                    .any(|character| character.is_control() || character.is_whitespace())
+        }) {
+            return Err(ExecutionManagerError::Internal(format!(
+                "runtime metric name is invalid: {name:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Bounded cursor request for exact-generation ordered runtime events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionEventsRequest {
+    pub after_sequence: u64,
+    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+impl ExecutionEventsRequest {
+    pub fn validate(&self) -> ExecutionManagerResult<()> {
+        if self.limit == 0 || self.limit > MAX_EXECUTION_EVENT_BATCH_ITEMS {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "event batch limit must be between 1 and {MAX_EXECUTION_EVENT_BATCH_ITEMS}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Backend-neutral ordered runtime event kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionEventKind {
+    ContainerCreating,
+    ContainerCreated,
+    ContainerStarted,
+    ContainerStopped,
+    ContainerDeleted,
+    ContainerPaused,
+    ContainerResumed,
+    ResourcesUpdated,
+    ProcessCreated,
+    ProcessStarted,
+    ProcessExited,
+    OutputDropped,
+    RuntimeWarning,
+}
+
+/// One event from the runtime's durable global order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionRuntimeEvent {
+    pub sequence: u64,
+    pub timestamp_unix_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
+    pub kind: ExecutionEventKind,
+    pub attributes: BTreeMap<String, String>,
+}
+
+/// One bounded event poll result for an exact Box generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionEventBatch {
+    pub execution_id: ExecutionId,
+    pub generation: ExecutionGeneration,
+    pub events: Vec<ExecutionRuntimeEvent>,
+    pub next_sequence: u64,
+}
+
+impl ExecutionEventBatch {
+    pub fn validate_after(&self, after_sequence: u64) -> ExecutionManagerResult<()> {
+        if self.next_sequence < after_sequence {
+            return Err(ExecutionManagerError::Internal(
+                "runtime event cursor regressed".to_string(),
+            ));
+        }
+        let mut previous = after_sequence;
+        for event in &self.events {
+            if event.sequence == 0 || event.sequence <= previous {
+                return Err(ExecutionManagerError::Internal(
+                    "runtime events are not strictly ordered after the requested cursor"
+                        .to_string(),
+                ));
+            }
+            if event.timestamp_unix_ns == 0 {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "runtime event {} has timestamp zero",
+                    event.sequence
+                )));
+            }
+            previous = event.sequence;
+        }
+        if self.next_sequence < previous {
+            return Err(ExecutionManagerError::Internal(
+                "runtime event next cursor precedes the returned batch".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_cpuset(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.split(',').all(|item| {
+            let item = item.trim();
+            match item.split_once('-') {
+                Some((lower, upper)) => parse_cpu_index(lower)
+                    .zip(parse_cpu_index(upper))
+                    .is_some_and(|(lower, upper)| lower <= upper),
+                None => parse_cpu_index(item).is_some(),
+            }
+        })
+}
+
+fn parse_cpu_index(value: &str) -> Option<u32> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
 /// Runtime evidence recovered after a service restart.
 #[derive(Debug, Clone)]
 pub enum ReconcileOutcome {
@@ -537,6 +879,53 @@ pub trait ExecutionManager: Send + Sync {
     ) -> ExecutionManagerResult<Vec<LogEntry>> {
         Err(ExecutionManagerError::Unavailable(
             "this execution manager does not expose structured logs".to_string(),
+        ))
+    }
+
+    /// Return the runtime-visible init and live exec processes for one exact generation.
+    async fn list_processes(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionProcessInventory> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not expose process inventory".to_string(),
+        ))
+    }
+
+    /// Return one normalized resource snapshot for an exact generation.
+    async fn stats(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionStats> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not expose runtime stats".to_string(),
+        ))
+    }
+
+    /// Poll ordered runtime events without crossing the selected generation.
+    async fn events(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: ExecutionEventsRequest,
+    ) -> ExecutionManagerResult<ExecutionEventBatch> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not expose runtime events".to_string(),
+        ))
+    }
+
+    /// Apply a replay-safe partial live resource update to one exact generation.
+    async fn update_resources(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _operation_id: &OperationId,
+        _update: ExecutionResourceUpdate,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support live resource updates".to_string(),
         ))
     }
 
@@ -740,5 +1129,99 @@ mod tests {
             serde_json::to_value(ExecutionRestartPolicy::OnFailure).unwrap(),
             "on-failure"
         );
+    }
+
+    #[test]
+    fn resource_updates_validate_and_preserve_unmentioned_limits() {
+        let mut limits = ResourceLimits {
+            memory_swap: Some(-1),
+            cpu_period: Some(100_000),
+            ulimits: vec!["NOFILE=1024:2048".to_string()],
+            ..Default::default()
+        };
+        let update = ExecutionResourceUpdate {
+            memory_reservation: Some(64 * 1024 * 1024),
+            pids_limit: Some(64),
+            cpu_shares: Some(512),
+            cpuset_cpus: Some("0-1,3".to_string()),
+            ..Default::default()
+        };
+
+        update.validate().unwrap();
+        update.apply_to(&mut limits);
+
+        assert_eq!(limits.memory_reservation, Some(64 * 1024 * 1024));
+        assert_eq!(limits.memory_swap, Some(-1));
+        assert_eq!(limits.cpu_period, Some(100_000));
+        assert_eq!(limits.pids_limit, Some(64));
+        assert_eq!(limits.cpu_shares, Some(512));
+        assert_eq!(limits.cpuset_cpus.as_deref(), Some("0-1,3"));
+        assert_eq!(limits.ulimits, ["NOFILE=1024:2048"]);
+
+        for invalid in [
+            ExecutionResourceUpdate::default(),
+            ExecutionResourceUpdate {
+                pids_limit: Some(0),
+                ..Default::default()
+            },
+            ExecutionResourceUpdate {
+                cpu_shares: Some(1),
+                ..Default::default()
+            },
+            ExecutionResourceUpdate {
+                cpu_quota: Some(-1),
+                ..Default::default()
+            },
+            ExecutionResourceUpdate {
+                cpuset_cpus: Some("3-1".to_string()),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                invalid.validate(),
+                Err(ExecutionManagerError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn event_batches_require_strict_order_and_nonregressing_cursors() {
+        let execution_id = ExecutionId::new("events").unwrap();
+        let batch = ExecutionEventBatch {
+            execution_id: execution_id.clone(),
+            generation: ExecutionGeneration::INITIAL,
+            events: vec![
+                ExecutionRuntimeEvent {
+                    sequence: 4,
+                    timestamp_unix_ns: 10,
+                    process_id: None,
+                    kind: ExecutionEventKind::ContainerStarted,
+                    attributes: BTreeMap::new(),
+                },
+                ExecutionRuntimeEvent {
+                    sequence: 7,
+                    timestamp_unix_ns: 11,
+                    process_id: Some("init".to_string()),
+                    kind: ExecutionEventKind::ProcessStarted,
+                    attributes: BTreeMap::new(),
+                },
+            ],
+            next_sequence: 7,
+        };
+        batch.validate_after(3).unwrap();
+
+        let mut duplicate = batch.clone();
+        duplicate.events[1].sequence = 4;
+        assert!(matches!(
+            duplicate.validate_after(3),
+            Err(ExecutionManagerError::Internal(_))
+        ));
+
+        let mut regressed = batch;
+        regressed.next_sequence = 3;
+        assert!(matches!(
+            regressed.validate_after(3),
+            Err(ExecutionManagerError::Internal(_))
+        ));
     }
 }

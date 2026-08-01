@@ -44,22 +44,23 @@ There is no silent fallback between them. The request, resolved backend, and
 policy are persisted so restart recovery cannot reinterpret the workload.
 
 > [!NOTE]
-> The architecture is actively converging on one public
-> `a3s-oci-sdk` boundary for both isolation classes. A reusable SDK-only
-> lifecycle adapter and explicitly constructed local backend now exist. That
-> boundary negotiates `a3s.oci.attachments.v1`, submits the bundle rootfs,
-> mounts, networking, process I/O, secret classifications, and optional
-> extensions as one validated manifest, and persists its exact digest for
-> recovery. That exact-generation boundary now carries memory-retaining
-> pause/resume and Box process sessions: captured and streaming exec, stdin,
-> cursor-checked output, signals and wait, PTY resize, exact exit status, and
-> bounded timeout cleanup. One-shot request IDs replay to the same process
-> after backend recreation, while raw runtime output remains separate from
-> structured Box logs. Legacy VM records keep their socket sessions; OCI-bound
-> records use the SDK transport on Unix and Windows. Process inventory,
-> resource update, stats, events, Box file sessions, production MicroVM routing,
-> and real-host cutover gates are not complete; the current split above remains
-> authoritative.
+> The current SDK-only Sandbox adapter now covers three exact-generation rails:
+>
+> - versioned rootfs, mount, network, process-I/O, secret, and extension
+>   attachments with a persisted manifest digest;
+> - memory-retaining pause/resume plus captured and streaming exec, stdin,
+>   cursor-checked output, signal/wait, PTY resize, exact exit status, and
+>   bounded timeout cleanup;
+> - live process inventory, normalized stats, bounded ordered events, and
+>   replay-safe resource updates compiled into one complete OCI contract.
+>
+> Calls are capability-checked and bound to the exact runtime target. Resource
+> intent is persisted before mutation and recovered with the same operation
+> identity after a lost response, while the original create identity remains
+> immutable. Raw runtime output stays separate from structured Box logs. Box
+> file sessions, production MicroVM routing, real-host process-session restart
+> evidence, and the broader cutover gates remain open; the current split above
+> is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -150,11 +151,11 @@ runtime mutation instead of being stored and silently weakened.
 
 | Product area | Current surface |
 | --- | --- |
-| Workloads | create, start, stop, restart, kill, pause, wait, inspect, exec, attach, PTY, health, and restart policy |
+| Workloads | create, start, stop, restart, kill, pause, wait, inspect, exec, attach, PTY, live process inventory, health, and restart policy |
 | Images and builds | pull, push, tag, save/load, verified layers, selected Dockerfile/Containerfile builds, content-addressed cache, and signed-image policy |
 | Storage | bind mounts, named volumes, tmpfs, copy, diff, export, commit, filesystem snapshots, and copy-on-write restore |
 | Networking and Compose | TSI, named bridges, peer discovery, TCP publication, generation-fenced Sandbox forwarding, and a bounded ACL/YAML Compose subset |
-| Operations | structured logs, stats, events, audit evidence, metrics, monitoring, resource updates, and cleanup |
+| Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
 A few end-to-end workflows:
@@ -212,6 +213,11 @@ Python, TypeScript, and Go exchange structured protocol-v3 messages with
 incompatible capabilities. See the
 [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md).
 
+The Rust execution contract also exposes `processes`, `runtime_stats`,
+`events`, and `update_resources` on the local Sandbox facade. Each call carries
+the current Box generation; a backend that does not advertise the matching
+runtime operation returns a typed availability error before dispatch.
+
 ## Platform status
 
 | Path | Current evidence | Boundary that remains visible |
@@ -268,8 +274,10 @@ OCI Runtime becomes authoritative for actual process/VM state, raw process
 I/O, operation replay, exact terminal status, driver selection, and runtime
 cleanup. The adapter retains only the exact runtime identity, immutable
 configuration and attachment digests, endpoint, driver, and isolation evidence
-needed to detect recovery drift. Solid current behavior and the phased cutover
-gates are kept separate in
+needed to detect recovery drift. Live reads recheck that binding after the SDK
+response; resource mutations enter a durable `updating_resources` state before
+dispatch and publish the new restart intent only after runtime acknowledgement.
+Solid current behavior and the phased cutover gates are kept separate in
 [ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
 platform capability.
 

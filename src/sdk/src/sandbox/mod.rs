@@ -13,8 +13,9 @@ mod script;
 use std::sync::{Arc, RwLock};
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
-    ExecutionState, ExecutionStatus,
+    ExecutionEventBatch, ExecutionEventsRequest, ExecutionGeneration, ExecutionId,
+    ExecutionIsolation, ExecutionProcessInventory, ExecutionResourceUpdate, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionState, ExecutionStats, ExecutionStatus, OperationId,
 };
 
 pub use builder::SandboxBuilder;
@@ -291,6 +292,49 @@ impl Sandbox {
             | Err(ClientError::BoxNotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Return the runtime-visible init and live exec processes.
+    pub async fn processes(&self) -> Result<ExecutionProcessInventory> {
+        let (_, generation) = self.inner.active_execution()?;
+        self.inner
+            .client
+            .list_execution_processes(&self.inner.execution_id, generation)
+            .await
+    }
+
+    /// Return one normalized resource snapshot for the current generation.
+    pub async fn runtime_stats(&self) -> Result<ExecutionStats> {
+        let (_, generation) = self.inner.active_execution()?;
+        self.inner
+            .client
+            .execution_stats(&self.inner.execution_id, generation)
+            .await
+    }
+
+    /// Poll ordered events without crossing the current runtime generation.
+    pub async fn events(&self, request: ExecutionEventsRequest) -> Result<ExecutionEventBatch> {
+        let (_, generation) = self.inner.active_execution()?;
+        self.inner
+            .client
+            .execution_events(&self.inner.execution_id, generation, request)
+            .await
+    }
+
+    /// Apply a replay-safe partial live resource update.
+    pub async fn update_resources(
+        &self,
+        operation_id: &OperationId,
+        update: ExecutionResourceUpdate,
+    ) -> Result<()> {
+        let (_, generation) = self.inner.active_execution()?;
+        let lease = self
+            .inner
+            .client
+            .update_execution_resources(&self.inner.execution_id, generation, operation_id, update)
+            .await?;
+        self.inner.update(lease.generation, ExecutionState::Running);
+        Ok(())
     }
 
     /// Kill the local execution and remove its runtime-owned record/resources.

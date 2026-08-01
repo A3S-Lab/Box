@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     BoxRecord, BoxStateStore, ManagedExecutionOperation, ManagedExecutionState,
-    ManagedRestartCompletion, ManagedRestartOutcome,
+    ManagedResourceUpdateCompletion, ManagedRestartCompletion, ManagedRestartOutcome,
 };
 
 /// Strict durable repository used by the local `ExecutionManager`.
@@ -147,7 +147,7 @@ impl ManagedExecutionStore {
                     .managed_execution
                     .as_ref()
                     .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(existing_id.clone()))?;
-                if !same_creation_intent(existing_metadata, &incoming_metadata)? {
+                if !same_reservation_intent(existing_metadata, &incoming_metadata)? {
                     return Err(ManagedExecutionStoreError::Conflict {
                         execution_id: existing_id,
                         message: format!(
@@ -334,6 +334,8 @@ impl ManagedExecutionStore {
                 .as_ref()
                 .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
             if updated_metadata.operation_id != original_metadata.operation_id
+                || updated_metadata.creation_intent_digest
+                    != original_metadata.creation_intent_digest
                 || !same_creation_intent(updated_metadata, &original_metadata)?
             {
                 return Err(ManagedExecutionStoreError::InvalidRecord(format!(
@@ -397,6 +399,18 @@ impl ManagedExecutionStore {
                     Some(operation @ ManagedExecutionOperation::Resume { .. }) => Some(operation),
                     _ => Some(ManagedExecutionOperation::Resume { operation_id: None }),
                 },
+                ManagedExecutionState::UpdatingResources => {
+                    match metadata.pending_operation.take() {
+                        Some(operation @ ManagedExecutionOperation::UpdateResources { .. }) => {
+                            Some(operation)
+                        }
+                        _ => {
+                            return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                            "resource update transition for {execution_id} has no persisted intent"
+                        )))
+                        }
+                    }
+                }
                 ManagedExecutionState::Snapshotting => match metadata.pending_operation.take() {
                     Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => Some(operation),
                     _ => {
@@ -432,6 +446,72 @@ impl ManagedExecutionStore {
                 | ManagedExecutionState::Stopped
                 | ManagedExecutionState::Failed => None,
             };
+            Ok(record.clone())
+        })
+    }
+
+    /// Commit one successfully applied live resource update and clear its claim.
+    ///
+    /// This dedicated transaction is the only managed transition allowed to
+    /// change creation-time resource intent. It applies exactly the persisted
+    /// partial request to both compatibility fields and restart recovery state.
+    pub fn finish_resource_update(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ManagedExecutionStoreResult<BoxRecord> {
+        let execution_id = execution_id.clone();
+        BoxStateStore::transact(&self.path, move |store| {
+            let record = store
+                .find_by_id_mut(execution_id.as_str())
+                .ok_or_else(|| ManagedExecutionStoreError::NotFound(execution_id.clone()))?;
+            let state = record
+                .managed_state()
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            let metadata = record
+                .managed_execution
+                .as_ref()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            if state != ManagedExecutionState::UpdatingResources
+                || metadata.generation != expected_generation
+            {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected updating_resources generation {}, found {state} generation {}",
+                        expected_generation.get(),
+                        metadata.generation.get()
+                    ),
+                });
+            }
+            let (operation_id, update) = match metadata.pending_operation.as_ref() {
+                Some(ManagedExecutionOperation::UpdateResources {
+                    operation_id,
+                    update,
+                }) => (operation_id.clone(), update.clone()),
+                _ => {
+                    return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                        "resource update completion for {execution_id} has no persisted intent"
+                    )))
+                }
+            };
+
+            let metadata = record
+                .managed_execution
+                .as_mut()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            update.apply_to(&mut metadata.request.config.resource_limits);
+            metadata.plan = a3s_box_core::resolve_execution(&metadata.request.config)
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+            record.resource_limits = metadata.request.config.resource_limits.clone();
+            metadata.last_resource_update = Some(ManagedResourceUpdateCompletion {
+                operation_id,
+                generation: expected_generation,
+                update,
+            });
+            metadata.pending_operation = None;
+            record.status = ManagedExecutionState::Running.as_status().to_string();
             Ok(record.clone())
         })
     }
@@ -476,6 +556,48 @@ fn same_creation_intent(
     Ok(left_request == right_request && left.plan == right.plan)
 }
 
+fn same_reservation_intent(
+    left: &crate::ManagedExecutionMetadata,
+    right: &crate::ManagedExecutionMetadata,
+) -> ManagedExecutionStoreResult<bool> {
+    match (
+        left.creation_intent_digest.as_deref(),
+        right.creation_intent_digest.as_deref(),
+    ) {
+        (Some(left_digest), Some(right_digest)) => {
+            Ok(left_digest == right_digest && same_immutable_reservation_shape(left, right)?)
+        }
+        // Records written before immutable creation identities use the current
+        // request as their backwards-compatible reservation evidence.
+        _ => same_creation_intent(left, right),
+    }
+}
+
+fn same_immutable_reservation_shape(
+    left: &crate::ManagedExecutionMetadata,
+    right: &crate::ManagedExecutionMetadata,
+) -> ManagedExecutionStoreResult<bool> {
+    let mut left_request = left.request.clone();
+    let mut right_request = right.request.clone();
+    clear_mutable_resource_limits(&mut left_request.config.resource_limits);
+    clear_mutable_resource_limits(&mut right_request.config.resource_limits);
+    let left_request = serde_json::to_value(left_request)
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    let right_request = serde_json::to_value(right_request)
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    Ok(left_request == right_request && left.plan == right.plan)
+}
+
+fn clear_mutable_resource_limits(limits: &mut a3s_box_core::ResourceLimits) {
+    limits.memory_reservation = None;
+    limits.memory_swap = None;
+    limits.pids_limit = None;
+    limits.cpu_shares = None;
+    limits.cpu_quota = None;
+    limits.cpu_period = None;
+    limits.cpuset_cpus = None;
+}
+
 fn transition_generation(
     execution_id: &ExecutionId,
     from: ManagedExecutionState,
@@ -484,7 +606,7 @@ fn transition_generation(
 ) -> ManagedExecutionStoreResult<ExecutionGeneration> {
     use ManagedExecutionState::{
         Created, Creating, Failed, Killing, Paused, Pausing, RestartStarting, RestartStopping,
-        Resuming, Running, Snapshotting, Starting, Stopped,
+        Resuming, Running, Snapshotting, Starting, Stopped, UpdatingResources,
     };
 
     let legal = matches!(
@@ -500,7 +622,13 @@ fn transition_generation(
             )
             | (
                 Running,
-                Pausing | Snapshotting | Killing | RestartStopping | Stopped | Failed
+                Pausing
+                    | UpdatingResources
+                    | Snapshotting
+                    | Killing
+                    | RestartStopping
+                    | Stopped
+                    | Failed
             )
             | (Pausing, Paused | Running | Killing | Stopped | Failed)
             | (
@@ -508,6 +636,7 @@ fn transition_generation(
                 Resuming | Snapshotting | Killing | RestartStopping | Stopped | Failed
             )
             | (Resuming, Running | Paused | Killing | Stopped | Failed)
+            | (UpdatingResources, Running | Killing | Stopped | Failed)
             | (Snapshotting, Running | Paused | Stopped | Failed)
             | (Killing, Stopped | Failed)
             | (Stopped | Failed, RestartStopping)

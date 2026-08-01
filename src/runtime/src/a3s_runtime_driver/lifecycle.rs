@@ -706,6 +706,7 @@ fn runtime_state(spec: &RuntimeUnitSpec, record: &BoxRecord) -> RuntimeResult<Ru
         | ManagedExecutionState::Pausing
         | ManagedExecutionState::Paused
         | ManagedExecutionState::Resuming
+        | ManagedExecutionState::UpdatingResources
         | ManagedExecutionState::Snapshotting
         | ManagedExecutionState::RestartStopping => Ok(RuntimeUnitState::Running),
         ManagedExecutionState::Killing | ManagedExecutionState::Removing => {

@@ -1,6 +1,6 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionState, KillExecutionOptions, ReconcileOutcome,
+    ExecutionResourceUpdate, ExecutionState, KillExecutionOptions, OperationId, ReconcileOutcome,
 };
 
 use super::record::{lease_from_record, reservation_from_record};
@@ -129,6 +129,25 @@ pub(super) fn paused_with_memory(
                 "execution {execution_id} has no persisted pause mode"
             ))
         })
+}
+
+pub(super) fn pending_resource_update(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+) -> ExecutionManagerResult<(OperationId, ExecutionResourceUpdate)> {
+    match record
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.pending_operation.as_ref())
+    {
+        Some(ManagedExecutionOperation::UpdateResources {
+            operation_id,
+            update,
+        }) => Ok((operation_id.clone(), update.clone())),
+        _ => Err(ExecutionManagerError::Internal(format!(
+            "execution {execution_id} has no persisted resource update intent"
+        ))),
+    }
 }
 
 pub(super) fn pending_restart_source_state(
