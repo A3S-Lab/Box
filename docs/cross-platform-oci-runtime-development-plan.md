@@ -1,18 +1,20 @@
 # A3S OCI Runtime Integration and Qualification
 
-Status: **M7 implemented; release qualification is enforced by CI**
+Status: **Sandbox migration implemented; unified execution migration active**
 
-This document is the source of truth for the A3S Box integration with
+This document records the qualified shared-host-kernel integration with
 [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime). The migration has
-one product outcome:
+already delivered one product outcome:
 
 > Explicit `sandbox` isolation is executed only by A3S OCI Runtime.
 
-The default Box isolation remains a libkrun MicroVM. A caller must explicitly
-request shared-host-kernel isolation. Box never silently changes the requested
-isolation class.
+The current default Box isolation remains a directly managed libkrun MicroVM.
+A caller must explicitly request shared-host-kernel isolation. The next
+migration routes both isolation choices through the public OCI Runtime SDK as
+defined in the repository [roadmap](../ROADMAP.md). Box never silently changes
+the requested isolation class during either stage.
 
-## Final backend model
+## Current backend baseline
 
 | Request | Backend | Isolation boundary | Supported hosts |
 | --- | --- | --- | --- |
@@ -23,6 +25,11 @@ Linux containers on macOS and Windows require a utility VM. They cannot provide
 shared-host-kernel isolation. Utility-VM qualification belongs to A3S OCI
 Runtime and does not cause Box to reinterpret a `sandbox` request as a
 MicroVM request.
+
+The target model keeps the same isolation contract but moves MicroVM execution
+behind A3S OCI Runtime: `microvm` requests `DedicatedVm`, while `sandbox`
+requests `SharedHostKernel`. The current direct libkrun path is removed only
+after the replacement passes the cross-platform parity and recovery gates.
 
 ## Completed migration
 
@@ -43,10 +50,10 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2`, which implements the versioned
-control/workload cgroup layout, prepares parent-namespace read-only bind mounts
-before user-namespace entry, and retains the earlier cross-platform
-qualification.
+`d8131f322a94c862995c08838d8df97c8e15c28f`, which retains the qualified
+control/workload cgroup and read-only bind behavior and adds deterministic
+multi-driver registration, isolation selection, and durable recorded-driver
+routing required by the unified execution migration.
 
 ## Upgrade behavior
 
@@ -126,7 +133,7 @@ A release is blocked unless:
 - supported platform build checks pass;
 - failure cleanup returns host state to the recorded baseline.
 
-## Acceptance criteria
+## Completed Sandbox acceptance criteria
 
 The replacement is complete when all of the following are true:
 
