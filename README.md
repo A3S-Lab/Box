@@ -46,9 +46,12 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > [!NOTE]
 > The architecture is actively converging on one public
 > `a3s-oci-sdk` boundary for both isolation classes. A reusable SDK-only
-> lifecycle adapter and explicitly constructed local backend now exist, but
-> production MicroVM routing and real-host cutover gates are not complete; the
-> current split above remains authoritative.
+> lifecycle adapter and explicitly constructed local backend now exist. That
+> boundary negotiates `a3s.oci.attachments.v1`, submits the bundle rootfs,
+> mounts, networking, process I/O, secret classifications, and optional
+> extensions as one validated manifest, and persists its exact digest for
+> recovery. Production MicroVM routing and real-host cutover gates are not
+> complete; the current split above remains authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -254,8 +257,11 @@ A3S OCI Runtime host service
 
 Box remains the product, image, storage, network, health, and policy owner.
 OCI Runtime becomes authoritative for actual process/VM state, operation
-replay, exact terminal status, driver selection, and runtime cleanup. Solid
-current behavior and the phased cutover gates are kept separate in
+replay, exact terminal status, driver selection, and runtime cleanup. The
+adapter retains only the exact runtime identity, immutable configuration and
+attachment digests, endpoint, driver, and isolation evidence needed to detect
+recovery drift. Solid current behavior and the phased cutover gates are kept
+separate in
 [ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
 platform capability.
 

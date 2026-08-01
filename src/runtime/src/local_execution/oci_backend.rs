@@ -9,10 +9,11 @@ use a3s_box_core::{
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
-    ContainerId, ContainerRecord, ContainerTarget, CreateRequest, DeleteMode, DeleteRequest,
-    DriverKind, ErrorCode, ExitStatus, IoMode, IsolationClass, IsolationRequest, KillRequest,
-    LocalIpcEndpoint, OciBundle, OperationContext, OperationId as OciOperationId, ProcessIo,
-    RuntimeClient, RuntimeInfo, RuntimeOperation, Signal, StartRequest, StateRequest, WaitRequest,
+    ContainerId, ContainerRecord, ContainerTarget, CreateAttachments, CreateRequest, DeleteMode,
+    DeleteRequest, DriverKind, ErrorCode, ExitStatus, IoMode, IsolationClass, IsolationRequest,
+    KillRequest, LocalIpcEndpoint, OciBundle, OperationContext, OperationId as OciOperationId,
+    ProcessIo, RuntimeClient, RuntimeInfo, RuntimeOperation, Signal, StartRequest, StateRequest,
+    WaitRequest, ATTACHMENT_SCHEMA_V1,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -26,7 +27,7 @@ use super::{
 use crate::{BoxRecord, ManagedExecutionState};
 
 /// Durable schema for one Box-to-OCI runtime attachment.
-pub const OCI_RUNTIME_BINDING_SCHEMA_VERSION: &str = "a3s.box.oci-runtime-binding.v1";
+pub const OCI_RUNTIME_BINDING_SCHEMA_VERSION: &str = "a3s.box.oci-runtime-binding.v2";
 
 const REQUIRED_LIFECYCLE_OPERATIONS: &[RuntimeOperation] = &[
     RuntimeOperation::Create,
@@ -129,6 +130,8 @@ pub struct OciRuntimeBinding {
     pub isolation: IsolationClass,
     /// Immutable OCI configuration evidence returned by the runtime.
     pub config_digest: String,
+    /// Complete versioned create-time attachment evidence returned by the runtime.
+    pub attachments_digest: String,
 }
 
 impl OciRuntimeBinding {
@@ -150,6 +153,11 @@ impl OciRuntimeBinding {
             driver: record.driver,
             isolation: record.isolation,
             config_digest: record.config_digest.clone(),
+            attachments_digest: record.attachments_digest.clone().ok_or_else(|| {
+                ExecutionManagerError::Internal(
+                    "A3S OCI returned no versioned attachment evidence".to_string(),
+                )
+            })?,
         };
         binding.validate()?;
         Ok(binding)
@@ -175,6 +183,7 @@ impl OciRuntimeBinding {
             ));
         }
         validate_config_digest(&self.config_digest)?;
+        validate_attachments_digest(&self.attachments_digest)?;
         Ok(())
     }
 
@@ -198,6 +207,7 @@ impl OciRuntimeBinding {
             || record.driver != self.driver
             || record.isolation != self.isolation
             || record.config_digest != self.config_digest
+            || record.attachments_digest.as_deref() != Some(self.attachments_digest.as_str())
         {
             return Err(ExecutionManagerError::Internal(format!(
                 "A3S OCI runtime evidence drifted for {} generation {:?}",
@@ -212,29 +222,46 @@ impl OciRuntimeBinding {
 #[derive(Debug, Clone)]
 pub struct OciPreparedExecution {
     pub bundle: OciBundle,
-    pub io: ProcessIo,
+    pub attachments: CreateAttachments,
     pub console_log: PathBuf,
     pub anonymous_volumes: Vec<String>,
 }
 
 impl OciPreparedExecution {
     /// Build a non-interactive prepared execution with a caller-owned console.
-    #[must_use]
-    pub fn new(bundle: OciBundle, console_log: impl Into<PathBuf>) -> Self {
-        Self {
+    pub fn new(bundle: OciBundle, console_log: impl Into<PathBuf>) -> ExecutionManagerResult<Self> {
+        let io = ProcessIo {
+            stdin: IoMode::Null,
+            stdout: IoMode::Null,
+            stderr: IoMode::Null,
+            terminal_size: None,
+        };
+        let attachments = CreateAttachments::from_bundle(&bundle, io)
+            .map_err(|error| sdk_error("prepare attachments", error))?;
+        Self::with_attachments(bundle, attachments, console_log)
+    }
+
+    /// Build a prepared execution with explicit, already-authorized classifications.
+    pub fn with_attachments(
+        bundle: OciBundle,
+        attachments: CreateAttachments,
+        console_log: impl Into<PathBuf>,
+    ) -> ExecutionManagerResult<Self> {
+        attachments
+            .validate(&bundle)
+            .map_err(|error| sdk_error("prepare attachments", error))?;
+        Ok(Self {
             bundle,
-            io: ProcessIo {
-                stdin: IoMode::Null,
-                stdout: IoMode::Null,
-                stderr: IoMode::Null,
-                terminal_size: None,
-            },
+            attachments,
             console_log: console_log.into(),
             anonymous_volumes: Vec::new(),
-        }
+        })
     }
 
     fn validate_for(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.attachments
+            .validate(&self.bundle)
+            .map_err(|error| sdk_error("validate attachments", error))?;
         if self.console_log != record.console_log {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "A3S OCI preparation changed the durable console path for {}",
@@ -314,6 +341,11 @@ impl OciLifecycleAdapter {
                 )));
             }
         }
+        if !info.attachments.supports_schema(ATTACHMENT_SCHEMA_V1) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "A3S OCI Runtime does not advertise attachment schema {ATTACHMENT_SCHEMA_V1}"
+            )));
+        }
         let required = oci_isolation_request(isolation).class();
         if !info.drivers.drivers.iter().any(|capability| {
             capability.can_launch() && capability.isolation_classes.contains(&required)
@@ -337,6 +369,10 @@ impl OciLifecycleAdapter {
         let id = runtime_container_id(execution_id)?;
         let requested = oci_isolation_request(isolation);
         let expected_config_digest = prepared.bundle.config_digest().to_string();
+        let expected_attachments_digest = prepared
+            .attachments
+            .digest()
+            .map_err(|error| sdk_error("digest attachments", error))?;
         let created = self
             .client
             .create(CreateRequest {
@@ -349,7 +385,7 @@ impl OciLifecycleAdapter {
                 id: id.clone(),
                 bundle: prepared.bundle,
                 isolation: requested.clone(),
-                io: prepared.io,
+                attachments: prepared.attachments,
             })
             .await
             .map_err(|error| sdk_error("create", error))?;
@@ -359,6 +395,7 @@ impl OciLifecycleAdapter {
             &id,
             requested.class(),
             Some(&expected_config_digest),
+            Some(&expected_attachments_digest),
         ) {
             self.cleanup_failed_launch(
                 execution_id,
@@ -495,7 +532,7 @@ impl OciLifecycleAdapter {
     ) -> ExecutionManagerResult<OciRuntimeLaunch> {
         let id = runtime_container_id(execution_id)?;
         let required = oci_isolation_request(isolation).class();
-        validate_created_record(info, created, &id, required, None)?;
+        validate_created_record(info, created, &id, required, None, None)?;
         let target = ContainerTarget::exact(id.clone(), created.generation);
         let started = self
             .client
@@ -1039,6 +1076,7 @@ fn validate_created_record(
     expected_id: &ContainerId,
     required_isolation: IsolationClass,
     expected_config_digest: Option<&str>,
+    expected_attachments_digest: Option<&str>,
 ) -> ExecutionManagerResult<()> {
     validate_record_id(record, expected_id, "create")?;
     if *record.state.status() != ContainerState::Created
@@ -1050,9 +1088,15 @@ fn validate_created_record(
         )));
     }
     validate_config_digest(&record.config_digest)?;
+    let attachments_digest = validate_record_attachments(record, "create")?;
     if expected_config_digest.is_some_and(|expected| record.config_digest != expected) {
         return Err(ExecutionManagerError::Internal(format!(
             "A3S OCI create returned configuration evidence that differs from the submitted bundle for {expected_id}"
+        )));
+    }
+    if expected_attachments_digest.is_some_and(|expected| attachments_digest != expected) {
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI create returned attachment evidence that differs from the submitted manifest for {expected_id}"
         )));
     }
     validate_selected_driver(info, record)
@@ -1071,6 +1115,7 @@ fn validate_recovered_record(
         )));
     }
     validate_config_digest(&record.config_digest)?;
+    validate_record_attachments(record, "recover")?;
     validate_selected_driver(info, record)
 }
 
@@ -1086,6 +1131,7 @@ fn validate_started_record(
         || started.driver != created.driver
         || started.isolation != required_isolation
         || started.config_digest != created.config_digest
+        || started.attachments_digest != created.attachments_digest
         || !matches!(
             started.state.status(),
             ContainerState::Running | ContainerState::Stopped
@@ -1096,6 +1142,7 @@ fn validate_started_record(
             target.id, target.generation
         )));
     }
+    validate_record_attachments(started, "start")?;
     validate_selected_driver(info, started)
 }
 
@@ -1132,16 +1179,37 @@ fn validate_record_id(
 }
 
 fn validate_config_digest(config_digest: &str) -> ExecutionManagerResult<()> {
-    let valid = config_digest.strip_prefix("sha256:").is_some_and(|digest| {
+    validate_sha256_evidence(config_digest, "configuration")
+}
+
+fn validate_attachments_digest(attachments_digest: &str) -> ExecutionManagerResult<()> {
+    validate_sha256_evidence(attachments_digest, "attachment")
+}
+
+fn validate_record_attachments<'a>(
+    record: &'a ContainerRecord,
+    operation: &str,
+) -> ExecutionManagerResult<&'a str> {
+    let digest = record.attachments_digest.as_deref().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "A3S OCI {operation} returned no versioned attachment evidence"
+        ))
+    })?;
+    validate_attachments_digest(digest)?;
+    Ok(digest)
+}
+
+fn validate_sha256_evidence(value: &str, label: &str) -> ExecutionManagerResult<()> {
+    let valid = value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     });
     if !valid {
-        return Err(ExecutionManagerError::Internal(
-            "A3S OCI binding contains invalid configuration evidence".to_string(),
-        ));
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI binding contains invalid {label} evidence"
+        )));
     }
     Ok(())
 }

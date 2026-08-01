@@ -24,6 +24,8 @@ use crate::{ManagedExecutionState, ManagedExecutionStore};
 const RUNTIME_GENERATION: Generation = Generation(41);
 const CONFIG_DIGEST: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const ATTACHMENTS_DIGEST: &str =
+    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
 #[derive(Clone)]
 struct FakeContainer {
@@ -39,6 +41,7 @@ struct FakeRuntimeService {
     kill_signals: Mutex<Vec<i32>>,
     delete_modes: Mutex<Vec<DeleteMode>>,
     create_digest_override: Mutex<Option<String>>,
+    create_attachments_digest_override: Mutex<Option<String>>,
     fail_create_after_effect: AtomicBool,
     fail_start_after_effect: AtomicBool,
     ignore_graceful_signal: AtomicBool,
@@ -53,6 +56,14 @@ impl FakeRuntimeService {
         Self::with_dedicated_readiness("probe-only")
     }
 
+    fn without_attachment_schema() -> Self {
+        let mut service = Self::launch_ready();
+        let mut info = serde_json::to_value(&service.info).expect("encode runtime info");
+        info["attachments"]["schemas"] = json!([]);
+        service.info = serde_json::from_value(info).expect("decode runtime info");
+        service
+    }
+
     fn with_dedicated_readiness(readiness: &str) -> Self {
         Self {
             info: runtime_info(readiness),
@@ -62,6 +73,7 @@ impl FakeRuntimeService {
             kill_signals: Mutex::new(Vec::new()),
             delete_modes: Mutex::new(Vec::new()),
             create_digest_override: Mutex::new(None),
+            create_attachments_digest_override: Mutex::new(None),
             fail_create_after_effect: AtomicBool::new(false),
             fail_start_after_effect: AtomicBool::new(false),
             ignore_graceful_signal: AtomicBool::new(false),
@@ -83,6 +95,7 @@ impl FakeRuntimeService {
             driver,
             isolation,
             CONFIG_DIGEST,
+            Some(ATTACHMENTS_DIGEST),
         )
         .expect("seed runtime record");
         self.containers.lock().expect("container lock").insert(
@@ -105,6 +118,7 @@ impl FakeRuntimeService {
             container.record.driver,
             container.record.isolation,
             &container.record.config_digest,
+            container.record.attachments_digest.as_deref(),
         )
         .expect("stopped runtime record");
         container.exit_status = Some(status);
@@ -148,6 +162,12 @@ impl OciRuntimeService for FakeRuntimeService {
             .lock()
             .map_err(|error| lock_error("create", error))?
             .clone();
+        let attachments_digest = self
+            .create_attachments_digest_override
+            .lock()
+            .map_err(|error| lock_error("create", error))?
+            .clone()
+            .unwrap_or(request.attachments.digest()?);
         let record = runtime_record(
             &request.id,
             RUNTIME_GENERATION,
@@ -157,6 +177,7 @@ impl OciRuntimeService for FakeRuntimeService {
             digest_override
                 .as_deref()
                 .unwrap_or_else(|| request.bundle.config_digest()),
+            Some(&attachments_digest),
         )?;
         let mut containers = self
             .containers
@@ -221,6 +242,7 @@ impl OciRuntimeService for FakeRuntimeService {
                     container.record.driver,
                     container.record.isolation,
                     &container.record.config_digest,
+                    container.record.attachments_digest.as_deref(),
                 )?;
             }
             ContainerState::Running => {}
@@ -268,6 +290,7 @@ impl OciRuntimeService for FakeRuntimeService {
                 container.record.driver,
                 container.record.isolation,
                 &container.record.config_digest,
+                container.record.attachments_digest.as_deref(),
             )?;
             container.exit_status = Some(ExitStatus::signaled(request.signal.get(), false)?);
         }
@@ -346,7 +369,7 @@ impl OciBundleProvider for FakeBundleProvider {
         } else {
             record.console_log.clone()
         };
-        let mut prepared = OciPreparedExecution::new(bundle, console_log);
+        let mut prepared = OciPreparedExecution::new(bundle, console_log)?;
         prepared.anonymous_volumes = record.anonymous_volumes.clone();
         Ok(prepared)
     }
@@ -434,6 +457,7 @@ fn binding_validation_rejects_schema_identity_generation_and_evidence_drift() {
         DriverKind::LibkrunWhpx,
         IsolationClass::DedicatedVm,
         CONFIG_DIGEST,
+        Some(ATTACHMENTS_DIGEST),
     )
     .expect("runtime record");
     let binding = OciRuntimeBinding::from_record(test_endpoint(), &runtime_id, &record)
@@ -445,7 +469,7 @@ fn binding_validation_rejects_schema_identity_generation_and_evidence_drift() {
         .expect("round-tripped binding");
 
     let mut wrong_schema = decoded.clone();
-    wrong_schema.schema_version = "a3s.box.oci-runtime-binding.v2".to_string();
+    wrong_schema.schema_version = "a3s.box.oci-runtime-binding.v1".to_string();
     assert!(wrong_schema.validate().is_err());
 
     let mut current_target = decoded.clone();
@@ -464,9 +488,25 @@ fn binding_validation_rejects_schema_identity_generation_and_evidence_drift() {
     malformed_digest.config_digest = "sha256:ABC".to_string();
     assert!(malformed_digest.validate().is_err());
 
+    let mut malformed_attachments = decoded.clone();
+    malformed_attachments.attachments_digest = "sha256:ABC".to_string();
+    assert!(malformed_attachments.validate().is_err());
+
+    let mut missing_attachments = record.clone();
+    missing_attachments.attachments_digest = None;
+    assert!(
+        OciRuntimeBinding::from_record(test_endpoint(), &runtime_id, &missing_attachments).is_err()
+    );
+
     let mut drifted = record;
     drifted.driver = DriverKind::LibkrunKvm;
     assert!(decoded.validate_record(&drifted).is_err());
+
+    let mut attachment_drifted = drifted;
+    attachment_drifted.driver = decoded.driver;
+    attachment_drifted.attachments_digest =
+        Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into());
+    assert!(decoded.validate_record(&attachment_drifted).is_err());
 }
 
 #[test]
@@ -489,6 +529,7 @@ fn durable_state_rejects_a_runtime_binding_owned_by_another_product_execution() 
         DriverKind::NativeLinux,
         IsolationClass::SharedHostKernel,
         CONFIG_DIGEST,
+        Some(ATTACHMENTS_DIGEST),
     )
     .expect("other runtime record");
     record
@@ -540,6 +581,37 @@ async fn preflight_rejects_probe_only_isolation_before_store_or_preparation() {
         manager.reconcile(&operation).await.expect("reconcile"),
         ReconcileOutcome::Absent
     ));
+}
+
+#[tokio::test]
+async fn preflight_requires_attachment_v1_before_store_or_preparation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::without_attachment_schema());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let operation = box_operation("missing-attachment-schema-create");
+
+    let error = manager
+        .create(
+            request("missing-attachment-schema", ExecutionIsolation::Sandbox),
+            &operation,
+        )
+        .await
+        .expect_err("attachment-unaware runtime must fail before mutation");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("a3s.oci.attachments.v1")
+    ));
+    assert!(!manager.state_path().exists());
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
+    assert!(service.create_requests().is_empty());
 }
 
 #[tokio::test]
@@ -609,6 +681,41 @@ async fn mismatched_runtime_config_evidence_forces_exact_cleanup() {
 }
 
 #[tokio::test]
+async fn mismatched_runtime_attachment_evidence_forces_exact_cleanup() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    *service
+        .create_attachments_digest_override
+        .lock()
+        .expect("attachment digest override lock") =
+        Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+
+    let error = manager
+        .create_and_start(
+            request("attachment-drift", ExecutionIsolation::Sandbox),
+            &box_operation("attachment-drift-operation"),
+        )
+        .await
+        .expect_err("runtime attachment drift must fail closed");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Internal(message) if message.contains("submitted manifest")
+    ));
+    assert_eq!(service.delete_modes(), vec![DeleteMode::Force]);
+    assert_eq!(service.container_count(), 0);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
     for (index, isolation, expected_request, expected_driver) in [
         (
@@ -654,6 +761,11 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
         assert_ne!(metadata.generation.get(), RUNTIME_GENERATION.0);
         assert_eq!(creates.len(), 1);
         assert_eq!(creates[0].isolation, expected_request);
+        assert_eq!(
+            creates[0].attachments.schema_version(),
+            ATTACHMENT_SCHEMA_V1
+        );
+        assert_eq!(creates[0].attachments.process_io().stdin, IoMode::Null);
         assert_eq!(starts.len(), 1);
         assert_ne!(
             creates[0].context.operation_id,
@@ -668,6 +780,13 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
         assert_eq!(binding.driver, expected_driver);
         assert_eq!(binding.isolation, expected_request.class());
         assert_eq!(binding.config_digest, creates[0].bundle.config_digest());
+        assert_eq!(
+            binding.attachments_digest,
+            creates[0]
+                .attachments
+                .digest()
+                .expect("submitted attachment digest")
+        );
         assert_eq!(persisted.pid, None);
         assert_eq!(persisted.pid_start_time, None);
         assert!(persisted.exec_socket_path.as_os_str().is_empty());
@@ -1059,7 +1178,11 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
         },
         "operations": [
             "features", "create", "state", "start", "kill", "delete", "wait"
-        ]
+        ],
+        "attachments": {
+            "schemas": ["a3s.oci.attachments.v1"],
+            "extensions": {}
+        }
     }))
     .expect("runtime feature fixture")
 }
@@ -1083,6 +1206,7 @@ fn runtime_record(
     driver: DriverKind,
     isolation: IsolationClass,
     config_digest: &str,
+    attachments_digest: Option<&str>,
 ) -> OciResult<ContainerRecord> {
     let state = StateBuilder::default()
         .version("1.3.0")
@@ -1098,6 +1222,7 @@ fn runtime_record(
         driver,
         isolation,
         config_digest: config_digest.to_string(),
+        attachments_digest: attachments_digest.map(str::to_string),
     })
 }
 

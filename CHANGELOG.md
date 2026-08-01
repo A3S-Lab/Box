@@ -21,6 +21,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Versioned Box-to-OCI attachment binding.** The opt-in SDK-only OCI backend
+  now requires `a3s.oci.attachments.v1` before product mutation, derives and
+  validates one bundle-bound manifest for rootfs, mounts, networking, process
+  I/O, secret classifications, and optional runtime extensions, and stores the
+  runtime-returned SHA-256 digest in durable binding schema v2. Missing,
+  malformed, or drifted attachment evidence fails closed; a create-time drift
+  triggers exact-generation runtime cleanup and provider rollback.
 - **Recorded multi-platform OCI assembly.** The typed
   `assemble_recorded_build_outputs` boundary deterministically combines two to
   eight revalidated single-platform plan receipts into one OCI image index.

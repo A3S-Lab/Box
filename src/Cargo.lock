@@ -262,7 +262,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=f60d5c12c5fa4cdd19974f075e895f16058e5292#f60d5c12c5fa4cdd19974f075e895f16058e5292"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=8d076fc82e05a71fa6be931eb109c85254989dc5#8d076fc82e05a71fa6be931eb109c85254989dc5"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -271,7 +271,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=f60d5c12c5fa4cdd19974f075e895f16058e5292#f60d5c12c5fa4cdd19974f075e895f16058e5292"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=8d076fc82e05a71fa6be931eb109c85254989dc5#8d076fc82e05a71fa6be931eb109c85254989dc5"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
@@ -1142,7 +1142,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3062,7 +3062,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3592,7 +3592,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
