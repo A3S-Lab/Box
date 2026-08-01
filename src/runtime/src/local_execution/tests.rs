@@ -57,6 +57,7 @@ impl FakeBackend {
             exec_socket_path: record.box_dir.join("sockets/exec.sock"),
             console_log: record.box_dir.join("logs/console.log"),
             anonymous_volumes: vec!["anonymous-1".to_string()],
+            oci_runtime: None,
         }
     }
 
@@ -684,6 +685,7 @@ async fn process_session_inherits_environment_from_persisted_record() {
                 exec_socket_path: socket_path.clone(),
                 console_log: record.box_dir.join("logs/console.log"),
                 anonymous_volumes: Vec::new(),
+                oci_runtime: None,
             },
         )
         .await

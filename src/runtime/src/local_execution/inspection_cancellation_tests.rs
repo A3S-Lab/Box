@@ -78,6 +78,7 @@ impl CancellationBackend {
             exec_socket_path: record.box_dir.join("sockets/exec.sock"),
             console_log: record.box_dir.join("logs/console.log"),
             anonymous_volumes: Vec::new(),
+            oci_runtime: None,
         }
     }
 }

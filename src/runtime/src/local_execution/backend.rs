@@ -8,6 +8,7 @@ use a3s_box_core::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use crate::local_execution::OciRuntimeBinding;
 use crate::BoxRecord;
 
 /// Runtime evidence persisted after an execution becomes ready.
@@ -19,6 +20,9 @@ pub struct LocalExecutionHandle {
     pub exec_socket_path: PathBuf,
     pub console_log: PathBuf,
     pub anonymous_volumes: Vec<String>,
+    /// Exact A3S OCI identity when lifecycle ownership is delegated through
+    /// the public SDK rather than a Box-owned VM process.
+    pub oci_runtime: Option<OciRuntimeBinding>,
 }
 
 impl LocalExecutionHandle {
@@ -28,7 +32,10 @@ impl LocalExecutionHandle {
                 "backend returned a PID start time without a PID for {execution_id}"
             )));
         }
-        if self.exec_socket_path.as_os_str().is_empty() {
+        if let Some(binding) = &self.oci_runtime {
+            binding.validate_for(execution_id)?;
+        }
+        if self.exec_socket_path.as_os_str().is_empty() && self.oci_runtime.is_none() {
             return Err(ExecutionManagerError::Internal(format!(
                 "backend returned an empty exec socket path for {execution_id}"
             )));
@@ -87,6 +94,12 @@ impl LocalExecutionObservation {
 /// external sandbox ID in managed metadata is an untrusted diagnostic label.
 #[async_trait]
 pub trait LocalExecutionBackend: Send + Sync {
+    /// Reject an unsupported execution before its durable reservation is
+    /// published. Backends must repeat mutable capability checks at launch.
+    async fn preflight(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
 
     async fn inspect(

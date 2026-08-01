@@ -372,5 +372,9 @@ fn kill_terminal_exit_code(
     options: KillExecutionOptions,
     observed_exit_code: Option<i32>,
 ) -> Option<i32> {
-    observed_exit_code.or_else(|| options.signal.map(|signal| 128 + signal))
+    observed_exit_code.or_else(|| {
+        options
+            .signal
+            .and_then(|signal| 128_i32.checked_add(signal))
+    })
 }

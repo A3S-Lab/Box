@@ -200,6 +200,7 @@ impl VmLocalExecutionBackend {
             exec_socket_path,
             console_log: record.box_dir.join("logs/console.log"),
             anonymous_volumes,
+            oci_runtime: None,
         })
     }
 

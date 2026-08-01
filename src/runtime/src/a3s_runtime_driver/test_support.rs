@@ -93,6 +93,7 @@ impl DriverFakeBackend {
             exec_socket_path: record.box_dir.join("sockets/exec.sock"),
             console_log: record.console_log.clone(),
             anonymous_volumes: Vec::new(),
+            oci_runtime: None,
         })
     }
 

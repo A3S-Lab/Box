@@ -10,6 +10,7 @@ pub use lifecycle_lock::{
     acquire_blocking as acquire_execution_lifecycle_lock, ExecutionLifecycleLock,
 };
 mod logs;
+mod oci_backend;
 mod operations;
 mod port;
 mod record;
@@ -41,6 +42,11 @@ use a3s_box_core::{
 pub use backend::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
     LocalExecutionTermination,
+};
+pub use oci_backend::{
+    oci_isolation_request, OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend,
+    OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
+    OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 use record::{build_managed_record, status_from_record};
 use store::RuntimeUpdate;

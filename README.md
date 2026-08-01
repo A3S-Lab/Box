@@ -45,8 +45,10 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 
 > [!NOTE]
 > The architecture is actively converging on one public
-> `a3s-oci-sdk` boundary for both isolation classes. The unified MicroVM
-> cutover is not complete; the current split above remains authoritative.
+> `a3s-oci-sdk` boundary for both isolation classes. A reusable SDK-only
+> lifecycle adapter and explicitly constructed local backend now exist, but
+> production MicroVM routing and real-host cutover gates are not complete; the
+> current split above remains authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

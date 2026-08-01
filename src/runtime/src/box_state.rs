@@ -244,11 +244,16 @@ fn validate_managed_records(records: &[BoxRecord]) -> Result<(), String> {
         let Some(metadata) = &record.managed_execution else {
             continue;
         };
+        let execution_id = ExecutionId::new(record.id.clone())
+            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
         metadata
             .validate()
             .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
-        ExecutionId::new(record.id.clone())
-            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
+        if let Some(binding) = &metadata.oci_runtime {
+            binding
+                .validate_for(&execution_id)
+                .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
+        }
         record
             .managed_state()
             .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;

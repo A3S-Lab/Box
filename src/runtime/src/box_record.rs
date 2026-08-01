@@ -339,6 +339,10 @@ pub struct ManagedExecutionMetadata {
     pub generation: ExecutionGeneration,
     /// Full creation intent required to recover an interrupted launch.
     pub request: CreateExecutionRequest,
+    /// Exact runtime identity returned by A3S OCI Runtime. Product and runtime
+    /// generations remain separate and this field is cleared after teardown.
+    #[serde(default)]
+    pub oci_runtime: Option<crate::local_execution::OciRuntimeBinding>,
     /// Backend resolution validated before any launch side effects.
     pub plan: ResolvedExecutionPlan,
     /// Lifecycle side effect claimed before calling the backend.
@@ -424,6 +428,7 @@ impl ManagedExecutionMetadata {
             operation_id,
             generation,
             request,
+            oci_runtime: None,
             plan,
             pending_operation: None,
             last_restart: None,
@@ -444,6 +449,19 @@ impl ManagedExecutionMetadata {
             return Err(a3s_box_core::BoxError::StateError(
                 "managed execution plan does not match its persisted creation request".to_string(),
             ));
+        }
+        if let Some(binding) = &self.oci_runtime {
+            binding
+                .validate()
+                .map_err(|error| a3s_box_core::BoxError::StateError(error.to_string()))?;
+            let expected_isolation =
+                crate::local_execution::oci_isolation_request(self.request.config.isolation)
+                    .class();
+            if binding.isolation != expected_isolation {
+                return Err(a3s_box_core::BoxError::StateError(
+                    "A3S OCI binding weakens or changes the requested isolation".to_string(),
+                ));
+            }
         }
         if let Some(completed) = &self.last_restart {
             let expected_target = next_generation(completed.source_generation)?;
@@ -564,9 +582,9 @@ fn validate_pending_operation(
         timeout_secs,
     }) = operation
     {
-        if signal.is_some_and(|signal| signal <= 0) {
+        if signal.is_some_and(|signal| signal <= 0 || 128_i32.checked_add(signal).is_none()) {
             return Err(a3s_box_core::BoxError::StateError(
-                "kill signal must be positive".to_string(),
+                "kill signal must be positive and representable as a Box exit code".to_string(),
             ));
         }
         validate_stop_timeout(*timeout_secs)?;

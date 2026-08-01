@@ -27,6 +27,7 @@ impl ExecutionManager for LocalExecutionManager {
             request,
             chrono::Utc::now(),
         )?;
+        self.backend.preflight(&record).await?;
         let reservation = self.reserve(record).await?;
         super::record::reservation_from_record(reservation.record())
     }
@@ -313,9 +314,12 @@ impl ExecutionManager for LocalExecutionManager {
 }
 
 fn validate_kill_options(options: KillExecutionOptions) -> ExecutionManagerResult<()> {
-    if options.signal.is_some_and(|signal| signal <= 0) {
+    if options
+        .signal
+        .is_some_and(|signal| signal <= 0 || 128_i32.checked_add(signal).is_none())
+    {
         return Err(ExecutionManagerError::InvalidRequest(
-            "kill signal must be positive".to_string(),
+            "kill signal must be positive and representable as a Box exit code".to_string(),
         ));
     }
     if options

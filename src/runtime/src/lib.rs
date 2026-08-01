@@ -78,7 +78,9 @@ pub use local_execution::VmLocalExecutionBackend;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
     LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
-    LocalExecutionTermination,
+    LocalExecutionTermination, OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend,
+    OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
+    OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,

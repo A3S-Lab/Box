@@ -76,39 +76,60 @@ host-service reopen, exact signal-9 wait replay, stopped-only delete, and
 complete runtime cleanup. That closes the Windows restart-evidence prerequisite
 for B0/B1, but it does not complete either milestone: the WHPX candidate remains
 `probe-only` until its immutable system root and in-process native-handle gates
-pass, and Box has not yet routed MicroVM lifecycle through the public SDK.
+pass, and Box has not yet selected the unified backend for production MicroVM
+launches.
+
+Box now also contains an explicitly constructed `OciLocalExecutionBackend` and
+SDK-only lifecycle adapter. The opt-in path preflights launch-ready isolation
+before reservation or bundle preparation, keeps Box and runtime generations in
+separate durable fields, persists exact endpoint/target/driver/config evidence,
+and reconciles lost create/start responses without issuing a second create.
+This is migration scaffolding, not a production routing change. Its in-process
+contract suite covers both isolation mappings, corrupt evidence, cleanup,
+adapter reopen, stopped-only deletion, and exact normal or signaled exit status;
+out-of-process restart and real-host gates remain below.
 
 ## Delivery Milestones
 
 ### B0 - Boundary And Contract Freeze
 
-- [ ] Keep product and runtime identifiers distinct in every durable record.
-- [ ] Define one Box-to-OCI adapter using only public `a3s-oci-sdk` types.
-- [ ] Map `microvm` to `DedicatedVm` and `sandbox` to `SharedHostKernel` without
+- [x] Keep product and runtime identifiers distinct in every durable record.
+- [x] Define one Box-to-OCI adapter using only public `a3s-oci-sdk` types.
+- [x] Map `microvm` to `DedicatedVm` and `sandbox` to `SharedHostKernel` without
   persisting a hard-coded hypervisor driver choice.
 - [ ] Define versioned attachment contracts for rootfs, mounts, networking,
   process I/O, secrets, and optional runtime extensions.
-- [ ] Reject an unavailable isolation class before image or product-state
+- [x] Reject an unavailable isolation class before image or product-state
   mutation.
 
 Exit gate: the target architecture compiles behind an opt-in migration flag,
 and dependency checks prove that Box imports no OCI Runtime implementation
 crate.
 
+The dependency check currently resolves only `a3s-oci-sdk` and its public core
+types from the OCI Runtime repository. The exit gate remains open until the
+attachment contracts and explicit production migration flag are complete.
+
 ### B1 - OCI Runtime Vertical Slice
 
-- [ ] Add an `OciLocalExecutionBackend` implementing the canonical
+- [x] Add an `OciLocalExecutionBackend` implementing the canonical
   `LocalExecutionBackend` contract.
-- [ ] Route create, state, start, wait, kill, delete, and exact exit status
+- [x] Route create, state, start, wait, kill, delete, and exact exit status
   through the SDK.
-- [ ] Persist only the runtime endpoint, container ID, generation, and driver
-  evidence required for reconciliation.
+- [x] Persist only the runtime endpoint, exact container ID/generation,
+  selected driver/isolation, and immutable configuration digest required for
+  reconciliation.
 - [ ] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
 - [ ] Exercise the path on native Linux and Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
+
+The local contract suite proves Box-adapter recreation plus interrupted
+`create`/`start` recovery against a shared SDK service. The two unchecked gates
+require a restarted out-of-process service and the same bundle on real native
+Linux and WHPX hosts; unit evidence is not promoted as platform evidence.
 
 ### B2 - Interactive And Observable Execution
 
