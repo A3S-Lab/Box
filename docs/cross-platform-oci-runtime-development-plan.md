@@ -72,9 +72,12 @@ authenticated guest shutdown evidence is normalized into protected host
 storage, matched to the exact target and durable configuration during startup,
 and committed to the durable wait cache before service. Missing or invalid
 evidence retains the explicit stopped-only fallback instead of inventing an
-exit status. It remains non-registerable at `probe-only` readiness until
-fresh-host runtime-share/restart recovery and immutable-system-root
-qualification pass.
+exit status. Upstream clean commit `2d91cd04f6ec1ecd9ea3fce4673be6fdc2b6f631`
+now passes the versioned real-WHPX owner-death gate across both Recover fault
+boundaries, host-service reopen, exact signal-9 wait replay, stopped-only
+delete, and complete protected-share cleanup. The candidate remains
+non-registerable at `probe-only` readiness until immutable-system-root and
+in-process native-handle reclamation qualification pass.
 
 ## Upgrade behavior
 

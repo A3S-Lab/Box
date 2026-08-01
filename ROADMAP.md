@@ -70,6 +70,14 @@ This split remains supported while migration is in progress, but it is not the
 target architecture. New platform execution features belong in OCI Runtime and
 must not introduce a third Box execution path.
 
+Upstream clean commit `A3S-Lab/OCI-Runtime@2d91cd0` now proves the protected
+WHPX share across exact owner termination, both Recover fault boundaries,
+host-service reopen, exact signal-9 wait replay, stopped-only delete, and
+complete runtime cleanup. That closes the Windows restart-evidence prerequisite
+for B0/B1, but it does not complete either milestone: the WHPX candidate remains
+`probe-only` until its immutable system root and in-process native-handle gates
+pass, and Box has not yet routed MicroVM lifecycle through the public SDK.
+
 ## Delivery Milestones
 
 ### B0 - Boundary And Contract Freeze
