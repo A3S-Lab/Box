@@ -67,9 +67,12 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > renegotiates on a later explicit reconciliation. The generic Box/OCI contract
 > also recovers one manager across two distinct runtime-owner test processes
 > with exactly one create and start. Raw runtime output stays separate from
-> structured Box logs. Production owner wiring, real native Linux/WHPX
-> process-and-filesystem restart evidence, and the broader cutover gates remain
-> open; the current split above is still authoritative.
+> structured Box logs. The pinned runtime qualification now exercises binary
+> file transfer and descriptor-confined mkdir/stat/list/move/remove against its
+> real native and utility-VM drivers before the Box SDK suite runs. Production
+> owner wiring, cross-process native Linux/WHPX process-and-filesystem recovery,
+> and the broader cutover gates remain open; the current split above is still
+> authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

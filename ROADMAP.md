@@ -97,7 +97,7 @@ the next reconnects, renegotiates, and recovers the original operation and
 generation without a second create or start. A second cross-platform contract
 launches two distinct owner fixture processes, reopens synchronized runtime
 state on the replacement, and proves the same retained manager still records
-only one create and start. OCI Runtime commit `24d6a967` independently reopens
+only one create and start. OCI Runtime commit `6487cd2a` independently reopens
 its durable `HostRuntimeService` and operation journal across two processes.
 Real driver state and production owner wiring remain below.
 
@@ -127,8 +127,11 @@ before SDK dispatch. Mutations carry one stable context across the adapter's
 single retry of an explicitly retryable lost response, while downloads and
 metadata reads remain context-free; the contract suite proves one mutation
 effect, response target/shape validation, and identical behavior on Unix and
-non-Unix hosts. Cross-process and real-driver filesystem-session recovery are
-still release gates rather than claimed evidence.
+non-Unix hosts. The pinned real-driver prerequisite now also proves binary
+upload/download, changed-request conflict fencing, stat/list/move, exact
+mutation replay, recursive removal, and post-cleanup `NotFound` through native
+Linux and utility-VM lifecycle harnesses. Cross-process filesystem-session
+recovery remains a release gate rather than claimed evidence.
 
 ## Delivery Milestones
 

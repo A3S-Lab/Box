@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2
+  A3S_OCI_RUNTIME_REV: 24169ce7b0865e2a5de684882cffeb4811b1a3b9
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -430,7 +430,7 @@ jobs:
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
-      - name: Qualify pinned OCI network, storage, and initialization profiles
+      - name: Qualify pinned OCI lifecycle, filesystem, and attachment profiles
         working-directory: oci-runtime
         run: bash .github/scripts/native-linux-smoke.sh
       - name: Build local SDK runtime artifacts
