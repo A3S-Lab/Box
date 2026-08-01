@@ -21,6 +21,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Exact-generation OCI process sessions.** The SDK-only backend now routes
+  captured and streaming exec, initial and streaming stdin, cursor-checked
+  stdout/stderr, process signals and wait, PTY input/resize, exact terminal
+  status, and bounded timeout cleanup to the persisted OCI target on Unix and
+  Windows. Capability and generation checks fail before mutation, keyed
+  one-shot calls replay the same process after a lost response and backend
+  recreation, stdin mutations retain their identity until acknowledged, and a
+  detached exact-target watchdog prevents caller cancellation from orphaning a
+  timed process. Raw process output remains separate from Box's structured log
+  store; alternate exec rootfs requests fail closed instead of being silently
+  reinterpreted.
 - **Replay-safe OCI freezer routing.** The opt-in SDK-only backend now routes
   memory-retaining pause and resume to the exact persisted OCI generation.
   Each cycle durably claims a stable, non-reused mutation identity, binds it to

@@ -2,18 +2,23 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use a3s_box_core::exec::{ExecRequest as BoxExecRequest, StreamType};
+use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionIsolation,
-    ExecutionManager, ExecutionManagerError, ExecutionState, KillExecutionOptions, KillOutcome,
-    NetworkMode, OperationId as BoxOperationId, ReconcileOutcome,
+    BoxConfig, CreateExecutionRequest, ExecEvent, ExecutionGeneration, ExecutionId,
+    ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionProcessSignal,
+    ExecutionSessionManager, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
+    OperationId as BoxOperationId, ReconcileOutcome,
 };
 use a3s_oci_sdk::oci_spec::runtime::{ContainerState, StateBuilder};
 use a3s_oci_sdk::{
-    async_trait, ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget,
-    CreateRequest, DeleteMode, DeleteRequest, DriverKind, Error, ErrorCode, ExitStatus, Generation,
-    IsolationClass, IsolationRequest, KillRequest, OciBundle, OciRuntimeService,
-    Result as OciResult, RuntimeClient, RuntimeInfo, RuntimeOperation, StartRequest, StateRequest,
-    WaitRequest, PAUSED_STATE_ANNOTATION,
+    async_trait, CloseStdinRequest, ContainerId, ContainerOperationRequest, ContainerRecord,
+    ContainerTarget, CreateRequest, DeleteMode, DeleteRequest, DriverKind, Error, ErrorCode,
+    ExecRequest as OciExecRequest, ExitStatus, Generation, IsolationClass, IsolationRequest,
+    KillRequest, OciBundle, OciRuntimeService, OutputChunk, OutputStream, ProcessRecord,
+    ProcessTarget, ReadOutputRequest, ResizeRequest, Result as OciResult, RuntimeClient,
+    RuntimeInfo, RuntimeOperation, SignalProcessRequest, StartRequest, StateRequest, TerminalSize,
+    WaitProcessRequest, WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -34,13 +39,31 @@ struct FakeContainer {
     exit_status: Option<ExitStatus>,
 }
 
+#[derive(Clone)]
+struct FakeProcess {
+    request: OciExecRequest,
+    record: ProcessRecord,
+    output: Vec<OutputChunk>,
+    exit_status: Option<ExitStatus>,
+}
+
 struct FakeRuntimeService {
     info: RuntimeInfo,
     containers: Mutex<HashMap<String, FakeContainer>>,
+    processes: Mutex<HashMap<String, FakeProcess>>,
     create_requests: Mutex<Vec<CreateRequest>>,
     start_requests: Mutex<Vec<StartRequest>>,
     pause_requests: Mutex<Vec<ContainerOperationRequest>>,
     resume_requests: Mutex<Vec<ContainerOperationRequest>>,
+    exec_requests: Mutex<Vec<OciExecRequest>>,
+    output_requests: Mutex<Vec<ReadOutputRequest>>,
+    stdin_requests: Mutex<Vec<WriteStdinRequest>>,
+    stdin_effects: Mutex<Vec<WriteStdinRequest>>,
+    stdin_journal: Mutex<HashMap<String, WriteStdinRequest>>,
+    close_stdin_requests: Mutex<Vec<CloseStdinRequest>>,
+    resize_requests: Mutex<Vec<ResizeRequest>>,
+    signal_process_requests: Mutex<Vec<SignalProcessRequest>>,
+    wait_process_requests: Mutex<Vec<WaitProcessRequest>>,
     kill_signals: Mutex<Vec<i32>>,
     delete_modes: Mutex<Vec<DeleteMode>>,
     create_digest_override: Mutex<Option<String>>,
@@ -50,6 +73,9 @@ struct FakeRuntimeService {
     fail_pause_before_effect: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     fail_resume_after_effect: AtomicBool,
+    fail_exec_after_effect: AtomicBool,
+    fail_stdin_after_effect: AtomicBool,
+    hold_next_process: AtomicBool,
     ignore_graceful_signal: AtomicBool,
 }
 
@@ -80,10 +106,20 @@ impl FakeRuntimeService {
         Self {
             info: runtime_info(readiness),
             containers: Mutex::new(HashMap::new()),
+            processes: Mutex::new(HashMap::new()),
             create_requests: Mutex::new(Vec::new()),
             start_requests: Mutex::new(Vec::new()),
             pause_requests: Mutex::new(Vec::new()),
             resume_requests: Mutex::new(Vec::new()),
+            exec_requests: Mutex::new(Vec::new()),
+            output_requests: Mutex::new(Vec::new()),
+            stdin_requests: Mutex::new(Vec::new()),
+            stdin_effects: Mutex::new(Vec::new()),
+            stdin_journal: Mutex::new(HashMap::new()),
+            close_stdin_requests: Mutex::new(Vec::new()),
+            resize_requests: Mutex::new(Vec::new()),
+            signal_process_requests: Mutex::new(Vec::new()),
+            wait_process_requests: Mutex::new(Vec::new()),
             kill_signals: Mutex::new(Vec::new()),
             delete_modes: Mutex::new(Vec::new()),
             create_digest_override: Mutex::new(None),
@@ -93,6 +129,9 @@ impl FakeRuntimeService {
             fail_pause_before_effect: AtomicBool::new(false),
             fail_pause_after_effect: AtomicBool::new(false),
             fail_resume_after_effect: AtomicBool::new(false),
+            fail_exec_after_effect: AtomicBool::new(false),
+            fail_stdin_after_effect: AtomicBool::new(false),
+            hold_next_process: AtomicBool::new(false),
             ignore_graceful_signal: AtomicBool::new(false),
         }
     }
@@ -155,6 +194,57 @@ impl FakeRuntimeService {
 
     fn resume_requests(&self) -> Vec<ContainerOperationRequest> {
         self.resume_requests.lock().expect("resume lock").clone()
+    }
+
+    fn exec_requests(&self) -> Vec<OciExecRequest> {
+        self.exec_requests.lock().expect("exec lock").clone()
+    }
+
+    fn stdin_requests(&self) -> Vec<WriteStdinRequest> {
+        self.stdin_requests.lock().expect("stdin lock").clone()
+    }
+
+    fn stdin_effects(&self) -> Vec<WriteStdinRequest> {
+        self.stdin_effects
+            .lock()
+            .expect("stdin effect lock")
+            .clone()
+    }
+
+    fn close_stdin_requests(&self) -> Vec<CloseStdinRequest> {
+        self.close_stdin_requests
+            .lock()
+            .expect("close stdin lock")
+            .clone()
+    }
+
+    fn resize_requests(&self) -> Vec<ResizeRequest> {
+        self.resize_requests.lock().expect("resize lock").clone()
+    }
+
+    fn signal_process_requests(&self) -> Vec<SignalProcessRequest> {
+        self.signal_process_requests
+            .lock()
+            .expect("signal process lock")
+            .clone()
+    }
+
+    fn wait_process_requests(&self) -> Vec<WaitProcessRequest> {
+        self.wait_process_requests
+            .lock()
+            .expect("wait process lock")
+            .clone()
+    }
+
+    fn require_fake_process(&self, target: &ProcessTarget, operation: &str) -> OciResult<()> {
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|error| lock_error(operation, error))?;
+        let process = processes
+            .get(target.process_id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, operation, "fake process is absent"))?;
+        validate_process_target(target, &process.record, operation)
     }
 
     fn kill_signals(&self) -> Vec<i32> {
@@ -419,6 +509,204 @@ impl OciRuntimeService for FakeRuntimeService {
         }
         containers.remove(request.target.id.as_str());
         Ok(())
+    }
+
+    async fn exec(&self, request: OciExecRequest) -> OciResult<ProcessRecord> {
+        self.exec_requests
+            .lock()
+            .map_err(|error| lock_error("exec", error))?
+            .push(request.clone());
+        {
+            let containers = self
+                .containers
+                .lock()
+                .map_err(|error| lock_error("exec", error))?;
+            let container = containers
+                .get(request.container.id.as_str())
+                .ok_or_else(|| oci_error(ErrorCode::NotFound, "exec", "container is absent"))?;
+            validate_target(&request.container, &container.record, "exec")?;
+            if *container.record.state.status() != ContainerState::Running {
+                return Err(oci_error(
+                    ErrorCode::FailedPrecondition,
+                    "exec",
+                    "container is not running",
+                ));
+            }
+        }
+
+        let key = request.process_id.to_string();
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|error| lock_error("exec", error))?;
+        if let Some(process) = processes.get(&key) {
+            if process.request != request {
+                return Err(oci_error(
+                    ErrorCode::Conflict,
+                    "exec",
+                    "process identity was reused with a different request",
+                ));
+            }
+            return Ok(process.record.clone());
+        }
+
+        let held = self.hold_next_process.swap(false, Ordering::SeqCst);
+        let terminal = request.process.terminal().unwrap_or(false);
+        let process = FakeProcess {
+            request: request.clone(),
+            record: ProcessRecord {
+                target: ProcessTarget {
+                    container: request.container.clone(),
+                    process_id: request.process_id.clone(),
+                },
+                pid: Some(9_000 + processes.len() as u32),
+                terminal,
+            },
+            output: fake_process_output(terminal, held),
+            exit_status: if held {
+                None
+            } else {
+                Some(ExitStatus::exited(23)?)
+            },
+        };
+        let record = process.record.clone();
+        processes.insert(key, process);
+        drop(processes);
+        if self.fail_exec_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake exec response was lost")
+                    .for_operation("exec")
+                    .retryable(true),
+            );
+        }
+        Ok(record)
+    }
+
+    async fn read_output(&self, request: ReadOutputRequest) -> OciResult<Vec<OutputChunk>> {
+        self.output_requests
+            .lock()
+            .map_err(|error| lock_error("read-output", error))?
+            .push(request.clone());
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|error| lock_error("read-output", error))?;
+        let process = processes
+            .get(request.process.process_id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, "read-output", "process is absent"))?;
+        validate_process_target(&request.process, &process.record, "read-output")?;
+        let mut bytes = 0_u64;
+        Ok(process
+            .output
+            .iter()
+            .filter(|chunk| chunk.sequence > request.after_sequence)
+            .take_while(|chunk| {
+                let next = bytes.saturating_add(chunk.data.len() as u64);
+                if next > u64::from(request.max_bytes) {
+                    false
+                } else {
+                    bytes = next;
+                    true
+                }
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn write_stdin(&self, request: WriteStdinRequest) -> OciResult<()> {
+        self.stdin_requests
+            .lock()
+            .map_err(|error| lock_error("write-stdin", error))?
+            .push(request.clone());
+        self.require_fake_process(&request.process, "write-stdin")?;
+        let operation_id = request.context.operation_id.to_string();
+        let mut journal = self
+            .stdin_journal
+            .lock()
+            .map_err(|error| lock_error("write-stdin", error))?;
+        if let Some(previous) = journal.get(&operation_id) {
+            if previous != &request {
+                return Err(oci_error(
+                    ErrorCode::Conflict,
+                    "write-stdin",
+                    "operation identity was reused with a different payload",
+                ));
+            }
+            return Ok(());
+        }
+        journal.insert(operation_id, request.clone());
+        self.stdin_effects
+            .lock()
+            .map_err(|error| lock_error("write-stdin", error))?
+            .push(request);
+        drop(journal);
+        if self.fail_stdin_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake stdin response was lost")
+                    .for_operation("write-stdin")
+                    .retryable(true),
+            );
+        }
+        Ok(())
+    }
+
+    async fn close_stdin(&self, request: CloseStdinRequest) -> OciResult<()> {
+        self.require_fake_process(&request.process, "close-stdin")?;
+        self.close_stdin_requests
+            .lock()
+            .map_err(|error| lock_error("close-stdin", error))?
+            .push(request);
+        Ok(())
+    }
+
+    async fn resize(&self, request: ResizeRequest) -> OciResult<()> {
+        self.require_fake_process(&request.process, "resize")?;
+        self.resize_requests
+            .lock()
+            .map_err(|error| lock_error("resize", error))?
+            .push(request);
+        Ok(())
+    }
+
+    async fn signal_process(&self, request: SignalProcessRequest) -> OciResult<()> {
+        self.signal_process_requests
+            .lock()
+            .map_err(|error| lock_error("signal-process", error))?
+            .push(request.clone());
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|error| lock_error("signal-process", error))?;
+        let process = processes
+            .get_mut(request.process.process_id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, "signal-process", "process is absent"))?;
+        validate_process_target(&request.process, &process.record, "signal-process")?;
+        process.exit_status = Some(ExitStatus::signaled(request.signal.get(), false)?);
+        append_missing_eof(&mut process.output, OutputStream::Stdout);
+        if !process.record.terminal {
+            append_missing_eof(&mut process.output, OutputStream::Stderr);
+        }
+        Ok(())
+    }
+
+    async fn wait_process(&self, request: WaitProcessRequest) -> OciResult<ExitStatus> {
+        self.wait_process_requests
+            .lock()
+            .map_err(|error| lock_error("wait-process", error))?
+            .push(request.clone());
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|error| lock_error("wait-process", error))?;
+        let process = processes
+            .get(request.process.process_id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, "wait-process", "process is absent"))?;
+        validate_process_target(&request.process, &process.record, "wait-process")?;
+        process.exit_status.clone().ok_or_else(|| {
+            Error::new(ErrorCode::DeadlineExceeded, "fake process is still running")
+                .for_operation("wait-process")
+                .retryable(true)
+        })
     }
 
     async fn wait(&self, request: WaitRequest) -> OciResult<ExitStatus> {
@@ -891,6 +1179,631 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
         assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
         assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let mut create = request("captured-exec", ExecutionIsolation::Sandbox);
+    create.config.extra_env = vec![
+        ("ALPHA".to_string(), "container".to_string()),
+        ("BETA".to_string(), "container".to_string()),
+    ];
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let lease = first
+        .create_and_start(create, &box_operation("captured-exec-create"))
+        .await
+        .expect("initial launch");
+    let exec = BoxExecRequest {
+        request_id: Some("health-probe-1".to_string()),
+        cmd: vec!["/bin/check".to_string(), "--ready".to_string()],
+        timeout_ns: 1_000_000_000,
+        env: vec!["BETA=request".to_string(), "GAMMA=request".to_string()],
+        working_dir: Some("/work".to_string()),
+        rootfs: None,
+        stdin: Some(b"probe input".to_vec()),
+        stdin_streaming: false,
+        user: Some("1000:1001".to_string()),
+        streaming: false,
+    };
+    service.fail_exec_after_effect.store(true, Ordering::SeqCst);
+
+    first
+        .execute(&lease.execution_id, lease.generation, exec.clone())
+        .await
+        .expect_err("first exec response is intentionally lost");
+    drop(first);
+
+    let reopened = manager(&directory, endpoint, service.clone(), provider);
+    let output = reopened
+        .execute(&lease.execution_id, lease.generation, exec)
+        .await
+        .expect("replayed captured exec");
+
+    assert_eq!(output.stdout, b"fake stdout\n");
+    assert_eq!(output.stderr, b"fake stderr\n");
+    assert_eq!(output.exit_code, 23);
+    assert!(!output.truncated);
+    assert!(reopened
+        .read_logs(&lease.execution_id, lease.generation)
+        .await
+        .expect("structured Box logs remain readable")
+        .is_empty());
+    let calls = service.exec_requests();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0], calls[1]);
+    assert_eq!(calls[0].container.generation, Some(RUNTIME_GENERATION));
+    assert_ne!(
+        calls[0].process_id.as_str(),
+        calls[0].context.operation_id.as_str()
+    );
+    assert!(calls[0]
+        .process_id
+        .as_str()
+        .starts_with("a3s-box-exec-process-"));
+    assert_eq!(
+        calls[0].process.args().as_ref().expect("process args"),
+        &["/bin/check", "--ready"]
+    );
+    assert_eq!(
+        calls[0]
+            .process
+            .env()
+            .as_ref()
+            .expect("process environment"),
+        &["ALPHA=container", "BETA=request", "GAMMA=request"]
+    );
+    assert_eq!(calls[0].process.cwd(), &std::path::PathBuf::from("/work"));
+    assert_eq!(calls[0].process.user().uid(), 1000);
+    assert_eq!(calls[0].process.user().gid(), 1001);
+    let capabilities = calls[0]
+        .process
+        .capabilities()
+        .as_ref()
+        .expect("explicit exec capability profile");
+    assert!(capabilities
+        .bounding()
+        .as_ref()
+        .is_some_and(|set| set.is_empty()));
+    assert!(capabilities
+        .effective()
+        .as_ref()
+        .is_some_and(|set| set.is_empty()));
+    assert!(capabilities
+        .permitted()
+        .as_ref()
+        .is_some_and(|set| set.is_empty()));
+    assert_eq!(service.processes.lock().expect("process lock").len(), 1);
+    let stdin = service.stdin_requests();
+    assert_eq!(stdin.len(), 1);
+    assert_eq!(stdin[0].data, b"probe input");
+    assert_eq!(stdin[0].process.container, calls[0].container);
+    assert_eq!(service.close_stdin_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn keyed_exec_rejects_changed_content_without_starting_a_second_process() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("keyed-conflict", ExecutionIsolation::Sandbox),
+            &box_operation("keyed-conflict-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut original = box_exec_request(Some("one-process-key"));
+    original.stdin = Some(b"original input".to_vec());
+    original.timeout_ns = 1_000_000_000;
+    manager
+        .execute(&lease.execution_id, lease.generation, original.clone())
+        .await
+        .expect("original keyed exec");
+    let mut changed = original;
+    changed.cmd.push("changed".to_string());
+    changed.stdin = Some(b"changed input".to_vec());
+    changed.timeout_ns = 2_000_000_000;
+
+    let error = manager
+        .execute(&lease.execution_id, lease.generation, changed)
+        .await
+        .expect_err("changed content must not reuse one keyed process");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("different request")
+    ));
+    let calls = service.exec_requests();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].process_id, calls[1].process_id);
+    assert_ne!(calls[0].context.operation_id, calls[1].context.operation_id);
+    assert_eq!(service.processes.lock().expect("process lock").len(), 1);
+    assert_eq!(service.stdin_effects().len(), 1);
+}
+
+#[tokio::test]
+async fn exec_capability_and_box_generation_fail_before_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::without_operation(
+        RuntimeOperation::Exec,
+    ));
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("missing-exec", ExecutionIsolation::Microvm),
+            &box_operation("missing-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let stale = ExecutionGeneration::new(lease.generation.get() + 1).expect("future generation");
+
+    let stale_error = manager
+        .execute(&lease.execution_id, stale, box_exec_request(None))
+        .await
+        .expect_err("Box generation mismatch must fail");
+    assert!(matches!(
+        stale_error,
+        ExecutionManagerError::Conflict { .. }
+    ));
+    let capability_error = manager
+        .execute(
+            &lease.execution_id,
+            lease.generation,
+            box_exec_request(None),
+        )
+        .await
+        .expect_err("missing SDK exec must fail closed");
+    assert!(matches!(
+        capability_error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("does not advertise exec")
+    ));
+    assert!(service.exec_requests().is_empty());
+}
+
+#[tokio::test]
+async fn exec_rejects_a_second_rootfs_before_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("second-rootfs", ExecutionIsolation::Sandbox),
+            &box_operation("second-rootfs-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut exec = box_exec_request(None);
+    exec.rootfs = Some("/nested-rootfs".to_string());
+
+    let error = manager
+        .execute(&lease.execution_id, lease.generation, exec)
+        .await
+        .expect_err("OCI exec must not silently reinterpret another rootfs");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("second rootfs")
+    ));
+    assert!(service.exec_requests().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_exec_identity_and_empty_command_fail_before_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("invalid-exec", ExecutionIsolation::Sandbox),
+            &box_operation("invalid-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let invalid_requests = [
+        BoxExecRequest {
+            request_id: Some(String::new()),
+            ..box_exec_request(None)
+        },
+        BoxExecRequest {
+            request_id: Some("x".repeat(513)),
+            ..box_exec_request(None)
+        },
+        BoxExecRequest {
+            request_id: Some("contains\0nul".to_string()),
+            ..box_exec_request(None)
+        },
+        BoxExecRequest {
+            cmd: Vec::new(),
+            ..box_exec_request(None)
+        },
+    ];
+
+    for request in invalid_requests {
+        let error = manager
+            .execute(&lease.execution_id, lease.generation, request)
+            .await
+            .expect_err("invalid exec must fail locally");
+        assert!(matches!(error, ExecutionManagerError::InvalidRequest(_)));
+    }
+    assert!(service.exec_requests().is_empty());
+}
+
+#[tokio::test]
+async fn session_mode_capabilities_are_checked_before_exec_dispatch() {
+    {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let service = Arc::new(FakeRuntimeService::without_operation(
+            RuntimeOperation::ReadOutput,
+        ));
+        let manager = manager(
+            &directory,
+            test_endpoint(),
+            service.clone(),
+            Arc::new(FakeBundleProvider::default()),
+        );
+        let lease = manager
+            .create_and_start(
+                request("missing-output", ExecutionIsolation::Sandbox),
+                &box_operation("missing-output-create"),
+            )
+            .await
+            .expect("initial launch");
+        let error = manager
+            .execute(
+                &lease.execution_id,
+                lease.generation,
+                box_exec_request(None),
+            )
+            .await
+            .expect_err("captured exec requires read-output");
+        assert!(error.to_string().contains("read-output"));
+        assert!(service.exec_requests().is_empty());
+    }
+
+    {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let service = Arc::new(FakeRuntimeService::without_operation(
+            RuntimeOperation::WriteStdin,
+        ));
+        let manager = manager(
+            &directory,
+            test_endpoint(),
+            service.clone(),
+            Arc::new(FakeBundleProvider::default()),
+        );
+        let lease = manager
+            .create_and_start(
+                request("missing-stdin", ExecutionIsolation::Sandbox),
+                &box_operation("missing-stdin-create"),
+            )
+            .await
+            .expect("initial launch");
+        let mut exec = box_exec_request(None);
+        exec.streaming = true;
+        exec.stdin_streaming = true;
+        let error = match manager
+            .start_process(&lease.execution_id, lease.generation, exec)
+            .await
+        {
+            Ok(_) => panic!("streaming exec requires write-stdin"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("write-stdin"));
+        assert!(service.exec_requests().is_empty());
+    }
+
+    {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let service = Arc::new(FakeRuntimeService::without_operation(
+            RuntimeOperation::Resize,
+        ));
+        let manager = manager(
+            &directory,
+            test_endpoint(),
+            service.clone(),
+            Arc::new(FakeBundleProvider::default()),
+        );
+        let lease = manager
+            .create_and_start(
+                request("missing-resize", ExecutionIsolation::Microvm),
+                &box_operation("missing-resize-create"),
+            )
+            .await
+            .expect("initial launch");
+        let error = match manager
+            .start_pty(
+                &lease.execution_id,
+                lease.generation,
+                PtyRequest {
+                    cmd: vec!["/bin/sh".to_string()],
+                    env: Vec::new(),
+                    working_dir: Some("/".to_string()),
+                    rootfs: None,
+                    user: None,
+                    cols: 80,
+                    rows: 24,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("PTY requires resize"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("resize"));
+        assert!(service.exec_requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("streaming-exec", ExecutionIsolation::Sandbox),
+            &box_operation("streaming-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut request = box_exec_request(None);
+    request.streaming = true;
+    request.stdin_streaming = true;
+    let mut process = manager
+        .start_process(&lease.execution_id, lease.generation, request)
+        .await
+        .expect("start streaming exec");
+    let input = process.input();
+    service
+        .fail_stdin_after_effect
+        .store(true, Ordering::SeqCst);
+
+    input
+        .write_stdin(b"replayed input")
+        .await
+        .expect_err("stdin response is intentionally lost");
+    input
+        .write_stdin(b"changed input")
+        .await
+        .expect_err("changed retry content must retain and conflict on the same mutation");
+    input
+        .write_stdin(b"replayed input")
+        .await
+        .expect("same stdin mutation replays");
+    input
+        .write_stdin(b"next input")
+        .await
+        .expect("next stdin mutation");
+    input.close_stdin().await.expect("close stdin");
+    input
+        .send_signal(ExecutionProcessSignal::Kill)
+        .await
+        .expect("signal exact process");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut terminal = None;
+    while let Some(event) = process.next_event().await.expect("stream event") {
+        match event {
+            ExecEvent::Chunk(chunk) => match chunk.stream {
+                StreamType::Stdout => stdout.extend_from_slice(&chunk.data),
+                StreamType::Stderr => stderr.extend_from_slice(&chunk.data),
+            },
+            ExecEvent::Exit(exit) => terminal = Some(exit),
+            ExecEvent::FlushAck => {}
+        }
+    }
+
+    assert_eq!(stdout, b"fake stdout\n");
+    assert_eq!(stderr, b"fake stderr\n");
+    assert_eq!(terminal.expect("terminal status").exit_code, 137);
+    let stdin_calls = service.stdin_requests();
+    assert_eq!(stdin_calls.len(), 4);
+    assert_eq!(
+        stdin_calls[0].context.operation_id,
+        stdin_calls[1].context.operation_id
+    );
+    assert_eq!(
+        stdin_calls[1].context.operation_id,
+        stdin_calls[2].context.operation_id
+    );
+    assert_ne!(
+        stdin_calls[2].context.operation_id,
+        stdin_calls[3].context.operation_id
+    );
+    assert_eq!(service.stdin_effects().len(), 2);
+    assert_eq!(service.close_stdin_requests().len(), 1);
+    let signals = service.signal_process_requests();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].signal.get(), 9);
+    assert_eq!(
+        signals[0].process.container.generation,
+        Some(RUNTIME_GENERATION)
+    );
+    assert!(!service.wait_process_requests().is_empty());
+}
+
+#[tokio::test]
+async fn pty_routes_merged_output_resize_and_signal_to_the_exact_sdk_process() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("pty-exec", ExecutionIsolation::Microvm),
+            &box_operation("pty-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut process = manager
+        .start_pty(
+            &lease.execution_id,
+            lease.generation,
+            PtyRequest {
+                cmd: vec!["/bin/sh".to_string()],
+                env: vec!["TERM=xterm".to_string()],
+                working_dir: Some("/".to_string()),
+                rootfs: None,
+                user: Some("root".to_string()),
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .await
+        .expect("start PTY");
+    let input = process.input();
+    input.write_stdin(b"echo ready\n").await.expect("PTY input");
+    input.resize_pty(120, 40).await.expect("PTY resize");
+    input
+        .send_signal(ExecutionProcessSignal::Terminate)
+        .await
+        .expect("PTY signal");
+
+    let ExecEvent::Chunk(chunk) = process
+        .next_event()
+        .await
+        .expect("PTY output")
+        .expect("PTY output event")
+    else {
+        panic!("expected PTY output")
+    };
+    assert_eq!(chunk.stream, StreamType::Stdout);
+    assert_eq!(chunk.data, b"fake tty\n");
+    let ExecEvent::Exit(exit) = process
+        .next_event()
+        .await
+        .expect("PTY exit")
+        .expect("PTY exit event")
+    else {
+        panic!("expected PTY exit")
+    };
+    assert_eq!(exit.exit_code, 143);
+    assert!(process.next_event().await.expect("PTY end").is_none());
+
+    let exec = service.exec_requests();
+    assert_eq!(exec.len(), 1);
+    assert!(exec[0].process.terminal().unwrap_or(false));
+    assert_eq!(exec[0].io.stdin, IoMode::Terminal);
+    assert_eq!(
+        exec[0].io.terminal_size,
+        Some(TerminalSize {
+            width: 80,
+            height: 24
+        })
+    );
+    let resize = service.resize_requests();
+    assert_eq!(resize.len(), 1);
+    assert_eq!(
+        resize[0].size,
+        TerminalSize {
+            width: 120,
+            height: 40
+        }
+    );
+    assert_eq!(
+        resize[0].process,
+        ProcessTarget {
+            container: exec[0].container.clone(),
+            process_id: exec[0].process_id.clone(),
+        }
+    );
+    assert_eq!(service.signal_process_requests()[0].signal.get(), 15);
+}
+
+#[tokio::test]
+async fn captured_exec_timeout_kills_and_returns_legacy_terminal_shape() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service.hold_next_process.store(true, Ordering::SeqCst);
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("timed-exec", ExecutionIsolation::Sandbox),
+            &box_operation("timed-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut exec = box_exec_request(Some("timed-exec-request"));
+    exec.timeout_ns = 1;
+
+    let output = manager
+        .execute(&lease.execution_id, lease.generation, exec)
+        .await
+        .expect("timed exec result");
+
+    assert_eq!(output.stdout, b"fake stdout\n");
+    assert_eq!(
+        output.stderr,
+        b"fake stderr\n\nProcess killed: timeout exceeded"
+    );
+    assert_eq!(output.exit_code, 137);
+    assert_eq!(service.signal_process_requests().len(), 1);
+    assert_eq!(service.signal_process_requests()[0].signal.get(), 9);
+}
+
+#[tokio::test]
+async fn dropped_exec_future_keeps_its_exact_timeout_watchdog() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service.hold_next_process.store(true, Ordering::SeqCst);
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
+        .create_and_start(
+            request("detached-timeout", ExecutionIsolation::Sandbox),
+            &box_operation("detached-timeout-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut exec = box_exec_request(None);
+    exec.timeout_ns = 50_000_000;
+
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(5),
+        manager.execute(&lease.execution_id, lease.generation, exec),
+    )
+    .await
+    .is_err());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let signals = service.signal_process_requests();
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].signal.get(), 9);
+    assert_eq!(
+        signals[0].process.container.generation,
+        Some(RUNTIME_GENERATION)
+    );
 }
 
 #[tokio::test]
@@ -1583,6 +2496,21 @@ fn box_operation(value: &str) -> BoxOperationId {
     BoxOperationId::new(value).expect("Box operation ID")
 }
 
+fn box_exec_request(request_id: Option<&str>) -> BoxExecRequest {
+    BoxExecRequest {
+        request_id: request_id.map(str::to_string),
+        cmd: vec!["/bin/echo".to_string(), "ready".to_string()],
+        timeout_ns: 1_000_000_000,
+        env: Vec::new(),
+        working_dir: Some("/".to_string()),
+        rootfs: None,
+        stdin: None,
+        stdin_streaming: false,
+        user: None,
+        streaming: false,
+    }
+}
+
 fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
     let platform = if cfg!(windows) {
         "windows"
@@ -1619,7 +2547,8 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
         },
         "operations": [
             "features", "create", "state", "start", "kill", "delete", "wait",
-            "pause", "resume"
+            "pause", "resume", "exec", "read-output", "write-stdin", "close-stdin",
+            "resize", "signal-process", "wait-process"
         ],
         "attachments": {
             "schemas": ["a3s.oci.attachments.v1"],
@@ -1639,6 +2568,71 @@ fn selected_driver(request: IsolationRequest) -> (DriverKind, IsolationClass) {
             panic!("the Box adapter does not request shared guest kernels")
         }
     }
+}
+
+fn fake_process_output(terminal: bool, held: bool) -> Vec<OutputChunk> {
+    let mut output = Vec::new();
+    append_output(
+        &mut output,
+        OutputStream::Stdout,
+        if terminal {
+            b"fake tty\n".to_vec()
+        } else {
+            b"fake stdout\n".to_vec()
+        },
+        false,
+    );
+    if !terminal {
+        append_output(
+            &mut output,
+            OutputStream::Stderr,
+            b"fake stderr\n".to_vec(),
+            false,
+        );
+    }
+    if !held {
+        append_missing_eof(&mut output, OutputStream::Stdout);
+        if !terminal {
+            append_missing_eof(&mut output, OutputStream::Stderr);
+        }
+    }
+    output
+}
+
+fn append_missing_eof(output: &mut Vec<OutputChunk>, stream: OutputStream) {
+    if output
+        .iter()
+        .any(|chunk| chunk.stream == stream && chunk.eof)
+    {
+        return;
+    }
+    append_output(output, stream, Vec::new(), true);
+}
+
+fn append_output(output: &mut Vec<OutputChunk>, stream: OutputStream, data: Vec<u8>, eof: bool) {
+    let previous = output.last().map_or(0, |chunk| chunk.sequence);
+    let width = if eof { 1 } else { data.len() as u64 };
+    output.push(OutputChunk {
+        sequence: previous + width,
+        stream,
+        data,
+        eof,
+    });
+}
+
+fn validate_process_target(
+    target: &ProcessTarget,
+    record: &ProcessRecord,
+    operation: &str,
+) -> OciResult<()> {
+    if target != &record.target {
+        return Err(oci_error(
+            ErrorCode::Conflict,
+            operation,
+            "fake process target does not match its exact generation",
+        ));
+    }
+    Ok(())
 }
 
 fn runtime_record(

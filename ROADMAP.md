@@ -102,6 +102,16 @@ recreation without issuing the mutation twice. Filesystem-only pause continues
 to use the existing
 stop/reprepare lifecycle rather than being mislabeled as an OCI freezer action.
 
+The backend-neutral session boundary now also routes captured and streaming
+exec, stdin, cursor-checked stdout/stderr, signal/wait, PTY, and resize through
+the exact OCI target. Capability preflight and immutable Box/runtime generation
+checks happen before exec mutation; keyed one-shot calls retain one process
+identity across a lost response and backend recreation. Initial and streaming
+stdin mutations are replay-safe, timeouts retain an exact SIGKILL watchdog even
+if the caller drops its future, and raw process output never enters Box's
+structured log store. Legacy VM records retain their existing socket transport,
+while OCI-bound sessions no longer depend on Unix-domain sockets.
+
 ## Delivery Milestones
 
 ### B0 - Boundary And Contract Freeze
@@ -150,20 +160,31 @@ evidence.
 
 - [x] Route memory-retaining pause/resume through exact-generation OCI SDK
   operations with capability checks and replay-safe recovery.
-- [ ] Route exec, process signal/wait, stdin, captured output, PTY, resize,
-  processes, resource update, stats, and ordered events through the OCI SDK.
-- [ ] Keep raw runtime output separate from Box log retention, indexing,
+- [x] Route captured and streaming exec, process signal/wait, stdin, captured
+  output, PTY, and resize through exact-generation OCI SDK operations with
+  capability preflight and replay-safe one-shot identities.
+- [ ] Route process inventory, resource update, stats, and ordered events
+  through the OCI SDK.
+- [x] Keep raw runtime output separate from Box log retention, indexing,
   cursor, search, and redaction policy.
-- [ ] Drive Box health probes through the canonical runtime exec boundary.
-- [ ] Preserve exact terminal status and generation fencing across restart.
+- [x] Drive Box command health probes through the canonical runtime exec
+  boundary.
+- [x] Preserve exact terminal status and Box/runtime generation fencing across
+  backend recreation and keyed replay.
+- [ ] Prove process-session recovery across an out-of-process runtime-service
+  restart on real native Linux and utility-VM drivers.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
 
 The in-process contract suite now covers repeated pause/resume cycles, stable
 claim-scoped operation identities, missing-operation rejection, immutable
-runtime binding, and backend recreation after lost freezer responses. Native
-driver and out-of-process restart evidence remains part of the exit gate.
+runtime binding, and backend recreation after lost freezer responses. It also
+covers keyed exec replay after a lost response, exact normal and signaled
+status, generation and capability rejection before mutation, replay-safe stdin,
+PTY output/resize/signal, raw-log separation, second-rootfs rejection, timeout
+cleanup, and caller-cancellation cleanup. Native-driver and out-of-process
+restart evidence remains part of the exit gate.
 
 ### B3 - Storage And Networking Attachments
 

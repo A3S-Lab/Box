@@ -11,6 +11,7 @@ pub use lifecycle_lock::{
 };
 mod logs;
 mod oci_backend;
+mod oci_session;
 mod operations;
 mod port;
 mod record;
@@ -20,6 +21,7 @@ mod resources;
 mod restart;
 #[cfg(unix)]
 mod session;
+mod session_support;
 #[cfg(not(unix))]
 mod session_unsupported;
 mod snapshot;
@@ -98,6 +100,14 @@ impl LocalExecutionManager {
                 message: "execution is not running".to_string(),
             });
         }
+        if let Some(binding) = record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.oci_runtime.as_ref())
+        {
+            binding.validate_for(execution_id)?;
+            return Ok(record);
+        }
         if record.exec_socket_path.as_os_str().is_empty() {
             return Err(ExecutionManagerError::Internal(format!(
                 "execution {execution_id} has no exec endpoint"
@@ -113,6 +123,36 @@ impl LocalExecutionManager {
             }
         }
         Ok(record)
+    }
+
+    pub(super) async fn require_same_runtime(
+        &self,
+        bound: &BoxRecord,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<()> {
+        let current = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if current.pid != bound.pid
+            || current.pid_start_time != bound.pid_start_time
+            || current.exec_socket_path != bound.exec_socket_path
+            || current
+                .managed_execution
+                .as_ref()
+                .and_then(|metadata| metadata.oci_runtime.as_ref())
+                != bound
+                    .managed_execution
+                    .as_ref()
+                    .and_then(|metadata| metadata.oci_runtime.as_ref())
+        {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "runtime generation changed while binding its execution session"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     #[cfg(feature = "vm")]

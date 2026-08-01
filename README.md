@@ -50,10 +50,16 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > boundary negotiates `a3s.oci.attachments.v1`, submits the bundle rootfs,
 > mounts, networking, process I/O, secret classifications, and optional
 > extensions as one validated manifest, and persists its exact digest for
-> recovery. Its exact-generation lifecycle path now also carries durable
-> memory-retaining pause/resume through the SDK, including lost-response
-> reconciliation. Production MicroVM routing and real-host cutover gates are
-> not complete; the current split above remains authoritative.
+> recovery. That exact-generation boundary now carries memory-retaining
+> pause/resume and Box process sessions: captured and streaming exec, stdin,
+> cursor-checked output, signals and wait, PTY resize, exact exit status, and
+> bounded timeout cleanup. One-shot request IDs replay to the same process
+> after backend recreation, while raw runtime output remains separate from
+> structured Box logs. Legacy VM records keep their socket sessions; OCI-bound
+> records use the SDK transport on Unix and Windows. Process inventory,
+> resource update, stats, events, Box file sessions, production MicroVM routing,
+> and real-host cutover gates are not complete; the current split above remains
+> authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -258,12 +264,12 @@ A3S OCI Runtime host service
 ```
 
 Box remains the product, image, storage, network, health, and policy owner.
-OCI Runtime becomes authoritative for actual process/VM state, operation
-replay, exact terminal status, driver selection, and runtime cleanup. The
-adapter retains only the exact runtime identity, immutable configuration and
-attachment digests, endpoint, driver, and isolation evidence needed to detect
-recovery drift. Solid current behavior and the phased cutover gates are kept
-separate in
+OCI Runtime becomes authoritative for actual process/VM state, raw process
+I/O, operation replay, exact terminal status, driver selection, and runtime
+cleanup. The adapter retains only the exact runtime identity, immutable
+configuration and attachment digests, endpoint, driver, and isolation evidence
+needed to detect recovery drift. Solid current behavior and the phased cutover
+gates are kept separate in
 [ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
 platform capability.
 

@@ -1,4 +1,4 @@
-//! Fail-closed session adapter for hosts without Unix-domain socket support.
+//! OCI SDK sessions plus fail-closed legacy handling on hosts without Unix sockets.
 
 use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
@@ -7,50 +7,110 @@ use a3s_box_core::{
 };
 use async_trait::async_trait;
 
+use super::session_support::{
+    debug_session_environment, has_oci_runtime, inherit_container_environment,
+};
 use super::LocalExecutionManager;
 
 #[async_trait]
 impl ExecutionSessionManager for LocalExecutionManager {
     async fn execute(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
-        _request: ExecRequest,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecOutput> {
-        Err(unsupported_session("execute commands"))
+        request.streaming = false;
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if !has_oci_runtime(&record) {
+            return Err(unsupported_session("execute commands"));
+        }
+        inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "execute",
+            &record.env,
+            &request.env,
+        );
+        self.require_same_runtime(&record, execution_id, generation)
+            .await?;
+        self.backend.execute(&record, request).await
     }
 
     async fn start_process(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
-        _request: ExecRequest,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        Err(unsupported_session("start processes"))
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if !has_oci_runtime(&record) {
+            return Err(unsupported_session("start processes"));
+        }
+        inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "start_process",
+            &record.env,
+            &request.env,
+        );
+        self.require_same_runtime(&record, execution_id, generation)
+            .await?;
+        self.backend.start_process(&record, request).await
     }
 
     async fn start_pty(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
-        _request: PtyRequest,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        mut request: PtyRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        Err(unsupported_session("start PTYs"))
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if !has_oci_runtime(&record) {
+            return Err(unsupported_session("start PTYs"));
+        }
+        inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "start_pty",
+            &record.env,
+            &request.env,
+        );
+        self.require_same_runtime(&record, execution_id, generation)
+            .await?;
+        self.backend.start_pty(&record, request).await
     }
 
     async fn transfer_file(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
         _request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if has_oci_runtime(&record) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "execution {execution_id} uses the A3S OCI SDK, whose current public contract does not expose Box file sessions"
+            )));
+        }
         Err(unsupported_session("transfer files"))
     }
 }
 
 fn unsupported_session(operation: &str) -> ExecutionManagerError {
     ExecutionManagerError::Unavailable(format!(
-        "cannot {operation}: managed execution sessions require Unix-domain socket support"
+        "cannot {operation}: legacy managed execution sessions require Unix-domain socket support"
     ))
 }
 

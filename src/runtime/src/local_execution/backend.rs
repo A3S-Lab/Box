@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use a3s_box_core::{
-    ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionState, KillOutcome,
+    pty::PtyRequest, ExecOutput, ExecRequest, ExecutionId, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionProcess, ExecutionState, KillOutcome,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -114,6 +115,41 @@ pub trait LocalExecutionBackend: Send + Sync {
     ) -> ExecutionManagerResult<LocalExecutionHandle>;
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
+
+    /// Execute one captured process through a backend-owned, generation-fenced
+    /// session boundary. The legacy VM backend retains its socket transport;
+    /// SDK-backed implementations override this method.
+    async fn execute(
+        &self,
+        _record: &BoxRecord,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecOutput> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose captured process sessions".to_string(),
+        ))
+    }
+
+    /// Start one streaming non-terminal process through the backend boundary.
+    async fn start_process(
+        &self,
+        _record: &BoxRecord,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose streaming process sessions".to_string(),
+        ))
+    }
+
+    /// Start one interactive terminal process through the backend boundary.
+    async fn start_pty(
+        &self,
+        _record: &BoxRecord,
+        _request: PtyRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose PTY sessions".to_string(),
+        ))
+    }
 
     /// Make a stopped, storage-retained rootfs available for a filesystem
     /// snapshot without starting the execution runtime.

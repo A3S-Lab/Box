@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionState, KillOutcome, OperationId as BoxOperationId,
+    pty::PtyRequest, ExecOutput, ExecRequest as BoxExecRequest, ExecutionGeneration, ExecutionId,
+    ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
+    ExecutionState, KillOutcome, OperationId as BoxOperationId,
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
@@ -321,6 +322,10 @@ impl OciLifecycleAdapter {
     ) -> ExecutionManagerResult<Self> {
         endpoint.validate()?;
         Ok(Self { endpoint, client })
+    }
+
+    pub(super) fn client(&self) -> RuntimeClient {
+        self.client.clone()
     }
 
     /// Fail before product preparation unless one launch-ready driver can meet
@@ -742,7 +747,7 @@ impl OciLocalExecutionBackend {
         })
     }
 
-    fn metadata<'a>(
+    pub(super) fn metadata<'a>(
         &self,
         record: &'a BoxRecord,
     ) -> ExecutionManagerResult<&'a crate::ManagedExecutionMetadata> {
@@ -758,12 +763,15 @@ impl OciLocalExecutionBackend {
         Ok(metadata)
     }
 
-    fn execution_id(&self, record: &BoxRecord) -> ExecutionManagerResult<ExecutionId> {
+    pub(super) fn execution_id(&self, record: &BoxRecord) -> ExecutionManagerResult<ExecutionId> {
         ExecutionId::new(record.id.clone())
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))
     }
 
-    fn binding(&self, record: &BoxRecord) -> ExecutionManagerResult<Option<OciRuntimeBinding>> {
+    pub(super) fn binding(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<Option<OciRuntimeBinding>> {
         let execution_id = self.execution_id(record)?;
         let binding = self.metadata(record)?.oci_runtime.clone();
         if let Some(binding) = &binding {
@@ -775,6 +783,10 @@ impl OciLocalExecutionBackend {
             }
         }
         Ok(binding)
+    }
+
+    pub(super) fn client(&self) -> RuntimeClient {
+        self.adapter.client()
     }
 
     fn handle(
@@ -1048,6 +1060,30 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         ))
     }
 
+    async fn execute(
+        &self,
+        record: &BoxRecord,
+        request: BoxExecRequest,
+    ) -> ExecutionManagerResult<ExecOutput> {
+        super::oci_session::execute(self, record, request).await
+    }
+
+    async fn start_process(
+        &self,
+        record: &BoxRecord,
+        request: BoxExecRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        super::oci_session::start_process(self, record, request).await
+    }
+
+    async fn start_pty(
+        &self,
+        record: &BoxRecord,
+        request: PtyRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        super::oci_session::start_pty(self, record, request).await
+    }
+
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         Ok(self.kill_with_status(record).await?.outcome)
     }
@@ -1164,7 +1200,7 @@ fn freezer_operation_seed(
         .to_string())
 }
 
-fn operation_context(
+pub(super) fn operation_context(
     seed: &str,
     generation: ExecutionGeneration,
     operation: &str,
@@ -1349,7 +1385,7 @@ fn validate_sha256_evidence(value: &str, label: &str) -> ExecutionManagerResult<
     Ok(())
 }
 
-fn exit_code(status: &ExitStatus) -> ExecutionManagerResult<i32> {
+pub(super) fn exit_code(status: &ExitStatus) -> ExecutionManagerResult<i32> {
     if let Some(exit_code) = status.exit_code {
         return Ok(exit_code);
     }
@@ -1365,7 +1401,7 @@ fn exit_code(status: &ExitStatus) -> ExecutionManagerResult<i32> {
     })
 }
 
-fn sdk_error(operation: &str, error: a3s_oci_sdk::Error) -> ExecutionManagerError {
+pub(super) fn sdk_error(operation: &str, error: a3s_oci_sdk::Error) -> ExecutionManagerError {
     match error.code {
         ErrorCode::InvalidArgument => {
             ExecutionManagerError::InvalidRequest(format!("A3S OCI {operation}: {error}"))
