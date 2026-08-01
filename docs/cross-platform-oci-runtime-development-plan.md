@@ -50,10 +50,12 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`d8131f322a94c862995c08838d8df97c8e15c28f`, which retains the qualified
+`1cdcb9b9771b2f66e6f3b2ff106d7885f6afa914`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
-routing required by the unified execution migration.
+routing required by the unified execution migration. Runtime service startup
+also fails closed when historical state references a missing driver or a
+driver whose advertised isolation has drifted.
 
 ## Upgrade behavior
 
