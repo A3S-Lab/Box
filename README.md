@@ -436,6 +436,11 @@ resolver. Lifecycle ownership, unsupported-feature rejection, audit evidence,
 and cleanup therefore stay inside one runtime boundary. No separate HTTP
 control plane or remote lifecycle service sits beside this path.
 
+This diagram describes the current migration baseline. The target architecture
+routes both `microvm` and `sandbox` isolation through the public A3S OCI Runtime
+SDK, leaving Box as the product, image, storage, network, and policy owner. The
+phased cutover and removal gates are defined in [ROADMAP.md](ROADMAP.md).
+
 Repository components are grouped by responsibility:
 
 - `src/core` — execution policy, protocol types, state, events, logs, and
@@ -451,6 +456,7 @@ Repository components are grouped by responsibility:
 
 ## Documentation
 
+- [Product and OCI Runtime migration roadmap](ROADMAP.md)
 - [Host integration and real-runtime validation](docs/host-integration.md)
 - [Cross-capability soak test plan](docs/soak-test-plan.md)
 - [Shared-kernel Sandbox threat model](docs/host-sandbox-backend-design.md)
