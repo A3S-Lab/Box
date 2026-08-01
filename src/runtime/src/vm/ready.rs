@@ -119,6 +119,8 @@ impl VmManager {
         #[cfg(windows)]
         let guest_control_ready_path =
             exec_socket_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
+        #[cfg(windows)]
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         tracing::debug!(
             socket_path = %exec_endpoint.display(),
@@ -142,6 +144,27 @@ impl VmManager {
                     tracing::debug!("VM exited before exec server became ready");
                     return Ok(());
                 }
+            }
+
+            // A very short WHPX workload can persist its exact status and close
+            // the guest-control channel between two 200 ms readiness polls. The
+            // shim may still be draining logs (or waiting for libkrun to return),
+            // so `try_wait_exit` deliberately remains pending. Classify this as
+            // terminal startup completion and let boot cleanup finish the shim
+            // and collect the durable guest result instead of timing out and
+            // replacing it with the forced process exit code.
+            #[cfg(windows)]
+            if let Some(exit_code) = super::windows_guest_persisted_exit_code(&box_dir) {
+                tracing::debug!(
+                    exit_code,
+                    "WHPX guest completed before exec server became ready"
+                );
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "WHPX guest completed with exit code {exit_code} before the exec server became ready"
+                    ),
+                    hint: None,
+                });
             }
 
             // One bounded connect + heartbeat attempt. On Windows, first wait for

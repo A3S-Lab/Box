@@ -159,6 +159,23 @@ fn windows_marker_matches(path: &Path, expected: &[u8]) -> bool {
     contents == expected
 }
 
+/// Read the durable workload status without treating it as provider completion.
+///
+/// The WHPX guest writes this file before libkrun necessarily returns to the
+/// shim. Readiness and boot cleanup use its presence only to distinguish a
+/// completed one-shot from a live guest that never became ready; normal wait
+/// paths still wait for the shim to finish relaying logs before collecting it.
+#[cfg(target_os = "windows")]
+fn windows_guest_persisted_exit_code(box_dir: &Path) -> Option<i32> {
+    use std::io::Read;
+
+    let exit_path = box_dir.join("rootfs").join(WINDOWS_GUEST_EXIT_CODE);
+    let (file, _) = a3s_box_core::windows_file::open_regular_file(&exit_path, None).ok()?;
+    let mut contents = String::new();
+    file.take(64).read_to_string(&mut contents).ok()?;
+    contents.trim().parse::<i32>().ok()
+}
+
 /// Collect the completed WHPX guest result after the shim process has exited.
 ///
 /// Current shims drain structured logs before exiting. The runtime still owns
@@ -448,6 +465,9 @@ impl VmManager {
     async fn cleanup_boot_failure(&mut self) {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
+        #[cfg(target_os = "windows")]
+        let guest_exit_before_cleanup = windows_guest_persisted_exit_code(&box_dir);
+
         if let Some(mut handler) = self.handler.write().await.take() {
             // A short-lived workload can finish before the runtime publishes
             // its readiness endpoint. That is a normal terminal completion,
@@ -490,16 +510,47 @@ impl VmManager {
             }
             #[cfg(target_os = "windows")]
             {
-                self.shim_exit_code = provider_exit_code;
+                let completed_before_cleanup = collected_before_cleanup
+                    || exited_before_cleanup
+                    || guest_exit_before_cleanup.is_some();
+                if completed_before_cleanup {
+                    let fallback_exit_code = guest_exit_before_cleanup.or(provider_exit_code);
+                    if let Some(fallback_exit_code) = fallback_exit_code {
+                        match collect_windows_guest_result(
+                            &box_dir,
+                            &self.log_config,
+                            fallback_exit_code,
+                        ) {
+                            Ok(exit_code) => self.shim_exit_code = Some(exit_code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    box_id = %self.box_id,
+                                    error = %error,
+                                    "Failed to collect the completed Windows guest during boot cleanup"
+                                );
+                                self.shim_exit_code =
+                                    guest_exit_before_cleanup.or(provider_exit_code);
+                            }
+                        }
+                    } else {
+                        // A provider can report process exit before its owned
+                        // child status becomes collectable. Keep the status
+                        // pending so the delayed terminal poll below can reap it.
+                        self.shim_exit_code = None;
+                    }
+                } else {
+                    self.shim_exit_code = provider_exit_code;
+                }
             }
             if exited_before_cleanup && self.shim_exit_code.is_none() {
                 self.shim_exit_code =
                     wait_for_delayed_terminal_exit(handler.as_mut(), &box_dir, &self.box_id).await;
             }
-            if self.config.persistent
-                && self.shim_exit_code.is_some()
-                && (collected_before_cleanup || exited_before_cleanup)
-            {
+            let completed_before_cleanup = collected_before_cleanup || exited_before_cleanup;
+            #[cfg(target_os = "windows")]
+            let completed_before_cleanup =
+                completed_before_cleanup || guest_exit_before_cleanup.is_some();
+            if self.config.persistent && self.shim_exit_code.is_some() && completed_before_cleanup {
                 self.preserve_rootfs_on_boot_failure = true;
             }
         }
@@ -2148,8 +2199,8 @@ fn boot_failure_persisted_exit_code(box_dir: &Path) -> Option<i32> {
 }
 
 #[cfg(target_os = "windows")]
-fn boot_failure_persisted_exit_code(_box_dir: &Path) -> Option<i32> {
-    None
+fn boot_failure_persisted_exit_code(box_dir: &Path) -> Option<i32> {
+    windows_guest_persisted_exit_code(box_dir)
 }
 
 #[cfg(test)]
@@ -3011,6 +3062,74 @@ mod tests {
         assert_eq!(vm.try_wait_exit().await.unwrap(), None);
         assert_eq!(vm.exit_code(), None);
         assert!(!vm.has_exited().await);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn test_wait_for_exec_ready_classifies_persisted_windows_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-windows-completed-before-ready".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::new(AtomicBool::new(false)),
+        }));
+
+        let rootfs = tmp.path().join("boxes").join(&box_id).join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "42\n").unwrap();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock")),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("completed with exit code 42"));
+        assert_eq!(vm.exit_code(), None, "log relay has not completed yet");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn test_boot_cleanup_collects_windows_guest_completed_before_readiness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-windows-cleanup-completed-before-ready".to_string();
+        let mut vm = VmManager::with_box_id(
+            BoxConfig {
+                persistent: true,
+                ..BoxConfig::default()
+            },
+            EventEmitter::new(16),
+            box_id.clone(),
+        );
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+        let stopped = Arc::new(AtomicBool::new(false));
+        *vm.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::clone(&stopped),
+        }));
+
+        let box_dir = tmp.path().join("boxes").join(&box_id);
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "guest output\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "guest failure\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "42\n").unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert!(stopped.load(Ordering::SeqCst));
+        assert_eq!(vm.exit_code(), Some(42));
+        assert!(vm.preserve_rootfs_on_boot_failure);
+        assert_eq!(
+            std::fs::read_to_string(box_dir.join("logs").join("console.log")).unwrap(),
+            "guest output\n"
+        );
+        assert!(rootfs.is_dir());
     }
 
     #[cfg(unix)]
