@@ -50,13 +50,15 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`57473160f5d710d6a2482bb7335905411e20e6ce`, which retains the qualified
+`9b5141b647a04cadbdbbc32310bde33c54937ac3`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
 also fails closed when historical state references a missing driver or a
 driver whose advertised isolation has drifted. Windows additionally has a
-protected, local-only named-pipe SDK host listener ready for the WHPX driver.
+protected, local-only named-pipe SDK host listener ready for the WHPX driver,
+and utility-VM ownership can explicitly close every guest-agent client clone
+before reaping the guest and hypervisor shim.
 
 ## Upgrade behavior
 
