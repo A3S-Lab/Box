@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downloads instead of extracting them as trusted inputs.
 - Keep the Windows runtime trio version-locked instead of combining a current
   `krun.dll` with an older downloaded firmware DLL.
+- Segment Windows host-to-guest stream reads into 3 KiB chunks so control
+  payloads larger than one guest receive descriptor cannot wedge WHPX startup.
 
 ## [0.1.5] - 2026-03-12
 
