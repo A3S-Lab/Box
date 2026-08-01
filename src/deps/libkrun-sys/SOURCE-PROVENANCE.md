@@ -7,25 +7,26 @@ are lowercase SHA-256 unless noted otherwise.
 ## Packaged Windows runtime
 
 The deterministic `vendor/krun-windows-x64.tar.xz` archive has SHA-256
-`99329b39d23ba8462d63a448af267bcd8fcd238ed2ea1b2656d4cdf84ebf1e5c`
+`ce178184bc9e309c9f8fef181312cd6c398fc825807124e31afab949b790627e`
 and contains exactly:
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `krun.dll` | 7,428,608 | `ab8ceb013795fa8b43a3793f9579179c0afb9608430af1c21f6e9145cf27d7d9` |
+| `krun.dll` | 7,428,608 | `f21293b65ee16058c9014b543c708d84c50dc28d7775dbd77bac32faabafa59e` |
 | `krun.lib` | 11,870 | `3ac760758158bd4d2d6570db58037d47cd370a8e6ea04ccf54a8b24fd1fdec3d` |
 | `libkrunfw.dll` | 21,473,280 | `44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077` |
 
 `krun.dll` and its import library correspond to A3S-Lab/libkrun commit
-`9480ee360cdfcf0855ca4fa0951743ea09d2f550`. That revision segments Windows
-host-to-guest stream reads into 3 KiB chunks so a request larger than one guest
-receive descriptor cannot stall the control channel. The packaged
+`dc5519faeabd8bf38d984ed29c44e6da977f0b5c`. That revision retains segmented
+Windows host-to-guest stream reads and reopens writable virtio-fs files with
+write access before `fsync`, so authenticated guest recovery reports can be
+flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`3f101741efd9370f1ef78b36c11e7b776cf3b281036ab754db876d40b3a08bcd`).
+`9f48d439184d16ce888a5f12920fe8e0fe4d2b6adccd14f9add3f48a61e0cd81`).
 The deterministic archive was generated from local tooling commit
-`9480ee360cdfcf0855ca4fa0951743ea09d2f550`; its
+`dc5519faeabd8bf38d984ed29c44e6da977f0b5c`; its
 `corresponding-source/2692169` directory preserves the exact wrapper source
 for the packaged firmware DLL. The archive also contains the Apache-2.0
 license and the EDK2 source notices.

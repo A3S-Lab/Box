@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `krun.dll` with an older downloaded firmware DLL.
 - Segment Windows host-to-guest stream reads into 3 KiB chunks so control
   payloads larger than one guest receive descriptor cannot wedge WHPX startup.
+- Reopen writable Windows virtio-fs files with write access before `fsync` so
+  guest recovery artifacts reach the host without a false `EIO`.
 
 ## [0.1.5] - 2026-03-12
 
