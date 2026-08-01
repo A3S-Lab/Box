@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use a3s_box_core::error::{BoxError, Result};
 use a3s_oci_sdk::{
-    ContainerId, ContainerTarget, CreateRequest, DeleteMode, DeleteRequest, DriverKind, IoMode,
-    IsolationRequest, OciBundle, OciContainerState, OperationContext, OperationId, ProcessIo,
-    RuntimeOperation, StartRequest,
+    ContainerId, ContainerTarget, CreateAttachments, CreateRequest, DeleteMode, DeleteRequest,
+    DriverKind, IoMode, IsolationRequest, OciBundle, OciContainerState, OperationContext,
+    OperationId, ProcessIo, RuntimeOperation, StartRequest,
 };
 
 use super::a3s_oci_client::A3sOciClient;
@@ -142,17 +142,22 @@ impl A3sOciController {
                 .map_err(sdk_boot_error)?;
             let container_id =
                 ContainerId::new(launch.container_id.clone()).map_err(sdk_boot_error)?;
-            let created = lifecycle_client.create(CreateRequest {
-                context: operation_context(&launch.container_id, "create")?,
-                id: container_id.clone(),
-                bundle,
-                isolation: IsolationRequest::SharedHostKernel,
-                io: ProcessIo {
+            let attachments = CreateAttachments::from_bundle(
+                &bundle,
+                ProcessIo {
                     stdin: IoMode::Null,
                     stdout: IoMode::Inherit,
                     stderr: IoMode::Inherit,
                     terminal_size: None,
                 },
+            )
+            .map_err(sdk_boot_error)?;
+            let created = lifecycle_client.create(CreateRequest {
+                context: operation_context(&launch.container_id, "create")?,
+                id: container_id.clone(),
+                bundle,
+                isolation: IsolationRequest::SharedHostKernel,
+                attachments,
             })?;
             let exact_target = ContainerTarget::exact(container_id, created.generation);
             validate_record(&created, &exact_target, None)?;
