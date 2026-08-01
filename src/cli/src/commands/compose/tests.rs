@@ -351,6 +351,16 @@ fn cached_image_config_with_health(
 
 #[cfg(windows)]
 #[test]
+fn windows_compose_up_rejects_bridge_networking_before_runtime_setup() {
+    let error = validate_compose_up_platform_support().unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("'compose up' is not supported"));
+    assert!(message.contains("bridge networking support"));
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_compose_rejects_declared_health_before_runtime_setup() {
     let error = validate_known_compose_health(
         "api",

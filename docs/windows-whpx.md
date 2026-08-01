@@ -144,7 +144,8 @@ the starting and final A3S process inventories were empty.
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains
 outside the current Windows support boundary even when a Compose file contains
-only one service.
+only one service. `compose up` rejects this platform combination before image
+resolution, network creation, box-directory creation, or VM startup.
 
 ## WHPX soak validation
 

@@ -395,6 +395,7 @@ impl VmLocalExecutionBackend {
         }
     }
 
+    #[cfg(not(windows))]
     async fn require_microvm(&self, record: &BoxRecord) -> ExecutionManagerResult<SharedVm> {
         match self.manager(&record.id) {
             Some(manager) => Ok(manager),
@@ -736,14 +737,25 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 "the local MicroVM backend",
             ));
         }
-        let shared = self.require_microvm(record).await?;
-        let manager = shared.lock().await;
-        require_recorded_pid(record, &manager).await?;
-        manager
-            .pause()
-            .await
-            .map_err(|error| runtime_error("pause", record, error))?;
-        self.handle_from_manager(record, &manager).await
+        #[cfg(windows)]
+        {
+            Err(unsupported(
+                record,
+                "pause",
+                "the local MicroVM backend on Windows",
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            let shared = self.require_microvm(record).await?;
+            let manager = shared.lock().await;
+            require_recorded_pid(record, &manager).await?;
+            manager
+                .pause()
+                .await
+                .map_err(|error| runtime_error("pause", record, error))?;
+            self.handle_from_manager(record, &manager).await
+        }
     }
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
@@ -751,14 +763,25 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         if metadata.plan.backend.is_sandbox() {
             return self.resume_sandbox(record).await;
         }
-        let shared = self.require_microvm(record).await?;
-        let manager = shared.lock().await;
-        require_recorded_pid(record, &manager).await?;
-        manager
-            .resume()
-            .await
-            .map_err(|error| runtime_error("resume", record, error))?;
-        self.handle_from_manager(record, &manager).await
+        #[cfg(windows)]
+        {
+            Err(unsupported(
+                record,
+                "resume",
+                "the local MicroVM backend on Windows",
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            let shared = self.require_microvm(record).await?;
+            let manager = shared.lock().await;
+            require_recorded_pid(record, &manager).await?;
+            manager
+                .resume()
+                .await
+                .map_err(|error| runtime_error("resume", record, error))?;
+            self.handle_from_manager(record, &manager).await
+        }
     }
 
     async fn prepare_quiescent_rootfs(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
@@ -874,6 +897,7 @@ fn graceful_stop_options(
     Ok(Some((signal, timeout_ms)))
 }
 
+#[cfg(not(windows))]
 async fn require_recorded_pid(
     record: &BoxRecord,
     manager: &VmManager,
@@ -984,13 +1008,10 @@ fn runtime_error(
 }
 
 fn unsupported(record: &BoxRecord, operation: &str, backend: &str) -> ExecutionManagerError {
-    match execution_id(record) {
-        Ok(execution_id) => ExecutionManagerError::Conflict {
-            execution_id,
-            message: format!("{operation} is not supported by {backend}"),
-        },
-        Err(error) => error,
-    }
+    ExecutionManagerError::Unavailable(format!(
+        "{operation} is not supported by {backend} for execution {}",
+        record.id
+    ))
 }
 
 #[cfg(unix)]

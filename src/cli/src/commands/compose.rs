@@ -340,6 +340,7 @@ async fn execute_up(
     validate_compose_restart_policies(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let project = ComposeRuntimePlan::with_base_dir(project_name, config, base_dir)?;
+    validate_compose_up_platform_support()?;
     // Windows has no guest health-probe transport. Resolve declared health
     // checks and image metadata before creating networks, box directories, or
     // starting a VM. Metadata resolution may populate the image cache.
@@ -922,6 +923,20 @@ async fn wait_for_healthy(
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+fn validate_compose_up_platform_support() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        Err(crate::platform::unsupported_command(
+            "compose up",
+            "bridge networking support",
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
     }
 }
 

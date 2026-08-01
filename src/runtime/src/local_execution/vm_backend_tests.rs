@@ -463,6 +463,22 @@ async fn filesystem_only_pause_fails_before_starting_a_runtime() {
     assert!(backend.managers.is_empty());
 }
 
+#[test]
+fn unsupported_backend_capabilities_are_unavailable() {
+    let temporary = tempfile::tempdir().unwrap();
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+
+    let error = unsupported(&record, "pause", "the test backend");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("pause")
+                && message.contains("the test backend")
+                && message.contains(&record.id)
+    ));
+}
+
 #[tokio::test]
 async fn retained_stops_preserve_anonymous_volumes_but_auto_remove_kill_removes_them() {
     let temporary = tempfile::tempdir().unwrap();

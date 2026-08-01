@@ -21,6 +21,7 @@ pub(crate) fn build_managed_record(
     now: DateTime<Utc>,
 ) -> ExecutionManagerResult<BoxRecord> {
     validate_health_policy(&request.policy)?;
+    validate_execution_config(&request.config)?;
     let metadata =
         ManagedExecutionMetadata::new(operation_id, ExecutionGeneration::INITIAL, request.clone())
             .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
@@ -103,6 +104,29 @@ pub(crate) fn build_managed_record(
         oom_kill_disable: policy.oom_kill_disable,
         oom_score_adj: policy.oom_score_adj,
     })
+}
+
+fn validate_execution_config(config: &a3s_box_core::BoxConfig) -> ExecutionManagerResult<()> {
+    if config.isolation == a3s_box_core::ExecutionIsolation::Microvm {
+        a3s_box_core::config::validate_vcpu_count(config.resources.vcpus)
+            .map_err(ExecutionManagerError::InvalidRequest)?;
+    }
+
+    #[cfg(windows)]
+    if matches!(config.network, a3s_box_core::NetworkMode::Bridge { .. }) {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "bridge networking is not supported on Windows".to_string(),
+        ));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    if matches!(config.network, a3s_box_core::NetworkMode::Bridge { .. }) {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "bridge networking is not supported on this platform".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub(super) fn validate_record_health(record: &BoxRecord) -> ExecutionManagerResult<()> {
