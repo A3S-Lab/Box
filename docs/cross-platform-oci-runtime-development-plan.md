@@ -50,12 +50,13 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`1cdcb9b9771b2f66e6f3b2ff106d7885f6afa914`, which retains the qualified
+`57473160f5d710d6a2482bb7335905411e20e6ce`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
 also fails closed when historical state references a missing driver or a
-driver whose advertised isolation has drifted.
+driver whose advertised isolation has drifted. Windows additionally has a
+protected, local-only named-pipe SDK host listener ready for the WHPX driver.
 
 ## Upgrade behavior
 
