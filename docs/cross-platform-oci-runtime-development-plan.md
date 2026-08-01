@@ -50,7 +50,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`b39cdc88d710b32c755bccd471d1e7aa1f54a9ff`, which retains the qualified
+`242f0ff6a1c63eaabc2eea63e2c06b0bd853641c`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
@@ -66,9 +66,13 @@ report to every shutdown caller. Native Linux and the new WHPX driver candidate
 share one eighteen-operation adapter. The candidate binds one VM to each exact
 dedicated-VM generation, permits parallel launches for different IDs, requires
 a protected runtime-owned guest root, and reconciles owner-death cleanup as a
-stopped, generation-fenced tombstone without inventing an exit status. It
-deliberately remains `probe-only` until immutable-root and restart-stable exact
-exit-evidence gates pass.
+stopped, generation-fenced tombstone. Authenticated guest shutdown evidence is
+normalized into protected host storage, matched to the exact target and durable
+configuration during startup, and committed to the durable wait cache before
+service. Missing or invalid evidence retains the explicit stopped-only fallback
+instead of inventing an exit status. It remains non-registerable at
+`probe-only` readiness until fresh-host restart recovery and
+immutable-system-root qualification pass.
 
 ## Upgrade behavior
 
