@@ -21,6 +21,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Retained local OCI runtime connection recovery.** Box now pins the SDK
+  transport that preserves one logical `RuntimeClient` across a broken local
+  stream. The request that observes the disconnect still fails without hidden
+  replay; a later explicit reconciliation reconnects to the same validated
+  endpoint and performs a fresh protocol handshake. A cross-platform backend
+  contract restarts the real Windows named-pipe or Unix-socket server behind
+  one retained `LocalExecutionManager`, then proves that the original operation
+  and runtime generation recover with exactly one create and start. This is
+  local transport-server evidence, not yet the real out-of-process owner and
+  native-driver qualification required by the migration gate.
 - **Exact-generation OCI observability and resource control.** The canonical
   execution manager, Rust client, and local Sandbox facade now expose live
   process inventory, normalized CPU/memory stats, bounded ordered-event polls,

@@ -57,10 +57,12 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > Calls are capability-checked and bound to the exact runtime target. Resource
 > intent is persisted before mutation and recovered with the same operation
 > identity after a lost response, while the original create identity remains
-> immutable. Raw runtime output stays separate from structured Box logs. Box
-> file sessions, production MicroVM routing, real-host process-session restart
-> evidence, and the broader cutover gates remain open; the current split above
-> is still authoritative.
+> immutable. A retained local SDK client now exposes the first broken-stream
+> result, then reconnects and renegotiates on a later explicit reconciliation.
+> Raw runtime output stays separate from structured Box logs. Box file sessions,
+> production MicroVM routing, real out-of-process and real-host restart evidence,
+> and the broader cutover gates remain open; the current split above is still
+> authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -277,9 +279,11 @@ configuration and attachment digests, endpoint, driver, and isolation evidence
 needed to detect recovery drift. Live reads recheck that binding after the SDK
 response; resource mutations enter a durable `updating_resources` state before
 dispatch and publish the new restart intent only after runtime acknowledgement.
-Solid current behavior and the phased cutover gates are kept separate in
-[ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
-platform capability.
+The retained SDK client reports a broken local stream without replaying the
+unknown request, then reconnects to the persisted endpoint and renegotiates on
+the next explicit retry or reconciliation. Solid current behavior and the
+phased cutover gates are kept separate in [ROADMAP.md](ROADMAP.md); unfinished
+migration work is never presented as a platform capability.
 
 This repository is a local runtime, not a hosted Sandbox control plane. Teams
 that need remote orchestration should put an authenticated service in front of

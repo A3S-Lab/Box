@@ -90,8 +90,12 @@ missing or drifted attachment evidence and reconciles lost create/start
 responses without issuing a second create. This is migration scaffolding, not
 a production routing change. Its in-process contract suite covers both
 isolation mappings, corrupt evidence, cleanup, adapter reopen, stopped-only
-deletion, and exact normal or signaled exit status; out-of-process restart and
-real-host gates remain below.
+deletion, and exact normal or signaled exit status. A separate local-transport
+contract now restarts the real Windows named-pipe or Unix-socket server behind
+one retained backend: the first reconciliation exposes the disconnect, while
+the next reconnects, renegotiates, and recovers the original operation and
+generation without a second create or start. This does not yet launch a fresh
+runtime-owner process or reopen real driver state; those gates remain below.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
@@ -151,10 +155,12 @@ through Box on Linux and Windows, including Box and runtime process restart.
 
 The local contract suite proves Box-adapter recreation plus interrupted
 `create`/`start` recovery against a shared SDK service, including exact
-attachment-manifest negotiation and durable digest drift checks. The two
-unchecked gates require a restarted out-of-process service and the same bundle
-on real native Linux and WHPX hosts; unit evidence is not promoted as platform
-evidence.
+attachment-manifest negotiation and durable digest drift checks. It also
+restarts the real platform IPC server behind a retained backend and proves
+next-call reconnect plus exact reconciliation without duplicate launch. The
+unchecked gates still require a fresh out-of-process runtime owner that reopens
+durable state and the same bundle on real native Linux and WHPX hosts; local
+transport evidence is not promoted as process or platform evidence.
 
 ### B2 - Interactive And Observable Execution
 
@@ -188,7 +194,9 @@ process targets, normalized stats, strict ordered-event cursors, durable
 `updating_resources` claims, immutable create identity after mutable resource
 intent, local completion replay, lost-response recovery after backend
 recreation, and terminal-exit races. Native-driver and out-of-process restart
-evidence remains part of the exit gate.
+evidence remains part of the exit gate. The retained-backend local IPC restart
+contract covers the shared transport prerequisite, but not a restarted owner
+process or live process-session driver state.
 
 ### B3 - Storage And Networking Attachments
 

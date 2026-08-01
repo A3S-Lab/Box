@@ -2388,6 +2388,62 @@ async fn reopened_backend_reconciles_lost_pause_and_resume_responses_without_rep
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn retained_backend_reconnects_and_reconciles_after_local_runtime_server_restart() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = restart_test_endpoint(&directory);
+    let first_server = spawn_runtime_transport_server(&endpoint, service.clone());
+    let backend = OciLocalExecutionBackend::connect(endpoint.clone(), provider.clone())
+        .await
+        .expect("connect Box backend over local IPC");
+    let manager = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        Arc::new(backend),
+    );
+    let operation = box_operation("runtime-server-restart-operation");
+    let running = manager
+        .create_and_start(
+            request("runtime-server-restart", ExecutionIsolation::Sandbox),
+            &operation,
+        )
+        .await
+        .expect("initial launch over local IPC");
+
+    first_server.abort();
+    assert!(first_server
+        .await
+        .expect_err("first runtime server must be aborted")
+        .is_cancelled());
+    let error = manager
+        .reconcile(&operation)
+        .await
+        .expect_err("the request that observes the disconnect must fail");
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+
+    let replacement_server = spawn_runtime_transport_server(&endpoint, service.clone());
+    let ReconcileOutcome::Ready(recovered) = manager
+        .reconcile(&operation)
+        .await
+        .expect("retained backend must reconnect and reconcile")
+    else {
+        panic!("expected the running execution to reconcile as ready")
+    };
+    assert_eq!(recovered.execution_id, running.execution_id);
+    assert_eq!(recovered.generation, running.generation);
+    assert_eq!(service.create_requests().len(), 1);
+    assert_eq!(service.start_requests().len(), 1);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+
+    drop(manager);
+    replacement_server
+        .await
+        .expect("replacement runtime server must join");
+}
+
 #[tokio::test]
 async fn lost_start_response_reconciles_the_existing_generation_without_duplicate_create() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -3128,6 +3184,70 @@ fn manager(
         directory.path().join("home"),
         Arc::new(backend),
     )
+}
+
+#[cfg(windows)]
+fn restart_test_endpoint(_directory: &tempfile::TempDir) -> OciRuntimeEndpoint {
+    static NEXT_PIPE: AtomicUsize = AtomicUsize::new(20_000);
+    OciRuntimeEndpoint::windows_named_pipe(format!(
+        r"\\.\pipe\a3s-box-oci-reconnect-test-{}-{}",
+        std::process::id(),
+        NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+    ))
+    .expect("Windows named-pipe endpoint")
+}
+
+#[cfg(unix)]
+fn restart_test_endpoint(directory: &tempfile::TempDir) -> OciRuntimeEndpoint {
+    OciRuntimeEndpoint::unix_socket(directory.path().join("runtime-reconnect.sock"))
+        .expect("Unix socket endpoint")
+}
+
+#[cfg(windows)]
+fn spawn_runtime_transport_server(
+    endpoint: &OciRuntimeEndpoint,
+    service: Arc<FakeRuntimeService>,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let OciRuntimeEndpoint::WindowsNamedPipe { name } = endpoint else {
+        panic!("Windows test requires a named-pipe endpoint")
+    };
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(name)
+        .expect("create runtime named-pipe server");
+    tokio::spawn(async move {
+        server
+            .connect()
+            .await
+            .expect("accept Box named-pipe client");
+        let runtime_service: Arc<dyn OciRuntimeService> = service;
+        a3s_oci_sdk::serve_transport_connection(runtime_service, server)
+            .await
+            .expect("serve Box SDK connection");
+    })
+}
+
+#[cfg(unix)]
+fn spawn_runtime_transport_server(
+    endpoint: &OciRuntimeEndpoint,
+    service: Arc<FakeRuntimeService>,
+) -> tokio::task::JoinHandle<()> {
+    let OciRuntimeEndpoint::UnixSocket { path } = endpoint else {
+        panic!("Unix test requires a socket endpoint")
+    };
+    if path.exists() {
+        std::fs::remove_file(path).expect("remove stale runtime test socket");
+    }
+    let listener = tokio::net::UnixListener::bind(path).expect("bind runtime Unix socket");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept Box Unix client");
+        let runtime_service: Arc<dyn OciRuntimeService> = service;
+        a3s_oci_sdk::serve_transport_connection(runtime_service, stream)
+            .await
+            .expect("serve Box SDK connection");
+    })
 }
 
 fn persisted(manager: &LocalExecutionManager, execution_id: &ExecutionId) -> BoxRecord {
