@@ -336,6 +336,12 @@ pub struct VmManager {
     /// OCI image config resolved during the last successful boot.
     pub(crate) image_config: Option<crate::oci::OciImageConfig>,
 
+    /// Exact rootfs cache entry paired with a snapshot-fork template.
+    ///
+    /// The template's guest memory and filesystem must come from the same
+    /// resolved image even when its configured tag moves later.
+    pub(crate) restore_rootfs_cache_key: Option<String>,
+
     /// Suppress an image-defined health check for callers that explicitly
     /// requested Docker-compatible `--no-healthcheck` semantics.
     pub(crate) healthcheck_disabled: bool,
@@ -407,6 +413,7 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
@@ -443,6 +450,7 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
@@ -689,6 +697,7 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]

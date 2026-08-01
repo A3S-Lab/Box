@@ -270,34 +270,36 @@ impl VmManager {
         let has_persistent_rootfs_generation =
             self.config.persistent && persistent_rootfs_generation_exists(&box_dir)?;
 
-        // Snapshot-fork fast path: a restored guest reuses the already-cached rootfs.
-        // Skip the registry pull/resolution — a network round-trip that costs ~100ms
-        // even on a cache hit — and the guest-init refresh (the snapshot already has
-        // it). Falls through to the normal pull on a cache miss (rare for a fork of a
-        // just-run template). The restored guest's main is already running, so no
-        // image config (entrypoint/env) is needed.
+        // Snapshot-fork fast path: a restored guest reuses the exact rootfs that
+        // was paired with its memory template. Skip registry resolution and the
+        // guest-init refresh (the snapshot already has it). A missing identity or
+        // cache entry fails closed so a moved tag can never pair new filesystem
+        // content with old guest memory; the warm-pool caller may cold-boot instead.
         #[cfg(unix)]
         if super::is_restore_mode(&self.config) {
-            let cache_key = RootfsCache::compute_key(reference, &[], &[], &[]);
-            if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
-                let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
-                // Record that this box holds `cache_key` as its overlay lower, so a
-                // concurrent box's cache prune won't evict it mid-mount (ENOENT).
-                self.mark_rootfs_cache_key(&box_dir, &cache_key);
-                let tee_instance_config = self.generate_tee_config(&box_dir)?;
-                return Ok(BoxLayout {
-                    rootfs_path,
-                    exec_socket_path: socket_dir.join("exec.sock"),
-                    pty_socket_path: socket_dir.join("pty.sock"),
-                    attest_socket_path: socket_dir.join("attest.sock"),
-                    port_forward_socket_path: socket_dir.join("portfwd.sock"),
-                    workspace_path,
-                    console_output: Some(logs_dir.join("console.log")),
-                    oci_config: None,
-                    prefer_image_rootfs_metadata: !has_persistent_rootfs_generation,
-                    tee_instance_config,
-                });
-            }
+            let cache_key = self.restore_rootfs_cache_key.as_deref();
+            let cached_path = match cache_key {
+                Some(cache_key) => self.try_rootfs_cache_path(cache_key)?,
+                None => None,
+            };
+            let (cache_key, cached_path) = require_snapshot_restore_rootfs(cache_key, cached_path)?;
+            let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
+            // Record that this box holds `cache_key` as its overlay lower, so a
+            // concurrent box's cache prune won't evict it mid-mount (ENOENT).
+            self.mark_rootfs_cache_key(&box_dir, cache_key);
+            let tee_instance_config = self.generate_tee_config(&box_dir)?;
+            return Ok(BoxLayout {
+                rootfs_path,
+                exec_socket_path: socket_dir.join("exec.sock"),
+                pty_socket_path: socket_dir.join("pty.sock"),
+                attest_socket_path: socket_dir.join("attest.sock"),
+                port_forward_socket_path: socket_dir.join("portfwd.sock"),
+                workspace_path,
+                console_output: Some(logs_dir.join("console.log")),
+                oci_config: None,
+                prefer_image_rootfs_metadata: !has_persistent_rootfs_generation,
+                tee_instance_config,
+            });
         }
 
         let images_dir = self.home_dir.join("images");
@@ -326,7 +328,7 @@ impl VmManager {
         let image_path = oci_image.root_dir().to_path_buf();
 
         // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
-        let cache_key = RootfsCache::compute_key(reference, &[], &[], &[]);
+        let cache_key = RootfsCache::compute_image_key(reference, oci_image.manifest_digest());
         let (rootfs_path, oci_config, prefer_image_rootfs_metadata) =
             if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
                 tracing::info!(
@@ -411,6 +413,7 @@ impl VmManager {
 
                     // Store in cache for next time
                     self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
+                    self.mark_rootfs_cache_key(&box_dir, &cache_key);
 
                     (rootfs_path, Some(config), true)
                 }
@@ -631,6 +634,10 @@ impl VmManager {
     /// the cache prune never evicts a live lower. Best-effort; removed with box_dir.
     fn mark_rootfs_cache_key(&self, box_dir: &Path, cache_key: &str) {
         let _ = std::fs::write(box_dir.join(".rootfs-cache-key"), cache_key);
+    }
+
+    pub(crate) fn current_rootfs_cache_key(&self) -> Result<Option<String>> {
+        retained_rootfs_cache_key(&self.home_dir.join("boxes").join(&self.box_id))
     }
 
     /// Rootfs-cache keys currently in use as an overlay lower by some live box.
@@ -1086,6 +1093,24 @@ fn retained_rootfs_cache_key(box_dir: &Path) -> Result<Option<String>> {
     Ok(Some(key.to_ascii_lowercase()))
 }
 
+#[cfg(any(unix, test))]
+fn require_snapshot_restore_rootfs(
+    cache_key: Option<&str>,
+    cached_path: Option<PathBuf>,
+) -> Result<(&str, PathBuf)> {
+    let cache_key = cache_key.ok_or_else(|| {
+        BoxError::StateError(
+            "snapshot restore is missing its exact rootfs cache identity".to_string(),
+        )
+    })?;
+    let cached_path = cached_path.ok_or_else(|| {
+        BoxError::StateError(format!(
+            "snapshot restore rootfs cache entry {cache_key} is unavailable"
+        ))
+    })?;
+    Ok((cache_key, cached_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::BoxState;
@@ -1123,6 +1148,7 @@ mod tests {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
@@ -1340,6 +1366,19 @@ mod tests {
         assert_eq!(
             retained_rootfs_cache_key(box_dir).unwrap(),
             Some("a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_requires_its_exact_cached_rootfs() {
+        let cache_key = "a".repeat(64);
+        let cached_path = PathBuf::from("cached-rootfs");
+
+        assert!(require_snapshot_restore_rootfs(None, Some(cached_path.clone())).is_err());
+        assert!(require_snapshot_restore_rootfs(Some(&cache_key), None).is_err());
+        assert_eq!(
+            require_snapshot_restore_rootfs(Some(&cache_key), Some(cached_path.clone())).unwrap(),
+            (cache_key.as_str(), cached_path)
         );
     }
 
