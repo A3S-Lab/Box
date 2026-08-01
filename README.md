@@ -44,26 +44,32 @@ There is no silent fallback between them. The request, resolved backend, and
 policy are persisted so restart recovery cannot reinterpret the workload.
 
 > [!NOTE]
-> The current SDK-only Sandbox adapter now covers three exact-generation rails:
+> The current SDK-only Sandbox adapter now covers four exact-generation rails:
 >
 > - versioned rootfs, mount, network, process-I/O, secret, and extension
 >   attachments with a persisted manifest digest;
 > - memory-retaining pause/resume plus captured and streaming exec, stdin,
 >   cursor-checked output, signal/wait, PTY resize, exact exit status, and
 >   bounded timeout cleanup;
+> - bounded file upload/download plus filesystem stat, recursive mkdir, move,
+>   bounded listing, and recursive removal through descriptor-confined runtime
+>   sessions;
 > - live process inventory, normalized stats, bounded ordered events, and
 >   replay-safe resource updates compiled into one complete OCI contract.
 >
-> Calls are capability-checked and bound to the exact runtime target. Resource
-> intent is persisted before mutation and recovered with the same operation
-> identity after a lost response, while the original create identity remains
-> immutable. A retained local SDK client now exposes the first broken-stream
-> result, then reconnects and renegotiates on a later explicit reconciliation.
-> The generic Box/OCI contract also recovers one manager across two distinct
-> runtime-owner test processes with exactly one create and start. Raw runtime
-> output stays separate from structured Box logs. Box file sessions, production
-> owner wiring, real native Linux/WHPX restart evidence, and the broader cutover
-> gates remain open; the current split above is still authoritative.
+> Calls are capability-checked and bound to the exact runtime target. File and
+> filesystem mutations reuse one operation identity for an explicitly
+> retryable lost response and are verified to take effect once; read responses
+> are size-bounded and rejected if the target or shape drifts. Resource intent
+> is persisted before mutation and recovered with the same operation identity,
+> while the original create identity remains immutable. A retained local SDK
+> client now exposes the first broken-stream result, then reconnects and
+> renegotiates on a later explicit reconciliation. The generic Box/OCI contract
+> also recovers one manager across two distinct runtime-owner test processes
+> with exactly one create and start. Raw runtime output stays separate from
+> structured Box logs. Production owner wiring, real native Linux/WHPX
+> process-and-filesystem restart evidence, and the broader cutover gates remain
+> open; the current split above is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -216,10 +222,11 @@ Python, TypeScript, and Go exchange structured protocol-v3 messages with
 incompatible capabilities. See the
 [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md).
 
-The Rust execution contract also exposes `processes`, `runtime_stats`,
-`events`, and `update_resources` on the local Sandbox facade. Each call carries
-the current Box generation; a backend that does not advertise the matching
-runtime operation returns a typed availability error before dispatch.
+The Rust execution contract also exposes `transfer_file`, `filesystem`,
+`processes`, `runtime_stats`, `events`, and `update_resources` on the local
+Sandbox facade. Each call carries the current Box generation; a backend that
+does not advertise the matching runtime operation returns a typed availability
+error before dispatch.
 
 ## Platform status
 
@@ -274,8 +281,9 @@ A3S OCI Runtime host service
 
 Box remains the product, image, storage, network, health, and policy owner.
 OCI Runtime becomes authoritative for actual process/VM state, raw process
-I/O, operation replay, exact terminal status, driver selection, and runtime
-cleanup. The adapter retains only the exact runtime identity, immutable
+I/O, descriptor-confined workload filesystem access, operation replay, exact
+terminal status, driver selection, and runtime cleanup. The adapter retains
+only the exact runtime identity, immutable
 configuration and attachment digests, endpoint, driver, and isolation evidence
 needed to detect recovery drift. Live reads recheck that binding after the SDK
 response; resource mutations enter a durable `updating_resources` state before

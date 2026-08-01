@@ -97,7 +97,7 @@ the next reconnects, renegotiates, and recovers the original operation and
 generation without a second create or start. A second cross-platform contract
 launches two distinct owner fixture processes, reopens synchronized runtime
 state on the replacement, and proves the same retained manager still records
-only one create and start. OCI Runtime commit `6487cd2a` independently reopens
+only one create and start. OCI Runtime commit `24d6a967` independently reopens
 its durable `HostRuntimeService` and operation journal across two processes.
 Real driver state and production owner wiring remain below.
 
@@ -119,6 +119,16 @@ stdin mutations are replay-safe, timeouts retain an exact SIGKILL watchdog even
 if the caller drops its future, and raw process output never enters Box's
 structured log store. Legacy VM records retain their existing socket transport,
 while OCI-bound sessions no longer depend on Unix-domain sockets.
+
+The same cross-platform session facade now maps file upload/download and
+filesystem stat, recursive mkdir, move, bounded listing, and recursive removal
+onto the exact OCI target. Box generation and advertised-operation checks run
+before SDK dispatch. Mutations carry one stable context across the adapter's
+single retry of an explicitly retryable lost response, while downloads and
+metadata reads remain context-free; the contract suite proves one mutation
+effect, response target/shape validation, and identical behavior on Unix and
+non-Unix hosts. Cross-process and real-driver filesystem-session recovery are
+still release gates rather than claimed evidence.
 
 ## Delivery Milestones
 
@@ -178,6 +188,9 @@ evidence.
   capability preflight and replay-safe one-shot identities.
 - [x] Route process inventory, resource update, stats, and ordered events
   through the OCI SDK.
+- [x] Route bounded file upload/download and filesystem stat, recursive mkdir,
+  move, bounded listing, and recursive removal through exact-generation OCI
+  SDK operations with capability preflight and replay-safe mutation contexts.
 - [x] Keep raw runtime output separate from Box log retention, indexing,
   cursor, search, and redaction policy.
 - [x] Drive Box command health probes through the canonical runtime exec
@@ -196,8 +209,11 @@ runtime binding, and backend recreation after lost freezer responses. It also
 covers keyed exec replay after a lost response, exact normal and signaled
 status, generation and capability rejection before mutation, replay-safe stdin,
 PTY output/resize/signal, raw-log separation, second-rootfs rejection, timeout
-cleanup, and caller-cancellation cleanup. The same suite now validates exact
-process targets, normalized stats, strict ordered-event cursors, durable
+cleanup, and caller-cancellation cleanup. File and filesystem contracts add
+generation/capability rejection before dispatch, exact target and response
+shape checks, bounded payload conversion, and one-effect retry after a lost
+mutation response. The same suite now validates exact process targets,
+normalized stats, strict ordered-event cursors, durable
 `updating_resources` claims, immutable create identity after mutable resource
 intent, local completion replay, lost-response recovery after backend
 recreation, and terminal-exit races. Native-driver process-session restart

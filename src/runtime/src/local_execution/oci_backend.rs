@@ -9,19 +9,27 @@ use a3s_box_core::{
     ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest, ExecutionGeneration,
     ExecutionId, ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult,
     ExecutionMemoryStats, ExecutionProcess, ExecutionProcessInfo, ExecutionProcessInventory,
-    ExecutionResourceUpdate, ExecutionRuntimeEvent, ExecutionState, ExecutionStats, KillOutcome,
-    OperationId as BoxOperationId,
+    ExecutionResourceUpdate, ExecutionRuntimeEvent, ExecutionState, ExecutionStats,
+    FileOp as BoxFileOp, FileRequest as BoxFileRequest, FileResponse as BoxFileResponse,
+    FilesystemEntry as BoxFilesystemEntry, FilesystemEntryKind as BoxFilesystemEntryKind,
+    FilesystemOp as BoxFilesystemOp, FilesystemRequest as BoxFilesystemRequest,
+    FilesystemResponse as BoxFilesystemResponse, KillOutcome, OperationId as BoxOperationId,
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
     ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, CreateAttachments,
     CreateRequest, DeleteMode, DeleteRequest, DriverKind, ErrorCode, EventsRequest, ExitStatus,
-    IoMode, IsolationClass, IsolationRequest, KillRequest, LinuxResources, LocalIpcEndpoint,
-    OciBundle, OperationContext, OperationId as OciOperationId, ProcessIo, ProcessRecord,
-    ProcessesRequest, RuntimeClient, RuntimeEventKind, RuntimeInfo, RuntimeOperation, Signal,
-    StartRequest, StateRequest, StatsRequest, UpdateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1,
+    FileOp as OciFileOp, FileRequest as OciFileRequest, FileResponse as OciFileResponse,
+    FilesystemEntry as OciFilesystemEntry, FilesystemEntryKind as OciFilesystemEntryKind,
+    FilesystemOp as OciFilesystemOp, FilesystemRequest as OciFilesystemRequest,
+    FilesystemResponse as OciFilesystemResponse, IoMode, IsolationClass, IsolationRequest,
+    KillRequest, LinuxResources, LocalIpcEndpoint, OciBundle, OperationContext,
+    OperationId as OciOperationId, ProcessIo, ProcessRecord, ProcessesRequest, RuntimeClient,
+    RuntimeEventKind, RuntimeInfo, RuntimeOperation, Signal, StartRequest, StateRequest,
+    StatsRequest, UpdateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1, MAX_FILE_TRANSFER_BYTES,
 };
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -792,6 +800,133 @@ impl OciLifecycleAdapter {
         Ok(batch)
     }
 
+    async fn file(
+        &self,
+        execution_id: &ExecutionId,
+        execution_generation: ExecutionGeneration,
+        binding: &OciRuntimeBinding,
+        request: BoxFileRequest,
+    ) -> ExecutionManagerResult<BoxFileResponse> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::File, "file")
+            .await?;
+        let expected_upload_size = match request.op {
+            BoxFileOp::Upload => {
+                let encoded = request.data.as_deref().ok_or_else(|| {
+                    ExecutionManagerError::InvalidRequest(
+                        "file upload requires base64 data".to_string(),
+                    )
+                })?;
+                let maximum_encoded = MAX_FILE_TRANSFER_BYTES.div_ceil(3) * 4;
+                if encoded.len() > maximum_encoded {
+                    return Err(ExecutionManagerError::InvalidRequest(format!(
+                        "file upload payload exceeds {MAX_FILE_TRANSFER_BYTES} decoded bytes"
+                    )));
+                }
+                let decoded = STANDARD.decode(encoded).map_err(|error| {
+                    ExecutionManagerError::InvalidRequest(format!(
+                        "file upload data is not valid base64: {error}"
+                    ))
+                })?;
+                if decoded.len() > MAX_FILE_TRANSFER_BYTES {
+                    return Err(ExecutionManagerError::InvalidRequest(format!(
+                        "file upload payload exceeds {MAX_FILE_TRANSFER_BYTES} decoded bytes"
+                    )));
+                }
+                Some(decoded.len() as u64)
+            }
+            BoxFileOp::Download => None,
+        };
+        let operation = match request.op {
+            BoxFileOp::Upload => OciFileOp::Upload,
+            BoxFileOp::Download => OciFileOp::Download,
+        };
+        let context = if request.op == BoxFileOp::Upload {
+            Some(operation_context(
+                &format!("session-{}", uuid::Uuid::new_v4().simple()),
+                execution_generation,
+                "file",
+                (&binding.target, &request),
+            )?)
+        } else {
+            None
+        };
+        let sdk_request = OciFileRequest {
+            target: binding.target.clone(),
+            op: operation,
+            path: request.guest_path,
+            data: request.data,
+            user: request.user,
+            context,
+        };
+        let response = match self.client.file(sdk_request.clone()).await {
+            Err(error) if error.retryable => self.client.file(sdk_request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("file", error))?;
+        validate_file_response(binding, &response, operation, expected_upload_size)?;
+        Ok(BoxFileResponse {
+            success: true,
+            data: response.data,
+            size: response.size,
+            error: None,
+        })
+    }
+
+    async fn filesystem(
+        &self,
+        execution_id: &ExecutionId,
+        execution_generation: ExecutionGeneration,
+        binding: &OciRuntimeBinding,
+        request: BoxFilesystemRequest,
+    ) -> ExecutionManagerResult<BoxFilesystemResponse> {
+        binding.validate_for(execution_id)?;
+        self.require_operation(RuntimeOperation::Filesystem, "filesystem")
+            .await?;
+        let operation = match request.op {
+            BoxFilesystemOp::Stat => OciFilesystemOp::Stat,
+            BoxFilesystemOp::MakeDir => OciFilesystemOp::MakeDir,
+            BoxFilesystemOp::Move => OciFilesystemOp::Move,
+            BoxFilesystemOp::ListDir => OciFilesystemOp::ListDir,
+            BoxFilesystemOp::Remove => OciFilesystemOp::Remove,
+        };
+        let context = if operation.is_mutating() {
+            Some(operation_context(
+                &format!("session-{}", uuid::Uuid::new_v4().simple()),
+                execution_generation,
+                "filesystem",
+                (&binding.target, &request),
+            )?)
+        } else {
+            None
+        };
+        let sdk_request = OciFilesystemRequest {
+            target: binding.target.clone(),
+            op: operation,
+            path: request.path,
+            destination: request.destination,
+            depth: request.depth,
+            user: request.user,
+            context,
+        };
+        let response = match self.client.filesystem(sdk_request.clone()).await {
+            Err(error) if error.retryable => self.client.filesystem(sdk_request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("filesystem", error))?;
+        validate_filesystem_response(binding, &response, operation)?;
+        Ok(BoxFilesystemResponse {
+            success: true,
+            entry: response.entry.map(map_filesystem_entry),
+            entries: response
+                .entries
+                .into_iter()
+                .map(map_filesystem_entry)
+                .collect(),
+            error: None,
+        })
+    }
+
     async fn kill(
         &self,
         execution_id: &ExecutionId,
@@ -1355,6 +1490,40 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         super::oci_session::start_pty(self, record, request).await
     }
 
+    async fn transfer_file(
+        &self,
+        record: &BoxRecord,
+        request: BoxFileRequest,
+    ) -> ExecutionManagerResult<BoxFileResponse> {
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding for file transfer"
+            ))
+        })?;
+        self.adapter
+            .file(&execution_id, generation, &binding, request)
+            .await
+    }
+
+    async fn filesystem(
+        &self,
+        record: &BoxRecord,
+        request: BoxFilesystemRequest,
+    ) -> ExecutionManagerResult<BoxFilesystemResponse> {
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding for filesystem access"
+            ))
+        })?;
+        self.adapter
+            .filesystem(&execution_id, generation, &binding, request)
+            .await
+    }
+
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         Ok(self.kill_with_status(record).await?.outcome)
     }
@@ -1625,6 +1794,106 @@ fn validate_updated_record(
         )));
     }
     Ok(())
+}
+
+fn validate_file_response(
+    binding: &OciRuntimeBinding,
+    response: &OciFileResponse,
+    operation: OciFileOp,
+    expected_upload_size: Option<u64>,
+) -> ExecutionManagerResult<()> {
+    if response.target != binding.target || response.size > MAX_FILE_TRANSFER_BYTES as u64 {
+        return Err(ExecutionManagerError::Internal(
+            "A3S OCI returned invalid file target or size evidence".to_string(),
+        ));
+    }
+    match operation {
+        OciFileOp::Upload
+            if response.data.is_some() || Some(response.size) != expected_upload_size =>
+        {
+            Err(ExecutionManagerError::Internal(
+                "A3S OCI returned an invalid file upload acknowledgement".to_string(),
+            ))
+        }
+        OciFileOp::Download => {
+            let data = response.data.as_deref().ok_or_else(|| {
+                ExecutionManagerError::Internal(
+                    "A3S OCI omitted the downloaded file payload".to_string(),
+                )
+            })?;
+            let maximum_encoded = MAX_FILE_TRANSFER_BYTES.div_ceil(3) * 4;
+            if data.len() > maximum_encoded {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "A3S OCI file payload exceeds {MAX_FILE_TRANSFER_BYTES} decoded bytes"
+                )));
+            }
+            let decoded = STANDARD.decode(data).map_err(|error| {
+                ExecutionManagerError::Internal(format!(
+                    "A3S OCI returned invalid base64 file data: {error}"
+                ))
+            })?;
+            if decoded.len() as u64 != response.size {
+                return Err(ExecutionManagerError::Internal(
+                    "A3S OCI file size does not match its decoded payload".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        OciFileOp::Upload => Ok(()),
+    }
+}
+
+fn validate_filesystem_response(
+    binding: &OciRuntimeBinding,
+    response: &OciFilesystemResponse,
+    operation: OciFilesystemOp,
+) -> ExecutionManagerResult<()> {
+    const MAX_ENTRIES: usize = 4_096;
+    const MAX_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+    let valid_shape = match operation {
+        OciFilesystemOp::Stat | OciFilesystemOp::MakeDir | OciFilesystemOp::Move => {
+            response.entry.is_some() && response.entries.is_empty()
+        }
+        OciFilesystemOp::ListDir => response.entry.is_none(),
+        OciFilesystemOp::Remove => response.entry.is_none() && response.entries.is_empty(),
+    };
+    if response.target != binding.target || !valid_shape || response.entries.len() > MAX_ENTRIES {
+        return Err(ExecutionManagerError::Internal(
+            "A3S OCI returned invalid filesystem target or response shape".to_string(),
+        ));
+    }
+    let encoded = serde_json::to_vec(response).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to size A3S OCI filesystem response: {error}"
+        ))
+    })?;
+    if encoded.len() > MAX_RESPONSE_BYTES {
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI filesystem response exceeds {MAX_RESPONSE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn map_filesystem_entry(entry: OciFilesystemEntry) -> BoxFilesystemEntry {
+    BoxFilesystemEntry {
+        name: entry.name,
+        kind: match entry.kind {
+            OciFilesystemEntryKind::Unspecified => BoxFilesystemEntryKind::Unspecified,
+            OciFilesystemEntryKind::File => BoxFilesystemEntryKind::File,
+            OciFilesystemEntryKind::Directory => BoxFilesystemEntryKind::Directory,
+        },
+        path: entry.path,
+        size: entry.size,
+        mode: entry.mode,
+        permissions: entry.permissions,
+        owner: entry.owner,
+        group: entry.group,
+        modified_seconds: entry.modified_seconds,
+        modified_nanos: entry.modified_nanos,
+        symlink_target: entry.symlink_target,
+        metadata: entry.metadata,
+    }
 }
 
 fn validate_process_records(

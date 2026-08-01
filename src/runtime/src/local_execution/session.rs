@@ -135,7 +135,17 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
-        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if has_oci_runtime(&record) {
+            self.require_same_runtime(&record, execution_id, generation)
+                .await?;
+            return self.backend.transfer_file(&record, request).await;
+        }
+        let (client, stream) = self
+            .bind_exec_record(&record, execution_id, generation)
+            .await?;
         client
             .file_transfer_on_stream(stream, &request)
             .await
@@ -148,7 +158,17 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
-        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if has_oci_runtime(&record) {
+            self.require_same_runtime(&record, execution_id, generation)
+                .await?;
+            return self.backend.filesystem(&record, request).await;
+        }
+        let (client, stream) = self
+            .bind_exec_record(&record, execution_id, generation)
+            .await?;
         client
             .filesystem_on_stream(stream, &request)
             .await
@@ -157,25 +177,6 @@ impl ExecutionSessionManager for LocalExecutionManager {
 }
 
 impl LocalExecutionManager {
-    async fn bind_exec(
-        &self,
-        execution_id: &ExecutionId,
-        generation: ExecutionGeneration,
-    ) -> ExecutionManagerResult<(BoxRecord, ExecClient, tokio::net::UnixStream)> {
-        let record = self
-            .require_running_record(execution_id, generation)
-            .await?;
-        if has_oci_runtime(&record) {
-            return Err(ExecutionManagerError::Unavailable(format!(
-                "execution {execution_id} uses the A3S OCI SDK, whose current public contract does not expose Box file sessions"
-            )));
-        }
-        let (client, stream) = self
-            .bind_exec_record(&record, execution_id, generation)
-            .await?;
-        Ok((record, client, stream))
-    }
-
     async fn bind_exec_record(
         &self,
         record: &BoxRecord,

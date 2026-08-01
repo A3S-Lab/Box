@@ -8,21 +8,28 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecutionEventsRequest, ExecutionGeneration,
     ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionProcessSignal, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionState,
-    KillExecutionOptions, KillOutcome, NetworkMode, OperationId as BoxOperationId,
-    ReconcileOutcome,
+    FileOp as BoxFileOp, FileRequest as BoxFileRequest,
+    FilesystemEntryKind as BoxFilesystemEntryKind, FilesystemOp as BoxFilesystemOp,
+    FilesystemRequest as BoxFilesystemRequest, KillExecutionOptions, KillOutcome, NetworkMode,
+    OperationId as BoxOperationId, ReconcileOutcome,
 };
 use a3s_oci_sdk::oci_spec::runtime::{ContainerState, StateBuilder};
 use a3s_oci_sdk::{
     async_trait, CloseStdinRequest, ContainerId, ContainerOperationRequest, ContainerRecord,
     ContainerStats, ContainerTarget, CpuStats, CreateRequest, DeleteMode, DeleteRequest,
     DriverKind, Error, ErrorCode, EventBatch, EventsRequest, ExecRequest as OciExecRequest,
-    ExitStatus, Generation, IsolationClass, IsolationRequest, KillRequest, MemoryStats, OciBundle,
+    ExitStatus, FileOp as OciFileOp, FileRequest as OciFileRequest,
+    FileResponse as OciFileResponse, FilesystemEntry as OciFilesystemEntry,
+    FilesystemEntryKind as OciFilesystemEntryKind, FilesystemOp as OciFilesystemOp,
+    FilesystemRequest as OciFilesystemRequest, FilesystemResponse as OciFilesystemResponse,
+    Generation, IsolationClass, IsolationRequest, KillRequest, MemoryStats, OciBundle,
     OciRuntimeService, OutputChunk, OutputStream, ProcessId, ProcessRecord, ProcessTarget,
     ProcessesRequest, ReadOutputRequest, ResizeRequest, Result as OciResult, RuntimeClient,
     RuntimeEvent, RuntimeEventKind, RuntimeInfo, RuntimeOperation, SignalProcessRequest,
     StartRequest, StateRequest, StatsRequest, TerminalSize, UpdateRequest, WaitProcessRequest,
     WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use serde_json::json;
 
@@ -68,6 +75,12 @@ struct FakeRuntimeService {
     processes_requests: Mutex<Vec<ProcessesRequest>>,
     stats_requests: Mutex<Vec<StatsRequest>>,
     events_requests: Mutex<Vec<EventsRequest>>,
+    file_requests: Mutex<Vec<OciFileRequest>>,
+    file_effects: Mutex<Vec<OciFileRequest>>,
+    file_journal: Mutex<HashMap<String, OciFileRequest>>,
+    filesystem_requests: Mutex<Vec<OciFilesystemRequest>>,
+    filesystem_effects: Mutex<Vec<OciFilesystemRequest>>,
+    filesystem_journal: Mutex<HashMap<String, OciFilesystemRequest>>,
     exec_requests: Mutex<Vec<OciExecRequest>>,
     output_requests: Mutex<Vec<ReadOutputRequest>>,
     stdin_requests: Mutex<Vec<WriteStdinRequest>>,
@@ -89,10 +102,14 @@ struct FakeRuntimeService {
     fail_update_after_effect: AtomicBool,
     fail_exec_after_effect: AtomicBool,
     fail_stdin_after_effect: AtomicBool,
+    fail_file_after_effect: AtomicBool,
+    fail_filesystem_after_effect: AtomicBool,
     hold_next_process: AtomicBool,
     ignore_graceful_signal: AtomicBool,
     drift_process_target: AtomicBool,
     drift_stats_target: AtomicBool,
+    drift_file_target: AtomicBool,
+    drift_filesystem_target: AtomicBool,
     misorder_events: AtomicBool,
 }
 
@@ -134,6 +151,12 @@ impl FakeRuntimeService {
             processes_requests: Mutex::new(Vec::new()),
             stats_requests: Mutex::new(Vec::new()),
             events_requests: Mutex::new(Vec::new()),
+            file_requests: Mutex::new(Vec::new()),
+            file_effects: Mutex::new(Vec::new()),
+            file_journal: Mutex::new(HashMap::new()),
+            filesystem_requests: Mutex::new(Vec::new()),
+            filesystem_effects: Mutex::new(Vec::new()),
+            filesystem_journal: Mutex::new(HashMap::new()),
             exec_requests: Mutex::new(Vec::new()),
             output_requests: Mutex::new(Vec::new()),
             stdin_requests: Mutex::new(Vec::new()),
@@ -155,10 +178,14 @@ impl FakeRuntimeService {
             fail_update_after_effect: AtomicBool::new(false),
             fail_exec_after_effect: AtomicBool::new(false),
             fail_stdin_after_effect: AtomicBool::new(false),
+            fail_file_after_effect: AtomicBool::new(false),
+            fail_filesystem_after_effect: AtomicBool::new(false),
             hold_next_process: AtomicBool::new(false),
             ignore_graceful_signal: AtomicBool::new(false),
             drift_process_target: AtomicBool::new(false),
             drift_stats_target: AtomicBool::new(false),
+            drift_file_target: AtomicBool::new(false),
+            drift_filesystem_target: AtomicBool::new(false),
             misorder_events: AtomicBool::new(false),
         }
     }
@@ -249,6 +276,28 @@ impl FakeRuntimeService {
         self.events_requests.lock().expect("events lock").clone()
     }
 
+    fn file_requests(&self) -> Vec<OciFileRequest> {
+        self.file_requests.lock().expect("file lock").clone()
+    }
+
+    fn file_effects(&self) -> Vec<OciFileRequest> {
+        self.file_effects.lock().expect("file effect lock").clone()
+    }
+
+    fn filesystem_requests(&self) -> Vec<OciFilesystemRequest> {
+        self.filesystem_requests
+            .lock()
+            .expect("filesystem lock")
+            .clone()
+    }
+
+    fn filesystem_effects(&self) -> Vec<OciFilesystemRequest> {
+        self.filesystem_effects
+            .lock()
+            .expect("filesystem effect lock")
+            .clone()
+    }
+
     fn exec_requests(&self) -> Vec<OciExecRequest> {
         self.exec_requests.lock().expect("exec lock").clone()
     }
@@ -298,6 +347,29 @@ impl FakeRuntimeService {
             .get(target.process_id.as_str())
             .ok_or_else(|| oci_error(ErrorCode::NotFound, operation, "fake process is absent"))?;
         validate_process_target(target, &process.record, operation)
+    }
+
+    fn require_running_container(
+        &self,
+        target: &ContainerTarget,
+        operation: &str,
+    ) -> OciResult<()> {
+        let containers = self
+            .containers
+            .lock()
+            .map_err(|error| lock_error(operation, error))?;
+        let container = containers
+            .get(target.id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, operation, "fake runtime is absent"))?;
+        validate_target(target, &container.record, operation)?;
+        if *container.record.state.status() != ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                operation,
+                "fake runtime is not running",
+            ));
+        }
+        Ok(())
     }
 
     fn kill_signals(&self) -> Vec<i32> {
@@ -695,6 +767,193 @@ impl OciRuntimeService for FakeRuntimeService {
             events,
             next_sequence: 8_u64.max(request.after_sequence),
         })
+    }
+
+    async fn file(&self, request: OciFileRequest) -> OciResult<OciFileResponse> {
+        self.file_requests
+            .lock()
+            .map_err(|error| lock_error("file", error))?
+            .push(request.clone());
+        self.require_running_container(&request.target, "file")?;
+        let response_target = if self.drift_file_target.load(Ordering::SeqCst) {
+            ContainerTarget::exact(
+                ContainerId::new("a3s-box-file-drift").expect("file drift container ID"),
+                Generation(99),
+            )
+        } else {
+            request.target.clone()
+        };
+        let response = match request.op {
+            OciFileOp::Upload => {
+                let size = STANDARD
+                    .decode(request.data.as_deref().unwrap_or_default())
+                    .map_err(|error| {
+                        oci_error(
+                            ErrorCode::InvalidArgument,
+                            "file",
+                            format!("invalid base64 upload: {error}"),
+                        )
+                    })?
+                    .len() as u64;
+                OciFileResponse {
+                    target: response_target,
+                    data: None,
+                    size,
+                }
+            }
+            OciFileOp::Download => {
+                let payload = b"fake file\n";
+                OciFileResponse {
+                    target: response_target,
+                    data: Some(STANDARD.encode(payload)),
+                    size: payload.len() as u64,
+                }
+            }
+        };
+        if request.op == OciFileOp::Upload {
+            let operation_id = request
+                .context
+                .as_ref()
+                .ok_or_else(|| {
+                    oci_error(
+                        ErrorCode::InvalidArgument,
+                        "file",
+                        "fake upload requires an operation context",
+                    )
+                })?
+                .operation_id
+                .to_string();
+            let mut journal = self
+                .file_journal
+                .lock()
+                .map_err(|error| lock_error("file", error))?;
+            if let Some(previous) = journal.get(&operation_id) {
+                if previous != &request {
+                    return Err(oci_error(
+                        ErrorCode::Conflict,
+                        "file",
+                        "operation identity was reused with a different upload",
+                    ));
+                }
+                return Ok(response);
+            }
+            journal.insert(operation_id, request.clone());
+            self.file_effects
+                .lock()
+                .map_err(|error| lock_error("file", error))?
+                .push(request);
+            drop(journal);
+            if self.fail_file_after_effect.swap(false, Ordering::SeqCst) {
+                return Err(
+                    Error::new(ErrorCode::Unavailable, "fake file response was lost")
+                        .for_operation("file")
+                        .retryable(true),
+                );
+            }
+        }
+        Ok(response)
+    }
+
+    async fn filesystem(&self, request: OciFilesystemRequest) -> OciResult<OciFilesystemResponse> {
+        self.filesystem_requests
+            .lock()
+            .map_err(|error| lock_error("filesystem", error))?
+            .push(request.clone());
+        self.require_running_container(&request.target, "filesystem")?;
+        let response_target = if self.drift_filesystem_target.load(Ordering::SeqCst) {
+            ContainerTarget::exact(
+                ContainerId::new("a3s-box-filesystem-drift")
+                    .expect("filesystem drift container ID"),
+                Generation(99),
+            )
+        } else {
+            request.target.clone()
+        };
+        let response = match request.op {
+            OciFilesystemOp::Stat => OciFilesystemResponse {
+                target: response_target,
+                entry: Some(fake_filesystem_entry(
+                    &request.path,
+                    OciFilesystemEntryKind::File,
+                )),
+                entries: Vec::new(),
+            },
+            OciFilesystemOp::MakeDir => OciFilesystemResponse {
+                target: response_target,
+                entry: Some(fake_filesystem_entry(
+                    &request.path,
+                    OciFilesystemEntryKind::Directory,
+                )),
+                entries: Vec::new(),
+            },
+            OciFilesystemOp::Move => OciFilesystemResponse {
+                target: response_target,
+                entry: Some(fake_filesystem_entry(
+                    request.destination.as_deref().unwrap_or_default(),
+                    OciFilesystemEntryKind::File,
+                )),
+                entries: Vec::new(),
+            },
+            OciFilesystemOp::ListDir => OciFilesystemResponse {
+                target: response_target,
+                entry: None,
+                entries: vec![fake_filesystem_entry(
+                    &format!("{}/fixture.txt", request.path.trim_end_matches('/')),
+                    OciFilesystemEntryKind::File,
+                )],
+            },
+            OciFilesystemOp::Remove => OciFilesystemResponse {
+                target: response_target,
+                entry: None,
+                entries: Vec::new(),
+            },
+        };
+        if request.op.is_mutating() {
+            let operation_id = request
+                .context
+                .as_ref()
+                .ok_or_else(|| {
+                    oci_error(
+                        ErrorCode::InvalidArgument,
+                        "filesystem",
+                        "fake mutation requires an operation context",
+                    )
+                })?
+                .operation_id
+                .to_string();
+            let mut journal = self
+                .filesystem_journal
+                .lock()
+                .map_err(|error| lock_error("filesystem", error))?;
+            if let Some(previous) = journal.get(&operation_id) {
+                if previous != &request {
+                    return Err(oci_error(
+                        ErrorCode::Conflict,
+                        "filesystem",
+                        "operation identity was reused with a different mutation",
+                    ));
+                }
+                return Ok(response);
+            }
+            journal.insert(operation_id, request.clone());
+            self.filesystem_effects
+                .lock()
+                .map_err(|error| lock_error("filesystem", error))?
+                .push(request);
+            drop(journal);
+            if self
+                .fail_filesystem_after_effect
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(Error::new(
+                    ErrorCode::Unavailable,
+                    "fake filesystem response was lost",
+                )
+                .for_operation("filesystem")
+                .retryable(true));
+            }
+        }
+        Ok(response)
     }
 
     async fn kill(&self, request: KillRequest) -> OciResult<ContainerRecord> {
@@ -1530,6 +1789,364 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
     assert_eq!(stdin[0].data, b"probe input");
     assert_eq!(stdin[0].process.container, calls[0].container);
     assert_eq!(service.close_stdin_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutations_once() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("filesystem-sessions", ExecutionIsolation::Sandbox),
+            &box_operation("filesystem-sessions-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    let upload_data = STANDARD.encode(b"adapter payload");
+    service.fail_file_after_effect.store(true, Ordering::SeqCst);
+    let upload = manager
+        .transfer_file(
+            &lease.execution_id,
+            lease.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Upload,
+                guest_path: "~/payload.txt".to_string(),
+                data: Some(upload_data.clone()),
+                user: Some("1000:1001".to_string()),
+            },
+        )
+        .await
+        .expect("upload replay after lost response");
+    assert!(upload.success);
+    assert_eq!(upload.data, None);
+    assert_eq!(upload.size, 15);
+    assert_eq!(upload.error, None);
+
+    let download = manager
+        .transfer_file(
+            &lease.execution_id,
+            lease.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Download,
+                guest_path: "/work/result.txt".to_string(),
+                data: None,
+                user: None,
+            },
+        )
+        .await
+        .expect("download through OCI SDK");
+    assert!(download.success);
+    assert_eq!(download.size, 10);
+    assert_eq!(
+        STANDARD
+            .decode(download.data.expect("download payload"))
+            .expect("valid download base64"),
+        b"fake file\n"
+    );
+
+    service
+        .fail_filesystem_after_effect
+        .store(true, Ordering::SeqCst);
+    let created = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::MakeDir,
+                path: "/work/tree".to_string(),
+                destination: None,
+                depth: 0,
+                user: Some("1000".to_string()),
+            },
+        )
+        .await
+        .expect("mkdir replay after lost response");
+    assert_eq!(
+        created.entry.expect("created directory").kind,
+        BoxFilesystemEntryKind::Directory
+    );
+
+    let stat = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Stat,
+                path: "/work/tree/payload.txt".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            },
+        )
+        .await
+        .expect("stat through OCI SDK");
+    let stat_entry = stat.entry.expect("stat entry");
+    assert_eq!(stat_entry.kind, BoxFilesystemEntryKind::File);
+    assert_eq!(stat_entry.permissions, "-rw-r--r--");
+    assert_eq!(
+        stat_entry.metadata.get("fake").map(String::as_str),
+        Some("true")
+    );
+
+    let listing = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::ListDir,
+                path: "/work/tree".to_string(),
+                destination: None,
+                depth: 2,
+                user: None,
+            },
+        )
+        .await
+        .expect("list through OCI SDK");
+    assert_eq!(listing.entry, None);
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].path, "/work/tree/fixture.txt");
+
+    let moved = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Move,
+                path: "/work/tree/payload.txt".to_string(),
+                destination: Some("/work/tree/moved.txt".to_string()),
+                depth: 0,
+                user: None,
+            },
+        )
+        .await
+        .expect("move through OCI SDK");
+    assert_eq!(
+        moved.entry.expect("moved entry").path,
+        "/work/tree/moved.txt"
+    );
+    let removed = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Remove,
+                path: "/work/tree".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            },
+        )
+        .await
+        .expect("remove through OCI SDK");
+    assert!(removed.entry.is_none());
+    assert!(removed.entries.is_empty());
+
+    let file_calls = service.file_requests();
+    assert_eq!(file_calls.len(), 3);
+    assert_eq!(file_calls[0], file_calls[1]);
+    assert_eq!(file_calls[0].op, OciFileOp::Upload);
+    assert_eq!(file_calls[0].path, "~/payload.txt");
+    assert_eq!(file_calls[0].data.as_deref(), Some(upload_data.as_str()));
+    assert!(file_calls[0].context.is_some());
+    assert_eq!(file_calls[2].op, OciFileOp::Download);
+    assert!(file_calls[2].context.is_none());
+    assert!(file_calls[2].data.is_none());
+    assert_eq!(service.file_effects(), vec![file_calls[0].clone()]);
+    assert!(file_calls
+        .iter()
+        .all(|call| call.target == file_calls[0].target));
+
+    let filesystem_calls = service.filesystem_requests();
+    assert_eq!(filesystem_calls.len(), 6);
+    assert_eq!(filesystem_calls[0], filesystem_calls[1]);
+    assert_eq!(filesystem_calls[0].op, OciFilesystemOp::MakeDir);
+    assert!(filesystem_calls[0].context.is_some());
+    assert_eq!(filesystem_calls[2].op, OciFilesystemOp::Stat);
+    assert!(filesystem_calls[2].context.is_none());
+    assert_eq!(filesystem_calls[3].op, OciFilesystemOp::ListDir);
+    assert_eq!(filesystem_calls[3].depth, 2);
+    assert!(filesystem_calls[3].context.is_none());
+    assert_eq!(filesystem_calls[4].op, OciFilesystemOp::Move);
+    assert!(filesystem_calls[4].context.is_some());
+    assert_eq!(filesystem_calls[5].op, OciFilesystemOp::Remove);
+    assert!(filesystem_calls[5].context.is_some());
+    assert_eq!(service.filesystem_effects().len(), 3);
+    assert!(filesystem_calls
+        .iter()
+        .all(|call| call.target == file_calls[0].target));
+}
+
+#[tokio::test]
+async fn file_and_filesystem_capabilities_and_box_generation_fail_before_dispatch() {
+    let file_directory = tempfile::tempdir().expect("file temporary directory");
+    let file_service = Arc::new(FakeRuntimeService::without_operation(
+        RuntimeOperation::File,
+    ));
+    let file_manager = manager(
+        &file_directory,
+        test_endpoint(),
+        file_service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let file_lease = file_manager
+        .create_and_start(
+            request("missing-file", ExecutionIsolation::Sandbox),
+            &box_operation("missing-file-create"),
+        )
+        .await
+        .expect("file capability launch");
+    let stale =
+        ExecutionGeneration::new(file_lease.generation.get() + 1).expect("future generation");
+    let file_request = BoxFileRequest {
+        op: BoxFileOp::Download,
+        guest_path: "/tmp/result".to_string(),
+        data: None,
+        user: None,
+    };
+    let stale_error = file_manager
+        .transfer_file(&file_lease.execution_id, stale, file_request.clone())
+        .await
+        .expect_err("stale file generation must fail");
+    assert!(matches!(
+        stale_error,
+        ExecutionManagerError::Conflict { .. }
+    ));
+    let capability_error = file_manager
+        .transfer_file(
+            &file_lease.execution_id,
+            file_lease.generation,
+            file_request,
+        )
+        .await
+        .expect_err("missing file capability must fail");
+    assert!(matches!(
+        capability_error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("does not advertise file")
+    ));
+    assert!(file_service.file_requests().is_empty());
+
+    let filesystem_directory = tempfile::tempdir().expect("filesystem temporary directory");
+    let filesystem_service = Arc::new(FakeRuntimeService::without_operation(
+        RuntimeOperation::Filesystem,
+    ));
+    let filesystem_manager = manager(
+        &filesystem_directory,
+        test_endpoint(),
+        filesystem_service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let filesystem_lease = filesystem_manager
+        .create_and_start(
+            request("missing-filesystem", ExecutionIsolation::Sandbox),
+            &box_operation("missing-filesystem-create"),
+        )
+        .await
+        .expect("filesystem capability launch");
+    let filesystem_request = BoxFilesystemRequest {
+        op: BoxFilesystemOp::Stat,
+        path: "/tmp".to_string(),
+        destination: None,
+        depth: 0,
+        user: None,
+    };
+    let stale_error = filesystem_manager
+        .filesystem(
+            &filesystem_lease.execution_id,
+            ExecutionGeneration::new(filesystem_lease.generation.get() + 1)
+                .expect("future filesystem generation"),
+            filesystem_request.clone(),
+        )
+        .await
+        .expect_err("stale filesystem generation must fail");
+    assert!(matches!(
+        stale_error,
+        ExecutionManagerError::Conflict { .. }
+    ));
+    let capability_error = filesystem_manager
+        .filesystem(
+            &filesystem_lease.execution_id,
+            filesystem_lease.generation,
+            filesystem_request,
+        )
+        .await
+        .expect_err("missing filesystem capability must fail");
+    assert!(matches!(
+        capability_error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("does not advertise filesystem")
+    ));
+    assert!(filesystem_service.filesystem_requests().is_empty());
+}
+
+#[tokio::test]
+async fn file_and_filesystem_sessions_reject_runtime_target_drift() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("filesystem-drift", ExecutionIsolation::Sandbox),
+            &box_operation("filesystem-drift-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    service.drift_file_target.store(true, Ordering::SeqCst);
+    let file_error = manager
+        .transfer_file(
+            &lease.execution_id,
+            lease.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Download,
+                guest_path: "/tmp/result".to_string(),
+                data: None,
+                user: None,
+            },
+        )
+        .await
+        .expect_err("file response target drift must fail closed");
+    assert!(matches!(
+        file_error,
+        ExecutionManagerError::Internal(message)
+            if message.contains("invalid file target")
+    ));
+
+    service.drift_file_target.store(false, Ordering::SeqCst);
+    service
+        .drift_filesystem_target
+        .store(true, Ordering::SeqCst);
+    let filesystem_error = manager
+        .filesystem(
+            &lease.execution_id,
+            lease.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Stat,
+                path: "/tmp".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            },
+        )
+        .await
+        .expect_err("filesystem response target drift must fail closed");
+    assert!(matches!(
+        filesystem_error,
+        ExecutionManagerError::Internal(message)
+            if message.contains("invalid filesystem target")
+    ));
 }
 
 #[tokio::test]
@@ -3339,7 +3956,7 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
             "features", "create", "state", "start", "kill", "delete", "wait",
             "pause", "resume", "exec", "read-output", "write-stdin", "close-stdin",
             "resize", "signal-process", "wait-process", "update", "processes", "stats",
-            "events"
+            "events", "file", "filesystem"
         ],
         "attachments": {
             "schemas": ["a3s.oci.attachments.v1"],
@@ -3347,6 +3964,40 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
         }
     }))
     .expect("runtime feature fixture")
+}
+
+fn fake_filesystem_entry(path: &str, kind: OciFilesystemEntryKind) -> OciFilesystemEntry {
+    OciFilesystemEntry {
+        name: path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        kind,
+        path: path.to_string(),
+        size: if kind == OciFilesystemEntryKind::File {
+            10
+        } else {
+            0
+        },
+        mode: if kind == OciFilesystemEntryKind::Directory {
+            0o755
+        } else {
+            0o644
+        },
+        permissions: if kind == OciFilesystemEntryKind::Directory {
+            "drwxr-xr-x".to_string()
+        } else {
+            "-rw-r--r--".to_string()
+        },
+        owner: "root".to_string(),
+        group: "root".to_string(),
+        modified_seconds: 1_700_000_000,
+        modified_nanos: 123_000_000,
+        symlink_target: None,
+        metadata: BTreeMap::from([("fake".to_string(), "true".to_string())]),
+    }
 }
 
 fn selected_driver(request: IsolationRequest) -> (DriverKind, IsolationClass) {

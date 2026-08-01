@@ -6,7 +6,7 @@ use a3s_box_core::{
     pty::PtyRequest, ExecOutput, ExecRequest, ExecutionEventBatch, ExecutionEventsRequest,
     ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
     ExecutionProcessInventory, ExecutionResourceUpdate, ExecutionState, ExecutionStats,
-    KillOutcome, OperationId,
+    FileRequest, FileResponse, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -201,6 +201,28 @@ pub trait LocalExecutionBackend: Send + Sync {
     ) -> ExecutionManagerResult<ExecutionProcess> {
         Err(ExecutionManagerError::Unavailable(
             "this execution backend does not expose PTY sessions".to_string(),
+        ))
+    }
+
+    /// Transfer one file through the backend's exact-generation session.
+    async fn transfer_file(
+        &self,
+        _record: &BoxRecord,
+        _request: FileRequest,
+    ) -> ExecutionManagerResult<FileResponse> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose file transfer sessions".to_string(),
+        ))
+    }
+
+    /// Inspect or mutate the exact generation's workload filesystem.
+    async fn filesystem(
+        &self,
+        _record: &BoxRecord,
+        _request: FilesystemRequest,
+    ) -> ExecutionManagerResult<FilesystemResponse> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution backend does not expose filesystem sessions".to_string(),
         ))
     }
 

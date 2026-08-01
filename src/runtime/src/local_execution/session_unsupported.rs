@@ -4,6 +4,7 @@ use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId, ExecutionManagerError,
     ExecutionManagerResult, ExecutionProcess, ExecutionSessionManager, FileRequest, FileResponse,
+    FilesystemRequest, FilesystemResponse,
 };
 use async_trait::async_trait;
 
@@ -94,17 +95,34 @@ impl ExecutionSessionManager for LocalExecutionManager {
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
-        _request: FileRequest,
+        request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
         let record = self
             .require_running_record(execution_id, generation)
             .await?;
         if has_oci_runtime(&record) {
-            return Err(ExecutionManagerError::Unavailable(format!(
-                "execution {execution_id} uses the A3S OCI SDK, whose current public contract does not expose Box file sessions"
-            )));
+            self.require_same_runtime(&record, execution_id, generation)
+                .await?;
+            return self.backend.transfer_file(&record, request).await;
         }
         Err(unsupported_session("transfer files"))
+    }
+
+    async fn filesystem(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FilesystemRequest,
+    ) -> ExecutionManagerResult<FilesystemResponse> {
+        let record = self
+            .require_running_record(execution_id, generation)
+            .await?;
+        if has_oci_runtime(&record) {
+            self.require_same_runtime(&record, execution_id, generation)
+                .await?;
+            return self.backend.filesystem(&record, request).await;
+        }
+        Err(unsupported_session("access filesystems"))
     }
 }
 
