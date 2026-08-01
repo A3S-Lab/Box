@@ -50,7 +50,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`242f0ff6a1c63eaabc2eea63e2c06b0bd853641c`, which retains the qualified
+`f60d5c12c5fa4cdd19974f075e895f16058e5292`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
@@ -65,14 +65,16 @@ clone-safe clients to concurrent operations, and returns one cached cleanup
 report to every shutdown caller. Native Linux and the new WHPX driver candidate
 share one eighteen-operation adapter. The candidate binds one VM to each exact
 dedicated-VM generation, permits parallel launches for different IDs, requires
-a protected runtime-owned guest root, and reconciles owner-death cleanup as a
-stopped, generation-fenced tombstone. Authenticated guest shutdown evidence is
-normalized into protected host storage, matched to the exact target and durable
-configuration during startup, and committed to the durable wait cache before
-service. Missing or invalid evidence retains the explicit stopped-only fallback
-instead of inventing an exit status. It remains non-registerable at
-`probe-only` readiness until fresh-host restart recovery and
-immutable-system-root qualification pass.
+a protected per-generation virtio-fs share disjoint from the guest system root,
+and reconciles owner-death cleanup as a stopped, generation-fenced tombstone.
+Bundles and one-time token/recovery handoff stay inside that exact share;
+authenticated guest shutdown evidence is normalized into protected host
+storage, matched to the exact target and durable configuration during startup,
+and committed to the durable wait cache before service. Missing or invalid
+evidence retains the explicit stopped-only fallback instead of inventing an
+exit status. It remains non-registerable at `probe-only` readiness until
+fresh-host runtime-share/restart recovery and immutable-system-root
+qualification pass.
 
 ## Upgrade behavior
 
