@@ -50,21 +50,25 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`4aefc4b8cff7831b6fe2edad27f296e478580048`, which retains the qualified
+`b39cdc88d710b32c755bccd471d1e7aa1f54a9ff`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
 also fails closed when historical state references a missing driver or a
-driver whose advertised isolation has drifted. Windows additionally has a
-protected, local-only named-pipe SDK host listener ready for the WHPX driver,
-and utility-VM ownership can explicitly close every guest-agent client clone
-before reaping the guest and hypervisor shim. The shared session keeps one VM
-owner, lends clone-safe clients to concurrent operations, and returns one
-cached cleanup report to every shutdown caller. Native Linux and the new WHPX
-driver candidate share one eighteen-operation adapter. The candidate binds one
-VM to each exact dedicated-VM generation, permits parallel launches for
-different IDs, requires a protected runtime-owned guest root, and deliberately
-remains `probe-only` until immutable-root and restart-reattachment gates pass.
+driver whose advertised isolation has drifted. Startup then calls only the
+exact recorded driver's idempotent recovery hook and commits any legal state
+observation before serving. Windows additionally has a protected, local-only
+named-pipe SDK host listener ready for the WHPX driver, and utility-VM
+ownership can explicitly close every guest-agent client clone before reaping
+the guest and hypervisor shim. The shared session keeps one VM owner, lends
+clone-safe clients to concurrent operations, and returns one cached cleanup
+report to every shutdown caller. Native Linux and the new WHPX driver candidate
+share one eighteen-operation adapter. The candidate binds one VM to each exact
+dedicated-VM generation, permits parallel launches for different IDs, requires
+a protected runtime-owned guest root, and reconciles owner-death cleanup as a
+stopped, generation-fenced tombstone without inventing an exit status. It
+deliberately remains `probe-only` until immutable-root and restart-stable exact
+exit-evidence gates pass.
 
 ## Upgrade behavior
 

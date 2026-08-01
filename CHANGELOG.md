@@ -56,6 +56,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- **Pinned OCI owner-death recovery contract.** The exact A3S OCI SDK revision
+  now includes startup reconciliation through each durable generation's
+  recorded driver. Its WHPX candidate converts owner-death cleanup into a
+  stopped, generation-fenced tombstone that remains inspectable and deletable
+  without relaunching the generation or fabricating an init exit status.
 - **Single-owner Sandbox resource contract.** `linux.resources` now carries
   exact workload CPU, memory, swap, and PID limits. The pinned A3S OCI Runtime
   derives the control-plane headroom, owns the fixed control/workload cgroup
