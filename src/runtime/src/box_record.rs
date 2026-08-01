@@ -369,8 +369,15 @@ pub enum ManagedExecutionOperation {
     Start,
     Pause {
         keep_memory: bool,
+        /// Stable backend mutation identity for this exact pause claim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
     },
-    Resume,
+    Resume {
+        /// Stable backend mutation identity for this exact resume claim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
+    },
     Snapshot {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
@@ -499,7 +506,7 @@ fn validate_pending_operation(
             Some(ManagedExecutionOperation::Pause { .. })
         ) | (
             ManagedExecutionState::Resuming,
-            Some(ManagedExecutionOperation::Resume)
+            Some(ManagedExecutionOperation::Resume { .. })
         ) | (
             ManagedExecutionState::Snapshotting,
             Some(ManagedExecutionOperation::Snapshot { .. })
@@ -593,7 +600,7 @@ fn validate_pending_operation(
         let valid_cold_pause_state = match (state, operation) {
             (
                 ManagedExecutionState::Pausing,
-                Some(ManagedExecutionOperation::Pause { keep_memory }),
+                Some(ManagedExecutionOperation::Pause { keep_memory, .. }),
             ) => !keep_memory,
             (ManagedExecutionState::Paused | ManagedExecutionState::Resuming, _) => true,
             (
@@ -750,6 +757,29 @@ mod tests {
                 signal: None,
                 timeout_secs: None,
             }
+        );
+    }
+
+    #[test]
+    fn legacy_freezer_operations_default_claim_identity() {
+        let pause: ManagedExecutionOperation = serde_json::from_value(serde_json::json!({
+            "kind": "pause",
+            "keep_memory": true
+        }))
+        .unwrap();
+        let resume: ManagedExecutionOperation =
+            serde_json::from_value(serde_json::json!({ "kind": "resume" })).unwrap();
+
+        assert_eq!(
+            pause,
+            ManagedExecutionOperation::Pause {
+                keep_memory: true,
+                operation_id: None,
+            }
+        );
+        assert_eq!(
+            resume,
+            ManagedExecutionOperation::Resume { operation_id: None }
         );
     }
 

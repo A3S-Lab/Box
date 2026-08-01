@@ -1295,7 +1295,10 @@ async fn reconcile_finishes_a_crashed_filesystem_only_pause() {
             &record,
             ManagedExecutionState::Running,
             ManagedExecutionState::Pausing,
-            RuntimeUpdate::PauseClaim(false),
+            RuntimeUpdate::PauseClaim {
+                keep_memory: false,
+                operation_id: operation("cold-pause-runtime-operation"),
+            },
         )
         .await
         .unwrap();
@@ -1669,7 +1672,10 @@ async fn reconciliation_completes_pause_after_backend_side_effect() {
             &record,
             ManagedExecutionState::Running,
             ManagedExecutionState::Pausing,
-            RuntimeUpdate::PauseClaim(true),
+            RuntimeUpdate::PauseClaim {
+                keep_memory: true,
+                operation_id: operation("warm-pause-runtime-operation"),
+            },
         )
         .await
         .unwrap();

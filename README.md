@@ -50,8 +50,10 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > boundary negotiates `a3s.oci.attachments.v1`, submits the bundle rootfs,
 > mounts, networking, process I/O, secret classifications, and optional
 > extensions as one validated manifest, and persists its exact digest for
-> recovery. Production MicroVM routing and real-host cutover gates are not
-> complete; the current split above remains authoritative.
+> recovery. Its exact-generation lifecycle path now also carries durable
+> memory-retaining pause/resume through the SDK, including lost-response
+> reconciliation. Production MicroVM routing and real-host cutover gates are
+> not complete; the current split above remains authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

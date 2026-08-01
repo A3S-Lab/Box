@@ -93,6 +93,15 @@ isolation mappings, corrupt evidence, cleanup, adapter reopen, stopped-only
 deletion, and exact normal or signaled exit status; out-of-process restart and
 real-host gates remain below.
 
+The same adapter now routes memory-retaining pause and resume through exact
+SDK targets. Every freezer mutation first requires the advertised operation,
+persists a claim-scoped mutation identity and combines it with the current Box
+generation without changing the runtime generation, validates the complete
+returned runtime binding, and reconciles a lost response after backend
+recreation without issuing the mutation twice. Filesystem-only pause continues
+to use the existing
+stop/reprepare lifecycle rather than being mislabeled as an OCI freezer action.
+
 ## Delivery Milestones
 
 ### B0 - Boundary And Contract Freeze
@@ -139,9 +148,10 @@ evidence.
 
 ### B2 - Interactive And Observable Execution
 
+- [x] Route memory-retaining pause/resume through exact-generation OCI SDK
+  operations with capability checks and replay-safe recovery.
 - [ ] Route exec, process signal/wait, stdin, captured output, PTY, resize,
-  pause/resume, processes, resource update, stats, and ordered events through
-  the OCI SDK.
+  processes, resource update, stats, and ordered events through the OCI SDK.
 - [ ] Keep raw runtime output separate from Box log retention, indexing,
   cursor, search, and redaction policy.
 - [ ] Drive Box health probes through the canonical runtime exec boundary.
@@ -149,6 +159,11 @@ evidence.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
+
+The in-process contract suite now covers repeated pause/resume cycles, stable
+claim-scoped operation identities, missing-operation rejection, immutable
+runtime binding, and backend recreation after lost freezer responses. Native
+driver and out-of-process restart evidence remains part of the exit gate.
 
 ### B3 - Storage And Networking Attachments
 

@@ -9,11 +9,11 @@ use a3s_box_core::{
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
-    ContainerId, ContainerRecord, ContainerTarget, CreateAttachments, CreateRequest, DeleteMode,
-    DeleteRequest, DriverKind, ErrorCode, ExitStatus, IoMode, IsolationClass, IsolationRequest,
-    KillRequest, LocalIpcEndpoint, OciBundle, OperationContext, OperationId as OciOperationId,
-    ProcessIo, RuntimeClient, RuntimeInfo, RuntimeOperation, Signal, StartRequest, StateRequest,
-    WaitRequest, ATTACHMENT_SCHEMA_V1,
+    ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, CreateAttachments,
+    CreateRequest, DeleteMode, DeleteRequest, DriverKind, ErrorCode, ExitStatus, IoMode,
+    IsolationClass, IsolationRequest, KillRequest, LocalIpcEndpoint, OciBundle, OperationContext,
+    OperationId as OciOperationId, ProcessIo, RuntimeClient, RuntimeInfo, RuntimeOperation, Signal,
+    StartRequest, StateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -357,6 +357,24 @@ impl OciLifecycleAdapter {
         Ok(info)
     }
 
+    async fn require_operation(
+        &self,
+        operation: RuntimeOperation,
+        label: &str,
+    ) -> ExecutionManagerResult<()> {
+        let info = self
+            .client
+            .features()
+            .await
+            .map_err(|error| sdk_error("features", error))?;
+        if !info.operations.contains(&operation) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "A3S OCI Runtime does not advertise {label}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn launch_preflighted(
         &self,
         info: &RuntimeInfo,
@@ -598,6 +616,46 @@ impl OciLifecycleAdapter {
             Err(error) if error.code == ErrorCode::DeadlineExceeded => Ok(None),
             Err(error) => Err(sdk_error("wait", error)),
         }
+    }
+
+    async fn set_paused(
+        &self,
+        execution_id: &ExecutionId,
+        execution_generation: ExecutionGeneration,
+        operation_seed: &str,
+        binding: &OciRuntimeBinding,
+        paused: bool,
+    ) -> ExecutionManagerResult<ContainerRecord> {
+        binding.validate_for(execution_id)?;
+        let (operation, label) = if paused {
+            (RuntimeOperation::Pause, "pause")
+        } else {
+            (RuntimeOperation::Resume, "resume")
+        };
+        self.require_operation(operation, label).await?;
+        let request = ContainerOperationRequest {
+            context: operation_context(
+                operation_seed,
+                execution_generation,
+                label,
+                (&binding.target, paused),
+            )?,
+            target: binding.target.clone(),
+        };
+        let result = if paused {
+            self.client.pause(request).await
+        } else {
+            self.client.resume(request).await
+        };
+        let record = match result {
+            Ok(record) => record,
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+            }
+            Err(error) => return Err(sdk_error(label, error)),
+        };
+        validate_freezer_record(binding, &record, paused, label)?;
+        Ok(record)
     }
 
     async fn kill(
@@ -943,19 +1001,51 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
     async fn pause(
         &self,
         record: &BoxRecord,
-        _keep_memory: bool,
+        keep_memory: bool,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
-        Err(ExecutionManagerError::Unavailable(format!(
-            "A3S OCI pause is not yet routed through OciLocalExecutionBackend for {}",
-            record.id
-        )))
+        if !keep_memory {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "A3S OCI in-place pause requires memory retention for {}",
+                record.id
+            )));
+        }
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let operation_seed = freezer_operation_seed(record, &execution_id, true)?;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding to pause"
+            ))
+        })?;
+        self.adapter
+            .set_paused(&execution_id, generation, &operation_seed, &binding, true)
+            .await?;
+        Ok(self.handle(
+            record,
+            binding,
+            record.console_log.clone(),
+            record.anonymous_volumes.clone(),
+        ))
     }
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
-        Err(ExecutionManagerError::Unavailable(format!(
-            "A3S OCI resume is not yet routed through OciLocalExecutionBackend for {}",
-            record.id
-        )))
+        let execution_id = self.execution_id(record)?;
+        let generation = self.metadata(record)?.generation;
+        let operation_seed = freezer_operation_seed(record, &execution_id, false)?;
+        let binding = self.binding(record)?.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exact A3S OCI binding to resume"
+            ))
+        })?;
+        self.adapter
+            .set_paused(&execution_id, generation, &operation_seed, &binding, false)
+            .await?;
+        Ok(self.handle(
+            record,
+            binding,
+            record.console_log.clone(),
+            record.anonymous_volumes.clone(),
+        ))
     }
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
@@ -1043,6 +1133,35 @@ pub const fn oci_isolation_request(isolation: ExecutionIsolation) -> IsolationRe
 fn runtime_container_id(execution_id: &ExecutionId) -> ExecutionManagerResult<ContainerId> {
     ContainerId::new(format!("a3s-box-{execution_id}"))
         .map_err(|error| ExecutionManagerError::Internal(error.to_string()))
+}
+
+fn freezer_operation_seed(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+    paused: bool,
+) -> ExecutionManagerResult<String> {
+    let operation = record
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.pending_operation.as_ref());
+    let operation_id = match (paused, operation) {
+        (true, Some(crate::ManagedExecutionOperation::Pause { operation_id, .. }))
+        | (false, Some(crate::ManagedExecutionOperation::Resume { operation_id })) => {
+            operation_id.as_ref()
+        }
+        _ => {
+            return Err(ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no matching durable OCI freezer claim"
+            )))
+        }
+    };
+    // Legacy transitional records predate explicit freezer mutation IDs. OCI
+    // routing did not exist when they were written, so the exact Box identity
+    // and generation remain a safe one-time recovery seed.
+    Ok(operation_id
+        .map(|operation_id| operation_id.as_str())
+        .unwrap_or_else(|| execution_id.as_str())
+        .to_string())
 }
 
 fn operation_context(
@@ -1144,6 +1263,22 @@ fn validate_started_record(
     }
     validate_record_attachments(started, "start")?;
     validate_selected_driver(info, started)
+}
+
+fn validate_freezer_record(
+    binding: &OciRuntimeBinding,
+    record: &ContainerRecord,
+    paused: bool,
+    operation: &str,
+) -> ExecutionManagerResult<()> {
+    binding.validate_record(record)?;
+    if *record.state.status() != ContainerState::Running || record.is_paused() != paused {
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI {operation} returned an invalid freezer state for {} generation {:?}",
+            binding.target.id, binding.target.generation
+        )));
+    }
+    Ok(())
 }
 
 fn validate_selected_driver(

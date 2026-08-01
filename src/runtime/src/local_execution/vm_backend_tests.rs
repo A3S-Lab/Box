@@ -226,7 +226,10 @@ fn transitional_states_retry_idempotent_pause_and_resume_operations() {
     let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
     record.status = ManagedExecutionState::Pausing.as_status().to_string();
     record.managed_execution.as_mut().unwrap().pending_operation =
-        Some(crate::ManagedExecutionOperation::Pause { keep_memory: true });
+        Some(crate::ManagedExecutionOperation::Pause {
+            keep_memory: true,
+            operation_id: None,
+        });
     assert_eq!(
         visible_active_state(&record).unwrap(),
         ExecutionState::Running
@@ -234,7 +237,7 @@ fn transitional_states_retry_idempotent_pause_and_resume_operations() {
 
     record.status = ManagedExecutionState::Resuming.as_status().to_string();
     record.managed_execution.as_mut().unwrap().pending_operation =
-        Some(crate::ManagedExecutionOperation::Resume);
+        Some(crate::ManagedExecutionOperation::Resume { operation_id: None });
     assert_eq!(
         visible_active_state(&record).unwrap(),
         ExecutionState::Paused
@@ -289,7 +292,8 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
     let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
     record.status = ManagedExecutionState::Resuming.as_status().to_string();
     let metadata = record.managed_execution.as_mut().unwrap();
-    metadata.pending_operation = Some(crate::ManagedExecutionOperation::Resume);
+    metadata.pending_operation =
+        Some(crate::ManagedExecutionOperation::Resume { operation_id: None });
     metadata.paused_with_memory = false;
     let sentinel = record.box_dir.join("rootfs/cold-resume-state.txt");
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();

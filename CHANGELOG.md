@@ -21,6 +21,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Replay-safe OCI freezer routing.** The opt-in SDK-only backend now routes
+  memory-retaining pause and resume to the exact persisted OCI generation.
+  Each cycle durably claims a stable, non-reused mutation identity, binds it to
+  the current Box generation, requires the runtime to advertise the operation
+  before dispatch, validates unchanged driver/configuration/attachment
+  evidence, and reconciles lost responses after backend recreation without
+  repeating the mutation.
+  Filesystem-only pause remains a stop-and-reprepare lifecycle operation.
 - **Versioned Box-to-OCI attachment binding.** The opt-in SDK-only OCI backend
   now requires `a3s.oci.attachments.v1` before product mutation, derives and
   validates one bundle-bound manifest for rootfs, mounts, networking, process

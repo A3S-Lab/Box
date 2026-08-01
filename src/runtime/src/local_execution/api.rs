@@ -128,12 +128,17 @@ impl ExecutionManager for LocalExecutionManager {
         if managed_state(&record)? != ManagedExecutionState::Running {
             return Err(state_conflict(&record, execution_id, "pause"));
         }
+        let backend_operation_id =
+            OperationId::new(format!("managed-pause-{}", uuid::Uuid::new_v4().simple()))?;
         let claimed = self
             .transition(
                 &record,
                 ManagedExecutionState::Running,
                 ManagedExecutionState::Pausing,
-                RuntimeUpdate::PauseClaim(keep_memory),
+                RuntimeUpdate::PauseClaim {
+                    keep_memory,
+                    operation_id: backend_operation_id,
+                },
             )
             .await?;
         self.finish_pause(claimed).await
@@ -155,12 +160,14 @@ impl ExecutionManager for LocalExecutionManager {
         if managed_state(&record)? != ManagedExecutionState::Paused {
             return Err(state_conflict(&record, execution_id, "resume"));
         }
+        let backend_operation_id =
+            OperationId::new(format!("managed-resume-{}", uuid::Uuid::new_v4().simple()))?;
         let claimed = self
             .transition(
                 &record,
                 ManagedExecutionState::Paused,
                 ManagedExecutionState::Resuming,
-                RuntimeUpdate::None,
+                RuntimeUpdate::ResumeClaim(backend_operation_id),
             )
             .await?;
         self.finish_resume(claimed).await

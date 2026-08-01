@@ -859,7 +859,10 @@ pub(super) fn should_force_rootfs_preservation(record: &BoxRecord) -> ExecutionM
         ManagedExecutionState::Starting => true,
         ManagedExecutionState::Pausing => matches!(
             metadata.pending_operation.as_ref(),
-            Some(ManagedExecutionOperation::Pause { keep_memory: false })
+            Some(ManagedExecutionOperation::Pause {
+                keep_memory: false,
+                ..
+            })
         ),
         ManagedExecutionState::Resuming => !metadata.paused_with_memory,
         ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => true,

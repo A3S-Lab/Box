@@ -138,10 +138,22 @@ impl LocalExecutionManager {
                     record.stopped_by_user = true;
                 }
                 RuntimeUpdate::ColdPause => clear_live_runtime_for_cold_pause(record),
-                RuntimeUpdate::PauseClaim(keep_memory) => {
+                RuntimeUpdate::PauseClaim {
+                    keep_memory,
+                    operation_id,
+                } => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
-                        metadata.pending_operation =
-                            Some(ManagedExecutionOperation::Pause { keep_memory });
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Pause {
+                            keep_memory,
+                            operation_id: Some(operation_id),
+                        });
+                    }
+                }
+                RuntimeUpdate::ResumeClaim(operation_id) => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Resume {
+                            operation_id: Some(operation_id),
+                        });
                     }
                 }
                 RuntimeUpdate::KillClaim(options) => {
@@ -253,7 +265,11 @@ pub(super) enum RuntimeUpdate {
     Terminal(Option<i32>),
     KillTerminal(Option<i32>),
     ColdPause,
-    PauseClaim(bool),
+    PauseClaim {
+        keep_memory: bool,
+        operation_id: OperationId,
+    },
+    ResumeClaim(OperationId),
     KillClaim(KillExecutionOptions),
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,

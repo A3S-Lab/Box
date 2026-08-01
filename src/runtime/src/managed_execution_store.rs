@@ -388,9 +388,15 @@ impl ManagedExecutionStore {
                 ManagedExecutionState::Starting => Some(ManagedExecutionOperation::Start),
                 ManagedExecutionState::Pausing => match metadata.pending_operation.take() {
                     Some(operation @ ManagedExecutionOperation::Pause { .. }) => Some(operation),
-                    _ => Some(ManagedExecutionOperation::Pause { keep_memory: false }),
+                    _ => Some(ManagedExecutionOperation::Pause {
+                        keep_memory: false,
+                        operation_id: None,
+                    }),
                 },
-                ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
+                ManagedExecutionState::Resuming => match metadata.pending_operation.take() {
+                    Some(operation @ ManagedExecutionOperation::Resume { .. }) => Some(operation),
+                    _ => Some(ManagedExecutionOperation::Resume { operation_id: None }),
+                },
                 ManagedExecutionState::Snapshotting => match metadata.pending_operation.take() {
                     Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => Some(operation),
                     _ => {

@@ -9,10 +9,11 @@ use a3s_box_core::{
 };
 use a3s_oci_sdk::oci_spec::runtime::{ContainerState, StateBuilder};
 use a3s_oci_sdk::{
-    async_trait, ContainerId, ContainerRecord, ContainerTarget, CreateRequest, DeleteMode,
-    DeleteRequest, DriverKind, Error, ErrorCode, ExitStatus, Generation, IsolationClass,
-    IsolationRequest, KillRequest, OciBundle, OciRuntimeService, Result as OciResult,
-    RuntimeClient, RuntimeInfo, StartRequest, StateRequest, WaitRequest,
+    async_trait, ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget,
+    CreateRequest, DeleteMode, DeleteRequest, DriverKind, Error, ErrorCode, ExitStatus, Generation,
+    IsolationClass, IsolationRequest, KillRequest, OciBundle, OciRuntimeService,
+    Result as OciResult, RuntimeClient, RuntimeInfo, RuntimeOperation, StartRequest, StateRequest,
+    WaitRequest, PAUSED_STATE_ANNOTATION,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -38,12 +39,17 @@ struct FakeRuntimeService {
     containers: Mutex<HashMap<String, FakeContainer>>,
     create_requests: Mutex<Vec<CreateRequest>>,
     start_requests: Mutex<Vec<StartRequest>>,
+    pause_requests: Mutex<Vec<ContainerOperationRequest>>,
+    resume_requests: Mutex<Vec<ContainerOperationRequest>>,
     kill_signals: Mutex<Vec<i32>>,
     delete_modes: Mutex<Vec<DeleteMode>>,
     create_digest_override: Mutex<Option<String>>,
     create_attachments_digest_override: Mutex<Option<String>>,
     fail_create_after_effect: AtomicBool,
     fail_start_after_effect: AtomicBool,
+    fail_pause_before_effect: AtomicBool,
+    fail_pause_after_effect: AtomicBool,
+    fail_resume_after_effect: AtomicBool,
     ignore_graceful_signal: AtomicBool,
 }
 
@@ -64,18 +70,29 @@ impl FakeRuntimeService {
         service
     }
 
+    fn without_operation(operation: RuntimeOperation) -> Self {
+        let mut service = Self::launch_ready();
+        service.info.operations.retain(|item| *item != operation);
+        service
+    }
+
     fn with_dedicated_readiness(readiness: &str) -> Self {
         Self {
             info: runtime_info(readiness),
             containers: Mutex::new(HashMap::new()),
             create_requests: Mutex::new(Vec::new()),
             start_requests: Mutex::new(Vec::new()),
+            pause_requests: Mutex::new(Vec::new()),
+            resume_requests: Mutex::new(Vec::new()),
             kill_signals: Mutex::new(Vec::new()),
             delete_modes: Mutex::new(Vec::new()),
             create_digest_override: Mutex::new(None),
             create_attachments_digest_override: Mutex::new(None),
             fail_create_after_effect: AtomicBool::new(false),
             fail_start_after_effect: AtomicBool::new(false),
+            fail_pause_before_effect: AtomicBool::new(false),
+            fail_pause_after_effect: AtomicBool::new(false),
+            fail_resume_after_effect: AtomicBool::new(false),
             ignore_graceful_signal: AtomicBool::new(false),
         }
     }
@@ -130,6 +147,14 @@ impl FakeRuntimeService {
 
     fn start_requests(&self) -> Vec<StartRequest> {
         self.start_requests.lock().expect("start lock").clone()
+    }
+
+    fn pause_requests(&self) -> Vec<ContainerOperationRequest> {
+        self.pause_requests.lock().expect("pause lock").clone()
+    }
+
+    fn resume_requests(&self) -> Vec<ContainerOperationRequest> {
+        self.resume_requests.lock().expect("resume lock").clone()
     }
 
     fn kill_signals(&self) -> Vec<i32> {
@@ -260,6 +285,79 @@ impl OciRuntimeService for FakeRuntimeService {
             return Err(
                 Error::new(ErrorCode::Unavailable, "fake start response was lost")
                     .for_operation("start")
+                    .retryable(true),
+            );
+        }
+        Ok(record)
+    }
+
+    async fn pause(&self, request: ContainerOperationRequest) -> OciResult<ContainerRecord> {
+        self.pause_requests
+            .lock()
+            .map_err(|error| lock_error("pause", error))?
+            .push(request.clone());
+        if self.fail_pause_before_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake pause failed before mutation")
+                    .for_operation("pause")
+                    .retryable(false),
+            );
+        }
+        let mut containers = self
+            .containers
+            .lock()
+            .map_err(|error| lock_error("pause", error))?;
+        let container = containers
+            .get_mut(request.target.id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, "pause", "fake runtime is absent"))?;
+        validate_target(&request.target, &container.record, "pause")?;
+        if *container.record.state.status() != ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "pause",
+                "fake runtime is not running",
+            ));
+        }
+        container.record = rebuild_paused_record(&container.record, true)?;
+        let record = container.record.clone();
+        drop(containers);
+        if self.fail_pause_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake pause response was lost")
+                    .for_operation("pause")
+                    .retryable(true),
+            );
+        }
+        Ok(record)
+    }
+
+    async fn resume(&self, request: ContainerOperationRequest) -> OciResult<ContainerRecord> {
+        self.resume_requests
+            .lock()
+            .map_err(|error| lock_error("resume", error))?
+            .push(request.clone());
+        let mut containers = self
+            .containers
+            .lock()
+            .map_err(|error| lock_error("resume", error))?;
+        let container = containers
+            .get_mut(request.target.id.as_str())
+            .ok_or_else(|| oci_error(ErrorCode::NotFound, "resume", "fake runtime is absent"))?;
+        validate_target(&request.target, &container.record, "resume")?;
+        if *container.record.state.status() != ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "resume",
+                "fake runtime is not running",
+            ));
+        }
+        container.record = rebuild_paused_record(&container.record, false)?;
+        let record = container.record.clone();
+        drop(containers);
+        if self.fail_resume_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake resume response was lost")
+                    .for_operation("resume")
                     .retryable(true),
             );
         }
@@ -796,6 +894,349 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
 }
 
 #[tokio::test]
+async fn pause_resume_use_exact_runtime_target_and_unique_box_generations() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let operation = box_operation("freezer-cycle-operation");
+    let running = manager
+        .create_and_start(
+            request("freezer-cycle", ExecutionIsolation::Sandbox),
+            &operation,
+        )
+        .await
+        .expect("initial launch");
+    let original = persisted(&manager, &running.execution_id);
+    let binding = original
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.oci_runtime.clone())
+        .expect("runtime binding");
+
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .expect("pause through OCI SDK");
+    let resumed = manager
+        .resume(&running.execution_id, paused.generation)
+        .await
+        .expect("resume through OCI SDK");
+    let paused_again = manager
+        .pause(&running.execution_id, resumed.generation, true)
+        .await
+        .expect("second pause through OCI SDK");
+
+    let pauses = service.pause_requests();
+    let resumes = service.resume_requests();
+    assert_eq!(pauses.len(), 2);
+    assert_eq!(resumes.len(), 1);
+    assert!(pauses
+        .iter()
+        .all(|request| request.target == binding.target));
+    assert_eq!(resumes[0].target, binding.target);
+    assert_ne!(
+        pauses[0].context.operation_id,
+        resumes[0].context.operation_id
+    );
+    assert_ne!(
+        pauses[0].context.operation_id,
+        pauses[1].context.operation_id
+    );
+    assert_eq!(paused.generation.get(), running.generation.get() + 1);
+    assert_eq!(resumed.generation.get(), paused.generation.get() + 1);
+    assert_eq!(paused_again.generation.get(), resumed.generation.get() + 1);
+    let persisted = persisted(&manager, &running.execution_id);
+    assert_eq!(persisted.status, ManagedExecutionState::Paused.as_status());
+    assert_eq!(
+        persisted
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.oci_runtime.as_ref()),
+        Some(&binding)
+    );
+    let runtime = service
+        .containers
+        .lock()
+        .expect("container lock")
+        .get(binding.target.id.as_str())
+        .expect("runtime container")
+        .record
+        .clone();
+    assert!(runtime.is_paused());
+    assert_eq!(runtime.generation, RUNTIME_GENERATION);
+    assert_eq!(service.create_requests().len(), 1);
+    assert_eq!(service.start_requests().len(), 1);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn pause_requires_advertised_sdk_operation_before_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::without_operation(
+        RuntimeOperation::Pause,
+    ));
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let running = manager
+        .create_and_start(
+            request("missing-pause", ExecutionIsolation::Microvm),
+            &box_operation("missing-pause-operation"),
+        )
+        .await
+        .expect("initial launch");
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .expect_err("missing pause capability must fail closed");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("does not advertise pause")
+    ));
+    assert!(service.pause_requests().is_empty());
+    let persisted = persisted(&manager, &running.execution_id);
+    assert_eq!(persisted.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(
+        persisted
+            .managed_execution
+            .as_ref()
+            .expect("managed metadata")
+            .generation,
+        running.generation
+    );
+}
+
+#[tokio::test]
+async fn pause_retry_after_rollback_uses_a_new_durable_mutation_identity() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service
+        .fail_pause_before_effect
+        .store(true, Ordering::SeqCst);
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let running = manager
+        .create_and_start(
+            request("pause-retry", ExecutionIsolation::Sandbox),
+            &box_operation("pause-retry-operation"),
+        )
+        .await
+        .expect("initial launch");
+
+    manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .expect_err("first pause fails before mutation");
+    let rolled_back = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        rolled_back.status,
+        ManagedExecutionState::Running.as_status()
+    );
+    assert_eq!(
+        rolled_back
+            .managed_execution
+            .as_ref()
+            .expect("managed metadata")
+            .generation,
+        running.generation
+    );
+
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .expect("new pause claim succeeds");
+    let requests = service.pause_requests();
+    assert_eq!(requests.len(), 2);
+    assert_ne!(
+        requests[0].context.operation_id,
+        requests[1].context.operation_id
+    );
+    assert_eq!(paused.generation.get(), running.generation.get() + 1);
+}
+
+#[tokio::test]
+async fn resume_requires_advertised_sdk_operation_before_runtime_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::without_operation(
+        RuntimeOperation::Resume,
+    ));
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let running = manager
+        .create_and_start(
+            request("missing-resume", ExecutionIsolation::Sandbox),
+            &box_operation("missing-resume-operation"),
+        )
+        .await
+        .expect("initial launch");
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .expect("pause remains advertised");
+
+    let error = manager
+        .resume(&running.execution_id, paused.generation)
+        .await
+        .expect_err("missing resume capability must fail closed");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("does not advertise resume")
+    ));
+    assert!(service.resume_requests().is_empty());
+    let persisted = persisted(&manager, &running.execution_id);
+    assert_eq!(persisted.status, ManagedExecutionState::Paused.as_status());
+    assert_eq!(
+        persisted
+            .managed_execution
+            .as_ref()
+            .expect("managed metadata")
+            .generation,
+        paused.generation
+    );
+}
+
+#[tokio::test]
+async fn reopened_backend_reconciles_lost_pause_and_resume_responses_without_replay() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let operation = box_operation("interrupted-freezer-operation");
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let running = first
+        .create_and_start(
+            request("interrupted-freezer", ExecutionIsolation::Sandbox),
+            &operation,
+        )
+        .await
+        .expect("initial launch");
+    let record = persisted(&first, &running.execution_id);
+    let pausing = first
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+            RuntimeUpdate::PauseClaim {
+                keep_memory: true,
+                operation_id: box_operation("interrupted-pause-runtime-operation"),
+            },
+        )
+        .await
+        .expect("persist pause claim");
+    let binding = pausing
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.oci_runtime.clone())
+        .expect("pause binding");
+    service
+        .fail_pause_after_effect
+        .store(true, Ordering::SeqCst);
+    service
+        .pause(ContainerOperationRequest {
+            context: operation_context(
+                "interrupted-pause-runtime-operation",
+                running.generation,
+                "pause",
+                (&binding.target, true),
+            )
+            .expect("pause context"),
+            target: binding.target.clone(),
+        })
+        .await
+        .expect_err("pause response is intentionally lost");
+    drop(first);
+
+    let reopened = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let ReconcileOutcome::Ready(paused) = reopened
+        .reconcile(&operation)
+        .await
+        .expect("reconcile paused runtime")
+    else {
+        panic!("expected paused execution to remain ready")
+    };
+    assert_eq!(service.pause_requests().len(), 1);
+    assert_eq!(paused.generation.get(), running.generation.get() + 1);
+
+    let record = persisted(&reopened, &running.execution_id);
+    reopened
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Resuming,
+            RuntimeUpdate::ResumeClaim(box_operation("interrupted-resume-runtime-operation")),
+        )
+        .await
+        .expect("persist resume claim");
+    service
+        .fail_resume_after_effect
+        .store(true, Ordering::SeqCst);
+    service
+        .resume(ContainerOperationRequest {
+            context: operation_context(
+                "interrupted-resume-runtime-operation",
+                paused.generation,
+                "resume",
+                (&binding.target, false),
+            )
+            .expect("resume context"),
+            target: binding.target.clone(),
+        })
+        .await
+        .expect_err("resume response is intentionally lost");
+    drop(reopened);
+
+    let reopened = manager(&directory, endpoint, service.clone(), provider.clone());
+    let ReconcileOutcome::Ready(resumed) = reopened
+        .reconcile(&operation)
+        .await
+        .expect("reconcile resumed runtime")
+    else {
+        panic!("expected resumed execution to remain ready")
+    };
+    assert_eq!(service.resume_requests().len(), 1);
+    assert_eq!(resumed.generation.get(), paused.generation.get() + 1);
+    let persisted = persisted(&reopened, &running.execution_id);
+    assert_eq!(persisted.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(
+        persisted
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.oci_runtime.as_ref()),
+        Some(&binding)
+    );
+    assert_eq!(service.create_requests().len(), 1);
+    assert_eq!(service.start_requests().len(), 1);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn lost_start_response_reconciles_the_existing_generation_without_duplicate_create() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
@@ -1177,7 +1618,8 @@ fn runtime_info(dedicated_readiness: &str) -> RuntimeInfo {
             ]
         },
         "operations": [
-            "features", "create", "state", "start", "kill", "delete", "wait"
+            "features", "create", "state", "start", "kill", "delete", "wait",
+            "pause", "resume"
         ],
         "attachments": {
             "schemas": ["a3s.oci.attachments.v1"],
@@ -1224,6 +1666,29 @@ fn runtime_record(
         config_digest: config_digest.to_string(),
         attachments_digest: attachments_digest.map(str::to_string),
     })
+}
+
+fn rebuild_paused_record(record: &ContainerRecord, paused: bool) -> OciResult<ContainerRecord> {
+    let mut annotations = record.state.annotations().clone().unwrap_or_default();
+    if paused {
+        annotations.insert(PAUSED_STATE_ANNOTATION.to_string(), "true".to_string());
+    } else {
+        annotations.remove(PAUSED_STATE_ANNOTATION);
+    }
+    let mut builder = StateBuilder::default()
+        .version(record.state.version())
+        .id(record.state.id())
+        .status(*record.state.status())
+        .bundle(record.state.bundle().clone())
+        .annotations(annotations);
+    if let Some(pid) = record.state.pid() {
+        builder = builder.pid(*pid);
+    }
+    let mut updated = record.clone();
+    updated.state = builder
+        .build()
+        .map_err(|error| Error::new(ErrorCode::Internal, error.to_string()))?;
+    Ok(updated)
 }
 
 fn validate_target(

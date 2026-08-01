@@ -87,7 +87,7 @@ pub(super) fn pending_pause_policy(
         .as_ref()
         .and_then(|metadata| metadata.pending_operation.as_ref())
     {
-        Some(ManagedExecutionOperation::Pause { keep_memory }) => Ok(*keep_memory),
+        Some(ManagedExecutionOperation::Pause { keep_memory, .. }) => Ok(*keep_memory),
         _ => Err(ExecutionManagerError::Internal(format!(
             "pausing execution {execution_id} has no persisted pause policy"
         ))),
