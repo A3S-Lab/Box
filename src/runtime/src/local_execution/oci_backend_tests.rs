@@ -36,6 +36,10 @@ const CONFIG_DIGEST: &str =
 const ATTACHMENTS_DIGEST: &str =
     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
+#[cfg(any(unix, windows))]
+#[path = "oci_backend_tests/process_restart.rs"]
+mod process_restart;
+
 #[derive(Clone)]
 struct FakeContainer {
     record: ContainerRecord,

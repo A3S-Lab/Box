@@ -59,10 +59,11 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > identity after a lost response, while the original create identity remains
 > immutable. A retained local SDK client now exposes the first broken-stream
 > result, then reconnects and renegotiates on a later explicit reconciliation.
-> Raw runtime output stays separate from structured Box logs. Box file sessions,
-> production MicroVM routing, real out-of-process and real-host restart evidence,
-> and the broader cutover gates remain open; the current split above is still
-> authoritative.
+> The generic Box/OCI contract also recovers one manager across two distinct
+> runtime-owner test processes with exactly one create and start. Raw runtime
+> output stays separate from structured Box logs. Box file sessions, production
+> owner wiring, real native Linux/WHPX restart evidence, and the broader cutover
+> gates remain open; the current split above is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -281,9 +282,12 @@ response; resource mutations enter a durable `updating_resources` state before
 dispatch and publish the new restart intent only after runtime acknowledgement.
 The retained SDK client reports a broken local stream without replaying the
 unknown request, then reconnects to the persisted endpoint and renegotiates on
-the next explicit retry or reconciliation. Solid current behavior and the
-phased cutover gates are kept separate in [ROADMAP.md](ROADMAP.md); unfinished
-migration work is never presented as a platform capability.
+the next explicit retry or reconciliation. The process-boundary contract keeps
+that same backend alive while two child owners exchange disk-backed runtime
+state, proving exact Box reconciliation without duplicate launch. Solid current
+behavior and the phased cutover gates are kept separate in
+[ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
+platform capability.
 
 This repository is a local runtime, not a hosted Sandbox control plane. Teams
 that need remote orchestration should put an authenticated service in front of

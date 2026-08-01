@@ -94,8 +94,12 @@ deletion, and exact normal or signaled exit status. A separate local-transport
 contract now restarts the real Windows named-pipe or Unix-socket server behind
 one retained backend: the first reconciliation exposes the disconnect, while
 the next reconnects, renegotiates, and recovers the original operation and
-generation without a second create or start. This does not yet launch a fresh
-runtime-owner process or reopen real driver state; those gates remain below.
+generation without a second create or start. A second cross-platform contract
+launches two distinct owner fixture processes, reopens synchronized runtime
+state on the replacement, and proves the same retained manager still records
+only one create and start. OCI Runtime commit `6487cd2a` independently reopens
+its durable `HostRuntimeService` and operation journal across two processes.
+Real driver state and production owner wiring remain below.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
@@ -146,7 +150,7 @@ explicit production migration flag is complete.
 - [x] Persist only the runtime endpoint, exact container ID/generation,
   selected driver/isolation, and immutable configuration and attachment
   digests required for reconciliation.
-- [ ] Reopen the local runtime service and reconcile interrupted Box operations
+- [x] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
 - [ ] Exercise the path on native Linux and Windows/WHPX.
 
@@ -158,9 +162,12 @@ The local contract suite proves Box-adapter recreation plus interrupted
 attachment-manifest negotiation and durable digest drift checks. It also
 restarts the real platform IPC server behind a retained backend and proves
 next-call reconnect plus exact reconciliation without duplicate launch. The
-unchecked gates still require a fresh out-of-process runtime owner that reopens
-durable state and the same bundle on real native Linux and WHPX hosts; local
-transport evidence is not promoted as process or platform evidence.
+process contract then replaces the owner with a distinct child process that
+reopens disk-backed state, while OCI Runtime separately proves the real durable
+host service and journal reopen across processes. The remaining unchecked gate
+requires production owner wiring and the same bundle on real native Linux and
+WHPX hosts; deterministic process evidence is not promoted as platform-driver
+evidence.
 
 ### B2 - Interactive And Observable Execution
 
@@ -193,10 +200,10 @@ cleanup, and caller-cancellation cleanup. The same suite now validates exact
 process targets, normalized stats, strict ordered-event cursors, durable
 `updating_resources` claims, immutable create identity after mutable resource
 intent, local completion replay, lost-response recovery after backend
-recreation, and terminal-exit races. Native-driver and out-of-process restart
-evidence remains part of the exit gate. The retained-backend local IPC restart
-contract covers the shared transport prerequisite, but not a restarted owner
-process or live process-session driver state.
+recreation, and terminal-exit races. Native-driver process-session restart
+evidence remains part of the exit gate. The retained-backend core-lifecycle
+process restart contract covers the shared owner/transport prerequisite, but
+not live process-session recovery in a native or utility-VM driver.
 
 ### B3 - Storage And Networking Attachments
 
