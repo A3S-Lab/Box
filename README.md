@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/readme/hero.svg" width="100%" alt="A3S Box resolves OCI workloads to a dedicated-kernel MicroVM by default or an explicitly selected shared-kernel Sandbox">
+  <img src="assets/readme/hero.svg" width="100%" alt="A3S Box resolves a local OCI workload to its requested MicroVM or Sandbox isolation boundary">
 </p>
 
 <p align="center">
-  <strong>A Docker-like local OCI runtime with hardware-backed isolation as the default contract.</strong>
+  <strong>The local product plane for Linux OCI workloads: Docker-like workflows, typed SDKs, and isolation that never changes behind your back.</strong>
 </p>
 
 <p align="center">
@@ -16,50 +16,42 @@
 </p>
 
 <p align="center">
-  <a href="#run-your-first-box">Quick start</a> ·
-  <a href="#local-runtime-boundary">Local boundary</a> ·
-  <a href="#isolation-is-part-of-the-request">Isolation</a> ·
-  <a href="#native-sdks">SDKs</a> ·
-  <a href="#platform-boundaries">Platforms</a> ·
-  <a href="#architecture">Architecture</a> ·
+  <a href="#start-with-one-workload">Start</a> ·
+  <a href="#choose-the-boundary-intentionally">Isolation</a> ·
+  <a href="#what-box-owns">Capabilities</a> ·
+  <a href="#one-state-model-four-native-sdks">SDKs</a> ·
+  <a href="#platform-status">Platforms</a> ·
+  <a href="#architecture-current-and-target">Architecture</a> ·
   <a href="#development">Development</a>
 </p>
 
 ---
 
-**A3S Box** runs Linux OCI workloads through a Docker-like CLI and typed local
-SDKs. Every workload enters one of two explicit execution classes:
+**A3S Box** turns an image, a command, and product policy into a
+lifecycle-managed workload on the local machine. It owns the developer
+experience and product resources: images, builds, networks, volumes,
+snapshots, health, restart policy, logs, and cleanup.
 
-- a dedicated-kernel [libkrun](https://github.com/containers/libkrun) MicroVM
-  by default; or
-- a shared-kernel [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime)
-  Sandbox only when a caller requests `--isolation sandbox` and the Linux host
-  passes the full capability probe. A3S OCI Runtime is the sole Sandbox
-  implementation; Box no longer discovers, packages, or invokes an external
-  OCI runtime binary.
+The current 3.2 execution model has two explicit paths:
 
-Box never silently falls back to the lower-isolation backend. The requested
-isolation class, effective backend, policy, and controls are persisted with the
-workload so lifecycle recovery cannot reinterpret the request.
+- omitting `--isolation` selects a dedicated-kernel MicroVM managed by Box
+  through libkrun;
+- `--isolation sandbox` selects the shared-host-kernel path on a qualified
+  Linux host, with lifecycle execution delegated through the pinned
+  [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime) SDK.
 
-## Local runtime boundary
+There is no silent fallback between them. The request, resolved backend, and
+policy are persisted so restart recovery cannot reinterpret the workload.
 
-A3S Box is a local runtime, not a hosted Sandbox service. The repository ships
-the CLI, native local SDKs, CRI/containerd adapters, and the host/guest runtime
-components required to execute workloads on the machine where Box is
-installed. It does not ship a remote Sandbox API, gateway, account service,
-connection adapter, or dedicated service image.
+> [!NOTE]
+> The architecture is actively converging on one public
+> `a3s-oci-sdk` boundary for both isolation classes. The unified MicroVM
+> cutover is not complete; the current split above remains authoritative.
+> Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
-Every public lifecycle request terminates at the same local
-`ExecutionManager`. Images, networks, volumes, snapshots, logs, generation
-fencing, policy checks, and cleanup therefore have one owner and one durable
-state model. Applications that need remote orchestration should place their own
-authenticated service in front of the native SDK instead of treating Box as a
-network control plane.
+## Start with one workload
 
-## Run your first box
-
-Install the current stable runtime on Linux or macOS:
+Install the stable release on Linux or macOS:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -72,27 +64,21 @@ On Windows x86_64, use PowerShell:
 irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
 ```
 
-Open a new terminal if needed, then verify the host:
+Open a new terminal if needed, then inspect the exact host capability before
+launch:
 
 ```text
 a3s-box --version
 a3s-box info
 ```
 
-The installers detect the platform, verify the release SHA-256 before
-extraction, and refuse unsupported architectures or unsafe replacement
-targets. See [Installation](docs/installation.md) for pinned versions, custom
-destinations, offline packages, Homebrew, PATH behavior, and uninstall steps.
-
-Run one command inside a MicroVM. Omitting `--isolation` selects the default
-hardware-backed path:
+Run a disposable Alpine workload. The omitted isolation flag is intentional:
 
 ```bash
 a3s-box run --rm alpine:3.20 -- sh -lc 'echo "inside $(uname -s)"; uname -r'
 ```
 
-Keep a service running, inspect it, and clean it up with familiar lifecycle
-commands:
+Then exercise the familiar long-running lifecycle:
 
 ```bash
 a3s-box run -d --name web --memory 1g -p 8080:80 nginx:alpine
@@ -103,7 +89,29 @@ a3s-box stop web
 a3s-box rm web
 ```
 
-On a certified Linux host, explicitly request the shared-kernel preview:
+The installers verify release SHA-256 values before extraction and reject
+unsupported architectures or unsafe replacement targets. Pinned versions,
+offline packages, Homebrew, PATH behavior, and uninstall steps live in
+[Installation](docs/installation.md).
+
+## Choose the boundary intentionally
+
+| Contract | Default MicroVM | Explicit Sandbox |
+| --- | --- | --- |
+| Request | omit `--isolation` | `--isolation sandbox` |
+| Effective isolation | `hardware-vm` | `shared-kernel` |
+| Current execution owner | Box → libkrun | Box → `a3s-oci-sdk` → native Linux service |
+| Kernel boundary | Dedicated guest Linux kernel | Shared host Linux kernel |
+| Qualified hosts | Linux/KVM, Apple Silicon/HVF, Windows x86_64/WHPX within the platform gates below | Certified Linux x86_64/aarch64 host |
+| Best fit | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
+| VM-only features | TEE, warm pool, snapshot-fork where qualified | Rejected |
+| Fallback | Never | Never |
+
+An explicit `--isolation microvm` spelling is rejected. Omission is the only
+public way to select the default, which prevents scripts from treating backend
+names as interchangeable compatibility modes.
+
+On a certified Linux host, request the shared-kernel preview explicitly:
 
 ```bash
 a3s-box run --rm \
@@ -113,137 +121,51 @@ a3s-box run --rm \
   alpine:3.20 -- sh -lc 'id; cat /proc/self/status'
 ```
 
-An explicit `--isolation microvm` value is intentionally rejected: omission is
-the only public way to select the default. This prevents scripts from treating
-backend names as interchangeable compatibility modes.
-
-Windows users must still enable and validate WHPX by following the
-[WHPX setup guide](docs/windows-whpx.md). Source builds use `just release`; see
-the host requirements below before running real workloads.
-
-## Isolation is part of the request
-
-| Contract | Default MicroVM | Explicit Sandbox |
-| --- | --- | --- |
-| Runtime backend | libkrun | A3S OCI Runtime |
-| Kernel boundary | Dedicated guest Linux kernel | Shared host Linux kernel |
-| Isolation class | `hardware-vm` | `shared-kernel` |
-| Intended workload | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
-| Required host | Linux/KVM, Apple Silicon/HVF, or Windows/WHPX | Certified Linux host with namespaces, seccomp, subordinate IDs, and delegated cgroup v2 |
-| Bridge networking and published ports | Supported within platform limits | CLI static publication is rejected; declared Runtime Services receive generation-fenced node-local TCP endpoints |
-| TEE, warm pool, and snapshot-fork | Available on qualifying MicroVM hosts | Rejected |
-| Automatic fallback | Never | Never |
-
-These are the complete execution-isolation choices in the current public
-contract, and both have real-runtime coverage. Network policy values such as
-`none`, `strict`, and `custom` are not additional execution classes:
-`strict` and `custom` remain unsupported admission modes and are covered by
-negative tests. TEE is a host-specific capability of a qualifying MicroVM, not
-a third execution backend.
-
-Sandbox resource control also has one owner. `linux.resources` contains the
-exact workload CPU, memory, and PID contract; A3S OCI Runtime derives a bounded
-outer control-plane envelope, owns the fixed `a3s-control` and `a3s-workload`
-cgroups, and performs live updates and cleanup across both levels. Guest Init
-joins workload processes only through runtime-provided descriptors while the
-Sandbox cgroup filesystem remains read-only.
-
 > [!IMPORTANT]
-> A shared-kernel Sandbox does not defend against a working host-kernel exploit,
-> a hostile host administrator, hardware side channels, or data deliberately
-> exposed through a bind mount. Use the default MicroVM boundary when those
-> risks matter.
+> A shared-kernel Sandbox does not defend against a working host-kernel
+> exploit, a hostile host administrator, hardware side channels, or data
+> deliberately exposed through a bind mount. Use the default MicroVM boundary
+> when those risks matter.
 
-The complete admission and threat model is documented in
+The complete admission rules and threat model are in
 [Host Sandbox Backend Design](docs/host-sandbox-backend-design.md).
 
-## What Box manages
+## What Box owns
 
-Box is Docker-like, not Docker-identical. Unsupported options fail before
-runtime state changes instead of being silently stored or weakened.
+Box is Docker-like, not Docker-identical. Unsupported controls fail before
+runtime mutation instead of being stored and silently weakened.
 
-- **Lifecycle and execution** — run, create, start, stop, restart, pause, wait,
-  remove, inspect, exec, PTY, attach, structured logs, health checks, and
-  restart policies.
-- **OCI images and builds** — bounded resumable pulls, concurrent verified
-  layers, registry credentials, optional cosign verification, save/load,
-  multi-stage builds, selected `RUN --mount` forms, and content-addressed
-  caching. Closed A3S ACL build plans add canonical identities, source-root
-  path confinement, an enforced network-none Linux `RUN` policy, and
-  plan-bound typed OCI descriptors with durable image-layout paths over the
-  same native build engine. The sole recorded-plan boundary persists immutable
-  operation, source, and plan identity in one ImageStore-derived journal and
-  exposes typed start, nonblocking inspect, cancel, exact replay, and terminal
-  cleanup. Content-addressed plans also export one portable Box-native OCI
-  cache artifact from the existing `BuildCache`; the cache key binds source,
-  plan, platform, and cache-schema semantics. The operation record persists
-  the admitted cache policy, and replay validates the exact cache manifest,
-  config, layers, blob inventory, and byte count.
-  `hydrate_recorded_build_cache` revalidates that same typed artifact and
-  imports it through the existing cache lock and blob/key publication
-  boundary. Hydration is idempotent, rejects a valid local key conflict before
-  publishing imported keys, copies rather than links layer data, and preserves
-  the imported layer set while enforcing the configured cache cap. A
-  crash-released execution lease distinguishes live work from a dead caller
-  without becoming another state store. Every supervised build uses a
-  hash-derived operation workspace below that journal; cancellation, failure,
-  and caller-death recovery fence the current Linux `RUN` process tree before
-  reclaiming it. The existing journal lock orders cache publication,
-  cancellation, and ImageStore publication, so restarted callers can adopt
-  both artifacts committed before the terminal receipt. The journal, native
-  engine, `BuildCache`, and ImageStore remain the only lifecycle, execution,
-  cache, and image authorities. Recorded single-platform receipts can be
-  combined with `assemble_recorded_build_outputs` into one deterministic OCI
-  image index only when their source and non-platform plan intent match.
-  Assembly sorts unique platforms, deduplicates shared blobs, and reuses the
-  same output validator and sole ImageStore commit boundary; it owns no
-  scheduler, queue, journal, manifest store, or publisher. The CLI exposes only
-  this native engine: Linux `RUN` uses the isolated local path and macOS uses
-  the same engine through `--run-pool`; publication remains the separate
-  `a3s-box push` image operation.
-- **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
-  commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
-  aliases for caller-provided Artifact trees below private provider roots.
-- **Networking and Compose** — TSI, named bridge networks, peer discovery, TCP
-  publishing, generation-fenced Sandbox loopback forwarding, and an explicit
-  Compose subset. ACL is the canonical project format; YAML is a bounded
-  compatibility input.
-- **Startup acceleration** — rootfs and layer caches, pre-booted warm pools,
-  build leases, one-shot pool routing, and opt-in Linux/KVM snapshot-fork.
-- **Security and operations** — resource and syscall controls, audit evidence,
-  stats, events, Prometheus metrics, health monitoring, SEV-SNP-oriented TEE
-  workflows, sealing, TEE secret injection, and caller-authorized transient
-  Runtime Secret materialization.
+| Product area | Current surface |
+| --- | --- |
+| Workloads | create, start, stop, restart, kill, pause, wait, inspect, exec, attach, PTY, health, and restart policy |
+| Images and builds | pull, push, tag, save/load, verified layers, selected Dockerfile/Containerfile builds, content-addressed cache, and signed-image policy |
+| Storage | bind mounts, named volumes, tmpfs, copy, diff, export, commit, filesystem snapshots, and copy-on-write restore |
+| Networking and Compose | TSI, named bridges, peer discovery, TCP publication, generation-fenced Sandbox forwarding, and a bounded ACL/YAML Compose subset |
+| Operations | structured logs, stats, events, audit evidence, metrics, monitoring, resource updates, and cleanup |
+| Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
-A few common workflows:
+A few end-to-end workflows:
 
 ```bash
-# Images and builds
+# Build and run
 a3s-box pull alpine:3.20
 a3s-box build -t local/app:dev .
+a3s-box run -d --name app local/app:dev
 
-# Durable storage and a stopped-filesystem snapshot
+# Durable data and a stopped-filesystem snapshot
 a3s-box volume create data
-a3s-box run -d --name app -v data:/data alpine:3.20 -- sleep 3600
-a3s-box stop app
-a3s-box snapshot create app --name checkpoint-1
+a3s-box run -d --name data-app -v data:/data alpine:3.20 -- sleep 3600
+a3s-box stop data-app
+a3s-box snapshot create data-app --name checkpoint-1
 
-# Named networking
+# Named networking and deterministic Compose normalization
 a3s-box network create backend --subnet 10.89.0.0/24
-a3s-box run -d --name api --network backend -p 8080:80 local/app:dev
-
-# Explicit host-loopback access to a Sandbox workload
-a3s-box run -d --name sandbox-api --isolation sandbox local/app:dev
-a3s-box port-forward sandbox-api --host-port 18080 --guest-port 8080
-
-# Deterministic Compose normalization and lifecycle
 a3s-box compose -f compose.acl config
 a3s-box compose -f compose.acl up -d
-a3s-box compose -f compose.acl down
 ```
 
 <details>
-<summary><strong>CLI command groups</strong></summary>
+<summary><strong>CLI command map</strong></summary>
 
 | Area | Commands |
 | --- | --- |
@@ -258,171 +180,113 @@ a3s-box compose -f compose.acl down
 
 </details>
 
-`a3s-box system-prune --all` also removes rootfs cache entries that no active
-Box references and interrupted image-pull work directories whose owner process
-has exited. It preserves active rootfs markers, live pulls, concurrent
-publication staging paths, and cache lock files.
+## One state model, four native SDKs
 
-## Native SDKs
+Rust, Python, TypeScript, and Go operate the same local resources and durable
+state as the CLI. They do not expose a remote endpoint, domain, or API-key
+setting.
 
-Rust, Python, TypeScript, and Go operate the same local images, Sandboxes, volumes,
-networks, snapshots, logs, and runtime state as the CLI. These packages expose
-no remote connection configuration: they require the installed runtime and do
-not read an endpoint, domain, or API key.
-
-| Language | Package and install command | Runtime access | Guide |
+| Language | Install | Runtime access | Guide |
 | --- | --- | --- | --- |
-| Rust | [`a3s-box-sdk`](https://crates.io/crates/a3s-box-sdk)<br>`cargo add a3s-box-sdk` | Direct typed calls into the runtime and generation-fenced execution manager | [Rust SDK](src/sdk/README.md) |
-| Python | [`a3s-box`](https://pypi.org/project/a3s-box/)<br>`python -m pip install a3s-box` | Sync and async APIs over the installed versioned machine bridge | [Python SDK](sdk/python/README.md) |
-| TypeScript | [`@a3s-lab/box`](https://www.npmjs.com/package/@a3s-lab/box)<br>`npm install @a3s-lab/box` | Promise APIs over the installed versioned machine bridge; Node.js 20+ | [TypeScript SDK](sdk/typescript/README.md) |
-| Go | [`github.com/A3S-Lab/Box/sdk/go/v3`](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3)<br>`go get github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware, concurrency-safe APIs over the installed versioned machine bridge; Go 1.25+ | [Go SDK](sdk/go/README.md) |
+| Rust | `cargo add a3s-box-sdk` | Direct typed calls into the runtime and generation-fenced execution manager | [Rust SDK](src/sdk/README.md) |
+| Python | `python -m pip install a3s-box` | Sync and async APIs over the installed machine bridge | [Python SDK](sdk/python/README.md) |
+| TypeScript | `npm install @a3s-lab/box` | Promise APIs over the installed machine bridge; Node.js 20+ | [TypeScript SDK](sdk/typescript/README.md) |
+| Go | `go get github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware APIs over the installed machine bridge; Go 1.25+ | [Go SDK](sdk/go/README.md) |
 
-Each package guide contains a complete, single-language quick start and
-programmable CI/CD example. The repository overview keeps the shared contract
-here instead of interleaving language-specific code.
+Python, TypeScript, and Go exchange structured protocol-v3 messages with
+`a3s-box sdk-bridge`; they never parse human CLI output. The exact
+48-operation handshake fails closed on missing, duplicate, malformed, or
+incompatible capabilities. See the
+[cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md).
 
-Python, TypeScript, and Go never parse human CLI output; they exchange one
-checked, structured request and response with `a3s-box sdk-bridge`. Protocol v3
-validates the exact 48-operation inventory before normal calls and fails closed
-on missing, duplicate, or malformed capabilities and typed results. Sandbox
-handles retain the effective `microvm` or `sandbox` isolation reported by the
-runtime, and stale generations return the stable `conflict` code. Use runtime
-and SDK packages from the same release because incompatible protocol versions
-are rejected before mutation.
+## Platform status
 
-Read the
-[cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md) for the
-shared API and compatibility rules.
-
-## Platform boundaries
-
-| Path | Status | Host and current boundary |
+| Path | Current evidence | Boundary that remains visible |
 | --- | --- | --- |
-| Linux MicroVM | Primary local runtime; conditional real-host gate | KVM and libkrun; the self-hosted KVM job must be armed explicitly and hosted CI does not prove a real boot |
-| macOS MicroVM | Implemented and build-checked | Apple Silicon and Hypervisor.framework; real HVF host validation is still required, and Intel macOS is unsupported |
-| Windows MicroVM | Implemented and real-host soak validated | x86_64 WHPX; currently one vCPU, with no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Preview and real-runtime CI validated | Explicit `--isolation sandbox` through the packaged A3S OCI Runtime; shares the host kernel and rejects VM-only features |
-| Kubernetes | Preview | CRI v1 server plus containerd runtime-v2 shim and opt-in `runtimeClassName: a3s-box`; complete CRI conformance is not claimed |
-| TEE | Host-specific | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and development-only simulation; TDX is not productized |
+| Linux MicroVM | Primary local path through KVM/libkrun; self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gate when `KVM_CI=true` | Hosted CI cannot prove a real KVM boot when the enrolled runner is absent |
+| macOS MicroVM | Apple Silicon/HVF build and packaging path | Real Apple Silicon/HVF release validation remains a separate host gate; Intel macOS is unsupported |
+| Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
+| Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go local SDK exercises | Shared-kernel preview; VM-only controls are rejected |
+| Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
+| TEE | SEV-SNP-oriented application and protocol flows | Simulation is not hardware security evidence |
 
-### What the validation covers
-
-| Execution path | Real-runtime evidence | Remaining boundary |
-| --- | --- | --- |
-| Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, post-boot non-interactive exec, bidirectional single-file copy, `top`, guest PID-aware stats, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
-| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs profile, including private read-only Artifact attachment without weakening its provider root, bounded digest-bound Task outputs, transient Secret nondisclosure, restart recovery, log reauthorization and redaction, and cleanup; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
-| Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
-| macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
-| SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
-
-An implemented API is not a production guarantee for every host or threat
-model. Unit tests, fixture servers, and simulated TEE results are not real-host
-evidence. Review [Host Integration](docs/host-integration.md),
+Real-host evidence is deliberately separate from unit, build-only, fixture, or
+simulation results. Review [Host Integration](docs/host-integration.md),
 [Cross-Capability Soak Tests](docs/soak-test-plan.md), and
 [CRI Conformance](docs/cri-conformance.md) before promoting a deployment.
 
-## Integrations
+Windows hosts must also follow the [WHPX setup guide](docs/windows-whpx.md).
 
-- **A3S Runtime provider** — Maps digest-pinned Tasks and Services onto the
-  A3S OCI shared-kernel Sandbox with generation fencing, recovery, structured
-  logs, bounded idempotent exec, resource controls, tmpfs, exact node-local TCP
-  endpoints, and HTTP, TCP, or command health probes for Services. Endpoint
-  listeners and probes are bound to the Box execution generation and reuse the
-  canonical Sandbox port connector or exec session boundary. Runtime health is
-  sampled directly into the current observation and is never copied into the
-  CLI monitor policy, so Box creates no second lifecycle store, durable endpoint
-  registry, health registry, or health worker for the same Service. The artifact
-  contract accepts OCI image manifests and multi-platform OCI image indexes; it
-  does not advertise a Docker manifest media type. Caller-owned read-only
-  Artifact directories are descriptor-pinned behind one Box-owned mount alias,
-  so a private provider parent stays private and no Artifact is copied, chowned,
-  or chmodded. The alias is removed on failed boot, stop, removal, and crash
-  recovery. A caller can compose this same driver with one
-  `BoxSecretMaterializer`; Box then advertises
-  `SecretReferences`, resolves shared Runtime references through that caller,
-  and mounts environment or file material read-only from a pre-mounted private
-  Linux tmpfs. Secret bytes never enter durable Box state, creation intent, or
-  OCI configuration. Recovery validates the existing generation without
-  rematerializing it, stop retains restartable material, and remove or stale
-  generation retirement cleans it. Log reads reauthorize every reference and
-  redact exact workload material before cursor construction. A registry target
-  is resolved only for an uncached pull, handed to the image boundary in memory,
-  and zeroized after use; cached images do not request it. The Runtime driver
-  passes explicit anonymous auth when no registry target is present, so it never
-  falls back to a Box-local or process-environment credential source.
-- **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
-  Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
-  live under [`deploy/`](deploy/).
-- **Confidential workloads** — Qualifying MicroVM hosts can use attestation,
-  RA-TLS, sealed data, and secret injection. Simulation tests application flow
-  only and provides no hardware security.
-- **Coding agents** — The first-party
-  [A3S Box Skill](integrations/skills/a3s-box/SKILL.md) teaches supported agents
-  CLI lifecycle, snapshots, warm pools, networking boundaries, and recovery.
-  Its installer supports project or user scope across A3S Code, Codex, Claude
-  Code, and the shared `.agents/skills` convention, including remote streamed
-  installation with a durable local copy.
+## Architecture: current and target
 
-## Architecture
-
-Every shipped entry point submits the same backend-neutral local execution
-request:
+Every shipped entry point reaches one backend-neutral local
+`ExecutionManager`:
 
 ```text
-CLI · Rust SDK · Python · TypeScript · Go · CRI · containerd shim
-                              │
-                      ExecutionManager
-           durable state · generation fencing
-                              │
-              capability probe + policy resolver
-                    ┌─────────┴─────────┐
-                    │                   │
-           default MicroVM     explicit Sandbox
-              libkrun              a3s-oci
-           guest kernel          host kernel
-                    └─────────┬─────────┘
-                              │
-         images · storage · networks · snapshots
-              logs · audit · metrics · TEE
+CLI · Rust · Python · TypeScript · Go · Compose · CRI · containerd shim
+                                  │
+                         ExecutionManager
+                  desired state · generations · policy
+                    ┌─────────────┴─────────────┐
+                    │                           │
+         images · builds · storage      isolation resolver
+        networks · logs · health        ┌───────┴────────┐
+                                       │                │
+                           current MicroVM      current Sandbox
+                           Box + libkrun        a3s-oci-sdk
+                           dedicated kernel    shared host kernel
 ```
 
-The runtime persists caller policy before allocation. Python, TypeScript, and Go
-reach the same `ExecutionManager` through the machine bridge instead of
-constructing CLI commands; CRI and RuntimeClass adapters also reuse the same
-resolver. Lifecycle ownership, unsupported-feature rejection, audit evidence,
-and cleanup therefore stay inside one runtime boundary. No separate HTTP
-control plane or remote lifecycle service sits beside this path.
+The target dependency direction removes the direct execution split:
 
-This diagram describes the current migration baseline. The target architecture
-routes both `microvm` and `sandbox` isolation through the public A3S OCI Runtime
-SDK, leaving Box as the product, image, storage, network, and policy owner. The
-phased cutover and removal gates are defined in [ROADMAP.md](ROADMAP.md).
+```text
+A3S Box product plane
+        │  prepared OCI bundle + desired isolation
+        ▼
+a3s-oci-sdk over bounded local IPC
+        ▼
+A3S OCI Runtime host service
+        ├── native Linux driver
+        └── KVM / HVF / WHPX utility-VM drivers
+```
 
-Repository components are grouped by responsibility:
+Box remains the product, image, storage, network, health, and policy owner.
+OCI Runtime becomes authoritative for actual process/VM state, operation
+replay, exact terminal status, driver selection, and runtime cleanup. Solid
+current behavior and the phased cutover gates are kept separate in
+[ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
+platform capability.
 
-- `src/core` — execution policy, protocol types, state, events, logs, and
-  errors;
-- `src/runtime` — canonical manager, backends, images, builds, storage,
-  networking, pools, snapshots, and TEE;
-- `src/cli`, `src/sdk`, `src/cri`, `containerd-shim` — public entry points and
-  cluster adapters;
-- `src/shim`, `src/guest/init`, `src/netproxy` — host/guest control and
-  platform integration;
-- `sdk/python`, `sdk/typescript`, `sdk/go` — native local language packages over the
-  checked machine bridge.
+This repository is a local runtime, not a hosted Sandbox control plane. Teams
+that need remote orchestration should put an authenticated service in front of
+the native SDK rather than treating Box as a network API.
+
+## Repository map
+
+```text
+src/core/          policy, protocol types, lifecycle state, logs, and errors
+src/runtime/       execution manager, backends, images, storage, networks, pools
+src/cli/           a3s-box command-line interface
+src/sdk/           native Rust SDK and machine bridge
+src/cri/           CRI v1 adapter
+src/shim/          current host/guest MicroVM control
+src/guest/init/    current guest init and execution service
+sdk/               Python, TypeScript, and Go packages
+containerd-shim/   RuntimeClass integration
+```
 
 ## Documentation
 
 - [Product and OCI Runtime migration roadmap](ROADMAP.md)
+- [Installation and packaging](docs/installation.md)
 - [Host integration and real-runtime validation](docs/host-integration.md)
-- [Cross-capability soak test plan](docs/soak-test-plan.md)
+- [Cross-capability soak plan](docs/soak-test-plan.md)
 - [Shared-kernel Sandbox threat model](docs/host-sandbox-backend-design.md)
 - [Windows WHPX support](docs/windows-whpx.md)
 - [SDK API and programmable CI/CD](docs/sdk-api-and-programmable-cicd.md)
 - [Compose normalization](docs/compose-normalization.md)
-- [Copy-on-write snapshot-fork design](docs/cow-snapshot-fork-design.md)
+- [Copy-on-write snapshot-fork](docs/cow-snapshot-fork-design.md)
 - [Kubernetes CRI conformance](docs/cri-conformance.md)
-- [Monitor service](docs/monitor-service.md)
 - [Changelog](CHANGELOG.md)
 
 ## Development
@@ -438,7 +302,7 @@ cargo test -p a3s-box-cli --test command_coverage
 cargo test -p a3s-box-sdk
 ```
 
-Language packages have their own test suites:
+Language packages keep independent test suites:
 
 ```bash
 cd sdk/python
@@ -451,7 +315,6 @@ npm run build
 npm test
 
 cd ../go
-gofmt -w .
 go vet ./...
 go test -race ./...
 ```
@@ -459,12 +322,12 @@ go test -race ./...
 Host-backed MicroVM, Sandbox, networking, build, CRI, and endurance tests need
 an explicitly prepared machine and isolated runtime state. Use
 [`scripts/host-integration-smoke.sh`](scripts/host-integration-smoke.sh) and
-[`scripts/local-sdk-smoke.sh`](scripts/local-sdk-smoke.sh), and record the host,
-backend, image digest, runtime version, and evidence bundle for every release
-gate.
+[`scripts/local-sdk-smoke.sh`](scripts/local-sdk-smoke.sh), and retain the
+host, backend, image digest, runtime revision, and evidence bundle for release
+gates.
 
 ## License
 
-The A3S Box runtime is available under the [MIT License](LICENSE). Individual
-SDK packages, vendored sources, generated fixtures, and release artifacts
-retain the license metadata shipped with their directories or archives.
+A3S Box is available under the [MIT License](LICENSE). Vendored sources,
+generated fixtures, SDK packages, and release archives retain the license
+metadata shipped with their directories or artifacts.

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
   <title id="title">A3S Box — OCI workloads isolated by intent</title>
-  <desc id="desc">A technical system map showing OCI requests resolved to a dedicated-kernel MicroVM by default or an explicitly selected shared-kernel Sandbox.</desc>
+  <desc id="desc">The current A3S Box product plane resolves each local OCI request to a dedicated-kernel MicroVM by default or an explicitly selected shared-kernel Sandbox.</desc>
   <defs>
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#20262b" stroke-width="1"/>
@@ -17,7 +17,7 @@
       <rect x="8" y="8" width="22" height="22" fill="none" stroke="#f4f1ea" stroke-width="2"/>
       <rect x="15" y="15" width="8" height="8" fill="#62d78b"/>
     </g>
-    <text x="116" y="78" fill="#aab2b9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700" letter-spacing="2.6">OCI WORKLOAD RUNTIME / v3.1</text>
+    <text x="116" y="78" fill="#aab2b9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700" letter-spacing="2.6">LOCAL PRODUCT PLANE / v3.2</text>
 
     <text x="62" y="158" fill="#f4f1ea" font-size="70" font-weight="760" letter-spacing="-2.5">A3S BOX</text>
     <text x="62" y="233" fill="#f4f1ea" font-size="54" font-weight="720" letter-spacing="-1.8">OCI workloads,</text>
@@ -29,17 +29,17 @@
     <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700" letter-spacing="0.8">
       <g transform="translate(62 399)">
         <rect width="142" height="34" rx="6" fill="#12171b" stroke="#394148"/>
-        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <circle cx="18" cy="17" r="4" fill="#8f9aa3"/>
         <text x="31" y="23" fill="#d8dde1">LINUX / KVM</text>
       </g>
       <g transform="translate(216 399)">
         <rect width="142" height="34" rx="6" fill="#12171b" stroke="#394148"/>
-        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <circle cx="18" cy="17" r="4" fill="#8f9aa3"/>
         <text x="31" y="23" fill="#d8dde1">macOS / HVF</text>
       </g>
       <g transform="translate(370 399)">
         <rect width="180" height="34" rx="6" fill="#12171b" stroke="#394148"/>
-        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <circle cx="18" cy="17" r="4" fill="#8f9aa3"/>
         <text x="31" y="23" fill="#d8dde1">WINDOWS / WHPX</text>
       </g>
     </g>
