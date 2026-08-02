@@ -347,7 +347,7 @@ impl VmManager {
             combined_runtime_digest(&runtime.runtime_sha256, &runtime.agent_sha256);
         let original_anonymous_volumes = self.anonymous_volumes.clone();
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-        let bundle_dir = box_dir.join("sandbox").join("oci-sdk-bundle");
+        let bundle_dir = box_dir.join("sandbox").join("bundle");
 
         let layout = match self.prepare_layout().await {
             Ok(layout) => layout,
@@ -468,10 +468,7 @@ impl VmManager {
         crate::sandbox::cleanup_sandbox_mount_aliases(&self.home_dir, &self.box_id)?;
         self.rootfs_provider
             .cleanup(&box_dir, self.config.persistent)?;
-        for path in [
-            box_dir.join("sandbox").join("oci-sdk-bundle"),
-            self.socket_dir(),
-        ] {
+        for path in [box_dir.join("sandbox").join("bundle"), self.socket_dir()] {
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
