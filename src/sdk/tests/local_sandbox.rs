@@ -4,9 +4,9 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use a3s_box_sdk::{
-    A3sBoxClient, ClientError, ExecutionIsolation, ExecutionSnapshotId, ListBoxesOptions,
-    OperationId, Sandbox, SandboxCreateOptions, SandboxLogOptions, SandboxNetwork,
-    SandboxRestartOptions, TagImage,
+    A3sBoxClient, A3sBoxPaths, ClientError, ExecutionIsolation, ExecutionSnapshotId,
+    ListBoxesOptions, OperationId, Sandbox, SandboxCreateOptions, SandboxLogOptions,
+    SandboxNetwork, SandboxRestartOptions, TagImage,
 };
 
 type AnyError = Box<dyn Error + Send + Sync>;
@@ -22,7 +22,10 @@ async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
     let isolation = requested_isolation()?;
     let base_image =
         std::env::var("A3S_BOX_SDK_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
-    let client = A3sBoxClient::from_home(&home);
+    // This async constructor is deliberately exercised even without migration:
+    // it must preserve the legacy backend when the opt-in is absent and select
+    // the production OCI composition when CI supplies it.
+    let client = A3sBoxClient::with_configured_paths(A3sBoxPaths::from_home(&home)).await?;
     let diagnostics = client.runtime_diagnostics();
     require(
         diagnostics.home == home,

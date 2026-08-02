@@ -8,7 +8,7 @@ use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionManager,
     ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, OperationId,
 };
-use a3s_box_runtime::{LocalExecutionManager, VmLocalExecutionBackend};
+use a3s_box_runtime::LocalExecutionManager;
 use clap::{Args, ValueEnum};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -418,8 +418,7 @@ use setup::{
 async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::terminal;
     use a3s_box_core::pty::PtyRequest;
-
-    let pty_socket_path = ctx.pty_socket_path.clone();
+    use a3s_box_core::ExecutionSessionManager;
 
     let entrypoint_override = args
         .common
@@ -442,23 +441,30 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    let mut client =
-        super::exec::connect_pty_with_retry(&pty_socket_path, std::time::Duration::from_secs(10))
+    let request = PtyRequest {
+        cmd: pty_cmd,
+        env,
+        working_dir: args.common.workdir.clone(),
+        rootfs: None,
+        user,
+        cols,
+        rows,
+    };
+    let exit_code = if run_context_uses_oci(&ctx) {
+        let process = ctx
+            .manager
+            .start_pty(&ctx.execution_id, ctx.generation, request)
             .await?;
-    client
-        .send_request(&PtyRequest {
-            cmd: pty_cmd,
-            env,
-            working_dir: args.common.workdir.clone(),
-            rootfs: None,
-            user,
-            cols,
-            rows,
-        })
+        let _raw_mode = terminal::raw_mode()?;
+        super::exec::run_managed_pty_session(process).await
+    } else {
+        let mut client = super::exec::connect_pty_with_retry(
+            &ctx.pty_socket_path,
+            std::time::Duration::from_secs(10),
+        )
         .await?;
-
-    let (read_half, write_half) = client.into_split();
-    let exit_code = {
+        client.send_request(&request).await?;
+        let (read_half, write_half) = client.into_split();
         let _raw_mode = terminal::raw_mode()?;
         super::exec::run_pty_session(read_half, write_half).await
     };
@@ -508,6 +514,7 @@ const FOREGROUND_SIGTERM: i32 = 15;
 
 const FOREGROUND_LOG_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const FOREGROUND_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const FOREGROUND_OCI_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 const FOREGROUND_HEALTH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 const FOREGROUND_LOG_DRAIN_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
 const FOREGROUND_LOG_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -611,7 +618,14 @@ async fn run_foreground(
     // VM health check is comparatively expensive and only needs the existing
     // 500 ms cadence. Keeping independent timers avoids adding a fixed half
     // second to every no-op without polling health more aggressively.
-    let mut exit_poll = tokio::time::interval(FOREGROUND_EXIT_POLL);
+    let exit_poll_period = if run_context_uses_oci(&ctx) {
+        // OCI inspection crosses the SDK/service boundary; a 100 ms cadence
+        // remains responsive without issuing 50 control requests per second.
+        FOREGROUND_OCI_EXIT_POLL
+    } else {
+        FOREGROUND_EXIT_POLL
+    };
+    let mut exit_poll = tokio::time::interval(exit_poll_period);
     exit_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut health_poll = tokio::time::interval_at(
         tokio::time::Instant::now() + FOREGROUND_HEALTH_POLL,
@@ -633,7 +647,7 @@ async fn run_foreground(
                 break ForegroundStopReason::TimedOut;
             }
             _ = exit_poll.tick() => {
-                if !managed_process_alive(&ctx) {
+                if !managed_process_alive(&mut ctx).await {
                     break ForegroundStopReason::ProcessExited;
                 }
             }
@@ -728,7 +742,7 @@ async fn run_foreground(
 async fn wait_for_sandbox_structured_log_drain(
     ctx: &RunContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !ctx.record.isolation.is_sandbox() {
+    if !ctx.record.isolation.is_sandbox() || run_context_uses_oci(ctx) {
         return Ok(());
     }
     let box_dir = ctx.box_dir.clone();
@@ -827,15 +841,42 @@ fn foreground_workload_exit_code(
     a3s_box_runtime::rootfs::read_persisted_exit_code(box_dir).or(recorded_exit_code)
 }
 
-fn managed_process_alive(ctx: &RunContext) -> bool {
-    ctx.record.pid.is_some_and(|pid| {
-        a3s_box_runtime::is_process_alive_with_identity(pid, ctx.record.pid_start_time)
-    })
+async fn managed_process_alive(ctx: &mut RunContext) -> bool {
+    if run_context_uses_oci(ctx) {
+        match ctx.manager.inspect(&ctx.execution_id).await {
+            Ok(status)
+                if matches!(
+                    status.state,
+                    ExecutionState::Running | ExecutionState::Paused
+                ) =>
+            {
+                true
+            }
+            Ok(_) => {
+                if let Ok(state) = StateFile::load_readonly() {
+                    if let Some(record) = state.find_by_id(&ctx.box_id) {
+                        ctx.record = record.clone();
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    } else {
+        ctx.record.pid.is_some_and(|pid| {
+            a3s_box_runtime::is_process_alive_with_identity(pid, ctx.record.pid_start_time)
+        })
+    }
 }
 
 #[cfg(unix)]
 async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
-    if !managed_process_alive(ctx) {
+    if run_context_uses_oci(ctx) {
+        return true;
+    }
+    if !ctx.record.pid.is_some_and(|pid| {
+        a3s_box_runtime::is_process_alive_with_identity(pid, ctx.record.pid_start_time)
+    }) {
         return false;
     }
     let probe = async {
@@ -853,7 +894,23 @@ async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
 
 #[cfg(not(unix))]
 async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
-    managed_process_alive(ctx)
+    if run_context_uses_oci(ctx) {
+        true
+    } else {
+        ctx.record.pid.is_some_and(|pid| {
+            a3s_box_runtime::is_process_alive_with_identity(pid, ctx.record.pid_start_time)
+        })
+    }
+}
+
+fn run_context_uses_oci(ctx: &RunContext) -> bool {
+    ctx.record
+        .managed_execution
+        .as_ref()
+        .is_some_and(|metadata| {
+            metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
+                || metadata.oci_runtime.is_some()
+        })
 }
 
 fn foreground_completion_message(

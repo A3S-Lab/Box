@@ -3,7 +3,7 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, OperationId, RestartExecutionOptions,
 };
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionOperation, ManagedExecutionState};
+use a3s_box_runtime::{ManagedExecutionOperation, ManagedExecutionState};
 use clap::Args;
 
 use crate::boot;
@@ -93,7 +93,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             // runtime crate, covering CLI, SDK, and reconcile entry points.
             drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
-            let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+            let manager = super::configured_local_execution_manager(&home).await?;
             let start_result = match managed_plan {
                 StartPlan::Managed {
                     execution_id,

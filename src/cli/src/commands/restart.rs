@@ -6,7 +6,7 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, OperationId, RestartExecutionOptions,
 };
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionOperation, ManagedExecutionState};
+use a3s_box_runtime::{ManagedExecutionOperation, ManagedExecutionState};
 use clap::Args;
 
 use crate::boot;
@@ -86,7 +86,7 @@ async fn restart_one(
             None => OperationId::new(format!("cli-restart-{}", uuid::Uuid::new_v4()))?,
         };
         let home = a3s_box_core::dirs_home();
-        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        let manager = super::configured_local_execution_manager(&home).await?;
         manager
             .restart_with_options(
                 &execution_id,

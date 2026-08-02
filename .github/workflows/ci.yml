@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 24169ce7b0865e2a5de684882cffeb4811b1a3b9
+  A3S_OCI_RUNTIME_REV: aac259224e89bef2b546fd0f8755ef1ba79570ce
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -394,6 +394,7 @@ jobs:
       A3S_HOME: /tmp/a3s-local-sdk-smoke-runtime-conformance
       A3S_BOX_OCI_RUNTIME_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci
       A3S_BOX_OCI_AGENT_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci-agent
+      A3S_BOX_OCI_HOST_ROOT: /tmp/a3s-box-production-oci-host
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
@@ -495,6 +496,27 @@ jobs:
               cargo test --locked -p a3s-box-runtime --lib \
                 box_runtime_passes_all_advertised_profiles \
                 -- --ignored --nocapture --test-threads=1
+      - name: Exercise production Box-to-OCI owner composition
+        run: |
+          cd src
+          sudo env \
+              PATH="$PATH" \
+              HOME="$HOME" \
+              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+              A3S_DEPS_STUB=1 \
+              A3S_HOME="$A3S_HOME" \
+              A3S_BOX_OCI_MIGRATION=sandbox \
+              A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
+              A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
+              A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
+              A3S_BOX_SDK_LOCAL_SMOKE=1 \
+              A3S_BOX_SDK_SMOKE_ISOLATION=sandbox \
+              A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
+              RUST_MIN_STACK=16777216 \
+              cargo test --locked -p a3s-box-sdk --test local_sandbox \
+                local_sandbox_exercises_real_runtime \
+                -- --ignored --nocapture --test-threads=1
       - name: Test Rust, Python, TypeScript, and Go SDKs without credentials
         run: |
           sudo env \
@@ -517,13 +539,49 @@ jobs:
         if: always()
         run: |
           cleanup_status=0
-          if pgrep -f 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' >/dev/null; then
-            ps aux | grep -E 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' | grep -v grep
+          sudo python3 - "$A3S_BOX_OCI_HOST_ROOT/box-owner.json" <<'PY' || cleanup_status=1
+          import json
+          import os
+          import pathlib
+          import signal
+          import sys
+          import time
+
+          record_path = pathlib.Path(sys.argv[1])
+          if not record_path.exists():
+              raise SystemExit(0)
+          record = json.loads(record_path.read_text(encoding="utf-8"))
+          pid = int(record["pid"])
+          expected_start = int(record["pid_start_time"])
+          stat_path = pathlib.Path(f"/proc/{pid}/stat")
+          if not stat_path.exists():
+              raise SystemExit(0)
+          raw = stat_path.read_text(encoding="utf-8")
+          actual_start = int(raw[raw.rfind(")") + 2:].split()[19])
+          if actual_start != expected_start:
+              raise RuntimeError("refusing to signal a reused OCI owner PID")
+          os.kill(pid, signal.SIGTERM)
+          for _ in range(200):
+              if not stat_path.exists():
+                  break
+              time.sleep(0.05)
+          else:
+              os.kill(pid, signal.SIGKILL)
+              for _ in range(100):
+                  if not stat_path.exists():
+                      break
+                  time.sleep(0.05)
+              else:
+                  raise RuntimeError("OCI owner remained after SIGKILL")
+          PY
+          if pgrep -f 'a3s-box-shim|a3s-oci.*native-linux-.*service|a3s-oci-agent' >/dev/null; then
+            ps aux | grep -E 'a3s-box-shim|a3s-oci.*native-linux-.*service|a3s-oci-agent' | grep -v grep
             cleanup_status=1
           fi
           if mountpoint -q "$A3S_HOME/runtime-secrets"; then
             sudo umount "$A3S_HOME/runtime-secrets" || cleanup_status=1
           fi
+          sudo rm -rf "$A3S_BOX_OCI_HOST_ROOT"
           sudo rm -rf "$A3S_HOME"
           exit "$cleanup_status"
 

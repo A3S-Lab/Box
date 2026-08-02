@@ -53,6 +53,24 @@ fn secure_guest_control_file(path: &Path) -> Result<()> {
 impl VmManager {
     /// Build InstanceSpec from config and layout.
     pub(crate) fn build_instance_spec(&mut self, layout: &BoxLayout) -> Result<InstanceSpec> {
+        self.build_instance_spec_with_bootstrap(layout, true)
+    }
+
+    /// Build the image process and filesystem view for an OCI runtime that owns
+    /// PID 1 and all process I/O itself. Unlike the VM bootstrap path, this must
+    /// not select the packaged guest init or inject its host-control variables.
+    pub(crate) fn build_runtime_owned_instance_spec(
+        &mut self,
+        layout: &BoxLayout,
+    ) -> Result<InstanceSpec> {
+        self.build_instance_spec_with_bootstrap(layout, false)
+    }
+
+    fn build_instance_spec_with_bootstrap(
+        &mut self,
+        layout: &BoxLayout,
+        include_guest_controls: bool,
+    ) -> Result<InstanceSpec> {
         // Build filesystem mounts
         let mut fs_mounts = vec![FsMount {
             tag: "workspace".to_string(),
@@ -149,7 +167,9 @@ impl VmManager {
 
         // Determine whether guest init is installed (it becomes PID 1 and
         // launches the container entrypoint from runtime control data).
-        let guest_init_exec = Self::guest_init_exec_path(&layout.rootfs_path);
+        let guest_init_exec = include_guest_controls
+            .then(|| Self::guest_init_exec_path(&layout.rootfs_path))
+            .flatten();
         // When guest init is PID 1 it applies the staged container user to the
         // main process itself; the shim must then NOT call libkrun set_uid
         // (which would drop PID 1 and break init). Only the legacy
@@ -453,46 +473,48 @@ impl VmManager {
                 .push(("A3S_TEE_SIMULATE".to_string(), "1".to_string()));
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            // WHPX named-pipe mappings are guest-initiated. Keep the shared
-            // Windows host-control channel connected even without published
-            // ports so stop requests can reach guest init.
+        if include_guest_controls {
+            #[cfg(target_os = "windows")]
+            {
+                // WHPX named-pipe mappings are guest-initiated. Keep the shared
+                // Windows host-control channel connected even without published
+                // ports so stop requests can reach guest init.
+                entrypoint
+                    .env
+                    .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
+            }
+
+            #[cfg(not(target_os = "windows"))]
             entrypoint
                 .env
-                .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
-        }
+                .push(("BOX_CRI_PORT_FWD".to_string(), "1".to_string()));
 
-        #[cfg(not(target_os = "windows"))]
-        entrypoint
-            .env
-            .push(("BOX_CRI_PORT_FWD".to_string(), "1".to_string()));
+            if self.config.persistent {
+                entrypoint
+                    .env
+                    .push(("BOX_PERSIST_ROOTFS_METADATA".to_string(), "1".to_string()));
+            }
 
-        if self.config.persistent {
-            entrypoint
-                .env
-                .push(("BOX_PERSIST_ROOTFS_METADATA".to_string(), "1".to_string()));
-        }
-
-        // Inject sidecar configuration so guest-init can launch the sidecar process
-        if let Some(ref sidecar) = self.config.sidecar {
-            entrypoint
-                .env
-                .push(("BOX_SIDECAR_IMAGE".to_string(), sidecar.image.clone()));
-            entrypoint.env.push((
-                "BOX_SIDECAR_VSOCK_PORT".to_string(),
-                sidecar.vsock_port.to_string(),
-            ));
-            for (i, (key, value)) in sidecar.env.iter().enumerate() {
+            // Inject sidecar configuration so guest-init can launch the sidecar process.
+            if let Some(ref sidecar) = self.config.sidecar {
+                entrypoint
+                    .env
+                    .push(("BOX_SIDECAR_IMAGE".to_string(), sidecar.image.clone()));
                 entrypoint.env.push((
-                    format!("BOX_SIDECAR_ENV_{}", i),
-                    format!("{}={}", key, value),
+                    "BOX_SIDECAR_VSOCK_PORT".to_string(),
+                    sidecar.vsock_port.to_string(),
+                ));
+                for (i, (key, value)) in sidecar.env.iter().enumerate() {
+                    entrypoint.env.push((
+                        format!("BOX_SIDECAR_ENV_{}", i),
+                        format!("{}={}", key, value),
+                    ));
+                }
+                entrypoint.env.push((
+                    "BOX_SIDECAR_ENV_COUNT".to_string(),
+                    sidecar.env.len().to_string(),
                 ));
             }
-            entrypoint.env.push((
-                "BOX_SIDECAR_ENV_COUNT".to_string(),
-                sidecar.env.len().to_string(),
-            ));
         }
 
         // The CLI validates this up front; this also guards compose, CRI, SDK,

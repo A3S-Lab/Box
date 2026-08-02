@@ -42,7 +42,9 @@ pub use a3s_box_core::{
     PortMapping, PortProtocol, ReconcileOutcome, RestartExecutionOptions,
     MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
-pub use a3s_box_runtime::{RegistryAuth, RegistryProtocol, SignaturePolicy};
+pub use a3s_box_runtime::{
+    NativeLinuxOciMigrationConfig, RegistryAuth, RegistryProtocol, SignaturePolicy,
+};
 
 #[cfg(unix)]
 pub use a3s_box_runtime::{

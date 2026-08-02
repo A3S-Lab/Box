@@ -4,7 +4,7 @@
 //! legacy state records.
 
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+use a3s_box_runtime::ManagedExecutionState;
 use clap::Args;
 
 use crate::lifecycle;
@@ -55,7 +55,7 @@ async fn pause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
         // the A3S OCI owner and the durable generation advances exactly once.
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
-        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        let manager = super::configured_local_execution_manager(&home).await?;
         manager.pause(&execution_id, generation, true).await?;
         println!("{}", record.name);
         return Ok(());

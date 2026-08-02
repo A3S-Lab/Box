@@ -36,7 +36,10 @@ async fn wait_one(
     query: &str,
     heartbeat_interval: Option<std::time::Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::{ExecutionId, ExecutionManager, ExecutionState};
+
     let mut heartbeat = WaitHeartbeat::new(heartbeat_interval);
+    let mut oci_manager = None;
     loop {
         let state = StateFile::load_default()?;
         let record = match resolve::resolve(&state, query) {
@@ -51,6 +54,33 @@ async fn wait_one(
             Err(error) => return Err(error.into()),
         };
 
+        if uses_oci_runtime(record) {
+            if oci_manager.is_none() {
+                let home = a3s_box_core::dirs_home();
+                oci_manager = Some(super::configured_local_execution_manager(&home).await?);
+            }
+            let status = oci_manager
+                .as_ref()
+                .expect("OCI manager initialized")
+                .inspect(&ExecutionId::new(record.id.clone())?)
+                .await?;
+            match status.state {
+                ExecutionState::Stopped | ExecutionState::Failed => {
+                    // inspect persisted the exact terminal result; reload it
+                    // before printing so the provider exit code is authoritative.
+                    let refreshed = StateFile::load_default()?;
+                    let refreshed = resolve::resolve(&refreshed, query)?;
+                    println!("{}", wait_exit_code(refreshed));
+                    return Ok(());
+                }
+                ExecutionState::Created | ExecutionState::Creating => {}
+                ExecutionState::Running | ExecutionState::Paused => {}
+            }
+            heartbeat.maybe_emit(query);
+            tokio::time::sleep(tokio::time::Duration::from_millis(WAIT_POLL_MILLIS)).await;
+            continue;
+        }
+
         match wait_poll_action(record) {
             WaitPollAction::Finish(exit_code) => {
                 println!("{exit_code}");
@@ -62,6 +92,13 @@ async fn wait_one(
             }
         }
     }
+}
+
+fn uses_oci_runtime(record: &BoxRecord) -> bool {
+    record.managed_execution.as_ref().is_some_and(|metadata| {
+        metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
+            || metadata.oci_runtime.is_some()
+    })
 }
 
 fn archived_wait_exit_code(query: &str) -> Result<Option<i32>, String> {

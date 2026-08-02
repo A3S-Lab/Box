@@ -44,6 +44,46 @@ impl A3sBoxClient {
         }
     }
 
+    /// Create a client that honors the explicit process-wide OCI migration
+    /// setting. With no opt-in this is equivalent to [`Self::with_paths`].
+    pub async fn with_configured_paths(paths: A3sBoxPaths) -> Result<Self> {
+        let local_execution_manager = Arc::new(
+            a3s_box_runtime::LocalExecutionManager::with_configured_backend(
+                paths.boxes_file.clone(),
+                paths.home.clone(),
+            )
+            .await?,
+        );
+        Ok(Self {
+            paths,
+            image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
+            execution_manager: local_execution_manager.clone(),
+            execution_session_manager: Some(local_execution_manager),
+        })
+    }
+
+    /// Create a client with a programmatic native-Linux Sandbox migration
+    /// configuration, independent of process environment parsing.
+    pub async fn with_native_linux_oci_migration(
+        paths: A3sBoxPaths,
+        config: a3s_box_runtime::NativeLinuxOciMigrationConfig,
+    ) -> Result<Self> {
+        let local_execution_manager = Arc::new(
+            a3s_box_runtime::LocalExecutionManager::with_native_linux_oci_migration(
+                paths.boxes_file.clone(),
+                paths.home.clone(),
+                config,
+            )
+            .await?,
+        );
+        Ok(Self {
+            paths,
+            image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
+            execution_manager: local_execution_manager.clone(),
+            execution_session_manager: Some(local_execution_manager),
+        })
+    }
+
     /// Create a client with an explicit backend-neutral execution manager.
     ///
     /// This keeps lifecycle calls on the canonical facade while allowing an

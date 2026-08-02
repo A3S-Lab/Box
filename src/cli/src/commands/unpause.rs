@@ -4,7 +4,7 @@
 //! legacy state records.
 
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+use a3s_box_runtime::ManagedExecutionState;
 use clap::Args;
 
 use crate::lifecycle;
@@ -54,7 +54,7 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
         // current records. Keep direct SIGCONT only for legacy state files.
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
-        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        let manager = super::configured_local_execution_manager(&home).await?;
         manager.resume(&execution_id, generation).await?;
         println!("{}", record.name);
         return Ok(());

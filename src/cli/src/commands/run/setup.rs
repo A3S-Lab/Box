@@ -144,9 +144,12 @@ pub(super) async fn setup_and_boot(
         },
     );
     let home = a3s_box_core::dirs_home();
-    let backend = VmLocalExecutionBackend::new(&home).with_pull_progress_fn(pull_progress_fn);
-    let manager =
-        LocalExecutionManager::new(home.join("boxes.json"), &home, std::sync::Arc::new(backend));
+    let manager = LocalExecutionManager::with_configured_backend_and_pull_progress(
+        home.join("boxes.json"),
+        &home,
+        Some(pull_progress_fn),
+    )
+    .await?;
     let reserve_start = std::time::Instant::now();
     let reservation = manager.create(request, &operation_id).await?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase("cli.reserve", reserve_start.elapsed());

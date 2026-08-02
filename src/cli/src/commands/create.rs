@@ -4,7 +4,6 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionManager, ExecutionRecordPolicy,
     ExecutionRestartPolicy, OperationId, ResourceConfig,
 };
-use a3s_box_runtime::LocalExecutionManager;
 use clap::Args;
 
 use super::common::{self, CommonBoxArgs};
@@ -166,7 +165,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         policy,
         rootfs_snapshot_id: None,
     };
-    let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), home);
+    let manager = super::configured_local_execution_manager(&home).await?;
     let reservation = manager.create(request, &operation_id).await?;
     let box_id = reservation.execution_id.to_string();
 

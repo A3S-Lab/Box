@@ -1,4 +1,5 @@
 use super::*;
+use a3s_box_runtime::VmLocalExecutionBackend;
 
 // --- build_resource_limits tests (using new struct layout) ---
 

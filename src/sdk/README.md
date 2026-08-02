@@ -230,6 +230,25 @@ println!(
 Use `A3sBoxClient::from_home(path)` for tests or tools that should operate on a
 non-default a3s-box state directory.
 
+On Linux, applications participating in the opt-in long-lived OCI owner
+migration should use the async configured constructor:
+
+```rust
+use a3s_box_sdk::{A3sBoxClient, A3sBoxPaths};
+
+# async fn configured() -> Result<(), a3s_box_sdk::ClientError> {
+let paths = A3sBoxPaths::from_home("/var/lib/a3s-box");
+let client = A3sBoxClient::with_configured_paths(paths).await?;
+# let _ = client;
+# Ok(()) }
+```
+
+It honors `A3S_BOX_OCI_MIGRATION=sandbox` and the paired
+`A3S_BOX_OCI_RUNTIME_PATH`/`A3S_BOX_OCI_AGENT_PATH` overrides. For an
+environment-independent embedding, construct `NativeLinuxOciMigrationConfig`
+and pass it to `A3sBoxClient::with_native_linux_oci_migration`. Synchronous
+constructors intentionally retain the legacy backend.
+
 ## Managed Lifecycle
 
 The SDK submits lifecycle requests directly to the same generation-fenced

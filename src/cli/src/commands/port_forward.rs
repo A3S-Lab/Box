@@ -48,7 +48,6 @@ pub async fn execute(_args: PortForwardArgs) -> Result<(), Box<dyn std::error::E
 pub async fn execute(args: PortForwardArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write as _;
 
-    use a3s_box_runtime::LocalExecutionManager;
     use tokio::net::TcpListener;
     use tokio::sync::Semaphore;
 
@@ -80,10 +79,7 @@ pub async fn execute(args: PortForwardArgs) -> Result<(), Box<dyn std::error::Er
     };
 
     let home = a3s_box_core::dirs_home();
-    let connector = Arc::new(LocalExecutionManager::with_vm_backend(
-        home.join("boxes.json"),
-        &home,
-    ));
+    let connector = Arc::new(super::configured_local_execution_manager(&home).await?);
     let bind_address =
         std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, args.host_port.get()));
     let listener = TcpListener::bind(bind_address).await.map_err(|error| {

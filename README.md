@@ -48,9 +48,11 @@ The runtime crate now also exposes an explicit `OciMigrationPolicy` and
 with `box_vm` or `oci_sdk` before capability preflight and persist that choice
 with the reservation before launch side effects. Later policy changes cannot
 reroute their lifecycle, recovery, or cleanup, and a selected OCI failure is
-never retried on the Box backend. Shipped CLI and SDK construction still use
-the two current paths above until production bundle preparation is wired to the
-pinned runtime host owner.
+never retried on the Box backend. On Linux, the CLI, machine bridge, and the
+async Rust SDK constructor can now opt new Sandbox records into the production
+bundle provider and long-lived pinned runtime owner with
+`A3S_BOX_OCI_MIGRATION=sandbox`. With the setting absent, current behavior is
+unchanged.
 
 > [!NOTE]
 > The current SDK-only Sandbox adapter now covers four exact-generation rails:
@@ -82,10 +84,12 @@ pinned runtime host owner.
 > file transfer and descriptor-confined mkdir/stat/list/move/remove against its
 > real native and utility-VM drivers before the Box SDK suite runs. The pinned
 > runtime now supplies a long-lived multi-container Native Linux host owner and
-> Box supplies durable fail-closed migration routing. Production bundle/owner
-> composition, cross-process native Linux/WHPX process-and-filesystem recovery,
-> and the broader cutover gates remain open; the current split above is still
-> authoritative.
+> Box now supplies its production direct-process bundle compiler, protected
+> identity-fenced owner startup, and explicit CLI/SDK composition. Native Linux
+> real-host acceptance is a blocking CI gate. WHPX composition,
+> cross-process real-driver process/filesystem recovery, remaining CLI
+> projections, and the broader cutover gates remain open; the default split
+> above is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -159,6 +163,45 @@ a3s-box run --rm \
   --memory 512m \
   alpine:3.20 -- sh -lc 'id; cat /proc/self/status'
 ```
+
+### Opt into the long-lived OCI owner on Linux
+
+The production migration path is deliberately not the default yet. Install the
+pinned `a3s-oci` and `a3s-oci-agent` pair, then keep the same configuration in
+every process that manages the migrated records:
+
+```bash
+export A3S_BOX_OCI_MIGRATION=sandbox
+export A3S_BOX_OCI_RUNTIME_PATH=/absolute/path/to/a3s-oci
+export A3S_BOX_OCI_AGENT_PATH=/absolute/path/to/a3s-oci-agent
+# Optional; the default is a short, per-UID/per-A3S-home directory under /tmp.
+export A3S_BOX_OCI_HOST_ROOT=/absolute/private/runtime-root
+
+a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
+```
+
+When overriding artifact discovery, both artifact variables must be supplied
+together; each executable is capability-probed and SHA-256 fenced before owner
+startup and again before bundle mutation. The owner root is created with mode
+`0700`; an existing root must be an absolute normalized, real, same-UID
+directory with that exact mode. A live owner is reused only when its PID start
+identity, endpoint, paths, and digests match. Unknown sockets and drifted
+artifacts fail closed.
+
+Rust applications select the same path with
+`A3sBoxClient::with_configured_paths(...).await` or construct
+`NativeLinuxOciMigrationConfig` explicitly. The synchronous `new`,
+`from_home`, and `with_paths` constructors retain legacy behavior for API
+compatibility.
+
+Current opt-in limits are intentional: only new Linux Sandbox reservations are
+routed; `all`/MicroVM migration is rejected; image-declared anonymous volumes
+must be replaced by explicit named or bind mounts; and remaining socket-based
+CLI projections (`attach`, `cp`, `top`, `stats`, live `container-update`, plus
+init stdout/stderr projection into Box logs) are not yet promoted on this path.
+The typed SDK lifecycle, exec/PTY, file/filesystem, process inventory, stats,
+events, resource update, pause/resume, wait, restart, and cleanup contracts do
+route through the exact OCI generation.
 
 > [!IMPORTANT]
 > A shared-kernel Sandbox does not defend against a working host-kernel

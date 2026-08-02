@@ -76,29 +76,7 @@ impl LocalExecutionBackendRouter {
     }
 
     fn route_for_record(&self, record: &BoxRecord) -> ExecutionManagerResult<ManagedRuntimeRoute> {
-        let metadata = record.managed_execution.as_ref().ok_or_else(|| {
-            ExecutionManagerError::Internal(format!(
-                "execution {} has no managed lifecycle metadata for backend routing",
-                record.id
-            ))
-        })?;
-        metadata
-            .validate()
-            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
-        match metadata.runtime_route {
-            ManagedRuntimeRoute::BoxVm => Ok(ManagedRuntimeRoute::BoxVm),
-            ManagedRuntimeRoute::OciSdk => Ok(ManagedRuntimeRoute::OciSdk),
-            ManagedRuntimeRoute::Unspecified if metadata.oci_runtime.is_some() => {
-                Ok(ManagedRuntimeRoute::OciSdk)
-            }
-            // OCI handles deliberately store no Box-owned exec socket. This
-            // preserves stopped pre-routing OCI records after their live
-            // binding has been cleared during teardown.
-            ManagedRuntimeRoute::Unspecified if record.exec_socket_path.as_os_str().is_empty() => {
-                Ok(ManagedRuntimeRoute::OciSdk)
-            }
-            ManagedRuntimeRoute::Unspecified => Ok(ManagedRuntimeRoute::BoxVm),
-        }
+        resolved_runtime_route(record)
     }
 
     fn backend_for_record(
@@ -110,6 +88,36 @@ impl LocalExecutionBackendRouter {
             ManagedRuntimeRoute::OciSdk => Ok(&self.oci),
             ManagedRuntimeRoute::Unspecified => unreachable!("route inference is exhaustive"),
         }
+    }
+}
+
+/// Resolve records written before the route field was introduced using the
+/// same durable evidence for both router dispatch and concrete backend checks.
+pub(super) fn resolved_runtime_route(
+    record: &BoxRecord,
+) -> ExecutionManagerResult<ManagedRuntimeRoute> {
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "execution {} has no managed lifecycle metadata for backend routing",
+            record.id
+        ))
+    })?;
+    metadata
+        .validate()
+        .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+    match metadata.runtime_route {
+        ManagedRuntimeRoute::BoxVm => Ok(ManagedRuntimeRoute::BoxVm),
+        ManagedRuntimeRoute::OciSdk => Ok(ManagedRuntimeRoute::OciSdk),
+        ManagedRuntimeRoute::Unspecified if metadata.oci_runtime.is_some() => {
+            Ok(ManagedRuntimeRoute::OciSdk)
+        }
+        // OCI handles deliberately store no Box-owned exec socket. This
+        // preserves stopped pre-routing OCI records after their live binding
+        // has been cleared during teardown.
+        ManagedRuntimeRoute::Unspecified if record.exec_socket_path.as_os_str().is_empty() => {
+            Ok(ManagedRuntimeRoute::OciSdk)
+        }
+        ManagedRuntimeRoute::Unspecified => Ok(ManagedRuntimeRoute::BoxVm),
     }
 }
 

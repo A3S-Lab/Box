@@ -17,14 +17,22 @@ use crate::sandbox::rootfs::{
 };
 use crate::sandbox::A3sOciController;
 use crate::sandbox::{
-    compile_oci_spec, plan_id_mappings, prepare_managed_mount_source,
-    prepare_managed_secret_mount_source, prepare_sandbox_path_access,
+    compile_oci_spec, compile_runtime_owned_oci_spec, plan_id_mappings,
+    prepare_managed_mount_source, prepare_managed_secret_mount_source, prepare_sandbox_path_access,
     probe_sandbox_capabilities_for, stage_read_only_mount_aliases, validate_external_mount_access,
-    write_bundle, SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources,
-    SandboxTmpfs,
+    write_bundle, SandboxBundleSpec, SandboxCapabilitySnapshot, SandboxLaunchSpec, SandboxMount,
+    SandboxResources, SandboxRuntimeProcess, SandboxTmpfs,
 };
 
 use super::{BoxState, VmManager};
+
+/// Product-owned bundle ready to be loaded through the public A3S OCI SDK.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeOwnedSandboxBundle {
+    pub bundle_dir: PathBuf,
+    pub console_output: PathBuf,
+    pub anonymous_volumes: Vec<String>,
+}
 
 impl VmManager {
     pub(super) async fn boot_sandbox(
@@ -301,6 +309,175 @@ impl VmManager {
             "sandbox.start_total",
             boot_start.elapsed(),
         );
+        Ok(())
+    }
+
+    /// Prepare a Sandbox bundle for a long-lived OCI Runtime service. The
+    /// runtime owns PID 1 and process I/O, so this path compiles the image
+    /// process directly instead of launching Box guest-init with inherited FDs.
+    pub(crate) async fn prepare_runtime_owned_sandbox_bundle(
+        &mut self,
+        execution_plan: &ResolvedExecutionPlan,
+        capabilities: &SandboxCapabilitySnapshot,
+    ) -> Result<RuntimeOwnedSandboxBundle> {
+        if execution_plan.backend != a3s_box_core::ExecutionBackend::A3sOci {
+            return Err(BoxError::BoxBootError {
+                message: "A3S OCI Runtime is the only supported Sandbox backend".to_string(),
+                hint: None,
+            });
+        }
+        capabilities.require_ready()?;
+        let runtime = capabilities
+            .a3s_oci
+            .as_ref()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: "Sandbox capability probe returned no A3S OCI artifacts".to_string(),
+                hint: None,
+            })?;
+        let user_namespace =
+            capabilities
+                .user_namespace
+                .as_ref()
+                .ok_or_else(|| BoxError::BoxBootError {
+                    message: "Sandbox capability probe did not return user-namespace evidence"
+                        .to_string(),
+                    hint: None,
+                })?;
+        let runtime_digest =
+            combined_runtime_digest(&runtime.runtime_sha256, &runtime.agent_sha256);
+        let original_anonymous_volumes = self.anonymous_volumes.clone();
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let bundle_dir = box_dir.join("sandbox").join("oci-sdk-bundle");
+
+        let layout = match self.prepare_layout().await {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        };
+        self.image_config = layout.oci_config.clone();
+
+        let prepare = (|| -> Result<RuntimeOwnedSandboxBundle> {
+            a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
+                &layout.rootfs_path,
+            )?;
+            let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
+            crate::oci::rootfs::write_guest_file(
+                &layout.rootfs_path,
+                "etc/resolv.conf",
+                resolv_content,
+            )?;
+            self.write_hostname_file(&layout)?;
+            self.write_standalone_hosts_file(&layout)?;
+
+            let resources = SandboxResources::from_box_config(&self.config)?;
+            let instance_spec = self.build_runtime_owned_instance_spec(&layout)?;
+            if self.anonymous_volumes != original_anonymous_volumes {
+                return Err(BoxError::ConfigError(
+                    "OCI migration does not yet introduce image-declared anonymous volumes; create an explicit named or bind mount before enabling migration"
+                        .to_string(),
+                ));
+            }
+            let runtime_process = resolve_runtime_owned_process(
+                &layout.rootfs_path,
+                &instance_spec,
+                &self.config.cap_drop,
+            )?;
+            let (mut mounts, tmpfs) = self.compile_sandbox_mounts(&layout, &instance_spec)?;
+            ensure_mount_destinations(&layout.rootfs_path, &mounts, &tmpfs)?;
+
+            let rootfs_ids = inspect_rootfs_identity_requirements_with_preference(
+                &layout.rootfs_path,
+                layout.prefer_image_rootfs_metadata,
+            )?;
+            let (account_uid, account_gid) = maximum_account_ids(&layout.rootfs_path)?;
+            let process_uid = runtime_process.uid;
+            let process_gid = std::iter::once(runtime_process.gid)
+                .chain(runtime_process.additional_gids.iter().copied())
+                .max()
+                .unwrap_or(0);
+            let maximum_uid = rootfs_ids.maximum_uid.max(account_uid).max(process_uid);
+            let maximum_gid = rootfs_ids.maximum_gid.max(account_gid).max(process_gid);
+            let id_mappings = plan_id_mappings(user_namespace, maximum_uid, maximum_gid)?;
+
+            self.prepare_sandbox_mount_sources(&layout, &mut mounts, &id_mappings)?;
+            prepare_rootfs_ownership_with_preference(
+                &layout.rootfs_path,
+                &id_mappings,
+                user_namespace.effective_uid,
+                self.config.read_only,
+                layout.prefer_image_rootfs_metadata,
+            )?;
+
+            let bundle_spec = SandboxBundleSpec {
+                box_id: self.box_id.clone(),
+                rootfs_path: layout.rootfs_path.clone(),
+                rootfs_read_only: self.config.read_only,
+                hostname: self
+                    .config
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| self.box_id.clone()),
+                // Unused by the runtime-owned compiler, but retained in the
+                // shared bundle input so mount/resource policy has one source.
+                init_path: "/sbin/init".to_string(),
+                init_environment: Vec::new(),
+                mounts,
+                tmpfs,
+                id_mappings,
+                resources,
+                requested_capabilities: self.config.cap_add.clone(),
+                execution_plan_digest: digest_json(execution_plan)?,
+                runtime_digest,
+            };
+            let oci_spec = compile_runtime_owned_oci_spec(&bundle_spec, &runtime_process)?;
+            write_bundle(&bundle_dir, &oci_spec, execution_plan, capabilities)?;
+            prepare_sandbox_path_access(
+                &self.home_dir,
+                &self.box_id,
+                &bundle_dir,
+                &layout.rootfs_path,
+                &bundle_spec.mounts,
+                &bundle_spec.id_mappings,
+            )?;
+            self.create_diff_baseline(&layout);
+
+            Ok(RuntimeOwnedSandboxBundle {
+                bundle_dir,
+                console_output: instance_spec
+                    .console_output
+                    .unwrap_or_else(|| box_dir.join("logs").join("console.log")),
+                anonymous_volumes: self.anonymous_volumes.clone(),
+            })
+        })();
+
+        match prepare {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                self.cleanup_boot_failure().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Detach preparation-owned mounts after the OCI Runtime has deleted the
+    /// exact generation. Persistent writable data follows normal Box policy.
+    pub(crate) fn cleanup_runtime_owned_sandbox_bundle(&self) -> Result<()> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        crate::sandbox::cleanup_sandbox_mount_aliases(&self.home_dir, &self.box_id)?;
+        self.rootfs_provider
+            .cleanup(&box_dir, self.config.persistent)?;
+        for path in [
+            box_dir.join("sandbox").join("oci-sdk-bundle"),
+            self.socket_dir(),
+        ] {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(BoxError::IoError(error)),
+            }
+        }
         Ok(())
     }
 
@@ -718,6 +895,321 @@ fn ensure_mount_destination(rootfs: &Path, destination: &Path, file: bool) -> Re
     Ok(())
 }
 
+const DEFAULT_CONTAINER_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+#[derive(Debug, Clone)]
+struct RuntimePasswdEntry {
+    name: String,
+    uid: u32,
+    gid: u32,
+    home: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeGroupEntry {
+    name: String,
+    gid: u32,
+    members: Vec<String>,
+}
+
+fn resolve_runtime_owned_process(
+    rootfs: &Path,
+    instance_spec: &crate::vmm::InstanceSpec,
+    dropped_capabilities: &[String],
+) -> Result<SandboxRuntimeProcess> {
+    let cwd = normalize_linux_guest_path("/", &instance_spec.workdir, "working directory")?;
+    crate::oci::rootfs::ensure_guest_directory(rootfs, cwd.trim_start_matches('/'))?;
+
+    let mut environment = instance_spec.entrypoint.env.clone();
+    let path = environment
+        .iter()
+        .rev()
+        .find_map(|(key, value)| (key == "PATH").then_some(value.as_str()))
+        .unwrap_or(DEFAULT_CONTAINER_PATH);
+    let executable =
+        resolve_runtime_executable(rootfs, &cwd, path, &instance_spec.entrypoint.executable)?;
+    let identity = resolve_runtime_identity(rootfs, instance_spec.user.as_deref())?;
+    if !environment.iter().any(|(key, _)| key == "HOME") {
+        if let Some(home) = identity.home.as_ref() {
+            environment.push(("HOME".to_string(), home.clone()));
+        }
+    }
+    let mut args = Vec::with_capacity(instance_spec.entrypoint.args.len() + 1);
+    args.push(executable);
+    args.extend(instance_spec.entrypoint.args.iter().cloned());
+
+    Ok(SandboxRuntimeProcess {
+        args,
+        environment,
+        cwd: PathBuf::from(cwd),
+        uid: identity.uid,
+        gid: identity.gid,
+        additional_gids: identity.additional_gids,
+        dropped_capabilities: dropped_capabilities.to_vec(),
+    })
+}
+
+fn resolve_runtime_executable(
+    rootfs: &Path,
+    cwd: &str,
+    path: &str,
+    command: &str,
+) -> Result<String> {
+    if command.is_empty() || command.contains('\0') {
+        return Err(BoxError::ConfigError(
+            "Sandbox runtime-owned executable must be non-empty and contain no NUL".to_string(),
+        ));
+    }
+
+    if command.contains('/') {
+        let candidate = normalize_linux_guest_path(cwd, command, "process executable")?;
+        require_runtime_executable(rootfs, &candidate)?;
+        return Ok(candidate);
+    }
+
+    for directory in path.split(':') {
+        let directory = if directory.is_empty() { cwd } else { directory };
+        let directory = normalize_linux_guest_path(cwd, directory, "PATH entry")?;
+        let candidate =
+            normalize_linux_guest_path(&directory, command, "PATH-resolved process executable")?;
+        if runtime_executable_exists(rootfs, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(BoxError::BoxBootError {
+        message: format!(
+            "Sandbox executable {command:?} was not found as an executable file in the prepared rootfs PATH"
+        ),
+        hint: Some("Use an absolute image ENTRYPOINT or include it in PATH".to_string()),
+    })
+}
+
+fn require_runtime_executable(rootfs: &Path, guest_path: &str) -> Result<()> {
+    if runtime_executable_exists(rootfs, guest_path)? {
+        Ok(())
+    } else {
+        Err(BoxError::BoxBootError {
+            message: format!(
+                "Sandbox executable {guest_path:?} is missing, not regular, or not executable in the prepared rootfs"
+            ),
+            hint: None,
+        })
+    }
+}
+
+fn runtime_executable_exists(rootfs: &Path, guest_path: &str) -> Result<bool> {
+    let host_path =
+        crate::oci::rootfs::resolve_guest_file_path(rootfs, guest_path.trim_start_matches('/'))?;
+    let metadata = match std::fs::metadata(&host_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn normalize_linux_guest_path(base: &str, value: &str, label: &str) -> Result<String> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox {label} must be non-empty and contain no NUL"
+        )));
+    }
+    if !base.starts_with('/') {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox {label} base is not absolute: {base:?}"
+        )));
+    }
+
+    let mut components = if value.starts_with('/') {
+        Vec::new()
+    } else {
+        base.split('/')
+            .filter(|component| !component.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    for component in value.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.pop().is_none() {
+                    return Err(BoxError::ConfigError(format!(
+                        "Sandbox {label} escapes the container root: {value:?}"
+                    )));
+                }
+            }
+            component => components.push(component.to_string()),
+        }
+    }
+    Ok(format!("/{}", components.join("/")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeIdentity {
+    uid: u32,
+    gid: u32,
+    additional_gids: Vec<u32>,
+    home: Option<String>,
+}
+
+fn resolve_runtime_identity(rootfs: &Path, requested: Option<&str>) -> Result<RuntimeIdentity> {
+    let passwd = runtime_passwd_entries(rootfs)?;
+    let groups = runtime_group_entries(rootfs)?;
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(RuntimeIdentity {
+            uid: 0,
+            gid: 0,
+            additional_gids: Vec::new(),
+            home: None,
+        });
+    };
+    if requested.matches(':').count() > 1 {
+        return Err(BoxError::ConfigError(format!(
+            "Invalid Sandbox user {requested:?}; expected user[:group]"
+        )));
+    }
+    let (user_part, group_part) = requested
+        .split_once(':')
+        .map_or((requested, None), |(user, group)| (user, Some(group)));
+    if user_part.is_empty() || group_part.is_some_and(str::is_empty) {
+        return Err(BoxError::ConfigError(format!(
+            "Invalid Sandbox user {requested:?}; user and group must be non-empty"
+        )));
+    }
+
+    let passwd_entry = if user_part == "root" {
+        passwd.iter().find(|entry| entry.uid == 0)
+    } else if let Ok(uid) = user_part.parse::<u32>() {
+        passwd.iter().find(|entry| entry.uid == uid)
+    } else {
+        Some(
+            passwd
+                .iter()
+                .find(|entry| entry.name == user_part)
+                .ok_or_else(|| {
+                    BoxError::ConfigError(format!(
+                "Sandbox user {user_part:?} is not present in the prepared rootfs /etc/passwd"
+            ))
+                })?,
+        )
+    };
+    let uid = if user_part == "root" {
+        0
+    } else {
+        user_part
+            .parse::<u32>()
+            .ok()
+            .or_else(|| passwd_entry.map(|entry| entry.uid))
+            .ok_or_else(|| {
+                BoxError::ConfigError(format!("Sandbox user {user_part:?} cannot be resolved"))
+            })?
+    };
+    let gid = match group_part {
+        Some("root") => 0,
+        Some(group) => group
+            .parse::<u32>()
+            .ok()
+            .or_else(|| {
+                groups
+                    .iter()
+                    .find(|entry| entry.name == group)
+                    .map(|entry| entry.gid)
+            })
+            .ok_or_else(|| {
+                BoxError::ConfigError(format!(
+                    "Sandbox group {group:?} is not present in the prepared rootfs /etc/group"
+                ))
+            })?,
+        None => passwd_entry.map(|entry| entry.gid).unwrap_or(0),
+    };
+    let username = if user_part.parse::<u32>().is_ok() || user_part == "root" {
+        passwd_entry.map(|entry| entry.name.as_str())
+    } else {
+        Some(user_part)
+    };
+    let mut additional_gids = groups
+        .iter()
+        .filter(|entry| {
+            entry.gid != gid
+                && username
+                    .is_some_and(|username| entry.members.iter().any(|member| member == username))
+        })
+        .map(|entry| entry.gid)
+        .collect::<Vec<_>>();
+    additional_gids.sort_unstable();
+    additional_gids.dedup();
+
+    let home = passwd_entry
+        .and_then(|entry| entry.home.as_deref())
+        .map(|home| normalize_linux_guest_path("/", home, "user home"))
+        .transpose()?;
+    Ok(RuntimeIdentity {
+        uid,
+        gid,
+        additional_gids,
+        home,
+    })
+}
+
+fn runtime_passwd_entries(rootfs: &Path) -> Result<Vec<RuntimePasswdEntry>> {
+    let Some(contents) = crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/passwd")?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(contents
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            if fields.len() < 7 || fields[0].is_empty() {
+                return None;
+            }
+            Some(RuntimePasswdEntry {
+                name: fields[0].to_string(),
+                uid: fields[2].parse().ok()?,
+                gid: fields[3].parse().ok()?,
+                home: (!fields[5].is_empty()).then(|| fields[5].to_string()),
+            })
+        })
+        .collect())
+}
+
+fn runtime_group_entries(rootfs: &Path) -> Result<Vec<RuntimeGroupEntry>> {
+    let Some(contents) = crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/group")? else {
+        return Ok(Vec::new());
+    };
+    Ok(contents
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            if fields.len() < 4 || fields[0].is_empty() {
+                return None;
+            }
+            Some(RuntimeGroupEntry {
+                name: fields[0].to_string(),
+                gid: fields[2].parse().ok()?,
+                members: fields[3]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|member| !member.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+            })
+        })
+        .collect())
+}
+
 fn maximum_account_ids(rootfs: &Path) -> Result<(u32, u32)> {
     let mut maximum_uid = 0u32;
     let mut maximum_gid = 0u32;
@@ -851,6 +1343,57 @@ mod tests {
     use a3s_box_core::{volume::VolumeConfig, BoxConfig, EventEmitter};
 
     use super::*;
+
+    #[test]
+    fn runtime_owned_process_resolves_path_and_named_identity_from_rootfs() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("usr/local/bin")).unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        let executable = rootfs.path().join("usr/local/bin/example");
+        std::fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            rootfs.path().join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/sh\napp:x:1001:1002:App:/home/app:/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::write(
+            rootfs.path().join("etc/group"),
+            "app:x:1002:\nmetrics:x:1003:app\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_runtime_executable(
+                rootfs.path(),
+                "/workspace",
+                "/usr/local/bin:/bin",
+                "example"
+            )
+            .unwrap(),
+            "/usr/local/bin/example"
+        );
+        assert_eq!(
+            resolve_runtime_identity(rootfs.path(), Some("app")).unwrap(),
+            RuntimeIdentity {
+                uid: 1001,
+                gid: 1002,
+                additional_gids: vec![1003],
+                home: Some("/home/app".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_owned_process_rejects_root_escape_and_unknown_named_user() {
+        let rootfs = tempfile::tempdir().unwrap();
+        assert!(normalize_linux_guest_path("/", "../../host", "test").is_err());
+        assert!(resolve_runtime_identity(rootfs.path(), Some("missing")).is_err());
+    }
 
     #[test]
     fn parses_volume_and_tmpfs_without_shell_interpretation() {
