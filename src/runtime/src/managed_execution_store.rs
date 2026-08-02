@@ -916,6 +916,7 @@ mod tests {
                         Some(ManagedExecutionOperation::Snapshot {
                             snapshot_id: snapshot_id.clone(),
                             source_state: ManagedExecutionState::Running,
+                            operation_id: Some(OperationId::new("snapshot-operation-1").unwrap()),
                         });
                 },
             )
@@ -934,7 +935,9 @@ mod tests {
             Some(ManagedExecutionOperation::Snapshot {
                 snapshot_id,
                 source_state: ManagedExecutionState::Running,
+                operation_id: Some(operation_id),
             }) if snapshot_id.as_str() == "snapshot-1"
+                && operation_id.as_str() == "snapshot-operation-1"
         ));
 
         let reopened = ManagedExecutionStore::new(store.path().to_path_buf());

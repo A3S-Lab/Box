@@ -2742,6 +2742,7 @@ async fn reconcile_recovers_a_crash_after_snapshot_pause() {
             RuntimeUpdate::SnapshotClaim {
                 snapshot_id: snapshot_id.clone(),
                 source_state: ManagedExecutionState::Running,
+                operation_id: operation("recovered-snapshot-freezer"),
             },
         )
         .await

@@ -7,8 +7,8 @@ use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecutionEventsRequest, ExecutionGeneration,
     ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
-    ExecutionProcessSignal, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionState,
-    FileOp as BoxFileOp, FileRequest as BoxFileRequest,
+    ExecutionProcessSignal, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionSnapshotId,
+    ExecutionState, FileOp as BoxFileOp, FileRequest as BoxFileRequest,
     FilesystemEntryKind as BoxFilesystemEntryKind, FilesystemOp as BoxFilesystemOp,
     FilesystemRequest as BoxFilesystemRequest, KillExecutionOptions, KillOutcome, NetworkMode,
     OperationId as BoxOperationId, ReconcileOutcome,
@@ -2747,6 +2747,65 @@ async fn pause_resume_use_exact_runtime_target_and_unique_box_generations() {
     assert_eq!(service.start_requests().len(), 1);
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn running_snapshot_uses_a_durable_freezer_identity_per_attempt() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let running = manager
+        .create_and_start(
+            request("snapshot-freezer", ExecutionIsolation::Sandbox),
+            &box_operation("snapshot-freezer-create"),
+        )
+        .await
+        .expect("initial launch");
+    let snapshot_id = ExecutionSnapshotId::new("snapshot-freezer-attempt").unwrap();
+
+    for attempt in 0..2 {
+        let error = manager
+            .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+            .await
+            .expect_err("an empty fake rootfs cannot be captured");
+        assert!(error
+            .to_string()
+            .contains("has no populated managed rootfs to snapshot"));
+
+        let pauses = service.pause_requests();
+        let resumes = service.resume_requests();
+        assert_eq!(pauses.len(), attempt + 1);
+        assert_eq!(resumes.len(), attempt + 1);
+        assert_eq!(pauses[attempt].target, resumes[attempt].target);
+        assert_ne!(
+            pauses[attempt].context.operation_id,
+            resumes[attempt].context.operation_id
+        );
+        if attempt > 0 {
+            assert_ne!(
+                pauses[attempt - 1].context.operation_id,
+                pauses[attempt].context.operation_id
+            );
+            assert_ne!(
+                resumes[attempt - 1].context.operation_id,
+                resumes[attempt].context.operation_id
+            );
+        }
+
+        let restored = persisted(&manager, &running.execution_id);
+        assert_eq!(restored.status, ManagedExecutionState::Running.as_status());
+        assert_eq!(
+            restored.managed_execution.as_ref().unwrap().generation,
+            running.generation
+        );
+        assert!(restored
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .pending_operation
+            .is_none());
+    }
 }
 
 #[tokio::test]

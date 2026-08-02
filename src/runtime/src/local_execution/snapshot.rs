@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
+    ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, OperationId,
 };
 
 use super::record::lease_from_record;
@@ -69,6 +69,10 @@ impl LocalExecutionManager {
             });
         }
 
+        let backend_operation_id = OperationId::new(format!(
+            "managed-snapshot-{}",
+            uuid::Uuid::new_v4().simple()
+        ))?;
         let claimed = self
             .transition(
                 &record,
@@ -77,6 +81,7 @@ impl LocalExecutionManager {
                 RuntimeUpdate::SnapshotClaim {
                     snapshot_id: snapshot_id.clone(),
                     source_state,
+                    operation_id: backend_operation_id,
                 },
             )
             .await?;
@@ -445,6 +450,7 @@ fn snapshot_operation(
         Some(ManagedExecutionOperation::Snapshot {
             snapshot_id,
             source_state,
+            ..
         }) if matches!(
             source_state,
             ManagedExecutionState::Running | ManagedExecutionState::Paused

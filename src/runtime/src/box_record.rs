@@ -425,6 +425,14 @@ pub enum ManagedExecutionOperation {
     Snapshot {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
+        /// Stable backend mutation identity for this exact snapshot attempt.
+        ///
+        /// One snapshot claim can drive both a pause and a resume. The backend
+        /// operation name keeps those mutations distinct while this seed makes
+        /// crash recovery replay each mutation exactly once. Older records did
+        /// not persist the seed, so the field remains optional for recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
     },
     Kill {
         #[serde(default)]

@@ -180,11 +180,13 @@ impl LocalExecutionManager {
                 RuntimeUpdate::SnapshotClaim {
                     snapshot_id,
                     source_state,
+                    operation_id,
                 } => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation = Some(ManagedExecutionOperation::Snapshot {
                             snapshot_id,
                             source_state,
+                            operation_id: Some(operation_id),
                         });
                     }
                 }
@@ -301,6 +303,7 @@ pub(super) enum RuntimeUpdate {
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
+        operation_id: OperationId,
     },
     RestartClaim {
         operation_id: OperationId,

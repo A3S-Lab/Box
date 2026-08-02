@@ -1633,24 +1633,33 @@ fn freezer_operation_seed(
         .managed_execution
         .as_ref()
         .and_then(|metadata| metadata.pending_operation.as_ref());
-    let operation_id = match (paused, operation) {
+    match (paused, operation) {
         (true, Some(crate::ManagedExecutionOperation::Pause { operation_id, .. }))
         | (false, Some(crate::ManagedExecutionOperation::Resume { operation_id })) => {
-            operation_id.as_ref()
+            // Legacy transitional records predate explicit freezer mutation
+            // IDs. OCI routing did not exist when they were written, so the
+            // exact Box identity remains a safe one-time recovery seed.
+            Ok(operation_id
+                .as_ref()
+                .map(|operation_id| operation_id.as_str())
+                .unwrap_or_else(|| execution_id.as_str())
+                .to_string())
         }
-        _ => {
-            return Err(ExecutionManagerError::Internal(format!(
-                "execution {execution_id} has no matching durable OCI freezer claim"
-            )))
-        }
-    };
-    // Legacy transitional records predate explicit freezer mutation IDs. OCI
-    // routing did not exist when they were written, so the exact Box identity
-    // and generation remain a safe one-time recovery seed.
-    Ok(operation_id
-        .map(|operation_id| operation_id.as_str())
-        .unwrap_or_else(|| execution_id.as_str())
-        .to_string())
+        (
+            _,
+            Some(crate::ManagedExecutionOperation::Snapshot {
+                snapshot_id,
+                source_state: ManagedExecutionState::Running,
+                operation_id,
+            }),
+        ) => Ok(operation_id
+            .as_ref()
+            .map(|operation_id| operation_id.as_str().to_string())
+            .unwrap_or_else(|| format!("legacy-snapshot-{execution_id}-{snapshot_id}"))),
+        _ => Err(ExecutionManagerError::Internal(format!(
+            "execution {execution_id} has no matching durable OCI freezer claim"
+        ))),
+    }
 }
 
 pub(super) fn operation_context(
