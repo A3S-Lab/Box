@@ -215,6 +215,25 @@ pub struct SandboxRuntimeProcess {
     pub dropped_capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxProcessOwner {
+    GuestInit,
+    RuntimeOwned,
+}
+
+impl SandboxProcessOwner {
+    const fn annotation(self) -> &'static str {
+        match self {
+            Self::GuestInit => "guest-init",
+            Self::RuntimeOwned => "a3s-oci-runtime",
+        }
+    }
+
+    const fn uses_control_workload_cgroup(self) -> bool {
+        matches!(self, Self::GuestInit)
+    }
+}
+
 /// Compile a complete OCI config. Arbitrary caller-provided OCI JSON is never
 /// accepted by this backend.
 pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
@@ -238,7 +257,7 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
         .build()
         .map_err(oci_error)?;
 
-    compile_spec(input, process, "guest-init")
+    compile_spec(input, process, SandboxProcessOwner::GuestInit)
 }
 
 /// Compile a complete OCI config whose PID 1 and I/O are owned directly by
@@ -271,7 +290,7 @@ pub fn compile_runtime_owned_oci_spec(
         .build()
         .map_err(oci_error)?;
 
-    compile_spec(input, process, "a3s-oci-runtime")
+    compile_spec(input, process, SandboxProcessOwner::RuntimeOwned)
 }
 
 fn validate_bundle_input(input: &SandboxBundleSpec) -> Result<()> {
@@ -286,7 +305,7 @@ fn validate_bundle_input(input: &SandboxBundleSpec) -> Result<()> {
 fn compile_spec(
     input: &SandboxBundleSpec,
     process: oci_spec::runtime::Process,
-    owner: &str,
+    owner: SandboxProcessOwner,
 ) -> Result<Spec> {
     let linux = LinuxBuilder::default()
         .uid_mappings(compile_id_mappings(&input.id_mappings.uid_mappings)?)
@@ -319,23 +338,28 @@ fn compile_spec(
         "com.a3s.box.isolation-class".to_string(),
         "shared-kernel".to_string(),
     );
-    annotations.insert("com.a3s.box.process-owner".to_string(), owner.to_string());
     annotations.insert(
-        CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
-        CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+        "com.a3s.box.process-owner".to_string(),
+        owner.annotation().to_string(),
     );
-    annotations.insert(
-        CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
-        SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
-    );
-    annotations.insert(
-        CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
-        input.resources.cpu_period.to_string(),
-    );
-    annotations.insert(
-        CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
-        SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
-    );
+    if owner.uses_control_workload_cgroup() {
+        annotations.insert(
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
+            SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
+            input.resources.cpu_period.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
+            SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
+        );
+    }
 
     SpecBuilder::default()
         .version("1.1.0".to_string())
@@ -1554,6 +1578,22 @@ mod tests {
         assert_eq!(
             value["annotations"]["com.a3s.box.process-owner"],
             "a3s-oci-runtime"
+        );
+        let annotations = value["annotations"].as_object().unwrap();
+        for annotation in [
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION,
+            CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION,
+            CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION,
+            CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION,
+        ] {
+            assert!(
+                !annotations.contains_key(annotation),
+                "runtime-owned process retained guest-init cgroup annotation {annotation}"
+            );
+        }
+        assert_eq!(
+            value["linux"]["resources"]["memory"]["limit"],
+            512 * 1024 * 1024i64
         );
         let environment = value["process"]["env"].as_array().unwrap();
         assert!(environment
