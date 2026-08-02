@@ -216,6 +216,52 @@ impl A3sBoxClient {
         Ok(collect_box_stats(&[record]).into_iter().next())
     }
 
+    /// Collect the compatibility Sandbox stats shape from the record's exact
+    /// lifecycle owner.
+    pub(crate) async fn get_sandbox_stats(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<Option<BoxStatsSummary>> {
+        let state = self.load_state()?;
+        let record = state
+            .find_by_id(execution_id.as_str())
+            .cloned()
+            .ok_or_else(|| ClientError::BoxNotFound(execution_id.to_string()))?;
+        if !record.is_active() {
+            return Ok(None);
+        }
+
+        let Some(metadata) = record.managed_execution.as_ref() else {
+            return self.get_box_stats(execution_id.as_str());
+        };
+        if metadata.runtime_route != ManagedRuntimeRoute::OciSdk {
+            return self.get_box_stats(execution_id.as_str());
+        }
+        if metadata.generation != generation {
+            return Err(ClientError::Execution(
+                a3s_box_core::ExecutionManagerError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected generation {}, received {}",
+                        metadata.generation.get(),
+                        generation.get()
+                    ),
+                },
+            ));
+        }
+
+        let first = self.execution_stats(execution_id, generation).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let second = self.execution_stats(execution_id, generation).await?;
+        let processes = self
+            .list_execution_processes(execution_id, generation)
+            .await?;
+        Ok(Some(project_runtime_box_stats(
+            &record, &first, &second, &processes,
+        )))
+    }
+
     /// List cached images from the runtime image store.
     pub async fn list_images(&self) -> Result<Vec<ImageSummary>> {
         let store = self.open_image_store()?;

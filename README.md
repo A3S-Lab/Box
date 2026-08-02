@@ -91,8 +91,9 @@ unchanged.
 > construction, the resource guard validates the managed home, durably attaches
 > product volumes and networking, and installs a verified snapshot lower with
 > fail-closed rollback. The blocking Native Linux real-host gate now passes this
-> production owner composition through typed Rust SDK lifecycle, exec,
-> filesystem, stats, pause/resume, snapshot restore, restart, and cleanup.
+> production owner composition through the Rust, Python, TypeScript, and Go SDK
+> lifecycle, exec, filesystem, route-aware stats, pause/resume, snapshot
+> restore, restart, and cleanup surfaces.
 > Real-driver owner/Box process restart, WHPX composition, cross-process
 > process/filesystem recovery, remaining CLI projections, and the broader
 > cutover gates remain open; the default split above is still authoritative.
@@ -300,7 +301,7 @@ error before dispatch.
 | Linux MicroVM | Primary local path through KVM/libkrun; self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gate when `KVM_CI=true` | Hosted CI cannot prove a real KVM boot when the enrolled runner is absent |
 | macOS MicroVM | Apple Silicon/HVF build and packaging path | Real Apple Silicon/HVF release validation remains a separate host gate; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go local SDK exercises | Shared-kernel preview; VM-only controls are rejected |
+| Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route | Shared-kernel preview; VM-only controls are rejected |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
 | TEE | SEV-SNP-oriented application and protocol flows | Simulation is not hardware security evidence |
 

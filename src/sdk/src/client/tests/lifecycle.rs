@@ -114,16 +114,38 @@ impl a3s_box_core::ExecutionManager for RecordingExecutionManager {
         execution_id: &a3s_box_core::ExecutionId,
         generation: a3s_box_core::ExecutionGeneration,
     ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionStats> {
-        self.calls.lock().unwrap().push(LifecycleCall::Stats {
-            execution_id: execution_id.to_string(),
-            generation: generation.get(),
-        });
+        let sample = {
+            let mut calls = self.calls.lock().unwrap();
+            let sample = calls
+                .iter()
+                .filter(|call| matches!(call, LifecycleCall::Stats { .. }))
+                .count();
+            calls.push(LifecycleCall::Stats {
+                execution_id: execution_id.to_string(),
+                generation: generation.get(),
+            });
+            sample
+        };
+        let (timestamp_unix_ns, usage_ns, user_ns, system_ns) = if sample == 0 {
+            (1_000_000_000, 100_000_000, 60_000_000, 40_000_000)
+        } else {
+            (1_200_000_000, 300_000_000, 180_000_000, 120_000_000)
+        };
         Ok(a3s_box_core::ExecutionStats {
             execution_id: execution_id.clone(),
             generation,
-            timestamp_unix_ns: 1,
-            cpu: Default::default(),
-            memory: Default::default(),
+            timestamp_unix_ns,
+            cpu: a3s_box_core::ExecutionCpuStats {
+                usage_ns,
+                user_ns,
+                system_ns,
+                throttled_ns: 0,
+            },
+            memory: a3s_box_core::ExecutionMemoryStats {
+                usage_bytes: 256 * 1024 * 1024,
+                limit_bytes: Some(512 * 1024 * 1024),
+                peak_bytes: Some(300 * 1024 * 1024),
+            },
             process_count: 1,
             metrics: Default::default(),
         })
@@ -392,6 +414,116 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
             && operation_id == "sdk-resource-update"
             && update == &resource_update
     ));
+}
+
+#[tokio::test]
+async fn oci_sandbox_stats_project_exact_runtime_counters() {
+    use std::sync::Arc;
+
+    use a3s_box_core::{
+        resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
+        ExecutionIsolation, ExecutionLease, ExecutionReservation, OperationId,
+    };
+    use a3s_box_runtime::{ManagedExecutionMetadata, ManagedRuntimeRoute};
+    use chrono::Utc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap();
+    let mut config = BoxConfig {
+        image: "alpine:3.20".to_string(),
+        isolation: ExecutionIsolation::Sandbox,
+        ..BoxConfig::default()
+    };
+    config.resources.vcpus = 2;
+    config.resources.memory_mb = 512;
+    let request = CreateExecutionRequest {
+        external_sandbox_id: "sdk-runtime-stats".to_string(),
+        config: config.clone(),
+        labels: Default::default(),
+        policy: Default::default(),
+        rootfs_snapshot_id: None,
+    };
+    let plan = resolve_execution(&config).unwrap();
+    let reservation = ExecutionReservation {
+        execution_id: execution_id.clone(),
+        generation: ExecutionGeneration::INITIAL,
+        plan: plan.clone(),
+        resources: config.resources.clone(),
+        created_at: Utc::now(),
+    };
+    let lease = ExecutionLease {
+        execution_id: execution_id.clone(),
+        generation: ExecutionGeneration::INITIAL,
+        plan,
+        resources: config.resources,
+        started_at: Utc::now(),
+    };
+    let manager = Arc::new(RecordingExecutionManager {
+        calls: std::sync::Mutex::new(Vec::new()),
+        reservation,
+        lease,
+    });
+    let client = A3sBoxClient::with_execution_manager(
+        A3sBoxPaths::from_home(temp.path()),
+        manager.clone(),
+    );
+    let mut record = box_record(execution_id.as_str(), "api", "running");
+    let mut metadata = ManagedExecutionMetadata::new(
+        OperationId::new("sdk-runtime-stats-create").unwrap(),
+        ExecutionGeneration::INITIAL,
+        request,
+    )
+    .unwrap();
+    metadata.runtime_route = ManagedRuntimeRoute::OciSdk;
+    record.managed_execution = Some(metadata);
+    record.isolation = ExecutionIsolation::Sandbox;
+    record.pid = None;
+    record.cpus = 2;
+    record.memory_mb = 512;
+    write_boxes(&client, &[record]);
+
+    let stats = client
+        .get_sandbox_stats(&execution_id, ExecutionGeneration::INITIAL)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(stats.id, execution_id.as_str());
+    assert_eq!(stats.pid, 42);
+    assert_eq!(stats.cpus, 2);
+    assert_eq!(stats.cpu_percent, 100.0);
+    assert_eq!(stats.cpu_percent_scaled, 50.0);
+    assert_eq!(stats.memory_bytes, 256 * 1024 * 1024);
+    assert_eq!(stats.memory_limit_bytes, 512 * 1024 * 1024);
+    assert_eq!(stats.memory_percent, 50.0);
+
+    let error = client
+        .get_sandbox_stats(
+            &execution_id,
+            ExecutionGeneration::new(2).expect("second generation"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ClientError::Execution(a3s_box_core::ExecutionManagerError::Conflict { .. })
+    ));
+
+    let calls = manager.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, LifecycleCall::Stats { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, LifecycleCall::Processes { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

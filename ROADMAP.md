@@ -138,9 +138,9 @@ bridge and async Rust SDK constructor honor the explicit
 startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux CI invocation now
-passes the existing real Rust SDK Sandbox suite through this exact composition,
-including lifecycle, exec, filesystem, stats, pause/resume, snapshot restore,
-restart, and cleanup.
+passes the Rust, Python, TypeScript, and Go Sandbox suites through this exact
+composition, including lifecycle, exec, filesystem, route-aware stats,
+pause/resume, snapshot restore, restart, and cleanup.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
@@ -210,7 +210,8 @@ later gates.
 - [x] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
 - [x] Exercise the production composition on native Linux through the blocking
-  real-host Rust SDK lifecycle, session, snapshot, restart, and cleanup gate.
+  real-host Rust, Python, TypeScript, and Go SDK lifecycle, session, snapshot,
+  restart, and cleanup gate.
 - [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
@@ -278,9 +279,9 @@ exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
 one exec dispatch. Native Linux and utility-VM driver reattachment on real
 hosts remains part of the unchecked exit gate. The production Linux smoke now
-drives the typed SDK lifecycle, exec, filesystem, stats, pause/resume, snapshot,
-restart and cleanup surfaces; the command-specific projections listed above
-remain deliberately unchecked.
+drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
+route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
+command-specific projections listed above remain deliberately unchecked.
 
 ### B3 - Storage And Networking Attachments
 
