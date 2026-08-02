@@ -1233,12 +1233,42 @@ struct FakeBundleProvider {
     prepares: AtomicUsize,
     cleanups: AtomicUsize,
     invalid_console: AtomicBool,
+    expected_snapshot_lower: Mutex<Option<std::path::PathBuf>>,
+    snapshot_lower_observed: AtomicBool,
+    last_box_dir: Mutex<Option<std::path::PathBuf>>,
 }
 
 #[async_trait]
 impl OciBundleProvider for FakeBundleProvider {
     async fn prepare(&self, record: &BoxRecord) -> ExecutionManagerResult<OciPreparedExecution> {
         self.prepares.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_box_dir
+            .lock()
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))? =
+            Some(record.box_dir.clone());
+        if let Some(expected) = self
+            .expected_snapshot_lower
+            .lock()
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?
+            .as_ref()
+        {
+            let marker = std::fs::read_to_string(record.box_dir.join(".snapshot-lower")).map_err(
+                |error| {
+                    ExecutionManagerError::Internal(format!(
+                        "OCI bundle preparation did not receive a snapshot lower marker: {error}"
+                    ))
+                },
+            )?;
+            if std::path::Path::new(marker.trim()) != expected {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "OCI bundle preparation received snapshot lower {} instead of {}",
+                    marker.trim(),
+                    expected.display()
+                )));
+            }
+            self.snapshot_lower_observed.store(true, Ordering::SeqCst);
+        }
         let spec = serde_json::from_value(json!({
             "ociVersion": "1.3.0",
             "process": {
@@ -1503,23 +1533,72 @@ async fn preflight_requires_attachment_v1_before_store_or_preparation() {
 }
 
 #[tokio::test]
+async fn snapshot_restore_prepares_the_managed_lower_before_oci_bundle_creation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let home = directory.path().join("home");
+    let snapshot_id = install_managed_snapshot(&home, "oci-restore-source");
+    let expected_lower = home
+        .join("snapshots")
+        .join(snapshot_id.as_str())
+        .join("rootfs")
+        .canonicalize()
+        .expect("canonical snapshot rootfs");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    *provider
+        .expected_snapshot_lower
+        .lock()
+        .expect("expected snapshot lower lock") = Some(expected_lower.clone());
+    let manager = manager(&directory, test_endpoint(), service, provider.clone());
+    let mut restore = request("snapshot-restore", ExecutionIsolation::Sandbox);
+    restore.rootfs_snapshot_id = Some(snapshot_id);
+
+    let lease = manager
+        .create_and_start(restore, &box_operation("snapshot-restore-operation"))
+        .await
+        .expect("snapshot-backed OCI start");
+    let record = persisted(&manager, &lease.execution_id);
+
+    assert!(provider.snapshot_lower_observed.load(Ordering::SeqCst));
+    assert_eq!(
+        std::path::PathBuf::from(
+            std::fs::read_to_string(record.box_dir.join(".snapshot-lower"))
+                .expect("persisted snapshot lower marker")
+                .trim()
+        ),
+        expected_lower
+    );
+}
+
+#[tokio::test]
 async fn invalid_preparation_is_cleaned_before_runtime_create() {
     let directory = tempfile::tempdir().expect("temporary directory");
+    let home = directory.path().join("home");
+    let snapshot_id = install_managed_snapshot(&home, "invalid-oci-restore-source");
+    let expected_lower = home
+        .join("snapshots")
+        .join(snapshot_id.as_str())
+        .join("rootfs")
+        .canonicalize()
+        .expect("canonical snapshot rootfs");
     let service = Arc::new(FakeRuntimeService::launch_ready());
     let provider = Arc::new(FakeBundleProvider::default());
     provider.invalid_console.store(true, Ordering::SeqCst);
+    *provider
+        .expected_snapshot_lower
+        .lock()
+        .expect("expected snapshot lower lock") = Some(expected_lower);
     let manager = manager(
         &directory,
         test_endpoint(),
         service.clone(),
         provider.clone(),
     );
+    let mut restore = request("invalid-preparation", ExecutionIsolation::Sandbox);
+    restore.rootfs_snapshot_id = Some(snapshot_id);
 
     let error = manager
-        .create_and_start(
-            request("invalid-preparation", ExecutionIsolation::Sandbox),
-            &box_operation("invalid-preparation-operation"),
-        )
+        .create_and_start(restore, &box_operation("invalid-preparation-operation"))
         .await
         .expect_err("provider must not change durable preparation fields");
 
@@ -1531,6 +1610,13 @@ async fn invalid_preparation_is_cleaned_before_runtime_create() {
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
     assert!(service.create_requests().is_empty());
     assert_eq!(service.container_count(), 0);
+    let box_dir = provider
+        .last_box_dir
+        .lock()
+        .expect("last box directory lock")
+        .clone()
+        .expect("prepared box directory");
+    assert!(!box_dir.join(".snapshot-lower").exists());
 }
 
 #[tokio::test]
@@ -4012,6 +4098,25 @@ fn persisted(manager: &LocalExecutionManager, execution_id: &ExecutionId) -> Box
         .get(execution_id)
         .expect("read managed store")
         .expect("persisted execution")
+}
+
+fn install_managed_snapshot(home: &std::path::Path, id: &str) -> ExecutionSnapshotId {
+    let snapshot_id = ExecutionSnapshotId::new(id).expect("snapshot ID");
+    let source = home.join(format!("{id}-rootfs-source"));
+    std::fs::create_dir_all(&source).expect("snapshot source rootfs");
+    std::fs::write(source.join("captured.txt"), b"captured").expect("snapshot source marker");
+    let mut metadata = a3s_box_core::SnapshotMetadata::new(
+        id.to_string(),
+        id.to_string(),
+        "source-execution".to_string(),
+        "alpine:3.20".to_string(),
+    );
+    metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
+    crate::SnapshotStore::new(&home.join("snapshots"))
+        .expect("snapshot store")
+        .save(metadata, &source)
+        .expect("published managed snapshot");
+    snapshot_id
 }
 
 fn request(external_id: &str, isolation: ExecutionIsolation) -> CreateExecutionRequest {

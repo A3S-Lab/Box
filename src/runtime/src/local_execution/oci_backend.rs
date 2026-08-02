@@ -34,6 +34,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::resources::ExecutionResourceGuard;
 use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
     LocalExecutionTermination,
@@ -1129,6 +1130,42 @@ impl OciLocalExecutionBackend {
     }
 }
 
+fn managed_resource_home(record: &BoxRecord) -> ExecutionManagerResult<PathBuf> {
+    let boxes = record.box_dir.parent().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "managed OCI execution {} has no boxes directory",
+            record.id
+        ))
+    })?;
+    let home = boxes.parent().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "managed OCI execution {} has no runtime home directory",
+            record.id
+        ))
+    })?;
+    if boxes.file_name().and_then(|name| name.to_str()) != Some("boxes")
+        || home.join("boxes").join(&record.id) != record.box_dir
+    {
+        return Err(ExecutionManagerError::Internal(format!(
+            "managed OCI execution {} has an unexpected host directory {}",
+            record.id,
+            record.box_dir.display()
+        )));
+    }
+    Ok(home.to_path_buf())
+}
+
+async fn rollback_execution_resources(resources: ExecutionResourceGuard, record: &BoxRecord) {
+    let execution_id = record.id.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || resources.rollback()).await {
+        tracing::warn!(
+            %execution_id,
+            %error,
+            "Managed OCI resource rollback task failed"
+        );
+    }
+}
+
 #[async_trait]
 impl LocalExecutionBackend for OciLocalExecutionBackend {
     fn route_for_create(
@@ -1166,9 +1203,29 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         }
 
         let info = self.adapter.require_isolation(record.isolation).await?;
-        let prepared = self.provider.prepare(record).await?;
+        let resource_home = managed_resource_home(record)?;
+        let resource_record = record.clone();
+        let resources = tokio::task::spawn_blocking(move || {
+            ExecutionResourceGuard::prepare(&resource_home, &resource_record)
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "managed OCI resource preparation task failed for {}: {error}",
+                record.id
+            ))
+        })??;
+        let prepared = match self.provider.prepare(record).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                rollback_execution_resources(resources, record).await;
+                return Err(error);
+            }
+        };
         if let Err(error) = prepared.validate_for(record) {
-            return match self.provider.cleanup(record).await {
+            let cleanup = self.provider.cleanup(record).await;
+            rollback_execution_resources(resources, record).await;
+            return match cleanup {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(ExecutionManagerError::Internal(format!(
                     "{error}; Box OCI preparation cleanup also failed: {cleanup}"
@@ -1190,25 +1247,37 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
             .await;
         match launch {
             Ok(launch) if *launch.record.state.status() == ContainerState::Running => {
+                resources.disarm();
                 Ok(self.handle(record, launch.binding, console_log, anonymous_volumes))
             }
-            Ok(_) => Err(ExecutionManagerError::Unavailable(format!(
-                "execution {execution_id} completed while A3S OCI startup was being published"
-            ))),
+            Ok(_) => {
+                // A runtime generation exists and owns the prepared rootfs even
+                // when it completed before Box could publish Running. Terminal
+                // reconciliation performs the normal provider/resource cleanup.
+                resources.disarm();
+                Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {execution_id} completed while A3S OCI startup was being published"
+                )))
+            }
             Err(error) => {
                 // Unknown create/start outcomes must be reconciled, not erased.
                 // Cleanup product preparation only when the runtime proves no
                 // current generation exists for the deterministic ID.
                 match self.adapter.state_current(&execution_id).await {
-                    Ok(Some(_)) => return Err(error),
+                    Ok(Some(_)) => {
+                        resources.disarm();
+                        return Err(error);
+                    }
                     Err(reconcile_error) => {
+                        resources.disarm();
                         return Err(ExecutionManagerError::Unavailable(format!(
                             "{error}; A3S OCI launch ownership could not be reconciled and Box preparation was retained: {reconcile_error}"
-                        )))
+                        )));
                     }
                     Ok(None) => {}
                 }
                 let cleanup = self.provider.cleanup(record).await;
+                rollback_execution_resources(resources, record).await;
                 match cleanup {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(ExecutionManagerError::Internal(format!(
