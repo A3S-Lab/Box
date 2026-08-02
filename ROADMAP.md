@@ -113,13 +113,17 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`aac259224e89bef2b546fd0f8755ef1ba79570ce` adds the matching long-lived,
+`a6f6242caf927f404f7e1f7f143fd3a350ce23b6` adds the matching long-lived,
 multi-container Native Linux host owner. Box now has a production provider that
 prepares the product-owned rootfs, mounts, resources, DNS/hostname files and
 OCI bundle while compiling the image process directly, without the legacy
 guest-init FD 3/4/5 contract. It resolves PATH, working directory, named or
 numeric users/groups, supplementary groups, HOME and capabilities against the
 prepared rootfs before mutation is handed to Runtime.
+The same pinned revision executes file and filesystem calls through a bounded,
+parent-bound helper inside the retained user and mount namespaces, so
+descriptor-confined operations preserve container IDs on rootfs, bind,
+ID-mapped and tmpfs mounts.
 
 The Linux owner composition validates an absolute private root, serializes
 startup across processes, records the exact PID start identity and pinned
