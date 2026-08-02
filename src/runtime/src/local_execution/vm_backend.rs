@@ -100,6 +100,12 @@ impl VmLocalExecutionBackend {
         metadata
             .validate()
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        if metadata.runtime_route == crate::ManagedRuntimeRoute::OciSdk {
+            return Err(ExecutionManagerError::Internal(format!(
+                "managed execution {} is pinned to the A3S OCI SDK route",
+                record.id
+            )));
+        }
         if record.isolation != metadata.request.config.isolation {
             return Err(ExecutionManagerError::Internal(format!(
                 "managed execution {} has inconsistent isolation metadata",
@@ -587,6 +593,13 @@ async fn destroy_after_observation(
 
 #[async_trait]
 impl LocalExecutionBackend for VmLocalExecutionBackend {
+    fn route_for_create(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<crate::ManagedRuntimeRoute> {
+        Ok(crate::ManagedRuntimeRoute::BoxVm)
+    }
+
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         super::record::validate_record_health(record)?;
         self.metadata(record)?;

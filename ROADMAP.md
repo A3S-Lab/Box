@@ -104,6 +104,20 @@ exec dispatch. OCI Runtime independently proves the same process target through
 its durable `HostRuntimeService` and operation journal across two processes.
 Real driver state and production owner wiring remain below.
 
+The backend-neutral manager now also has one durable migration router with
+three explicit creation policies: retain both current paths, route only
+Sandbox through the unified OCI adapter, or route both isolation choices.
+Every new record is stamped with `box_vm` or `oci_sdk` before backend preflight
+and persists that choice with its reservation before launch side effects. All
+later lifecycle, session, observability, filesystem, restart, and cleanup calls
+use that record-level choice and never fall back after an error. Records written
+before this field are recovered from an exact OCI binding or the absence of a
+Box-owned exec endpoint. The pinned OCI Runtime revision
+`aac259224e89bef2b546fd0f8755ef1ba79570ce` adds the matching long-lived,
+multi-container Native Linux host owner. Shipped CLI/SDK construction still
+uses the current split until Box production bundle preparation is connected to
+that owner.
+
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
 persists a claim-scoped mutation identity and combines it with the current Box
@@ -153,9 +167,10 @@ Exit gate: the target architecture compiles behind an opt-in migration flag,
 and dependency checks prove that Box imports no OCI Runtime implementation
 crate.
 
-The dependency check currently resolves only `a3s-oci-sdk` and its public core
-types from the OCI Runtime repository. The exit gate remains open until the
-explicit production migration flag is complete.
+The dependency check resolves only `a3s-oci-sdk` and its public core types from
+the OCI Runtime repository. The typed opt-in composition and durable selection
+now satisfy this boundary gate; production activation remains a B1 cutover
+gate and is not implied by compiling the router.
 
 ### B1 - OCI Runtime Vertical Slice
 
@@ -180,9 +195,11 @@ restarts the real platform IPC server behind a retained backend and proves
 next-call reconnect plus exact reconciliation without duplicate launch. The
 process contract then replaces the owner with a distinct child process that
 reopens disk-backed state, while OCI Runtime separately proves the real durable
-host service and journal reopen across processes. The remaining unchecked gate
-requires production owner wiring and the same bundle on real native Linux and
-WHPX hosts; deterministic process evidence is not promoted as platform-driver
+host service and journal reopen across processes. OCI Runtime now exposes the
+long-lived Native Linux owner and Box now persists fail-closed mixed-backend
+routing. The remaining unchecked gate requires Box's production bundle
+provider/owner composition and the same bundle on real native Linux and WHPX
+hosts; deterministic process evidence is not promoted as platform-driver
 evidence.
 
 ### B2 - Interactive And Observable Execution

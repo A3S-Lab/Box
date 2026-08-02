@@ -43,6 +43,15 @@ The current 3.2 execution model has two explicit paths:
 There is no silent fallback between them. The request, resolved backend, and
 policy are persisted so restart recovery cannot reinterpret the workload.
 
+The runtime crate now also exposes an explicit `OciMigrationPolicy` and
+`LocalExecutionBackendRouter` for the phased cutover. New records are stamped
+with `box_vm` or `oci_sdk` before capability preflight and persist that choice
+with the reservation before launch side effects. Later policy changes cannot
+reroute their lifecycle, recovery, or cleanup, and a selected OCI failure is
+never retried on the Box backend. Shipped CLI and SDK construction still use
+the two current paths above until production bundle preparation is wired to the
+pinned runtime host owner.
+
 > [!NOTE]
 > The current SDK-only Sandbox adapter now covers four exact-generation rails:
 >
@@ -71,8 +80,10 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > through the replacement owner. Raw runtime output stays separate from
 > structured Box logs. The pinned runtime qualification now exercises binary
 > file transfer and descriptor-confined mkdir/stat/list/move/remove against its
-> real native and utility-VM drivers before the Box SDK suite runs. Production
-> owner wiring, cross-process native Linux/WHPX process-and-filesystem recovery,
+> real native and utility-VM drivers before the Box SDK suite runs. The pinned
+> runtime now supplies a long-lived multi-container Native Linux host owner and
+> Box supplies durable fail-closed migration routing. Production bundle/owner
+> composition, cross-process native Linux/WHPX process-and-filesystem recovery,
 > and the broader cutover gates remain open; the current split above is still
 > authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
@@ -298,8 +309,11 @@ unknown request, then reconnects to the persisted endpoint and renegotiates on
 the next explicit retry or reconciliation. The process-boundary contract keeps
 that same backend alive while two child owners exchange disk-backed runtime
 state, proving exact Box reconciliation and continued use of one live exec
-stream without duplicate launch. Solid current behavior and the phased cutover
-gates are kept separate in
+stream without duplicate launch. The migration router stamps its selection
+before backend preflight, persists it with the successful reservation, routes
+old OCI records from their binding or empty Box endpoint evidence, and never
+consults the current rollout policy again for an explicitly routed record.
+Solid current behavior and the phased cutover gates are kept separate in
 [ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
 platform capability.
 

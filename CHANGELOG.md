@@ -21,6 +21,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Durable fail-closed OCI migration routing.** New managed records can now be
+  composed through `LegacyOnly`, `SandboxViaOci`, or `AllViaOci` policy. The
+  router stamps `box_vm` or `oci_sdk` before capability preflight, persists it
+  with the reservation before launch side effects, dispatches every later
+  lifecycle/session/observability/filesystem operation from that record instead
+  of the current rollout policy, preserves pre-routing OCI and Box records
+  through durable evidence, and never tries the alternate backend after
+  failure. The pinned OCI Runtime now also provides the long-lived
+  multi-container Native Linux host owner needed by the next production bundle
+  wiring slice.
 - **Out-of-process OCI owner reconciliation.** A cross-platform contract now
   launches two distinct runtime-owner fixture processes on one local endpoint.
   The first persists the exact runtime generation, starts a streaming exec, and

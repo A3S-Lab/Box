@@ -31,6 +31,15 @@ behind A3S OCI Runtime: `microvm` requests `DedicatedVm`, while `sandbox`
 requests `SharedHostKernel`. The current direct libkrun path is removed only
 after the replacement passes the cross-platform parity and recovery gates.
 
+The runtime crate contains the phased-cutover router used to reach that target.
+An explicit policy selects only new records, stamps `box_vm` or `oci_sdk`
+before capability preflight, persists it with the successful reservation before
+launch side effects, and never retries a selected failure on the other backend.
+Recovery and cleanup use the persisted route; pre-routing records are inferred
+from their exact OCI binding or retained Box endpoint evidence. The shipped CLI
+and SDK still construct the current backend while production bundle preparation
+is connected to OCI Runtime's multi-container Native Linux owner.
+
 ## Completed migration
 
 Box now:
@@ -50,7 +59,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`f60d5c12c5fa4cdd19974f075e895f16058e5292`, which retains the qualified
+`aac259224e89bef2b546fd0f8755ef1ba79570ce`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup

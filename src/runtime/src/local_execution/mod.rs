@@ -19,6 +19,9 @@ mod recovery;
 mod remove;
 mod resources;
 mod restart;
+mod router;
+#[cfg(test)]
+mod router_tests;
 #[cfg(unix)]
 mod session;
 mod session_support;
@@ -51,6 +54,7 @@ pub use oci_backend::{
     OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 use record::{build_managed_record, status_from_record};
+pub use router::{LocalExecutionBackendRouter, OciMigrationPolicy};
 use store::RuntimeUpdate;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 pub(crate) use transient_registry_auth::{TransientRegistryAuthBroker, TransientRegistryAuthLease};
@@ -163,6 +167,23 @@ impl LocalExecutionManager {
             home_dir.clone(),
             Arc::new(VmLocalExecutionBackend::new(home_dir)),
         )
+    }
+
+    /// Compose the retained Box backend with an explicitly supplied OCI SDK
+    /// backend. The policy affects new reservations only; every selected route
+    /// is persisted before preflight and remains authoritative after restart.
+    #[cfg(feature = "vm")]
+    pub fn with_oci_migration_backend(
+        state_path: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        oci_backend: Arc<dyn LocalExecutionBackend>,
+        policy: OciMigrationPolicy,
+    ) -> Self {
+        let home_dir = home_dir.into();
+        let legacy: Arc<dyn LocalExecutionBackend> =
+            Arc::new(VmLocalExecutionBackend::new(home_dir.clone()));
+        let router = LocalExecutionBackendRouter::new(legacy, oci_backend, policy);
+        Self::new(state_path, home_dir, Arc::new(router))
     }
 }
 

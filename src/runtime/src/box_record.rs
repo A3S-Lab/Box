@@ -354,6 +354,13 @@ pub struct ManagedExecutionMetadata {
     /// generations remain separate and this field is cleared after teardown.
     #[serde(default)]
     pub oci_runtime: Option<crate::local_execution::OciRuntimeBinding>,
+    /// Product-selected lifecycle route for every generation of this record.
+    ///
+    /// `Unspecified` is retained only for records written before production
+    /// routing existed. New concrete backends persist an exact route before
+    /// the reservation is published.
+    #[serde(default, skip_serializing_if = "ManagedRuntimeRoute::is_unspecified")]
+    pub runtime_route: ManagedRuntimeRoute,
     /// Backend resolution validated before any launch side effects.
     pub plan: ResolvedExecutionPlan,
     /// Lifecycle side effect claimed before calling the backend.
@@ -374,6 +381,25 @@ pub struct ManagedExecutionMetadata {
     /// warm pauses, so the backwards-compatible default is `true`.
     #[serde(default = "default_paused_with_memory")]
     pub paused_with_memory: bool,
+}
+
+/// Durable Box-side selection of the lifecycle implementation for one record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedRuntimeRoute {
+    /// Compatibility marker for records created before explicit routing.
+    #[default]
+    Unspecified,
+    /// Box's existing in-process VM/Sandbox ownership path.
+    BoxVm,
+    /// The public A3S OCI SDK and its out-of-process host service.
+    OciSdk,
+}
+
+impl ManagedRuntimeRoute {
+    pub const fn is_unspecified(&self) -> bool {
+        matches!(self, Self::Unspecified)
+    }
 }
 
 /// Recoverable backend operation associated with a transitional state.
@@ -464,6 +490,7 @@ impl ManagedExecutionMetadata {
             generation,
             request,
             oci_runtime: None,
+            runtime_route: ManagedRuntimeRoute::Unspecified,
             plan,
             pending_operation: None,
             last_restart: None,
@@ -490,6 +517,11 @@ impl ManagedExecutionMetadata {
             ));
         }
         if let Some(binding) = &self.oci_runtime {
+            if self.runtime_route == ManagedRuntimeRoute::BoxVm {
+                return Err(a3s_box_core::BoxError::StateError(
+                    "Box VM-routed execution contains an A3S OCI binding".to_string(),
+                ));
+            }
             binding
                 .validate()
                 .map_err(|error| a3s_box_core::BoxError::StateError(error.to_string()))?;
@@ -836,6 +868,39 @@ mod tests {
         );
         assert_eq!(encoded["managed_execution"]["generation"], 1);
         assert_eq!(encoded["managed_execution"]["paused_with_memory"], true);
+        assert!(encoded["managed_execution"].get("runtime_route").is_none());
+        assert_eq!(managed.runtime_route, ManagedRuntimeRoute::Unspecified);
+    }
+
+    #[test]
+    fn managed_runtime_route_is_exact_and_legacy_compatible() {
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-route").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-route".to_string(),
+                config: a3s_box_core::BoxConfig {
+                    image: "alpine:latest".to_string(),
+                    isolation: ExecutionIsolation::Sandbox,
+                    ..Default::default()
+                },
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.runtime_route = ManagedRuntimeRoute::OciSdk;
+
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(encoded["runtime_route"], "oci_sdk");
+        let decoded: ManagedExecutionMetadata = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.runtime_route, ManagedRuntimeRoute::OciSdk);
+
+        let mut legacy = serde_json::to_value(decoded).unwrap();
+        legacy.as_object_mut().unwrap().remove("runtime_route");
+        let decoded: ManagedExecutionMetadata = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.runtime_route, ManagedRuntimeRoute::Unspecified);
     }
 
     #[test]

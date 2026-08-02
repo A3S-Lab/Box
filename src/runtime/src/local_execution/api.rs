@@ -21,13 +21,23 @@ impl ExecutionManager for LocalExecutionManager {
         operation_id: &OperationId,
     ) -> ExecutionManagerResult<ExecutionReservation> {
         let execution_id = ExecutionId::new(uuid::Uuid::new_v4().to_string())?;
-        let record = build_managed_record(
+        let mut record = build_managed_record(
             &self.home_dir,
             &execution_id,
             operation_id.clone(),
             request,
             chrono::Utc::now(),
         )?;
+        let route = self.backend.route_for_create(&record)?;
+        record
+            .managed_execution
+            .as_mut()
+            .ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "new execution {execution_id} has no managed lifecycle metadata"
+                ))
+            })?
+            .runtime_route = route;
         self.backend.preflight(&record).await?;
         let reservation = self.reserve(record).await?;
         super::record::reservation_from_record(reservation.record())

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::local_execution::OciRuntimeBinding;
-use crate::BoxRecord;
+use crate::{BoxRecord, ManagedRuntimeRoute};
 
 /// Runtime evidence persisted after an execution becomes ready.
 #[derive(Debug, Clone)]
@@ -97,6 +97,15 @@ impl LocalExecutionObservation {
 /// external sandbox ID in managed metadata is an untrusted diagnostic label.
 #[async_trait]
 pub trait LocalExecutionBackend: Send + Sync {
+    /// Select the durable route for a new record before capability preflight.
+    ///
+    /// Custom test or embedding backends may leave the route unspecified. Box
+    /// production backends must return an exact route so a later policy change
+    /// cannot reinterpret a claimed or stopped generation.
+    fn route_for_create(&self, _record: &BoxRecord) -> ExecutionManagerResult<ManagedRuntimeRoute> {
+        Ok(ManagedRuntimeRoute::Unspecified)
+    }
+
     /// Reject an unsupported execution before its durable reservation is
     /// published. Backends must repeat mutable capability checks at launch.
     async fn preflight(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {

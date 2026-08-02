@@ -71,17 +71,17 @@ pub use a3s_runtime_driver::{
 pub use box_record::{
     BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionOperation,
     ManagedExecutionState, ManagedResourceUpdateCompletion, ManagedRestartCompletion,
-    ManagedRestartOutcome,
+    ManagedRestartOutcome, ManagedRuntimeRoute,
 };
 pub use box_state::BoxStateStore;
 #[cfg(feature = "vm")]
 pub use local_execution::VmLocalExecutionBackend;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
-    LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
-    LocalExecutionTermination, OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend,
-    OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
-    OCI_RUNTIME_BINDING_SCHEMA_VERSION,
+    LocalExecutionBackendRouter, LocalExecutionHandle, LocalExecutionManager,
+    LocalExecutionObservation, LocalExecutionTermination, OciBundleProvider, OciLifecycleAdapter,
+    OciLocalExecutionBackend, OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding,
+    OciRuntimeEndpoint, OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,

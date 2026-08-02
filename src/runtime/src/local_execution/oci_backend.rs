@@ -1024,6 +1024,12 @@ impl OciLocalExecutionBackend {
         metadata
             .validate()
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        if metadata.runtime_route == crate::ManagedRuntimeRoute::BoxVm {
+            return Err(ExecutionManagerError::Internal(format!(
+                "managed execution {} is pinned to the Box VM route",
+                record.id
+            )));
+        }
         Ok(metadata)
     }
 
@@ -1125,6 +1131,13 @@ impl OciLocalExecutionBackend {
 
 #[async_trait]
 impl LocalExecutionBackend for OciLocalExecutionBackend {
+    fn route_for_create(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<crate::ManagedRuntimeRoute> {
+        Ok(crate::ManagedRuntimeRoute::OciSdk)
+    }
+
     async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.metadata(record)?;
         self.adapter.require_isolation(record.isolation).await?;
