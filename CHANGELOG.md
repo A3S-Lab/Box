@@ -21,6 +21,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Native Linux aarch64 production-owner qualification.** Box revision
+  `a16772c3` now runs the same pinned OCI Runtime `a6cdae7` revision on native
+  x86_64 and aarch64 Ubuntu hosts, builds the architecture-matched musl guest
+  init, and drives the Rust, Python, TypeScript, and Go SDK surfaces through the
+  production owner route. Both blocking lanes also kill the exact owner and use
+  fresh Box processes to prove stopped-only reconciliation, exact cleanup, endpoint
+  rebinding, and next-generation restart. The cancellation replay scenario now
+  releases its retained workload with an explicit marker only after the caller
+  is cancelled and its durable receipt is observed, removing a host-speed race
+  without weakening the replay assertion.
 - **Durable fail-closed OCI migration routing.** New managed records can now be
   composed through `LegacyOnly`, `SandboxViaOci`, or `AllViaOci` policy. The
   router stamps `box_vm` or `oci_sdk` before capability preflight, persists it

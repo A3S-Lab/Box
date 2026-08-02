@@ -106,8 +106,9 @@ generations are unaffected.
 
 ### Box integration gate
 
-The `SDK Local Sandbox (A3S OCI Runtime)` job runs on Ubuntu without KVM and
-must:
+The `SDK Local Sandbox (A3S OCI Runtime)` and
+`SDK Local Sandbox (A3S OCI Runtime, aarch64)` checks run on native Ubuntu
+x86_64 and aarch64 hosts without KVM. Each must:
 
 1. check out the exact pinned OCI Runtime revision;
 2. run its native Linux qualification script;
@@ -142,8 +143,9 @@ The pinned OCI Runtime qualification must exercise real containers for:
 - PID, mount, cgroup, namespace, owner, and session cleanup.
 
 The same script runs on Linux x86_64 and Linux aarch64 in the OCI Runtime
-repository. Box additionally runs it for the exact dependency revision on its
-Linux x86_64 integration lane.
+repository. Box additionally runs it for the exact dependency revision on both
+native architecture integration lanes before exercising the production owner
+composition.
 
 ### Cross-platform gates
 
@@ -189,10 +191,17 @@ The replacement is complete when all of the following are true:
 - [x] Linux x86_64/aarch64, macOS arm64, and Windows x86_64 builds remain gated.
 - [x] The change's pull-request and main-branch CI runs are green.
 
-The accepted replacement evidence is Box
+The accepted production-adapter evidence remains Box
 `2cbe588b2bc6255ffa700bd0f9dbce451dafe02e`: its
 [pull-request CI run](https://github.com/A3S-Lab/Box/actions/runs/30747729543)
 and its
 [main-branch CI run](https://github.com/A3S-Lab/Box/actions/runs/30748314872)
-both completed successfully. Later documentation-only commits do not replace
-that qualified code revision.
+both completed successfully. The dual-architecture qualification evidence is
+Box `a16772c399528a6c4eaf584767f6000ca4e53f16`: its
+[pull-request CI run](https://github.com/A3S-Lab/Box/actions/runs/30754808084)
+and its
+[main-branch CI run](https://github.com/A3S-Lab/Box/actions/runs/30755797650)
+both completed successfully with the x86_64 and aarch64 real-host lanes. That
+later revision changes only the CI matrix, deterministic recovery conformance
+fixture, and plan documentation relative to the qualified production adapter.
+Later documentation-only commits do not replace either evidence revision.
