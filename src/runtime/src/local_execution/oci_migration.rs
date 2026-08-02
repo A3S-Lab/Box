@@ -147,13 +147,13 @@ impl LocalExecutionManager {
             }
             let provider = Arc::new(provider);
             let oci = Arc::new(OciLocalExecutionBackend::connect(endpoint, provider).await?);
-            return Ok(Self::with_oci_migration_backend_and_pull_progress(
+            Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
                 home_dir,
                 oci,
                 OciMigrationPolicy::SandboxViaOci,
                 pull_progress_fn,
-            ));
+            ))
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -266,8 +266,7 @@ fn default_service_root(home_dir: &Path) -> PathBuf {
         let digest = Sha256::digest(home_dir.as_os_str().as_bytes());
         // SAFETY: geteuid has no preconditions or failure result.
         let uid = unsafe { libc::geteuid() };
-        return std::env::temp_dir()
-            .join(format!("a3s-box-oci-{uid}-{}", hex::encode(&digest[..6])));
+        std::env::temp_dir().join(format!("a3s-box-oci-{uid}-{}", hex::encode(&digest[..6])))
     }
 
     #[cfg(not(target_os = "linux"))]

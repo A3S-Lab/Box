@@ -181,7 +181,6 @@ async fn wait_until_ready(
     mut child: Option<&mut Child>,
 ) -> ExecutionManagerResult<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
-    let mut last_error = None;
     loop {
         if let Some(child) = child.as_deref_mut() {
             match child.try_wait() {
@@ -198,18 +197,18 @@ async fn wait_until_ready(
                 }
             }
         }
-        match OciLifecycleAdapter::connect(endpoint.clone()).await {
+        let last_error = match OciLifecycleAdapter::connect(endpoint.clone()).await {
             Ok(adapter) => match adapter.require_isolation(ExecutionIsolation::Sandbox).await {
                 Ok(_) => return Ok(()),
-                Err(error) => last_error = Some(error.to_string()),
+                Err(error) => error.to_string(),
             },
-            Err(error) => last_error = Some(error.to_string()),
-        }
+            Err(error) => error.to_string(),
+        };
         if Instant::now() >= deadline {
             return Err(ExecutionManagerError::Unavailable(format!(
                 "native Linux OCI owner did not publish a launch-ready SDK endpoint within {} ms: {}",
                 STARTUP_TIMEOUT.as_millis(),
-                last_error.unwrap_or_else(|| "endpoint unavailable".to_string())
+                last_error
             )));
         }
         tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
@@ -250,7 +249,6 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
 
 fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
     let file = std::fs::OpenOptions::new()
-        .write(true)
         .create(true)
         .append(true)
         .mode(0o600)
