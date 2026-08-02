@@ -187,7 +187,12 @@ The replacement is complete when all of the following are true:
 - [x] Sandbox resource creation, live update, OOM isolation, and cleanup have
   one A3S OCI owner and no guest cgroupfs write path.
 - [x] Linux x86_64/aarch64, macOS arm64, and Windows x86_64 builds remain gated.
-- [ ] The change's pull-request and main-branch CI runs are green.
+- [x] The change's pull-request and main-branch CI runs are green.
 
-The final unchecked item is evidence, not an implementation fallback. It must
-be updated only from completed GitHub Actions runs for the exact commit.
+The accepted replacement evidence is Box
+`2cbe588b2bc6255ffa700bd0f9dbce451dafe02e`: its
+[pull-request CI run](https://github.com/A3S-Lab/Box/actions/runs/30747729543)
+and its
+[main-branch CI run](https://github.com/A3S-Lab/Box/actions/runs/30748314872)
+both completed successfully. Later documentation-only commits do not replace
+that qualified code revision.
