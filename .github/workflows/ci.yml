@@ -387,8 +387,20 @@ jobs:
 
   # ── Real shared-kernel local SDK gate ──────────────────────────
   sdk-local-sandbox:
-    name: SDK Local Sandbox (A3S OCI Runtime)
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.job_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job_name: SDK Local Sandbox (A3S OCI Runtime)
+            os: ubuntu-24.04
+            guest_target: x86_64-unknown-linux-musl
+            recovery_artifact: a3s-box-native-owner-recovery
+          - job_name: SDK Local Sandbox (A3S OCI Runtime, aarch64)
+            os: ubuntu-24.04-arm
+            guest_target: aarch64-unknown-linux-musl
+            recovery_artifact: a3s-box-native-owner-recovery-aarch64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
       A3S_HOME: /tmp/a3s-local-sdk-smoke-runtime-conformance
@@ -423,7 +435,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential musl-tools protobuf-compiler
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add "${{ matrix.guest_target }}"
           sed -nE \
             's/^[[:space:]]*pub fn (krun_[A-Za-z0-9_]+).*/long \1(void) { return -1; }/p' \
             src/deps/libkrun-sys/src/lib.rs \
@@ -440,7 +452,7 @@ jobs:
           cd src
           cargo build --locked -p a3s-box-cli -p a3s-box-shim
           cargo build --locked --release -p a3s-box-guest-init \
-            --target x86_64-unknown-linux-musl
+            --target "${{ matrix.guest_target }}"
           cd ../oci-runtime
           cargo build --locked --release -p a3s-oci-cli -p a3s-oci-agent
       - name: Install R17 runtime artifacts and host identity ranges
@@ -449,7 +461,7 @@ jobs:
           sudo install -m 755 src/target/debug/a3s-box-shim \
             "$A3S_HOME/bin/a3s-box-shim"
           sudo install -m 755 \
-            src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init \
+            "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" \
             "$A3S_HOME/bin/a3s-box-guest-init"
           sudo install -m 755 oci-runtime/target/release/a3s-oci "$A3S_BOX_OCI_RUNTIME_PATH"
           sudo install -m 755 oci-runtime/target/release/a3s-oci-agent "$A3S_BOX_OCI_AGENT_PATH"
@@ -534,7 +546,7 @@ jobs:
               A3S_BOX_OCI_OWNER_RECOVERY_REPORT="$A3S_BOX_OCI_OWNER_RECOVERY_REPORT" \
               A3S_BOX_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box" \
               A3S_BOX_SHIM_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box-shim" \
-              A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init" \
+              A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" \
               RUST_MIN_STACK=16777216 \
               PYTHON=python3 \
               GO=go \
@@ -559,7 +571,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: a3s-box-native-owner-recovery
+          name: ${{ matrix.recovery_artifact }}
           path: ${{ env.A3S_BOX_OCI_OWNER_RECOVERY_REPORT }}
           if-no-files-found: warn
           retention-days: 14
