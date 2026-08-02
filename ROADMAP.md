@@ -137,12 +137,12 @@ bridge and async Rust SDK constructor honor the explicit
 `A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
 startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
-of requiring Box guest sockets. The blocking native-Linux CI invocation now
-passes the Rust, Python, TypeScript, and Go Sandbox suites through this exact
-composition, including lifecycle, exec, filesystem, route-aware stats,
+of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
+lanes now pass the Rust, Python, TypeScript, and Go Sandbox suites through this
+exact composition, including lifecycle, exec, filesystem, route-aware stats,
 pause/resume, snapshot restore, restart, and cleanup.
-That blocking gate also sends `SIGKILL` to the exact recorded Native Linux OCI
-owner while a real Sandbox generation is running. It verifies the owner,
+Both blocking lanes also send `SIGKILL` to the exact recorded Native Linux OCI
+owner while a real Sandbox generation is running. They verify the owner,
 launcher, and init identities terminate; a fresh Box SDK-bridge process then
 rebinds a distinct owner and reconciles the exact runtime tombstone as stopped
 without a fabricated exit code before deleting only that stopped generation.
@@ -219,12 +219,13 @@ later gates.
   digests required for reconciliation.
 - [x] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
-- [x] Exercise the production composition on native Linux through the blocking
-  real-host Rust, Python, TypeScript, and Go SDK lifecycle, session, snapshot,
-  restart, and cleanup gate.
-- [x] Kill the real Native Linux owner under a running Sandbox and prove fresh
-  Box processes reconcile stopped-only state, exact cleanup, endpoint rebinding,
-  and next-generation restart without inventing terminal evidence.
+- [x] Exercise the production composition on native Linux x86_64 and aarch64
+  through the blocking real-host Rust, Python, TypeScript, and Go SDK lifecycle,
+  session, snapshot, restart, and cleanup lanes.
+- [x] Kill the real Native Linux owner under a running Sandbox on x86_64 and
+  aarch64 and prove fresh Box processes reconcile stopped-only state, exact
+  cleanup, endpoint rebinding, and next-generation restart without inventing
+  terminal evidence.
 - [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
@@ -241,11 +242,11 @@ host service and journal reopen across processes. OCI Runtime now exposes the
 long-lived Native Linux owner, and Box now supplies fail-closed mixed-backend
 routing, verified product-resource preparation, a direct-process production
 bundle provider, protected owner startup, and explicit CLI/SDK construction.
-The real-host Native Linux production composition and owner/Box process restart
-gate now pass. The remaining B1 platform gate is the equivalent WHPX production
-path; the deterministic live-session fixtures are not promoted as proof that a
-real driver can transparently retain process or filesystem sessions after its
-owner dies.
+The real-host Native Linux x86_64 and aarch64 production composition and
+owner/Box process restart lanes now pass. The remaining B1 platform gate is the
+equivalent WHPX production path; the deterministic live-session fixtures are
+not promoted as proof that a real driver can transparently retain process or
+filesystem sessions after its owner dies.
 
 ### B2 - Interactive And Observable Execution
 

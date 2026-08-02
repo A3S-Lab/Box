@@ -94,12 +94,12 @@ unchanged.
 > `PATH` to resolve `argv[0]` against that prepared rootfs before OCI dispatch,
 > preserving shell-free `Argv("printf", ...)` behavior without weakening the
 > runtime's normalized-absolute-path contract. The blocking Native Linux
-> real-host gate now passes this
-> production owner composition through the Rust, Python, TypeScript, and Go SDK
+> x86_64 and aarch64 real-host lanes now pass this production owner composition
+> through the Rust, Python, TypeScript, and Go SDK
 > lifecycle, exec, filesystem, route-aware stats, pause/resume, snapshot
-> restore, restart, and cleanup surfaces. The same gate now kills the exact
-> authenticated OCI owner under a running Sandbox, proves its launcher and init
-> identities terminate, and uses fresh Box SDK-bridge processes to rebind the
+> restore, restart, and cleanup surfaces. Both lanes kill the exact
+> authenticated OCI owner under a running Sandbox, prove its launcher and init
+> identities terminate, and use fresh Box SDK-bridge processes to rebind the
 > owner endpoint, reconcile the generation as stopped without inventing an exit
 > status, delete its exact runtime tombstone, and restart the next Box and OCI
 > generations.
@@ -209,8 +209,9 @@ tree is terminated with it. The next explicit Box operation starts a distinct
 identity-fenced owner, treats the authenticated old generation as stopped,
 refuses to synthesize an unavailable exit status, removes only that exact
 generation, and permits an explicit restart to create the next Box and OCI
-generations. This is stopped-only crash recovery, not transparent continuation
-of live exec or filesystem sessions.
+generations. This stopped-only crash recovery is qualified on real x86_64 and
+aarch64 Linux hosts; it is not transparent continuation of live exec or
+filesystem sessions.
 
 Rust applications select the same path with
 `A3sBoxClient::with_configured_paths(...).await` or construct
