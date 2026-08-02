@@ -735,6 +735,60 @@ fn build_box_stats(system: &System, record: &BoxRecord) -> Option<BoxStatsSummar
     })
 }
 
+fn project_runtime_box_stats(
+    record: &BoxRecord,
+    first: &ExecutionStats,
+    second: &ExecutionStats,
+    processes: &ExecutionProcessInventory,
+) -> BoxStatsSummary {
+    let elapsed_ns = second
+        .timestamp_unix_ns
+        .saturating_sub(first.timestamp_unix_ns);
+    let usage_ns = second.cpu.usage_ns.saturating_sub(first.cpu.usage_ns);
+    let cpus = record.cpus.max(1);
+    let cpu_percent = if elapsed_ns == 0 {
+        0.0
+    } else {
+        (usage_ns as f64 / elapsed_ns as f64 * 100.0).min(f64::from(cpus) * 100.0)
+    };
+    let memory_limit_bytes = second
+        .memory
+        .limit_bytes
+        .unwrap_or(u64::from(record.memory_mb) * 1024 * 1024);
+    let memory_percent = if memory_limit_bytes == 0 {
+        0.0
+    } else {
+        second.memory.usage_bytes as f64 / memory_limit_bytes as f64 * 100.0
+    };
+    let pid = processes
+        .processes
+        .iter()
+        .find(|process| process.process_id == "init")
+        .and_then(|process| process.pid)
+        .or_else(|| processes.processes.iter().find_map(|process| process.pid))
+        .or(record.pid)
+        .unwrap_or_default();
+    let network = collect_network_stats(record);
+
+    BoxStatsSummary {
+        id: record.id.clone(),
+        short_id: record.short_id.clone(),
+        name: record.name.clone(),
+        status: record.status.clone(),
+        pid,
+        cpus: record.cpus,
+        cpu_percent: cpu_percent as f32,
+        cpu_percent_scaled: cpu_percent / f64::from(cpus),
+        memory_bytes: second.memory.usage_bytes,
+        memory_limit_bytes,
+        memory_percent,
+        network_rx_bytes: network.rx_bytes,
+        network_tx_bytes: network.tx_bytes,
+        block_read_bytes: 0,
+        block_write_bytes: 0,
+    }
+}
+
 fn collect_network_stats(record: &BoxRecord) -> NetworkStats {
     read_network_stats_file(&record.box_dir.join("sockets").join("net.stats.json"))
         .unwrap_or_default()

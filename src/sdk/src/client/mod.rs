@@ -32,9 +32,9 @@ use a3s_box_runtime::is_process_alive;
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{
     is_process_alive_with_identity, load_resolved_image_config, BuildConfig as RuntimeBuildConfig,
-    BuildNetworkPolicy, ImagePuller, ImageReference, ImageStore, NetworkStore, OciImage,
-    PushResult, RegistryAuth, RegistryProtocol, RegistryPusher, SignaturePolicy, SnapshotStore,
-    VolumeStore,
+    BuildNetworkPolicy, ImagePuller, ImageReference, ImageStore, ManagedRuntimeRoute, NetworkStore,
+    OciImage, PushResult, RegistryAuth, RegistryProtocol, RegistryPusher, SignaturePolicy,
+    SnapshotStore, VolumeStore,
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};

@@ -79,6 +79,7 @@ pub(crate) async fn connect_pty_with_retry(
 
 pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::exec::ExecRequest;
+    use a3s_box_core::{ExecutionId, ExecutionSessionManager};
     use a3s_box_runtime::ExecClient;
 
     let user = common::normalize_user_option(args.user.as_deref())
@@ -88,8 +89,15 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
-    crate::socket_paths::require_running(record, "exec")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let oci_session = uses_oci_session(record);
+    if oci_session {
+        if record.status != "running" {
+            return Err(format!("Box {} is not running", record.name).into());
+        }
+    } else {
+        crate::socket_paths::require_running(record, "exec")
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    }
 
     // If -t is specified, use interactive PTY mode
     if args.tty {
@@ -100,17 +108,12 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         ));
 
         #[cfg(not(windows))]
-        return execute_pty(args, record, user).await;
+        return if oci_session {
+            execute_managed_pty(args, record, user).await
+        } else {
+            execute_pty(args, record, user).await
+        };
     }
-
-    // Non-interactive mode (original behavior)
-    let exec_socket_path = crate::socket_paths::require_runtime_socket(
-        record,
-        crate::socket_paths::RuntimeSocket::Exec,
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    let client = ExecClient::connect(&exec_socket_path).await?;
 
     let timeout_ns = timeout_secs_to_ns(args.timeout);
 
@@ -141,7 +144,29 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         streaming: false,
     };
 
-    let output = client.exec_command(&request).await?;
+    let output = if oci_session {
+        let metadata = record
+            .managed_execution
+            .as_ref()
+            .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+        let home = a3s_box_core::dirs_home();
+        let manager = super::configured_local_execution_manager(&home).await?;
+        manager
+            .execute(
+                &ExecutionId::new(record.id.clone())?,
+                metadata.generation,
+                request,
+            )
+            .await?
+    } else {
+        let exec_socket_path = crate::socket_paths::require_runtime_socket(
+            record,
+            crate::socket_paths::RuntimeSocket::Exec,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let client = ExecClient::connect(&exec_socket_path).await?;
+        client.exec_command(&request).await?
+    };
     // Record that an exec happened (best-effort) before the exit-code branch
     // below may std::process::exit. The container command's own exit code is
     // separate from whether the exec was delivered.
@@ -169,6 +194,13 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn uses_oci_session(record: &crate::state::BoxRecord) -> bool {
+    record.managed_execution.as_ref().is_some_and(|metadata| {
+        metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
+            || metadata.oci_runtime.is_some()
+    })
+}
+
 fn timeout_secs_to_ns(timeout_secs: u64) -> u64 {
     if timeout_secs == 0 {
         a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS
@@ -177,6 +209,137 @@ fn timeout_secs_to_ns(timeout_secs: u64) -> u64 {
         // timeout in release builds.
         timeout_secs.saturating_mul(NANOS_PER_SECOND)
     }
+}
+
+#[cfg(not(windows))]
+async fn execute_managed_pty(
+    args: ExecArgs,
+    record: &crate::state::BoxRecord,
+    user: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::pty::PtyRequest;
+    use a3s_box_core::{ExecutionId, ExecutionSessionManager};
+
+    let metadata = record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let (cols, rows) = crate::terminal::size().unwrap_or((80, 24));
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+    let process = manager
+        .start_pty(
+            &ExecutionId::new(record.id.clone())?,
+            metadata.generation,
+            PtyRequest {
+                cmd: args.cmd,
+                env: args.envs,
+                working_dir: args.workdir,
+                rootfs: None,
+                user,
+                cols,
+                rows,
+            },
+        )
+        .await?;
+    crate::audit::record(
+        a3s_box_core::audit::AuditAction::ExecCommand,
+        a3s_box_core::audit::AuditOutcome::Success,
+        &record.id,
+        &format!("exec (managed pty) in box {}", record.name),
+    );
+
+    let exit_code = {
+        let _raw_mode = crate::terminal::raw_mode()?;
+        run_managed_pty_session(process).await
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn run_managed_pty_session(mut process: a3s_box_core::ExecutionProcess) -> i32 {
+    use a3s_box_core::{ExecEvent, StreamType};
+
+    let input = process.input();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match process.next_event().await {
+                Ok(Some(ExecEvent::Chunk(chunk))) => {
+                    use tokio::io::AsyncWriteExt as _;
+                    let result = match chunk.stream {
+                        StreamType::Stdout => {
+                            let mut output = tokio::io::stdout();
+                            let result = output.write_all(&chunk.data).await;
+                            let _ = output.flush().await;
+                            result
+                        }
+                        StreamType::Stderr => {
+                            let mut output = tokio::io::stderr();
+                            let result = output.write_all(&chunk.data).await;
+                            let _ = output.flush().await;
+                            result
+                        }
+                    };
+                    if result.is_err() {
+                        return -1;
+                    }
+                }
+                Ok(Some(ExecEvent::FlushAck)) => {}
+                Ok(Some(ExecEvent::Exit(status))) => return status.exit_code,
+                Ok(None) | Err(_) => return -1,
+            }
+        }
+    });
+
+    let writer_task = tokio::spawn(async move {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut stdin = std::io::stdin();
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) if sender.blocking_send(buffer[..count].to_vec()).is_err() => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+        loop {
+            tokio::select! {
+                data = receiver.recv() => match data {
+                    Some(data) => {
+                        if input.write_stdin(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        let _ = input.close_stdin().await;
+                        break;
+                    }
+                },
+                _ = async {
+                    match sigwinch {
+                        Some(ref mut signal) => { signal.recv().await; }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok((cols, rows)) = crate::terminal::size() {
+                        let _ = input.resize_pty(cols, rows).await;
+                    }
+                }
+            }
+        }
+    });
+
+    let exit_code = reader_task.await.unwrap_or(1);
+    writer_task.abort();
+    exit_code
 }
 
 /// Execute a command with an interactive PTY session.

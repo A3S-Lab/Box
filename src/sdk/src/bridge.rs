@@ -213,7 +213,16 @@ pub async fn dispatch_json(input: &str) -> BridgeResponse {
             })
         }
     };
-    handle_request(&A3sBoxClient::new(), request).await
+    let client = match A3sBoxClient::with_configured_paths(crate::A3sBoxPaths::default()).await {
+        Ok(client) => client,
+        Err(error) => {
+            return BridgeResponse::failure(BridgeFailure {
+                code: "runtime_error",
+                message: format!("failed to configure local execution: {error}"),
+            })
+        }
+    };
+    handle_request(&client, request).await
 }
 
 pub async fn handle_request(client: &A3sBoxClient, request: BridgeRequest) -> BridgeResponse {

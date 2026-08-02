@@ -6,7 +6,7 @@ use a3s_box_core::{
     vmm::parse_signal_name, ExecutionGeneration, ExecutionId, ExecutionManager,
     KillExecutionOptions,
 };
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+use a3s_box_runtime::ManagedExecutionState;
 
 use crate::cleanup;
 use crate::lifecycle;
@@ -70,7 +70,7 @@ async fn stop_one(
         let auto_remove = record.auto_remove;
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
-        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        let manager = super::configured_local_execution_manager(&home).await?;
         manager
             .kill_with_options(&execution_id, generation, options)
             .await?;

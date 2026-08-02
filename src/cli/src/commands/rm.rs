@@ -3,7 +3,7 @@
 use clap::Args;
 
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager, KillExecutionOptions};
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+use a3s_box_runtime::ManagedExecutionState;
 
 use crate::cleanup;
 use crate::resolve;
@@ -64,7 +64,7 @@ async fn rm_one(
         let name = record.name.clone();
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
-        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        let manager = super::configured_local_execution_manager(&home).await?;
         if terminate {
             manager
                 .kill_with_options(

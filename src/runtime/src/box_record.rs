@@ -425,6 +425,22 @@ pub enum ManagedExecutionOperation {
     Snapshot {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
+        /// Stable backend mutation identity for this exact snapshot attempt.
+        ///
+        /// One snapshot claim can drive both a pause and a resume. The backend
+        /// operation name keeps those mutations distinct while this seed makes
+        /// crash recovery replay each mutation exactly once. Older records did
+        /// not persist the seed, so the field remains optional for recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
+        /// The runtime freeze was confirmed before snapshot capture began.
+        ///
+        /// This phase fence distinguishes an initial running claim from a
+        /// container that was already thawed after capture. Without it, crash
+        /// recovery could replay a completed pause journal entry while the
+        /// actual container remained running.
+        #[serde(default)]
+        freezer_applied: bool,
     },
     Kill {
         #[serde(default)]
@@ -684,7 +700,12 @@ fn validate_pending_operation(
         }
         validate_stop_timeout(*stop_timeout_secs)?;
     }
-    if let Some(ManagedExecutionOperation::Snapshot { source_state, .. }) = operation {
+    if let Some(ManagedExecutionOperation::Snapshot {
+        source_state,
+        freezer_applied,
+        ..
+    }) = operation
+    {
         if state != ManagedExecutionState::Snapshotting
             || !matches!(
                 source_state,
@@ -693,6 +714,11 @@ fn validate_pending_operation(
         {
             return Err(a3s_box_core::BoxError::StateError(
                 "snapshot operation has an invalid source state".to_string(),
+            ));
+        }
+        if *freezer_applied && *source_state != ManagedExecutionState::Running {
+            return Err(a3s_box_core::BoxError::StateError(
+                "paused-source snapshot cannot carry a runtime freezer phase".to_string(),
             ));
         }
     }
@@ -926,6 +952,12 @@ mod tests {
         .unwrap();
         let resume: ManagedExecutionOperation =
             serde_json::from_value(serde_json::json!({ "kind": "resume" })).unwrap();
+        let snapshot: ManagedExecutionOperation = serde_json::from_value(serde_json::json!({
+            "kind": "snapshot",
+            "snapshot_id": "legacy-snapshot",
+            "source_state": "running"
+        }))
+        .unwrap();
 
         assert_eq!(
             pause,
@@ -937,6 +969,15 @@ mod tests {
         assert_eq!(
             resume,
             ManagedExecutionOperation::Resume { operation_id: None }
+        );
+        assert_eq!(
+            snapshot,
+            ManagedExecutionOperation::Snapshot {
+                snapshot_id: ExecutionSnapshotId::new("legacy-snapshot").unwrap(),
+                source_state: ManagedExecutionState::Running,
+                operation_id: None,
+                freezer_applied: false,
+            }
         );
     }
 

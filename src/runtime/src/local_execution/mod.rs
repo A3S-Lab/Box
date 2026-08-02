@@ -11,6 +11,12 @@ pub use lifecycle_lock::{
 };
 mod logs;
 mod oci_backend;
+#[cfg(feature = "vm")]
+mod oci_migration;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+mod oci_owner;
+#[cfg(feature = "vm")]
+mod oci_production;
 mod oci_session;
 mod operations;
 mod port;
@@ -53,6 +59,10 @@ pub use oci_backend::{
     OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
     OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
+#[cfg(feature = "vm")]
+pub use oci_migration::NativeLinuxOciMigrationConfig;
+#[cfg(feature = "vm")]
+pub use oci_production::NativeLinuxOciBundleProvider;
 use record::{build_managed_record, status_from_record};
 pub use router::{LocalExecutionBackendRouter, OciMigrationPolicy};
 use store::RuntimeUpdate;
@@ -179,9 +189,29 @@ impl LocalExecutionManager {
         oci_backend: Arc<dyn LocalExecutionBackend>,
         policy: OciMigrationPolicy,
     ) -> Self {
+        Self::with_oci_migration_backend_and_pull_progress(
+            state_path,
+            home_dir,
+            oci_backend,
+            policy,
+            None,
+        )
+    }
+
+    #[cfg(feature = "vm")]
+    fn with_oci_migration_backend_and_pull_progress(
+        state_path: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        oci_backend: Arc<dyn LocalExecutionBackend>,
+        policy: OciMigrationPolicy,
+        pull_progress_fn: Option<crate::PullProgressFn>,
+    ) -> Self {
         let home_dir = home_dir.into();
-        let legacy: Arc<dyn LocalExecutionBackend> =
-            Arc::new(VmLocalExecutionBackend::new(home_dir.clone()));
+        let mut legacy_backend = VmLocalExecutionBackend::new(home_dir.clone());
+        if let Some(pull_progress_fn) = pull_progress_fn {
+            legacy_backend = legacy_backend.with_pull_progress_fn(pull_progress_fn);
+        }
+        let legacy: Arc<dyn LocalExecutionBackend> = Arc::new(legacy_backend);
         let router = LocalExecutionBackendRouter::new(legacy, oci_backend, policy);
         Self::new(state_path, home_dir, Arc::new(router))
     }

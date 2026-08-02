@@ -154,7 +154,7 @@ impl Sandbox {
         Ok(entries)
     }
 
-    /// Read one bounded host resource-usage snapshot when locally available.
+    /// Read one bounded resource-usage snapshot from the Sandbox lifecycle owner.
     pub async fn stats(&self) -> Result<Option<BoxStatsSummary>> {
         let state = self.inner.state();
         if state.closed {
@@ -166,6 +166,9 @@ impl Sandbox {
             .inspect_execution(&self.inner.execution_id)
             .await?;
         self.inner.update(status.generation, status.state);
-        self.inner.client.get_box_stats(self.id())
+        self.inner
+            .client
+            .get_sandbox_stats(&self.inner.execution_id, status.generation)
+            .await
     }
 }

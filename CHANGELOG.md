@@ -150,6 +150,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **OCI-routed direct argv commands.** Captured exec, streaming exec, and PTY
+  sessions now resolve a relative `argv[0]` through the effective container
+  `PATH` against the prepared rootfs before SDK dispatch. Native Rust, Python,
+  TypeScript, and Go callers keep the documented shell-free `Argv("printf",
+  ...)` behavior while A3S OCI Runtime still receives a normalized absolute
+  Linux executable path.
 - **Sandbox cgroup namespace handoff.** Guest Init now accepts and verifies the
   runtime's pre-isolated control membership after the namespace is rooted at
   management and rejects a populated management envelope. The workload

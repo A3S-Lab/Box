@@ -77,6 +77,14 @@ impl VmLocalExecutionBackend {
         &self,
         record: &'a BoxRecord,
     ) -> ExecutionManagerResult<&'a ManagedExecutionMetadata> {
+        self.metadata_for_route(record, crate::ManagedRuntimeRoute::BoxVm)
+    }
+
+    fn metadata_for_route<'a>(
+        &self,
+        record: &'a BoxRecord,
+        expected_route: crate::ManagedRuntimeRoute,
+    ) -> ExecutionManagerResult<&'a ManagedExecutionMetadata> {
         uuid::Uuid::parse_str(&record.id).map_err(|error| {
             ExecutionManagerError::Internal(format!(
                 "managed execution has an invalid internal ID {}: {error}",
@@ -100,10 +108,11 @@ impl VmLocalExecutionBackend {
         metadata
             .validate()
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
-        if metadata.runtime_route == crate::ManagedRuntimeRoute::OciSdk {
+        let resolved_route = super::router::resolved_runtime_route(record)?;
+        if resolved_route != expected_route {
             return Err(ExecutionManagerError::Internal(format!(
-                "managed execution {} is pinned to the A3S OCI SDK route",
-                record.id
+                "managed execution {} is pinned to {:?}, not {:?}",
+                record.id, resolved_route, expected_route
             )));
         }
         if record.isolation != metadata.request.config.isolation {
@@ -117,6 +126,22 @@ impl VmLocalExecutionBackend {
 
     fn new_manager(&self, record: &BoxRecord) -> ExecutionManagerResult<VmManager> {
         let metadata = self.metadata(record)?;
+        self.new_manager_from_metadata(record, metadata)
+    }
+
+    pub(super) fn new_oci_preparation_manager(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<VmManager> {
+        let metadata = self.metadata_for_route(record, crate::ManagedRuntimeRoute::OciSdk)?;
+        self.new_manager_from_metadata(record, metadata)
+    }
+
+    fn new_manager_from_metadata(
+        &self,
+        record: &BoxRecord,
+        metadata: &ManagedExecutionMetadata,
+    ) -> ExecutionManagerResult<VmManager> {
         let mut config = metadata.request.config.clone();
         // Network connect/disconnect is intentionally mutable while an
         // execution is inactive. The managed creation request remains the

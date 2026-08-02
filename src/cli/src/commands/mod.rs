@@ -62,7 +62,7 @@ mod version;
 pub mod volume;
 mod wait;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -205,6 +205,20 @@ pub enum Command {
 /// Return the path to the image store directory (~/.a3s/images).
 pub(crate) fn images_dir() -> PathBuf {
     a3s_box_core::dirs_home().join("images")
+}
+
+/// Construct the canonical local lifecycle facade. OCI migration remains a
+/// process-wide explicit opt-in; an absent setting preserves the VM backend.
+pub(crate) async fn configured_local_execution_manager(
+    home: &Path,
+) -> Result<a3s_box_runtime::LocalExecutionManager, Box<dyn std::error::Error>> {
+    Ok(
+        a3s_box_runtime::LocalExecutionManager::with_configured_backend(
+            home.join("boxes.json"),
+            home,
+        )
+        .await?,
+    )
 }
 
 /// Open the shared image store.

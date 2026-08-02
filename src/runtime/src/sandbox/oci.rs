@@ -199,16 +199,46 @@ pub struct SandboxBundleSpec {
     pub runtime_digest: String,
 }
 
+/// Container process compiled for the long-lived A3S OCI Runtime owner.
+///
+/// The executable, user and working directory are resolved against the
+/// prepared rootfs before this value reaches the compiler. Bootstrap listener
+/// descriptors deliberately have no representation here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxRuntimeProcess {
+    pub args: Vec<String>,
+    pub environment: Vec<(String, String)>,
+    pub cwd: PathBuf,
+    pub uid: u32,
+    pub gid: u32,
+    pub additional_gids: Vec<u32>,
+    pub dropped_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxProcessOwner {
+    GuestInit,
+    RuntimeOwned,
+}
+
+impl SandboxProcessOwner {
+    const fn annotation(self) -> &'static str {
+        match self {
+            Self::GuestInit => "guest-init",
+            Self::RuntimeOwned => "a3s-oci-runtime",
+        }
+    }
+
+    const fn uses_control_workload_cgroup(self) -> bool {
+        matches!(self, Self::GuestInit)
+    }
+}
+
 /// Compile a complete OCI config. Arbitrary caller-provided OCI JSON is never
 /// accepted by this backend.
 pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
-    validate_box_id(&input.box_id)?;
-    validate_rootfs_path(&input.rootfs_path)?;
-    validate_hostname(&input.hostname)?;
+    validate_bundle_input(input)?;
     validate_init_path(&input.init_path)?;
-    validate_digest("execution plan", &input.execution_plan_digest)?;
-    validate_digest("runtime", &input.runtime_digest)?;
-    validate_id_mapping_plan(&input.id_mappings)?;
 
     let process = ProcessBuilder::default()
         .terminal(false)
@@ -227,6 +257,56 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
         .build()
         .map_err(oci_error)?;
 
+    compile_spec(input, process, SandboxProcessOwner::GuestInit)
+}
+
+/// Compile a complete OCI config whose PID 1 and I/O are owned directly by
+/// A3S OCI Runtime. The legacy guest-init listener variables are removed even
+/// if an image attempts to provide them.
+pub fn compile_runtime_owned_oci_spec(
+    input: &SandboxBundleSpec,
+    runtime_process: &SandboxRuntimeProcess,
+) -> Result<Spec> {
+    validate_bundle_input(input)?;
+    validate_runtime_process(runtime_process, &input.id_mappings)?;
+
+    let user = UserBuilder::default()
+        .uid(runtime_process.uid)
+        .gid(runtime_process.gid)
+        .additional_gids(runtime_process.additional_gids.clone())
+        .build()
+        .map_err(oci_error)?;
+    let process = ProcessBuilder::default()
+        .terminal(false)
+        .user(user)
+        .args(runtime_process.args.clone())
+        .env(compile_runtime_environment(&runtime_process.environment)?)
+        .cwd(runtime_process.cwd.clone())
+        .capabilities(compile_workload_capabilities(
+            &input.requested_capabilities,
+            &runtime_process.dropped_capabilities,
+        )?)
+        .no_new_privileges(true)
+        .build()
+        .map_err(oci_error)?;
+
+    compile_spec(input, process, SandboxProcessOwner::RuntimeOwned)
+}
+
+fn validate_bundle_input(input: &SandboxBundleSpec) -> Result<()> {
+    validate_box_id(&input.box_id)?;
+    validate_rootfs_path(&input.rootfs_path)?;
+    validate_hostname(&input.hostname)?;
+    validate_digest("execution plan", &input.execution_plan_digest)?;
+    validate_digest("runtime", &input.runtime_digest)?;
+    validate_id_mapping_plan(&input.id_mappings)
+}
+
+fn compile_spec(
+    input: &SandboxBundleSpec,
+    process: oci_spec::runtime::Process,
+    owner: SandboxProcessOwner,
+) -> Result<Spec> {
     let linux = LinuxBuilder::default()
         .uid_mappings(compile_id_mappings(&input.id_mappings.uid_mappings)?)
         .gid_mappings(compile_id_mappings(&input.id_mappings.gid_mappings)?)
@@ -259,21 +339,27 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
         "shared-kernel".to_string(),
     );
     annotations.insert(
-        CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
-        CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+        "com.a3s.box.process-owner".to_string(),
+        owner.annotation().to_string(),
     );
-    annotations.insert(
-        CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
-        SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
-    );
-    annotations.insert(
-        CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
-        input.resources.cpu_period.to_string(),
-    );
-    annotations.insert(
-        CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
-        SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
-    );
+    if owner.uses_control_workload_cgroup() {
+        annotations.insert(
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
+            SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
+            input.resources.cpu_period.to_string(),
+        );
+        annotations.insert(
+            CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
+            SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
+        );
+    }
 
     SpecBuilder::default()
         .version("1.1.0".to_string())
@@ -293,7 +379,16 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
         .map_err(oci_error)
 }
 
-fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> {
+const RESERVED_BOOTSTRAP_ENVIRONMENT: &[&str] = &[
+    "A3S_BOOTSTRAP_MODE",
+    "A3S_EXEC_LISTENER_FD",
+    "A3S_PTY_LISTENER_FD",
+    "A3S_INIT_LOG_FD",
+];
+
+fn validated_environment(
+    environment: &[(String, String)],
+) -> Result<std::collections::BTreeMap<String, String>> {
     let mut values = std::collections::BTreeMap::new();
     for (key, value) in environment {
         if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
@@ -306,6 +401,11 @@ fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> 
     values.entry("PATH".to_string()).or_insert_with(|| {
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
     });
+    Ok(values)
+}
+
+fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> {
+    let mut values = validated_environment(environment)?;
     values.insert("A3S_BOOTSTRAP_MODE".to_string(), "host-sandbox".to_string());
     values.insert("A3S_EXEC_LISTENER_FD".to_string(), "3".to_string());
     values.insert("A3S_PTY_LISTENER_FD".to_string(), "4".to_string());
@@ -315,6 +415,48 @@ fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> 
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect())
+}
+
+fn compile_runtime_environment(environment: &[(String, String)]) -> Result<Vec<String>> {
+    let mut values = validated_environment(environment)?;
+    for reserved in RESERVED_BOOTSTRAP_ENVIRONMENT {
+        values.remove(*reserved);
+    }
+    Ok(values
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect())
+}
+
+fn validate_runtime_process(
+    process: &SandboxRuntimeProcess,
+    id_mappings: &SandboxIdMappingPlan,
+) -> Result<()> {
+    let executable = process.args.first().ok_or_else(|| {
+        BoxError::ConfigError("Sandbox runtime-owned process requires an executable".to_string())
+    })?;
+    validate_linux_absolute_normalized(Path::new(executable), "process executable")?;
+    if process.args.iter().any(|argument| argument.contains('\0')) {
+        return Err(BoxError::ConfigError(
+            "Sandbox process arguments must not contain NUL".to_string(),
+        ));
+    }
+    validate_linux_absolute_normalized(&process.cwd, "process working directory")?;
+    if process.uid > id_mappings.maximum_container_uid {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox process UID {} exceeds the mapped maximum {}",
+            process.uid, id_mappings.maximum_container_uid
+        )));
+    }
+    for gid in std::iter::once(&process.gid).chain(process.additional_gids.iter()) {
+        if *gid > id_mappings.maximum_container_gid {
+            return Err(BoxError::ConfigError(format!(
+                "Sandbox process GID {gid} exceeds the mapped maximum {}",
+                id_mappings.maximum_container_gid
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn compile_capabilities(requested: &[String]) -> Result<oci_spec::runtime::LinuxCapabilities> {
@@ -351,13 +493,68 @@ fn compile_capabilities(requested: &[String]) -> Result<oci_spec::runtime::Linux
         .map_err(oci_error)
 }
 
-fn parse_allowed_capability(value: &str) -> Result<Capability> {
-    let normalized = value
-        .trim()
-        .to_ascii_uppercase()
+fn compile_workload_capabilities(
+    added: &[String],
+    dropped: &[String],
+) -> Result<oci_spec::runtime::LinuxCapabilities> {
+    let mut names: std::collections::BTreeSet<String> = [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "NET_BIND_SERVICE",
+        "SETGID",
+        "SETPCAP",
+        "SETUID",
+        "SYS_CHROOT",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect();
+
+    for capability in added {
+        let normalized = normalize_capability_name(capability);
+        parse_allowed_capability(&normalized)?;
+        names.insert(normalized);
+    }
+    if dropped
+        .iter()
+        .any(|capability| normalize_capability_name(capability) == "ALL")
+    {
+        names.clear();
+    } else {
+        for capability in dropped {
+            let normalized = normalize_capability_name(capability);
+            parse_allowed_capability(&normalized)?;
+            names.remove(&normalized);
+        }
+    }
+
+    let capabilities = names
+        .iter()
+        .map(|capability| parse_allowed_capability(capability))
+        .collect::<Result<Capabilities>>()?;
+    LinuxCapabilitiesBuilder::default()
+        .bounding(capabilities.clone())
+        .effective(capabilities.clone())
+        .permitted(capabilities)
+        .inheritable(HashSet::<Capability>::new())
+        .ambient(HashSet::<Capability>::new())
+        .build()
+        .map_err(oci_error)
+}
+
+fn normalize_capability_name(value: &str) -> String {
+    let normalized = value.trim().to_ascii_uppercase();
+    normalized
         .strip_prefix("CAP_")
-        .map(ToString::to_string)
-        .unwrap_or_else(|| value.trim().to_ascii_uppercase());
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn parse_allowed_capability(value: &str) -> Result<Capability> {
+    let normalized = normalize_capability_name(value);
     let capability = match normalized.as_str() {
         "AUDIT_WRITE" => Capability::AuditWrite,
         "CHOWN" => Capability::Chown,
@@ -1342,6 +1539,95 @@ mod tests {
 
     fn as_json(spec: &Spec) -> Value {
         serde_json::to_value(spec).unwrap()
+    }
+
+    fn sample_runtime_process() -> SandboxRuntimeProcess {
+        SandboxRuntimeProcess {
+            args: vec!["/usr/bin/example".to_string(), "--serve".to_string()],
+            environment: vec![
+                ("APP_MODE".to_string(), "production".to_string()),
+                ("A3S_EXEC_LISTENER_FD".to_string(), "99".to_string()),
+                ("A3S_PTY_LISTENER_FD".to_string(), "98".to_string()),
+                ("A3S_INIT_LOG_FD".to_string(), "97".to_string()),
+                ("A3S_BOOTSTRAP_MODE".to_string(), "image-value".to_string()),
+            ],
+            cwd: PathBuf::from("/workspace"),
+            uid: 123,
+            gid: 456,
+            additional_gids: vec![789],
+            dropped_capabilities: vec!["SETUID".to_string()],
+        }
+    }
+
+    #[test]
+    fn runtime_owned_compiler_uses_direct_process_without_bootstrap_descriptors() {
+        let value = as_json(
+            &compile_runtime_owned_oci_spec(&sample_input(), &sample_runtime_process()).unwrap(),
+        );
+        assert_eq!(
+            value["process"]["args"],
+            serde_json::json!(["/usr/bin/example", "--serve"])
+        );
+        assert_eq!(value["process"]["cwd"], "/workspace");
+        assert_eq!(value["process"]["user"]["uid"], 123);
+        assert_eq!(value["process"]["user"]["gid"], 456);
+        assert_eq!(
+            value["process"]["user"]["additionalGids"],
+            serde_json::json!([789])
+        );
+        assert_eq!(
+            value["annotations"]["com.a3s.box.process-owner"],
+            "a3s-oci-runtime"
+        );
+        let annotations = value["annotations"].as_object().unwrap();
+        for annotation in [
+            CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION,
+            CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION,
+            CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION,
+            CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION,
+        ] {
+            assert!(
+                !annotations.contains_key(annotation),
+                "runtime-owned process retained guest-init cgroup annotation {annotation}"
+            );
+        }
+        assert_eq!(
+            value["linux"]["resources"]["memory"]["limit"],
+            512 * 1024 * 1024i64
+        );
+        let environment = value["process"]["env"].as_array().unwrap();
+        assert!(environment
+            .iter()
+            .any(|value| value == "APP_MODE=production"));
+        for reserved in RESERVED_BOOTSTRAP_ENVIRONMENT {
+            assert!(
+                !environment.iter().any(|value| value
+                    .as_str()
+                    .is_some_and(|value| value.starts_with(&format!("{reserved}=")))),
+                "runtime-owned process retained {reserved}"
+            );
+        }
+        let bounding = value["process"]["capabilities"]["bounding"]
+            .as_array()
+            .unwrap();
+        assert!(!bounding.iter().any(|value| value == "CAP_SETUID"));
+        assert!(bounding.iter().any(|value| value == "CAP_CHOWN"));
+    }
+
+    #[test]
+    fn runtime_owned_compiler_rejects_relative_executable_and_unmapped_user() {
+        let input = sample_input();
+        let mut process = sample_runtime_process();
+        process.args[0] = "example".to_string();
+        assert!(compile_runtime_owned_oci_spec(&input, &process).is_err());
+
+        process.args[0] = "/usr/bin/example".to_string();
+        process.uid = input.id_mappings.maximum_container_uid + 1;
+        assert!(compile_runtime_owned_oci_spec(&input, &process).is_err());
+
+        process.uid = 0;
+        process.dropped_capabilities = vec!["NOT_A_CAPABILITY".to_string()];
+        assert!(compile_runtime_owned_oci_spec(&input, &process).is_err());
     }
 
     #[test]

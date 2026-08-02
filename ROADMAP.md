@@ -87,8 +87,9 @@ versioned manifest for rootfs, mounts, networking, process I/O, secret
 classifications, and optional extensions, and persists exact
 endpoint/target/driver/configuration/attachment evidence. Create rejects
 missing or drifted attachment evidence and reconciles lost create/start
-responses without issuing a second create. This is migration scaffolding, not
-a production routing change. Its in-process contract suite covers both
+responses without issuing a second create. This contract began as migration
+scaffolding; Linux now has an explicit production Sandbox route, while the
+default route remains unchanged. Its in-process contract suite covers both
 isolation mappings, corrupt evidence, cleanup, adapter reopen, stopped-only
 deletion, and exact normal or signaled exit status. A separate local-transport
 contract now restarts the real Windows named-pipe or Unix-socket server behind
@@ -102,7 +103,7 @@ input handle across the observed disconnect, then continues inventory, stdin,
 output, signal, exact wait, and cleanup through the replacement owner with one
 exec dispatch. OCI Runtime independently proves the same process target through
 its durable `HostRuntimeService` and operation journal across two processes.
-Real driver state and production owner wiring remain below.
+Real-driver promotion and production cutover gates remain below.
 
 The backend-neutral manager now also has one durable migration router with
 three explicit creation policies: retain both current paths, route only
@@ -113,19 +114,43 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`aac259224e89bef2b546fd0f8755ef1ba79570ce` adds the matching long-lived,
-multi-container Native Linux host owner. Shipped CLI/SDK construction still
-uses the current split until Box production bundle preparation is connected to
-that owner.
+`a6f6242caf927f404f7e1f7f143fd3a350ce23b6` adds the matching long-lived,
+multi-container Native Linux host owner. Box now first validates the exact
+managed home and durably prepares snapshot-lower, named-volume, and network
+ownership. Its production provider then prepares the product-owned rootfs,
+mounts, resources, DNS/hostname files and OCI bundle while compiling the image
+process directly, without the legacy guest-init FD 3/4/5 contract. It resolves
+PATH, working directory, named or numeric users/groups, supplementary groups,
+HOME and capabilities against the prepared rootfs before mutation is handed to
+Runtime. A provably failed launch rolls back every preparation-owned effect;
+unknown launch ownership retains them for exact reconciliation.
+The same pinned revision executes file and filesystem calls through a bounded,
+parent-bound helper inside the retained user and mount namespaces, so
+descriptor-confined operations preserve container IDs on rootfs, bind,
+ID-mapped and tmpfs mounts.
+
+The Linux owner composition validates an absolute private root, serializes
+startup across processes, records the exact PID start identity and pinned
+runtime/agent paths plus SHA-256 digests, refuses an unowned socket or live
+artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
+bridge and async Rust SDK constructor honor the explicit
+`A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
+startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
+pause/resume and cleanup commands now detect the persisted OCI route instead
+of requiring Box guest sockets. The blocking native-Linux CI invocation now
+passes the Rust, Python, TypeScript, and Go Sandbox suites through this exact
+composition, including lifecycle, exec, filesystem, route-aware stats,
+pause/resume, snapshot restore, restart, and cleanup.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
-persists a claim-scoped mutation identity and combines it with the current Box
-generation without changing the runtime generation, validates the complete
-returned runtime binding, and reconciles a lost response after backend
-recreation without issuing the mutation twice. Filesystem-only pause continues
-to use the existing
-stop/reprepare lifecycle rather than being mislabeled as an OCI freezer action.
+persists a claim-scoped mutation identity and whether the freezer is currently
+applied, and combines the identity with the current Box generation without
+changing the runtime generation. Recovery reuses the identity while the
+mutation is pending and never replays thaw after its durable applied phase is
+cleared. Returned runtime bindings are validated in full. Filesystem-only pause
+continues to use the existing stop/reprepare lifecycle rather than being
+mislabeled as an OCI freezer action.
 
 The backend-neutral session boundary now also routes captured and streaming
 exec, stdin, cursor-checked stdout/stderr, signal/wait, PTY, and resize through
@@ -135,7 +160,11 @@ identity across a lost response and backend recreation. Initial and streaming
 stdin mutations are replay-safe, timeouts retain an exact SIGKILL watchdog even
 if the caller drops its future, and raw process output never enters Box's
 structured log store. Legacy VM records retain their existing socket transport,
-while OCI-bound sessions no longer depend on Unix-domain sockets.
+while OCI-bound sessions no longer depend on Unix-domain sockets. Relative
+direct-argv executables resolve through the request, image, or default container
+`PATH` against the prepared rootfs, then cross the SDK boundary as normalized
+absolute Linux paths; this applies equally to captured exec, streaming exec,
+and PTY sessions without invoking a shell.
 
 The same cross-platform session facade now maps file upload/download and
 filesystem stat, recursive mkdir, move, bounded listing, and recursive removal
@@ -169,8 +198,9 @@ crate.
 
 The dependency check resolves only `a3s-oci-sdk` and its public core types from
 the OCI Runtime repository. The typed opt-in composition and durable selection
-now satisfy this boundary gate; production activation remains a B1 cutover
-gate and is not implied by compiling the router.
+now satisfy this boundary gate. Linux Sandbox production activation remains
+explicitly opt-in; default activation and the unified MicroVM cutover remain
+later gates.
 
 ### B1 - OCI Runtime Vertical Slice
 
@@ -183,7 +213,10 @@ gate and is not implied by compiling the router.
   digests required for reconciliation.
 - [x] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
-- [ ] Exercise the path on native Linux and Windows/WHPX.
+- [x] Exercise the production composition on native Linux through the blocking
+  real-host Rust, Python, TypeScript, and Go SDK lifecycle, session, snapshot,
+  restart, and cleanup gate.
+- [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
@@ -196,11 +229,13 @@ next-call reconnect plus exact reconciliation without duplicate launch. The
 process contract then replaces the owner with a distinct child process that
 reopens disk-backed state, while OCI Runtime separately proves the real durable
 host service and journal reopen across processes. OCI Runtime now exposes the
-long-lived Native Linux owner and Box now persists fail-closed mixed-backend
-routing. The remaining unchecked gate requires Box's production bundle
-provider/owner composition and the same bundle on real native Linux and WHPX
-hosts; deterministic process evidence is not promoted as platform-driver
-evidence.
+long-lived Native Linux owner, and Box now supplies fail-closed mixed-backend
+routing, verified product-resource preparation, a direct-process production
+bundle provider, protected owner startup, and explicit CLI/SDK construction.
+The real-host Native Linux production composition now passes. The remaining
+unchecked gates are owner/Box process restart on the real driver and the
+equivalent WHPX path; deterministic process evidence is not promoted as
+platform-driver evidence.
 
 ### B2 - Interactive And Observable Execution
 
@@ -220,6 +255,9 @@ evidence.
   boundary.
 - [x] Preserve exact terminal status and Box/runtime generation fencing across
   backend recreation and keyed replay.
+- [ ] Route the remaining socket-oriented CLI projections (`attach`, `cp`,
+  `top`, `stats`, live `container-update`, and init stdout/stderr log
+  projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
 
@@ -244,7 +282,10 @@ contract now keeps the original Box process stream and input handle alive,
 exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
 one exec dispatch. Native Linux and utility-VM driver reattachment on real
-hosts remains part of the unchecked exit gate.
+hosts remains part of the unchecked exit gate. The production Linux smoke now
+drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
+route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
+command-specific projections listed above remain deliberately unchecked.
 
 ### B3 - Storage And Networking Attachments
 
@@ -256,6 +297,11 @@ hosts remains part of the unchecked exit gate.
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots.
+
+The production provider currently accepts explicit bind/named/tmpfs mounts but
+rejects newly introduced image-declared anonymous volumes before Runtime
+mutation. That rejection remains until the complete B3 ownership and cleanup
+contract is qualified.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId, OperationId};
+use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionSnapshotId, OperationId};
 use thiserror::Error;
 
 use crate::{
@@ -446,6 +446,69 @@ impl ManagedExecutionStore {
                 | ManagedExecutionState::Stopped
                 | ManagedExecutionState::Failed => None,
             };
+            Ok(record.clone())
+        })
+    }
+
+    /// Persist that a running snapshot claim reached the frozen runtime phase.
+    ///
+    /// The exact snapshot and backend operation identities fence a delayed
+    /// writer from marking a newer same-generation attempt. Repeating the same
+    /// write is idempotent so a lost store response remains recoverable.
+    pub fn mark_snapshot_freezer_applied(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        expected_snapshot_id: &ExecutionSnapshotId,
+        expected_operation_id: Option<&OperationId>,
+    ) -> ManagedExecutionStoreResult<BoxRecord> {
+        let execution_id = execution_id.clone();
+        let expected_snapshot_id = expected_snapshot_id.clone();
+        let expected_operation_id = expected_operation_id.cloned();
+        BoxStateStore::transact(&self.path, move |store| {
+            let record = store
+                .find_by_id_mut(execution_id.as_str())
+                .ok_or_else(|| ManagedExecutionStoreError::NotFound(execution_id.clone()))?;
+            let state = record
+                .managed_state()
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            let metadata = record
+                .managed_execution
+                .as_mut()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            if state != ManagedExecutionState::Snapshotting
+                || metadata.generation != expected_generation
+            {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected snapshotting generation {}, found {state} generation {}",
+                        expected_generation.get(),
+                        metadata.generation.get()
+                    ),
+                });
+            }
+            match metadata.pending_operation.as_mut() {
+                Some(ManagedExecutionOperation::Snapshot {
+                    snapshot_id,
+                    source_state: ManagedExecutionState::Running,
+                    operation_id,
+                    freezer_applied,
+                }) if snapshot_id == &expected_snapshot_id
+                    && operation_id == &expected_operation_id =>
+                {
+                    *freezer_applied = true;
+                }
+                _ => {
+                    return Err(ManagedExecutionStoreError::Conflict {
+                        execution_id: execution_id.clone(),
+                        message: format!(
+                            "snapshot freezer phase does not match claim {expected_snapshot_id}"
+                        ),
+                    })
+                }
+            }
             Ok(record.clone())
         })
     }
@@ -916,6 +979,8 @@ mod tests {
                         Some(ManagedExecutionOperation::Snapshot {
                             snapshot_id: snapshot_id.clone(),
                             source_state: ManagedExecutionState::Running,
+                            operation_id: Some(OperationId::new("snapshot-operation-1").unwrap()),
+                            freezer_applied: false,
                         });
                 },
             )
@@ -934,7 +999,56 @@ mod tests {
             Some(ManagedExecutionOperation::Snapshot {
                 snapshot_id,
                 source_state: ManagedExecutionState::Running,
+                operation_id: Some(operation_id),
+                freezer_applied: false,
             }) if snapshot_id.as_str() == "snapshot-1"
+                && operation_id.as_str() == "snapshot-operation-1"
+        ));
+
+        let snapshot_operation_id = OperationId::new("snapshot-operation-1").unwrap();
+        let marked = store
+            .mark_snapshot_freezer_applied(
+                &id,
+                ExecutionGeneration::INITIAL,
+                &snapshot_id,
+                Some(&snapshot_operation_id),
+            )
+            .unwrap();
+        assert!(matches!(
+            marked
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .pending_operation
+                .as_ref(),
+            Some(ManagedExecutionOperation::Snapshot {
+                freezer_applied: true,
+                ..
+            })
+        ));
+        let replayed = store
+            .mark_snapshot_freezer_applied(
+                &id,
+                ExecutionGeneration::INITIAL,
+                &snapshot_id,
+                Some(&snapshot_operation_id),
+            )
+            .unwrap();
+        assert_eq!(
+            replayed.managed_execution.as_ref().unwrap().generation,
+            marked.managed_execution.as_ref().unwrap().generation
+        );
+        assert!(matches!(
+            replayed
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .pending_operation
+                .as_ref(),
+            Some(ManagedExecutionOperation::Snapshot {
+                freezer_applied: true,
+                ..
+            })
         ));
 
         let reopened = ManagedExecutionStore::new(store.path().to_path_buf());
@@ -943,6 +1057,18 @@ mod tests {
             persisted.managed_state().unwrap(),
             Some(ManagedExecutionState::Snapshotting)
         );
+        assert!(matches!(
+            persisted
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .pending_operation
+                .as_ref(),
+            Some(ManagedExecutionOperation::Snapshot {
+                freezer_applied: true,
+                ..
+            })
+        ));
         let completed = reopened
             .transition(
                 &id,

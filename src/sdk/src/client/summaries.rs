@@ -56,7 +56,7 @@ pub struct BoxLogLine {
     pub message: String,
 }
 
-/// Host-side resource usage snapshot for one active box.
+/// Compatibility resource usage snapshot for one active box.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoxStatsSummary {
     pub id: String,

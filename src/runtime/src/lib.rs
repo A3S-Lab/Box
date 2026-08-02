@@ -30,6 +30,7 @@ pub mod managed_execution_store;
 pub mod network;
 pub mod oci;
 pub mod process;
+mod process_path;
 pub mod prom;
 pub mod resize;
 mod resolved_image;
@@ -74,14 +75,16 @@ pub use box_record::{
     ManagedRestartOutcome, ManagedRuntimeRoute,
 };
 pub use box_state::BoxStateStore;
-#[cfg(feature = "vm")]
-pub use local_execution::VmLocalExecutionBackend;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
     LocalExecutionBackendRouter, LocalExecutionHandle, LocalExecutionManager,
     LocalExecutionObservation, LocalExecutionTermination, OciBundleProvider, OciLifecycleAdapter,
     OciLocalExecutionBackend, OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding,
     OciRuntimeEndpoint, OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
+};
+#[cfg(feature = "vm")]
+pub use local_execution::{
+    NativeLinuxOciBundleProvider, NativeLinuxOciMigrationConfig, VmLocalExecutionBackend,
 };
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,

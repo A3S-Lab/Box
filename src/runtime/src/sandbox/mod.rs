@@ -143,8 +143,8 @@ impl a3s_box_core::vmm::VmHandler for A3sOciHandler {
     }
 }
 pub use oci::{
-    compile_oci_spec, SandboxBundleSpec, SandboxMount, SandboxResources, SandboxTmpfs,
-    DEFAULT_SANDBOX_PIDS_LIMIT,
+    compile_oci_spec, compile_runtime_owned_oci_spec, SandboxBundleSpec, SandboxMount,
+    SandboxResources, SandboxRuntimeProcess, SandboxTmpfs, DEFAULT_SANDBOX_PIDS_LIMIT,
 };
 pub use path_access::prepare_sandbox_path_access;
 pub use rootfs::{

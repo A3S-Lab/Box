@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use a3s_box_core::{ExecutionGeneration, ExecutionManager, OperationId, RestartExecutionOptions};
-use a3s_box_runtime::{LocalExecutionManager, ManagedRestartOutcome};
+use a3s_box_runtime::ManagedRestartOutcome;
 use clap::Args;
 
 use crate::boot;
@@ -476,7 +476,7 @@ async fn restart_managed_candidate(
         None => OperationId::new(format!("monitor-restart-{}", uuid::Uuid::new_v4()))?,
     };
     let home = a3s_box_core::dirs_home();
-    let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+    let manager = super::configured_local_execution_manager(&home).await?;
     let lease = manager
         .restart_with_options(
             &execution_id,
