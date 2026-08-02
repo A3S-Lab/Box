@@ -29,7 +29,7 @@ impl LocalExecutionManager {
         require_generation(&record, execution_id, expected_generation)?;
         let source_state = managed_state(&record)?;
         if source_state == ManagedExecutionState::Snapshotting {
-            let (pending_snapshot_id, _) = snapshot_operation(&record)?;
+            let (pending_snapshot_id, _, _) = snapshot_operation(&record)?;
             if &pending_snapshot_id != snapshot_id {
                 return Err(state_conflict(&record, execution_id, "snapshot"));
             }
@@ -112,7 +112,8 @@ impl LocalExecutionManager {
     }
 
     async fn drive_snapshot(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionSnapshot> {
-        let (snapshot_id, source_state) = snapshot_operation(&record)?;
+        let (snapshot_id, source_state, freezer_applied) = snapshot_operation(&record)?;
+        let mut record = record;
         let execution_id = ExecutionId::new(record.id.clone())?;
         if source_state == ManagedExecutionState::Paused
             && !paused_with_memory(&record, &execution_id)?
@@ -123,20 +124,54 @@ impl LocalExecutionManager {
         observation.validate(&execution_id)?;
         let mut handle = required_handle(&observation, &execution_id)?;
 
-        match (source_state, observation.state) {
-            (ManagedExecutionState::Running, ExecutionState::Running) => {
-                handle = self.pause_for_snapshot(&record, &execution_id).await?;
+        match (source_state, observation.state, freezer_applied) {
+            (ManagedExecutionState::Running, ExecutionState::Running, true) => {
+                let published = self.load_snapshot(&snapshot_id).await?;
+                if published
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.source_box_id != record.id)
+                {
+                    return Err(ExecutionManagerError::Unavailable(format!(
+                        "filesystem snapshot {snapshot_id} belongs to another execution"
+                    )));
+                }
+                let completed = self
+                    .complete_with_handle(
+                        &record,
+                        ManagedExecutionState::Snapshotting,
+                        ManagedExecutionState::Running,
+                        handle,
+                    )
+                    .await?;
+                return match published {
+                    Some(published) => Ok(ExecutionSnapshot {
+                        snapshot_id,
+                        size_bytes: published.size_bytes,
+                        state: ExecutionState::Running,
+                        lease: lease_from_record(&completed)?,
+                    }),
+                    None => Err(ExecutionManagerError::Unavailable(format!(
+                        "execution {execution_id} was thawed before filesystem snapshot {snapshot_id} was published; the snapshot claim was rolled back"
+                    ))),
+                };
             }
-            (ManagedExecutionState::Running, ExecutionState::Paused)
-            | (ManagedExecutionState::Paused, ExecutionState::Paused) => {}
-            (ManagedExecutionState::Paused, ExecutionState::Running) => {
+            (ManagedExecutionState::Running, ExecutionState::Running, false) => {
+                handle = self.pause_for_snapshot(&record, &execution_id).await?;
+                record = self.mark_snapshot_freezer_applied(&record).await?;
+            }
+            (ManagedExecutionState::Running, ExecutionState::Paused, false) => {
+                record = self.mark_snapshot_freezer_applied(&record).await?;
+            }
+            (ManagedExecutionState::Running, ExecutionState::Paused, true)
+            | (ManagedExecutionState::Paused, ExecutionState::Paused, false) => {}
+            (ManagedExecutionState::Paused, ExecutionState::Running, false) => {
                 return Err(ExecutionManagerError::Conflict {
                     execution_id,
                     message: "a paused execution resumed while its filesystem snapshot was pending"
                         .to_string(),
                 })
             }
-            (_, state) => {
+            (_, state, _) => {
                 return Err(ExecutionManagerError::Conflict {
                     execution_id,
                     message: format!(
@@ -441,7 +476,7 @@ impl LocalExecutionManager {
 
 fn snapshot_operation(
     record: &BoxRecord,
-) -> ExecutionManagerResult<(ExecutionSnapshotId, ManagedExecutionState)> {
+) -> ExecutionManagerResult<(ExecutionSnapshotId, ManagedExecutionState, bool)> {
     match record
         .managed_execution
         .as_ref()
@@ -450,13 +485,14 @@ fn snapshot_operation(
         Some(ManagedExecutionOperation::Snapshot {
             snapshot_id,
             source_state,
+            freezer_applied,
             ..
         }) if matches!(
             source_state,
             ManagedExecutionState::Running | ManagedExecutionState::Paused
         ) =>
         {
-            Ok((snapshot_id.clone(), *source_state))
+            Ok((snapshot_id.clone(), *source_state, *freezer_applied))
         }
         _ => Err(ExecutionManagerError::Internal(format!(
             "execution {} has invalid snapshot recovery metadata",

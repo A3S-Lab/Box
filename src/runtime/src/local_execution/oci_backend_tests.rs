@@ -2809,6 +2809,83 @@ async fn running_snapshot_uses_a_durable_freezer_identity_per_attempt() {
 }
 
 #[tokio::test]
+async fn snapshot_recovery_does_not_replay_a_completed_pause_after_thaw() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let first = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let create_operation = box_operation("snapshot-thaw-recovery-create");
+    let running = first
+        .create_and_start(
+            request("snapshot-thaw-recovery", ExecutionIsolation::Sandbox),
+            &create_operation,
+        )
+        .await
+        .expect("initial launch");
+    let snapshot_id = ExecutionSnapshotId::new("snapshot-thaw-recovery").unwrap();
+    let record = persisted(&first, &running.execution_id);
+    let claimed = first
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Running,
+                operation_id: box_operation("snapshot-thaw-freezer"),
+            },
+        )
+        .await
+        .expect("persist snapshot claim");
+    first
+        .backend
+        .pause(&claimed, true)
+        .await
+        .expect("freeze snapshot source");
+    let frozen = first
+        .mark_snapshot_freezer_applied(&claimed)
+        .await
+        .expect("persist frozen phase");
+    first
+        .backend
+        .resume(&frozen)
+        .await
+        .expect("simulate thaw before Box completion");
+    drop(first);
+
+    let recovered = manager(&directory, test_endpoint(), service.clone(), provider);
+    let error = recovered
+        .reconcile(&create_operation)
+        .await
+        .expect_err("an unpublished thawed snapshot must roll back");
+    assert!(error
+        .to_string()
+        .contains("was thawed before filesystem snapshot"));
+    assert_eq!(service.pause_requests().len(), 1);
+    assert_eq!(service.resume_requests().len(), 1);
+    let rolled_back = persisted(&recovered, &running.execution_id);
+    assert_eq!(
+        rolled_back.status,
+        ManagedExecutionState::Running.as_status()
+    );
+    assert_eq!(
+        rolled_back.managed_execution.as_ref().unwrap().generation,
+        running.generation
+    );
+    assert!(rolled_back
+        .managed_execution
+        .as_ref()
+        .unwrap()
+        .pending_operation
+        .is_none());
+}
+
+#[tokio::test]
 async fn pause_requires_advertised_sdk_operation_before_runtime_mutation() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::without_operation(

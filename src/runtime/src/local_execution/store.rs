@@ -187,6 +187,7 @@ impl LocalExecutionManager {
                             snapshot_id,
                             source_state,
                             operation_id: Some(operation_id),
+                            freezer_applied: false,
                         });
                     }
                 }
@@ -280,6 +281,41 @@ impl LocalExecutionManager {
         let execution_id = execution_id(record)?;
         let generation = generation(record, &execution_id)?;
         run_store(move || store.finish_resource_update(&execution_id, generation)).await
+    }
+
+    pub(super) async fn mark_snapshot_freezer_applied(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        let store = self.store.clone();
+        let execution_id = execution_id(record)?;
+        let generation = generation(record, &execution_id)?;
+        let (snapshot_id, operation_id) = match record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.pending_operation.as_ref())
+        {
+            Some(ManagedExecutionOperation::Snapshot {
+                snapshot_id,
+                source_state: ManagedExecutionState::Running,
+                operation_id,
+                ..
+            }) => (snapshot_id.clone(), operation_id.clone()),
+            _ => {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "execution {execution_id} has no running snapshot freezer claim"
+                )))
+            }
+        };
+        run_store(move || {
+            store.mark_snapshot_freezer_applied(
+                &execution_id,
+                generation,
+                &snapshot_id,
+                operation_id.as_ref(),
+            )
+        })
+        .await
     }
 }
 

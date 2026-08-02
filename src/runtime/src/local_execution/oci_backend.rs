@@ -1651,6 +1651,7 @@ fn freezer_operation_seed(
                 snapshot_id,
                 source_state: ManagedExecutionState::Running,
                 operation_id,
+                ..
             }),
         ) => Ok(operation_id
             .as_ref()
