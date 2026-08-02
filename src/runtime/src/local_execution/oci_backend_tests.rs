@@ -234,6 +234,23 @@ impl FakeRuntimeService {
         container.exit_status = Some(status);
     }
 
+    fn mark_stopped_without_exit_evidence(&self, execution_id: &ExecutionId) {
+        let id = runtime_container_id(execution_id).expect("runtime container ID");
+        let mut containers = self.containers.lock().expect("container lock");
+        let container = containers.get_mut(id.as_str()).expect("runtime exists");
+        container.record = runtime_record(
+            &id,
+            container.record.generation,
+            ContainerState::Stopped,
+            container.record.driver,
+            container.record.isolation,
+            &container.record.config_digest,
+            container.record.attachments_digest.as_deref(),
+        )
+        .expect("stopped runtime record");
+        container.exit_status = None;
+    }
+
     fn create_requests(&self) -> Vec<CreateRequest> {
         self.create_requests.lock().expect("create lock").clone()
     }
@@ -1220,11 +1237,19 @@ impl OciRuntimeService for FakeRuntimeService {
             .get(request.target.id.as_str())
             .ok_or_else(|| oci_error(ErrorCode::NotFound, "wait", "fake runtime is absent"))?;
         validate_target(&request.target, &container.record, "wait")?;
-        container.exit_status.clone().ok_or_else(|| {
-            Error::new(ErrorCode::DeadlineExceeded, "fake runtime is still running")
-                .for_operation("wait")
-                .retryable(true)
-        })
+        match container.exit_status.clone() {
+            Some(status) => Ok(status),
+            None if *container.record.state.status() == ContainerState::Stopped => Err(Error::new(
+                ErrorCode::FailedPrecondition,
+                "fake stopped runtime has no exact terminal evidence",
+            )
+            .for_operation("wait")),
+            None => Err(
+                Error::new(ErrorCode::DeadlineExceeded, "fake runtime is still running")
+                    .for_operation("wait")
+                    .retryable(true),
+            ),
+        }
     }
 }
 
@@ -3583,6 +3608,47 @@ async fn reopened_backend_observes_natural_terminal_status_before_stopped_only_d
     assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
     assert_eq!(service.container_count(), 0);
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reopened_backend_cleans_stopped_generation_without_inventing_exit_status() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let lease = first
+        .create_and_start(
+            request("owner-death", ExecutionIsolation::Sandbox),
+            &box_operation("owner-death-operation"),
+        )
+        .await
+        .expect("initial launch");
+    service.mark_stopped_without_exit_evidence(&lease.execution_id);
+    let reopened = manager(&directory, endpoint, service.clone(), provider.clone());
+
+    let status = reopened
+        .inspect(&lease.execution_id)
+        .await
+        .expect("owner-death terminal inspection");
+    let record = persisted(&reopened, &lease.execution_id);
+
+    assert_eq!(status.state, ExecutionState::Stopped);
+    assert_eq!(record.exit_code, None);
+    assert_eq!(record.status, ManagedExecutionState::Stopped.as_status());
+    assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
+    assert_eq!(service.container_count(), 0);
+    assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+    assert!(record
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.oci_runtime.as_ref())
+        .is_none());
 }
 
 #[tokio::test]

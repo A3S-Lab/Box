@@ -78,7 +78,7 @@ impl NativeLinuxOwnerRecord {
     }
 
     fn is_alive(&self) -> bool {
-        crate::process::is_process_alive_with_identity(self.pid, Some(self.pid_start_time))
+        crate::process::is_process_running_with_identity(self.pid, Some(self.pid_start_time))
     }
 }
 
@@ -460,6 +460,8 @@ fn is_sha256_hex(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[test]
@@ -482,5 +484,39 @@ mod tests {
         assert!(validate_service_root(Path::new("relative")).is_err());
         assert!(validate_service_root(Path::new("/tmp/a/../b")).is_err());
         assert!(validate_service_root(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn completed_zombie_owner_is_not_reused() {
+        let artifacts = CertifiedA3sOci {
+            runtime_path: PathBuf::from("/opt/a3s/a3s-oci"),
+            runtime_sha256: "a".repeat(64),
+            agent_path: PathBuf::from("/opt/a3s/a3s-oci-agent"),
+            agent_sha256: "b".repeat(64),
+        };
+        let mut child = Command::new("/bin/true")
+            .spawn()
+            .expect("spawn completed owner fixture");
+        let pid = child.id();
+        let start_time = crate::process::pid_start_time(pid).expect("capture owner identity");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while crate::process::is_process_running_with_identity(pid, Some(start_time))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            crate::process::is_process_alive_with_identity(pid, Some(start_time)),
+            "unreaped fixture must remain addressable as a zombie"
+        );
+
+        let record = NativeLinuxOwnerRecord::new(
+            pid,
+            start_time,
+            &artifacts,
+            PathBuf::from("/tmp/a3s-owner/runtime.sock"),
+        );
+        assert!(!record.is_alive(), "a zombie owner must be reclaimed");
+        child.wait().expect("reap completed owner fixture");
     }
 }

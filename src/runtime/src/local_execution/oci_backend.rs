@@ -612,6 +612,42 @@ impl OciLifecycleAdapter {
         Ok(status)
     }
 
+    /// Read terminal evidence only after the runtime has authoritatively
+    /// reported this exact generation as stopped. A recovered runtime is
+    /// allowed to refuse an exact exit result when no authenticated reaper
+    /// survived owner death; Box must preserve that uncertainty rather than
+    /// inventing an exit code.
+    async fn wait_stopped(
+        &self,
+        record: &ContainerRecord,
+        binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<Option<ExitStatus>> {
+        binding.validate_record(record)?;
+        if *record.state.status() != ContainerState::Stopped {
+            return Err(ExecutionManagerError::Internal(format!(
+                "A3S OCI terminal wait was requested for non-stopped container {}",
+                binding.target.id
+            )));
+        }
+        match self
+            .client
+            .wait(WaitRequest {
+                target: binding.target.clone(),
+                timeout_ms: Some(0),
+            })
+            .await
+        {
+            Ok(status) => {
+                status
+                    .validate()
+                    .map_err(|error| sdk_error("wait", error))?;
+                Ok(Some(status))
+            }
+            Err(error) if error.code == ErrorCode::FailedPrecondition => Ok(None),
+            Err(error) => Err(sdk_error("wait", error)),
+        }
+    }
+
     async fn wait_until(
         &self,
         binding: &OciRuntimeBinding,
@@ -1113,11 +1149,12 @@ impl OciLocalExecutionBackend {
     async fn terminal_observation(
         &self,
         record: &BoxRecord,
+        runtime: &ContainerRecord,
         binding: &OciRuntimeBinding,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         let execution_id = self.execution_id(record)?;
         let generation = self.metadata(record)?.generation;
-        let status = self.adapter.wait(binding, Some(0)).await?;
+        let status = self.adapter.wait_stopped(runtime, binding).await?;
         self.adapter
             .delete(&execution_id, generation, binding, DeleteMode::StoppedOnly)
             .await?;
@@ -1125,7 +1162,7 @@ impl OciLocalExecutionBackend {
         Ok(LocalExecutionObservation {
             state: ExecutionState::Stopped,
             handle: None,
-            exit_code: Some(exit_code(&status)?),
+            exit_code: status.as_ref().map(exit_code).transpose()?,
         })
     }
 }
@@ -1352,7 +1389,7 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 )),
                 exit_code: None,
             }),
-            ContainerState::Stopped => self.terminal_observation(record, &binding).await,
+            ContainerState::Stopped => self.terminal_observation(record, &runtime, &binding).await,
         }
     }
 
