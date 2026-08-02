@@ -1878,6 +1878,54 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
 }
 
 #[tokio::test]
+async fn relative_exec_resolves_against_the_prepared_rootfs_path() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("relative-exec", ExecutionIsolation::Sandbox),
+            &box_operation("relative-exec-create"),
+        )
+        .await
+        .expect("initial launch");
+    let rootfs = directory
+        .path()
+        .join("home")
+        .join("boxes")
+        .join(lease.execution_id.as_str())
+        .join("rootfs");
+    std::fs::create_dir_all(rootfs.join("usr/bin")).expect("create rootfs PATH directory");
+    let executable = rootfs.join("usr/bin/printf");
+    std::fs::write(&executable, b"fake executable").expect("create rootfs executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("mark rootfs command executable");
+    }
+
+    let mut exec = box_exec_request(Some("relative-path-command"));
+    exec.cmd = vec!["printf".to_string(), "sdk-ok".to_string()];
+    manager
+        .execute(&lease.execution_id, lease.generation, exec)
+        .await
+        .expect("relative exec through OCI backend");
+
+    let calls = service.exec_requests();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].process.args().as_ref().expect("process args"),
+        &["/usr/bin/printf", "sdk-ok"]
+    );
+}
+
+#[tokio::test]
 async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutations_once() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());

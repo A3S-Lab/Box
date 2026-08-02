@@ -160,7 +160,11 @@ identity across a lost response and backend recreation. Initial and streaming
 stdin mutations are replay-safe, timeouts retain an exact SIGKILL watchdog even
 if the caller drops its future, and raw process output never enters Box's
 structured log store. Legacy VM records retain their existing socket transport,
-while OCI-bound sessions no longer depend on Unix-domain sockets.
+while OCI-bound sessions no longer depend on Unix-domain sockets. Relative
+direct-argv executables resolve through the request, image, or default container
+`PATH` against the prepared rootfs, then cross the SDK boundary as normalized
+absolute Linux paths; this applies equally to captured exec, streaming exec,
+and PTY sessions without invoking a shell.
 
 The same cross-platform session facade now maps file upload/download and
 filesystem stat, recursive mkdir, move, bounded listing, and recursive removal

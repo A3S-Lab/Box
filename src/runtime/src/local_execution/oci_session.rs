@@ -28,6 +28,9 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use super::oci_backend::{exit_code, operation_context, sdk_error, OciLocalExecutionBackend};
+use crate::process_path::{
+    normalize_linux_guest_path, resolve_runtime_executable, DEFAULT_CONTAINER_PATH,
+};
 use crate::BoxRecord;
 
 const OUTPUT_POLL_BYTES: u32 = 64 * 1024;
@@ -227,8 +230,15 @@ async fn launch_process(
     })?;
     binding.validate_for(&execution_id)?;
     let terminal = matches!(launch.io.stdin, IoMode::Terminal);
+    let mut args = launch.args;
+    resolve_exec_executable(
+        record,
+        &mut args,
+        &launch.env,
+        launch.working_dir.as_deref(),
+    )?;
     let process = build_process(
-        launch.args,
+        args,
         launch.env,
         launch.working_dir,
         launch.rootfs,
@@ -341,6 +351,67 @@ async fn launch_process(
         done: false,
         empty_polls_after_exit: 0,
     })
+}
+
+fn resolve_exec_executable(
+    record: &BoxRecord,
+    args: &mut [String],
+    env: &[String],
+    working_dir: Option<&str>,
+) -> ExecutionManagerResult<()> {
+    let Some(command) = args.first_mut() else {
+        return Ok(());
+    };
+    if command.starts_with('/') {
+        *command = normalize_linux_guest_path("/", command, "exec process executable")
+            .map_err(exec_path_request_error)?;
+        return Ok(());
+    }
+
+    let cwd = working_dir.unwrap_or("/");
+    let request_path = env
+        .iter()
+        .rev()
+        .find_map(|entry| entry.strip_prefix("PATH="));
+    let image_config = if request_path.is_none() {
+        crate::load_resolved_image_config(&record.box_dir).map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "cannot load resolved image environment for A3S OCI exec in {}: {error}",
+                record.id
+            ))
+        })?
+    } else {
+        None
+    };
+    let path = request_path
+        .or_else(|| {
+            image_config.as_ref().and_then(|config| {
+                config
+                    .env
+                    .iter()
+                    .rev()
+                    .find_map(|(key, value)| (key == "PATH").then_some(value.as_str()))
+            })
+        })
+        .unwrap_or(DEFAULT_CONTAINER_PATH);
+    *command = resolve_runtime_executable(&record.box_dir.join("rootfs"), cwd, path, command)
+        .map_err(exec_path_request_error)?;
+    Ok(())
+}
+
+fn exec_path_request_error(error: a3s_box_core::BoxError) -> ExecutionManagerError {
+    match error {
+        a3s_box_core::BoxError::ConfigError(message) => {
+            ExecutionManagerError::InvalidRequest(message)
+        }
+        a3s_box_core::BoxError::BoxBootError { message, hint } => {
+            let message = hint.map_or(message.clone(), |hint| format!("{message} ({hint})"));
+            ExecutionManagerError::InvalidRequest(message)
+        }
+        error => ExecutionManagerError::Unavailable(format!(
+            "failed to inspect the prepared rootfs for A3S OCI exec: {error}"
+        )),
+    }
 }
 
 fn spawn_timeout_watchdog(

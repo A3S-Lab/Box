@@ -30,6 +30,7 @@ pub mod managed_execution_store;
 pub mod network;
 pub mod oci;
 pub mod process;
+mod process_path;
 pub mod prom;
 pub mod resize;
 mod resolved_image;

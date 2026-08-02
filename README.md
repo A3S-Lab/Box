@@ -90,7 +90,11 @@ unchanged.
 > identity-fenced owner startup, and explicit CLI/SDK composition. Before bundle
 > construction, the resource guard validates the managed home, durably attaches
 > product volumes and networking, and installs a verified snapshot lower with
-> fail-closed rollback. The blocking Native Linux real-host gate now passes this
+> fail-closed rollback. Direct SDK argv commands use the effective container
+> `PATH` to resolve `argv[0]` against that prepared rootfs before OCI dispatch,
+> preserving shell-free `Argv("printf", ...)` behavior without weakening the
+> runtime's normalized-absolute-path contract. The blocking Native Linux
+> real-host gate now passes this
 > production owner composition through the Rust, Python, TypeScript, and Go SDK
 > lifecycle, exec, filesystem, route-aware stats, pause/resume, snapshot
 > restore, restart, and cleanup surfaces.
