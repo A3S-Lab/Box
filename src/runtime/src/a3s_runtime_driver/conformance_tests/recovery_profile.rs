@@ -129,11 +129,13 @@ async fn create_before_ack_and_client_restart(
 }
 
 async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixture) -> Result<()> {
-    let request = fixture.cases.task(
-        "recovery-cancelled-task",
-        "printf 'r17-cancelled-task\\n'; sleep 5",
-        30_000,
+    const RELEASE_MARKER: &str = "r17-cancelled-task-release";
+    let command = format!(
+        "printf 'r17-cancelled-task\\n'; while [ ! -e /workspace/{RELEASE_MARKER} ]; do sleep 1; done"
     );
+    let request = fixture
+        .cases
+        .task("recovery-cancelled-task", &command, 30_000);
     let client = Arc::new(fixture.client_with(fixture.driver.clone(), fixture.state.clone()));
     let apply = {
         let client = client.clone();
@@ -141,7 +143,7 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
         tokio::spawn(async move { client.apply(&request).await })
     };
 
-    let provider_id = tokio::time::timeout(Duration::from_secs(120), async {
+    let provider_record = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             let records = fixture.records_for(&fixture.driver, &request.spec).await?;
             require(
@@ -150,7 +152,7 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
             )?;
             if let Some(record) = records.first() {
                 match local_identity(record)?.2 {
-                    ManagedExecutionState::Running => break Ok(record.id.clone()),
+                    ManagedExecutionState::Running => break Ok(record.clone()),
                     ManagedExecutionState::Stopped | ManagedExecutionState::Failed => {
                         break Err(super::protocol(
                             "cancellation fixture Task became terminal before cancellation",
@@ -170,6 +172,7 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
     .await
     .map_err(|_| super::failure("cancellation fixture did not reach a running Sandbox"))??;
 
+    let provider_id = provider_record.id.clone();
     apply.abort();
     match apply.await {
         Err(error) if error.is_cancelled() => {}
@@ -190,6 +193,14 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
         pending.state == RuntimeRequestState::Pending,
         "cancelled Task apply did not preserve a replayable pending receipt",
     )?;
+    std::fs::write(
+        provider_record
+            .box_dir
+            .join("workspace")
+            .join(RELEASE_MARKER),
+        b"release\n",
+    )
+    .map_err(|error| super::external("release cancelled Task fixture", error))?;
 
     let restarted_driver = fixture.restarted_driver()?;
     let restarted = fixture.client_with(restarted_driver.clone(), fixture.state.clone());
