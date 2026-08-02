@@ -202,10 +202,27 @@ async fn exercise(
     sandbox.files.remove(directory).await?;
     let logs = sandbox.logs(SandboxLogOptions::tail(20)).await?;
     require(logs.len() <= 20, "Sandbox logs exceeded the requested tail")?;
-    require(
-        sandbox.stats().await?.is_some(),
-        "running Sandbox did not expose a stats snapshot",
-    )?;
+    if expected_isolation == ExecutionIsolation::Sandbox {
+        let info = sandbox.info();
+        let stats = sandbox.runtime_stats().await?;
+        require(
+            stats.execution_id.as_str() == sandbox.id(),
+            "runtime stats targeted a different Sandbox",
+        )?;
+        require(
+            stats.generation.get() == info.generation,
+            "runtime stats targeted a different Sandbox generation",
+        )?;
+        require(
+            stats.timestamp_unix_ns > 0 && stats.process_count > 0,
+            "running Sandbox returned an invalid runtime stats snapshot",
+        )?;
+    } else {
+        require(
+            sandbox.stats().await?.is_some(),
+            "running MicroVM did not expose a host stats snapshot",
+        )?;
+    }
 
     if expected_isolation == ExecutionIsolation::Sandbox {
         exercise_filesystem_snapshot(sandbox, client, image).await?;
