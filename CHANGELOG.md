@@ -23,14 +23,16 @@ All notable changes to A3S Box will be documented in this file.
 
 - **Out-of-process OCI owner reconciliation.** A cross-platform contract now
   launches two distinct runtime-owner fixture processes on one local endpoint.
-  The first persists the exact runtime generation and is terminated; the second
-  reopens that state while the same `LocalExecutionManager` retains its backend.
-  The first reconciliation exposes owner death, the next reconnects and
-  recovers the original Box operation and generation, and the cross-process log
-  records exactly one create and start. Together with OCI Runtime commit
-  `6487cd2a` reopening its real durable `HostRuntimeService` across two owner
-  processes, this closes the B1 service-reopen contract. Production owner
-  wiring and real native Linux/WHPX driver qualification remain open.
+  The first persists the exact runtime generation, starts a streaming exec, and
+  is terminated; the second reopens that state while the same
+  `LocalExecutionManager`, process stream, and input handle remain alive. The
+  observed request exposes owner death without hidden replay, then the retained
+  objects reconnect and continue process inventory, stdin, output, close,
+  signal, wait, container reconciliation, and cleanup. The cross-process log
+  records exactly one create, start, and exec. OCI Runtime independently proves
+  the same session operations through its real durable `HostRuntimeService`.
+  Production owner wiring and real native Linux/WHPX driver qualification
+  remain open.
 - **Retained local OCI runtime connection recovery.** Box now pins the SDK
   transport that preserves one logical `RuntimeClient` across a broken local
   stream. The request that observes the disconnect still fails without hidden

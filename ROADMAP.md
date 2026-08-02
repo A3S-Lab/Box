@@ -97,7 +97,10 @@ the next reconnects, renegotiates, and recovers the original operation and
 generation without a second create or start. A second cross-platform contract
 launches two distinct owner fixture processes, reopens synchronized runtime
 state on the replacement, and proves the same retained manager still records
-only one create and start. OCI Runtime commit `6487cd2a` independently reopens
+only one create and start. That contract now also keeps one live exec stream and
+input handle across the observed disconnect, then continues inventory, stdin,
+output, signal, exact wait, and cleanup through the replacement owner with one
+exec dispatch. OCI Runtime independently proves the same process target through
 its durable `HostRuntimeService` and operation journal across two processes.
 Real driver state and production owner wiring remain below.
 
@@ -219,10 +222,12 @@ mutation response. The same suite now validates exact process targets,
 normalized stats, strict ordered-event cursors, durable
 `updating_resources` claims, immutable create identity after mutable resource
 intent, local completion replay, lost-response recovery after backend
-recreation, and terminal-exit races. Native-driver process-session restart
-evidence remains part of the exit gate. The retained-backend core-lifecycle
-process restart contract covers the shared owner/transport prerequisite, but
-not live process-session recovery in a native or utility-VM driver.
+recreation, and terminal-exit races. The cross-platform deterministic owner
+contract now keeps the original Box process stream and input handle alive,
+exposes the first broken request, reconnects to a replacement process, and
+continues inventory, stdin, output, close, signal, exact wait, and cleanup with
+one exec dispatch. Native Linux and utility-VM driver reattachment on real
+hosts remains part of the unchecked exit gate.
 
 ### B3 - Storage And Networking Attachments
 

@@ -66,7 +66,9 @@ policy are persisted so restart recovery cannot reinterpret the workload.
 > client now exposes the first broken-stream result, then reconnects and
 > renegotiates on a later explicit reconciliation. The generic Box/OCI contract
 > also recovers one manager across two distinct runtime-owner test processes
-> with exactly one create and start. Raw runtime output stays separate from
+> with exactly one create, start, and exec; the original live process stream and
+> input handle continue inventory, stdin, output, signal, wait, and cleanup
+> through the replacement owner. Raw runtime output stays separate from
 > structured Box logs. The pinned runtime qualification now exercises binary
 > file transfer and descriptor-confined mkdir/stat/list/move/remove against its
 > real native and utility-VM drivers before the Box SDK suite runs. Production
@@ -295,8 +297,9 @@ The retained SDK client reports a broken local stream without replaying the
 unknown request, then reconnects to the persisted endpoint and renegotiates on
 the next explicit retry or reconciliation. The process-boundary contract keeps
 that same backend alive while two child owners exchange disk-backed runtime
-state, proving exact Box reconciliation without duplicate launch. Solid current
-behavior and the phased cutover gates are kept separate in
+state, proving exact Box reconciliation and continued use of one live exec
+stream without duplicate launch. Solid current behavior and the phased cutover
+gates are kept separate in
 [ROADMAP.md](ROADMAP.md); unfinished migration work is never presented as a
 platform capability.
 

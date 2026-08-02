@@ -1,11 +1,14 @@
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::*;
+
+#[path = "process_restart/model.rs"]
+mod model;
+use model::{DurableFixtureProcess, DurableFixtureService, DurableFixtureState};
 
 const CHILD_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_CHILD";
 const STATE_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_STATE";
@@ -16,140 +19,6 @@ const CHILD_TEST_NAME: &str = concat!(
     "local_execution::oci_backend::tests::process_restart::",
     "retained_backend_recovers_after_runtime_owner_process_restart"
 );
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct DurableFixtureState {
-    record: ContainerRecord,
-    create_operation: String,
-    start_operation: Option<String>,
-    exit_status: Option<ExitStatus>,
-}
-
-struct DurableFixtureService {
-    state_path: PathBuf,
-    call_log: PathBuf,
-    lock: Mutex<()>,
-}
-
-impl DurableFixtureService {
-    fn new(state_path: PathBuf, call_log: PathBuf) -> Self {
-        Self {
-            state_path,
-            call_log,
-            lock: Mutex::new(()),
-        }
-    }
-
-    fn load(&self, operation: &str) -> OciResult<Option<DurableFixtureState>> {
-        match std::fs::read(&self.state_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-                oci_error(
-                    ErrorCode::Internal,
-                    operation,
-                    format!(
-                        "failed to decode durable process fixture {}: {error}",
-                        self.state_path.display()
-                    ),
-                )
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!(
-                    "failed to read durable process fixture {}: {error}",
-                    self.state_path.display()
-                ),
-            )),
-        }
-    }
-
-    fn store(&self, state: &DurableFixtureState, operation: &str) -> OciResult<()> {
-        let bytes = serde_json::to_vec(state).map_err(|error| {
-            oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!("failed to encode durable process fixture: {error}"),
-            )
-        })?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&self.state_path)
-            .map_err(|error| {
-                oci_error(
-                    ErrorCode::Internal,
-                    operation,
-                    format!(
-                        "failed to open durable process fixture {}: {error}",
-                        self.state_path.display()
-                    ),
-                )
-            })?;
-        file.write_all(&bytes).map_err(|error| {
-            oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!("failed to write durable process fixture: {error}"),
-            )
-        })?;
-        file.sync_all().map_err(|error| {
-            oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!("failed to sync durable process fixture: {error}"),
-            )
-        })
-    }
-
-    fn append_call(&self, operation: &'static str) -> OciResult<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.call_log)
-            .map_err(|error| {
-                oci_error(
-                    ErrorCode::Internal,
-                    operation,
-                    format!(
-                        "failed to open process fixture call log {}: {error}",
-                        self.call_log.display()
-                    ),
-                )
-            })?;
-        writeln!(file, "{operation}").map_err(|error| {
-            oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!("failed to append process fixture call log: {error}"),
-            )
-        })?;
-        file.sync_all().map_err(|error| {
-            oci_error(
-                ErrorCode::Internal,
-                operation,
-                format!("failed to sync process fixture call log: {error}"),
-            )
-        })
-    }
-
-    fn rewritten_record(
-        state: &DurableFixtureState,
-        status: ContainerState,
-    ) -> OciResult<ContainerRecord> {
-        let id = ContainerId::new(state.record.state.id().to_string())?;
-        runtime_record(
-            &id,
-            state.record.generation,
-            status,
-            state.record.driver,
-            state.record.isolation,
-            &state.record.config_digest,
-            state.record.attachments_digest.as_deref(),
-        )
-    }
-}
 
 #[async_trait]
 impl OciRuntimeService for DurableFixtureService {
@@ -165,6 +34,13 @@ impl OciRuntimeService for DurableFixtureService {
                     | RuntimeOperation::Kill
                     | RuntimeOperation::Delete
                     | RuntimeOperation::Wait
+                    | RuntimeOperation::Exec
+                    | RuntimeOperation::Processes
+                    | RuntimeOperation::ReadOutput
+                    | RuntimeOperation::WriteStdin
+                    | RuntimeOperation::CloseStdin
+                    | RuntimeOperation::SignalProcess
+                    | RuntimeOperation::WaitProcess
             )
         });
         Ok(info)
@@ -208,6 +84,7 @@ impl OciRuntimeService for DurableFixtureService {
                 create_operation: operation,
                 start_operation: None,
                 exit_status: None,
+                process: None,
             },
             "process-fixture-create",
         )?;
@@ -319,6 +196,322 @@ impl OciRuntimeService for DurableFixtureService {
             )
         })?;
         self.append_call("delete")
+    }
+
+    async fn exec(&self, request: OciExecRequest) -> OciResult<ProcessRecord> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-exec", error))?;
+        let mut state = self.load("process-fixture-exec")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-exec",
+                "durable process fixture is absent",
+            )
+        })?;
+        validate_target(&request.container, &state.record, "process-fixture-exec")?;
+        if state.record.state.status() != &ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "process-fixture-exec",
+                "durable process fixture is not running",
+            ));
+        }
+        if let Some(process) = &state.process {
+            if process.request == request {
+                return Ok(process.record.clone());
+            }
+            return Err(oci_error(
+                ErrorCode::Conflict,
+                "process-fixture-exec",
+                "durable process fixture already owns another exec identity",
+            ));
+        }
+
+        let terminal = request.process.terminal().unwrap_or(false);
+        let record = ProcessRecord {
+            target: ProcessTarget {
+                container: request.container.clone(),
+                process_id: request.process_id.clone(),
+            },
+            pid: Some(9_001),
+            terminal,
+        };
+        let mut output = Vec::new();
+        append_output(
+            &mut output,
+            OutputStream::Stdout,
+            b"runtime owner session\n".to_vec(),
+            false,
+        );
+        state.process = Some(DurableFixtureProcess {
+            request,
+            record: record.clone(),
+            output,
+            exit_status: None,
+            stdin_operations: BTreeMap::new(),
+            close_stdin_operations: BTreeMap::new(),
+            signal_operations: BTreeMap::new(),
+        });
+        self.store(&state, "process-fixture-exec")?;
+        self.append_call("exec")?;
+        Ok(record)
+    }
+
+    async fn processes(&self, request: ProcessesRequest) -> OciResult<Vec<ProcessRecord>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-processes", error))?;
+        let state = self.load("process-fixture-processes")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-processes",
+                "durable process fixture is absent",
+            )
+        })?;
+        validate_target(&request.target, &state.record, "process-fixture-processes")?;
+        let mut records = Vec::new();
+        if state.record.state.status() != &ContainerState::Stopped {
+            records.push(ProcessRecord {
+                target: ProcessTarget {
+                    container: ContainerTarget::exact(
+                        request.target.id.clone(),
+                        state.record.generation,
+                    ),
+                    process_id: ProcessId::init(),
+                },
+                pid: state
+                    .record
+                    .state
+                    .pid()
+                    .and_then(|pid| u32::try_from(pid).ok()),
+                terminal: false,
+            });
+        }
+        if let Some(process) = state
+            .process
+            .filter(|process| process.exit_status.is_none())
+        {
+            records.push(process.record);
+        }
+        Ok(records)
+    }
+
+    async fn read_output(&self, request: ReadOutputRequest) -> OciResult<Vec<OutputChunk>> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-read-output", error))?;
+        let state = self.load("process-fixture-read-output")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-read-output",
+                "durable process fixture is absent",
+            )
+        })?;
+        let process = state.process.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-read-output",
+                "durable exec process is absent",
+            )
+        })?;
+        validate_process_target(
+            &request.process,
+            &process.record,
+            "process-fixture-read-output",
+        )?;
+        let mut bytes = 0_u64;
+        Ok(process
+            .output
+            .into_iter()
+            .filter(|chunk| chunk.sequence > request.after_sequence)
+            .take_while(|chunk| {
+                let next = bytes.saturating_add(chunk.data.len() as u64);
+                if next > u64::from(request.max_bytes) {
+                    false
+                } else {
+                    bytes = next;
+                    true
+                }
+            })
+            .collect())
+    }
+
+    async fn write_stdin(&self, request: WriteStdinRequest) -> OciResult<()> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-write-stdin", error))?;
+        let mut state = self.load("process-fixture-write-stdin")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-write-stdin",
+                "durable process fixture is absent",
+            )
+        })?;
+        let process = state.process.as_mut().ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-write-stdin",
+                "durable exec process is absent",
+            )
+        })?;
+        validate_process_target(
+            &request.process,
+            &process.record,
+            "process-fixture-write-stdin",
+        )?;
+        let operation = request.context.operation_id.to_string();
+        if let Some(previous) = process.stdin_operations.get(&operation) {
+            if previous == &request {
+                return Ok(());
+            }
+            return Err(oci_error(
+                ErrorCode::Conflict,
+                "process-fixture-write-stdin",
+                "stdin operation identity was reused with different data",
+            ));
+        }
+        append_output(
+            &mut process.output,
+            OutputStream::Stdout,
+            request.data.clone(),
+            false,
+        );
+        process.stdin_operations.insert(operation, request);
+        self.store(&state, "process-fixture-write-stdin")?;
+        self.append_call("write-stdin")
+    }
+
+    async fn close_stdin(&self, request: CloseStdinRequest) -> OciResult<()> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-close-stdin", error))?;
+        let mut state = self.load("process-fixture-close-stdin")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-close-stdin",
+                "durable process fixture is absent",
+            )
+        })?;
+        let process = state.process.as_mut().ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-close-stdin",
+                "durable exec process is absent",
+            )
+        })?;
+        validate_process_target(
+            &request.process,
+            &process.record,
+            "process-fixture-close-stdin",
+        )?;
+        let operation = request.context.operation_id.to_string();
+        if let Some(previous) = process.close_stdin_operations.get(&operation) {
+            if previous == &request {
+                return Ok(());
+            }
+            return Err(oci_error(
+                ErrorCode::Conflict,
+                "process-fixture-close-stdin",
+                "close-stdin operation identity was reused with different content",
+            ));
+        }
+        process.close_stdin_operations.insert(operation, request);
+        self.store(&state, "process-fixture-close-stdin")?;
+        self.append_call("close-stdin")
+    }
+
+    async fn signal_process(&self, request: SignalProcessRequest) -> OciResult<()> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-signal-process", error))?;
+        let mut state = self
+            .load("process-fixture-signal-process")?
+            .ok_or_else(|| {
+                oci_error(
+                    ErrorCode::NotFound,
+                    "process-fixture-signal-process",
+                    "durable process fixture is absent",
+                )
+            })?;
+        let process = state.process.as_mut().ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-signal-process",
+                "durable exec process is absent",
+            )
+        })?;
+        validate_process_target(
+            &request.process,
+            &process.record,
+            "process-fixture-signal-process",
+        )?;
+        let operation = request.context.operation_id.to_string();
+        if let Some(previous) = process.signal_operations.get(&operation) {
+            if previous == &request {
+                return Ok(());
+            }
+            return Err(oci_error(
+                ErrorCode::Conflict,
+                "process-fixture-signal-process",
+                "signal operation identity was reused with different content",
+            ));
+        }
+        if process.exit_status.is_some() {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "process-fixture-signal-process",
+                "durable exec process already exited",
+            ));
+        }
+        process.exit_status = Some(ExitStatus::signaled(request.signal.get(), false)?);
+        append_missing_eof(&mut process.output, OutputStream::Stdout);
+        if !process.record.terminal {
+            append_missing_eof(&mut process.output, OutputStream::Stderr);
+        }
+        process.signal_operations.insert(operation, request);
+        self.store(&state, "process-fixture-signal-process")?;
+        self.append_call("signal-process")
+    }
+
+    async fn wait_process(&self, request: WaitProcessRequest) -> OciResult<ExitStatus> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-wait-process", error))?;
+        let state = self.load("process-fixture-wait-process")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-wait-process",
+                "durable process fixture is absent",
+            )
+        })?;
+        let process = state.process.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-wait-process",
+                "durable exec process is absent",
+            )
+        })?;
+        validate_process_target(
+            &request.process,
+            &process.record,
+            "process-fixture-wait-process",
+        )?;
+        process.exit_status.ok_or_else(|| {
+            Error::new(
+                ErrorCode::DeadlineExceeded,
+                "durable exec process is still running",
+            )
+            .for_operation("process-fixture-wait-process")
+            .retryable(true)
+        })
     }
 
     async fn wait(&self, request: WaitRequest) -> OciResult<ExitStatus> {
@@ -528,8 +721,40 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
         )
         .await
         .expect("initial launch through first runtime-owner process");
+    let mut exec = box_exec_request(None);
+    exec.streaming = true;
+    exec.stdin_streaming = true;
+    exec.timeout_ns = 30_000_000_000;
+    let mut process = manager
+        .start_process(&running.execution_id, running.generation, exec)
+        .await
+        .expect("start live process session through first runtime owner");
+    let input = process.input();
+    let first_event = process
+        .next_event()
+        .await
+        .expect("read first process event")
+        .expect("first process event");
+    assert!(matches!(
+        first_event,
+        ExecEvent::Chunk(chunk)
+            if chunk.stream == StreamType::Stdout
+                && chunk.data == b"runtime owner session\n"
+    ));
+    input
+        .write_stdin(b"before restart\n")
+        .await
+        .expect("write process stdin through first runtime owner");
 
     first_owner.terminate();
+    let process_error = process
+        .next_event()
+        .await
+        .expect_err("live process session must expose the observed owner disconnect");
+    assert!(matches!(
+        process_error,
+        ExecutionManagerError::Unavailable(_)
+    ));
     let error = manager
         .reconcile(&operation)
         .await
@@ -555,9 +780,73 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
     assert_eq!(recovered.execution_id, running.execution_id);
     assert_eq!(recovered.generation, running.generation);
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+    let inventory = manager
+        .list_processes(&running.execution_id, running.generation)
+        .await
+        .expect("recover live process inventory through replacement owner");
+    assert_eq!(inventory.processes.len(), 2);
+    assert!(inventory
+        .processes
+        .iter()
+        .any(|candidate| candidate.process_id != "init"));
+    input
+        .write_stdin(b"after restart\n")
+        .await
+        .expect("continue process stdin through replacement owner");
+    input
+        .close_stdin()
+        .await
+        .expect("close recovered process stdin");
+    input
+        .send_signal(ExecutionProcessSignal::Kill)
+        .await
+        .expect("signal recovered process session");
+
+    let mut resumed_output = Vec::new();
+    let mut exit = None;
+    while let Some(event) = process
+        .next_event()
+        .await
+        .expect("continue recovered process stream")
+    {
+        match event {
+            ExecEvent::Chunk(chunk) => resumed_output.extend_from_slice(&chunk.data),
+            ExecEvent::Exit(status) => exit = Some(status),
+            ExecEvent::FlushAck => {}
+        }
+    }
+    assert_eq!(resumed_output, b"before restart\nafter restart\n");
+    assert_eq!(exit.expect("recovered process exit").exit_code, 137);
+    manager
+        .kill(&running.execution_id, running.generation)
+        .await
+        .expect("clean up recovered container");
+
     let calls = std::fs::read_to_string(&call_log).expect("read runtime-owner call log");
     assert_eq!(calls.lines().filter(|call| *call == "create").count(), 1);
     assert_eq!(calls.lines().filter(|call| *call == "start").count(), 1);
+    assert_eq!(calls.lines().filter(|call| *call == "exec").count(), 1);
+    assert_eq!(
+        calls.lines().filter(|call| *call == "write-stdin").count(),
+        2
+    );
+    assert_eq!(
+        calls.lines().filter(|call| *call == "close-stdin").count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| *call == "signal-process")
+            .count(),
+        1
+    );
+    assert_eq!(calls.lines().filter(|call| *call == "kill").count(), 1);
+    assert_eq!(calls.lines().filter(|call| *call == "delete").count(), 1);
+    assert!(
+        !state_path.exists(),
+        "container cleanup must remove durable process-session state"
+    );
 
     second_owner.terminate();
     drop(manager);
