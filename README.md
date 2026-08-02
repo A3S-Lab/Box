@@ -72,9 +72,11 @@ unchanged.
 > filesystem mutations reuse one operation identity for an explicitly
 > retryable lost response and are verified to take effect once; read responses
 > are size-bounded and rejected if the target or shape drifts. Resource intent
-> is persisted before mutation and recovered with the same operation identity,
-> while the original create identity remains immutable. A retained local SDK
-> client now exposes the first broken-stream result, then reconnects and
+> is persisted before mutation and recovered with the same operation identity.
+> Snapshot freezer claims also persist whether their runtime mutation has been
+> applied, so crash recovery never replays an already completed thaw, while the
+> original create identity remains immutable. A retained local SDK client now
+> exposes the first broken-stream result, then reconnects and
 > renegotiates on a later explicit reconciliation. The generic Box/OCI contract
 > also recovers one manager across two distinct runtime-owner test processes
 > with exactly one create, start, and exec; the original live process stream and
@@ -85,11 +87,15 @@ unchanged.
 > real native and utility-VM drivers before the Box SDK suite runs. The pinned
 > runtime now supplies a long-lived multi-container Native Linux host owner and
 > Box now supplies its production direct-process bundle compiler, protected
-> identity-fenced owner startup, and explicit CLI/SDK composition. Native Linux
-> real-host acceptance is a blocking CI gate. WHPX composition,
-> cross-process real-driver process/filesystem recovery, remaining CLI
-> projections, and the broader cutover gates remain open; the default split
-> above is still authoritative.
+> identity-fenced owner startup, and explicit CLI/SDK composition. Before bundle
+> construction, the resource guard validates the managed home, durably attaches
+> product volumes and networking, and installs a verified snapshot lower with
+> fail-closed rollback. The blocking Native Linux real-host gate now passes this
+> production owner composition through typed Rust SDK lifecycle, exec,
+> filesystem, stats, pause/resume, snapshot restore, restart, and cleanup.
+> Real-driver owner/Box process restart, WHPX composition, cross-process
+> process/filesystem recovery, remaining CLI projections, and the broader
+> cutover gates remain open; the default split above is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

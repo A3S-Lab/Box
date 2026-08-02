@@ -526,6 +526,7 @@ jobs:
               CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
               A3S_DEPS_STUB=1 \
               A3S_HOME="$A3S_HOME" \
+              A3S_BOX_OCI_MIGRATION=sandbox \
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
               A3S_BOX_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box" \

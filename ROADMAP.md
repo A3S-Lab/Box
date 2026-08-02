@@ -87,8 +87,9 @@ versioned manifest for rootfs, mounts, networking, process I/O, secret
 classifications, and optional extensions, and persists exact
 endpoint/target/driver/configuration/attachment evidence. Create rejects
 missing or drifted attachment evidence and reconciles lost create/start
-responses without issuing a second create. This is migration scaffolding, not
-a production routing change. Its in-process contract suite covers both
+responses without issuing a second create. This contract began as migration
+scaffolding; Linux now has an explicit production Sandbox route, while the
+default route remains unchanged. Its in-process contract suite covers both
 isolation mappings, corrupt evidence, cleanup, adapter reopen, stopped-only
 deletion, and exact normal or signaled exit status. A separate local-transport
 contract now restarts the real Windows named-pipe or Unix-socket server behind
@@ -114,12 +115,15 @@ use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
 `a6f6242caf927f404f7e1f7f143fd3a350ce23b6` adds the matching long-lived,
-multi-container Native Linux host owner. Box now has a production provider that
-prepares the product-owned rootfs, mounts, resources, DNS/hostname files and
-OCI bundle while compiling the image process directly, without the legacy
-guest-init FD 3/4/5 contract. It resolves PATH, working directory, named or
-numeric users/groups, supplementary groups, HOME and capabilities against the
-prepared rootfs before mutation is handed to Runtime.
+multi-container Native Linux host owner. Box now first validates the exact
+managed home and durably prepares snapshot-lower, named-volume, and network
+ownership. Its production provider then prepares the product-owned rootfs,
+mounts, resources, DNS/hostname files and OCI bundle while compiling the image
+process directly, without the legacy guest-init FD 3/4/5 contract. It resolves
+PATH, working directory, named or numeric users/groups, supplementary groups,
+HOME and capabilities against the prepared rootfs before mutation is handed to
+Runtime. A provably failed launch rolls back every preparation-owned effect;
+unknown launch ownership retains them for exact reconciliation.
 The same pinned revision executes file and filesystem calls through a bounded,
 parent-bound helper inside the retained user and mount namespaces, so
 descriptor-confined operations preserve container IDs on rootfs, bind,
@@ -133,17 +137,20 @@ bridge and async Rust SDK constructor honor the explicit
 `A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
 startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
-of requiring Box guest sockets. A blocking native-Linux CI invocation runs the
-existing real Rust SDK Sandbox suite through this exact composition.
+of requiring Box guest sockets. The blocking native-Linux CI invocation now
+passes the existing real Rust SDK Sandbox suite through this exact composition,
+including lifecycle, exec, filesystem, stats, pause/resume, snapshot restore,
+restart, and cleanup.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
-persists a claim-scoped mutation identity and combines it with the current Box
-generation without changing the runtime generation, validates the complete
-returned runtime binding, and reconciles a lost response after backend
-recreation without issuing the mutation twice. Filesystem-only pause continues
-to use the existing
-stop/reprepare lifecycle rather than being mislabeled as an OCI freezer action.
+persists a claim-scoped mutation identity and whether the freezer is currently
+applied, and combines the identity with the current Box generation without
+changing the runtime generation. Recovery reuses the identity while the
+mutation is pending and never replays thaw after its durable applied phase is
+cleared. Returned runtime bindings are validated in full. Filesystem-only pause
+continues to use the existing stop/reprepare lifecycle rather than being
+mislabeled as an OCI freezer action.
 
 The backend-neutral session boundary now also routes captured and streaming
 exec, stdin, cursor-checked stdout/stderr, signal/wait, PTY, and resize through
@@ -187,8 +194,9 @@ crate.
 
 The dependency check resolves only `a3s-oci-sdk` and its public core types from
 the OCI Runtime repository. The typed opt-in composition and durable selection
-now satisfy this boundary gate; production activation remains a B1 cutover
-gate and is not implied by compiling the router.
+now satisfy this boundary gate. Linux Sandbox production activation remains
+explicitly opt-in; default activation and the unified MicroVM cutover remain
+later gates.
 
 ### B1 - OCI Runtime Vertical Slice
 
@@ -201,8 +209,8 @@ gate and is not implied by compiling the router.
   digests required for reconciliation.
 - [x] Reopen the local runtime service and reconcile interrupted Box operations
   without launching a duplicate workload.
-- [ ] Exercise the production composition on native Linux; the blocking
-  real-host job is wired and must pass before this item is checked.
+- [x] Exercise the production composition on native Linux through the blocking
+  real-host Rust SDK lifecycle, session, snapshot, restart, and cleanup gate.
 - [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
@@ -217,11 +225,12 @@ process contract then replaces the owner with a distinct child process that
 reopens disk-backed state, while OCI Runtime separately proves the real durable
 host service and journal reopen across processes. OCI Runtime now exposes the
 long-lived Native Linux owner, and Box now supplies fail-closed mixed-backend
-routing, a direct-process production bundle provider, protected owner startup,
-and explicit CLI/SDK construction. The remaining unchecked gate is real-host
-evidence for that composition, owner/Box process restart, and the equivalent
-WHPX path; deterministic process evidence is not promoted as platform-driver
-evidence.
+routing, verified product-resource preparation, a direct-process production
+bundle provider, protected owner startup, and explicit CLI/SDK construction.
+The real-host Native Linux production composition now passes. The remaining
+unchecked gates are owner/Box process restart on the real driver and the
+equivalent WHPX path; deterministic process evidence is not promoted as
+platform-driver evidence.
 
 ### B2 - Interactive And Observable Execution
 
