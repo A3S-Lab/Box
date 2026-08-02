@@ -110,11 +110,223 @@ A3S_BOX_BINARY="$A3S_BOX_BINARY" \
     A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
     PYTHONPATH="$REPO_ROOT/sdk/python/src" \
     "$PYTHON" - <<'PY'
+import json
 import os
 import shutil
+import signal
+import stat
+import time
 from pathlib import Path
 
 from a3s_box import A3SBoxClient, Sandbox
+
+
+def read_private_json(path: Path) -> dict:
+    metadata = path.lstat()
+    assert stat.S_ISREG(metadata.st_mode), f"{path} is not a regular file"
+    assert not path.is_symlink(), f"{path} is a symlink"
+    assert metadata.st_uid == 0, f"{path} is not root-owned"
+    assert stat.S_IMODE(metadata.st_mode) == 0o600, f"{path} is not mode 0600"
+    payload = path.read_bytes()
+    assert len(payload) <= 64 * 1024, f"{path} exceeds the evidence bound"
+    value = json.loads(payload)
+    assert isinstance(value, dict), f"{path} does not contain a JSON object"
+    return value
+
+
+def process_start_time(pid: int) -> int | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    closing = raw.rfind(") ")
+    assert closing >= 0, f"process {pid} has malformed stat evidence"
+    fields = raw[closing + 2 :].split()
+    assert len(fields) > 19, f"process {pid} has incomplete stat evidence"
+    assert len(fields[0]) == 1, f"process {pid} has invalid state evidence"
+    if fields[0] in {"Z", "X", "x"}:
+        return None
+    return int(fields[19])
+
+
+def require_live_identity(label: str, identity: dict) -> tuple[int, int]:
+    pid = int(identity["pid"])
+    start_time = int(identity["startTimeTicks"])
+    assert pid > 0 and start_time > 0, f"{label} has an invalid process identity"
+    assert process_start_time(pid) == start_time, f"{label} is not alive with its recorded identity"
+    return pid, start_time
+
+
+def wait_identity_gone(label: str, identity: tuple[int, int]) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        observed = process_start_time(identity[0])
+        if observed is None or observed != identity[1]:
+            return
+        time.sleep(0.025)
+    raise AssertionError(f"{label} remained alive after OCI owner SIGKILL")
+
+
+def load_owner_record(host_root: Path) -> dict:
+    root_metadata = host_root.lstat()
+    assert stat.S_ISDIR(root_metadata.st_mode), f"{host_root} is not a directory"
+    assert root_metadata.st_uid == 0, f"{host_root} is not root-owned"
+    assert stat.S_IMODE(root_metadata.st_mode) == 0o700, f"{host_root} is not mode 0700"
+    record = read_private_json(host_root / "box-owner.json")
+    assert set(record) == {
+        "schema",
+        "pid",
+        "pid_start_time",
+        "runtime_path",
+        "runtime_sha256",
+        "agent_path",
+        "agent_sha256",
+        "socket_path",
+    }
+    assert record["schema"] == "a3s.box.native-linux-oci-owner.v1"
+    assert Path(record["runtime_path"]).resolve() == Path(os.environ["A3S_BOX_OCI_RUNTIME_PATH"]).resolve()
+    assert Path(record["agent_path"]).resolve() == Path(os.environ["A3S_BOX_OCI_AGENT_PATH"]).resolve()
+    assert Path(record["socket_path"]) == host_root / "runtime.sock"
+    for field in ("runtime_sha256", "agent_sha256"):
+        digest = record[field]
+        assert len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+    owner_identity = {
+        "pid": record["pid"],
+        "startTimeTicks": record["pid_start_time"],
+    }
+    require_live_identity("OCI owner", owner_identity)
+    socket_metadata = (host_root / "runtime.sock").lstat()
+    assert stat.S_ISSOCK(socket_metadata.st_mode), "OCI endpoint is not a Unix socket"
+    assert socket_metadata.st_uid == 0, "OCI endpoint is not root-owned"
+    return record
+
+
+def executor_root(host_root: Path, owner: dict) -> Path:
+    return host_root / "executor" / (
+        f"a3s-oci-agent-{int(owner['pid'])}-{int(owner['pid_start_time']):016x}"
+    )
+
+
+def load_runtime_record(host_root: Path, container_id: str) -> tuple[Path, dict]:
+    path = host_root / "state" / "containers" / container_id / "record.json"
+    record = read_private_json(path)
+    assert record["schemaVersion"] == "a3s.oci.container-record.v1"
+    assert record["id"] == container_id
+    assert record["record"]["state"]["id"] == container_id
+    return path, record
+
+
+def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tuple[Path, dict]:
+    root = executor_root(host_root, owner)
+    candidates = list(root.glob("c-*/recovery.json"))
+    assert len(candidates) == 1, f"expected one live recovery record below {root}, found {len(candidates)}"
+    recovery = read_private_json(candidates[0])
+    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v1"
+    assert recovery["target"]["id"] == container_id
+    assert int(recovery["owner"]["pid"]) == int(owner["pid"])
+    assert int(recovery["owner"]["startTimeTicks"]) == int(owner["pid_start_time"])
+    return candidates[0], recovery
+
+
+def exercise_owner_death_recovery(sandbox: Sandbox) -> None:
+    host_root = Path(os.environ["A3S_BOX_OCI_HOST_ROOT"])
+    container_id = f"a3s-box-{sandbox.id}"
+    old_box_generation = sandbox.generation
+    old_owner = load_owner_record(host_root)
+    old_owner_identity = (int(old_owner["pid"]), int(old_owner["pid_start_time"]))
+    old_socket_descriptor = os.open(
+        host_root / "runtime.sock",
+        os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    old_socket_metadata = os.fstat(old_socket_descriptor)
+    old_socket_identity = (old_socket_metadata.st_dev, old_socket_metadata.st_ino)
+    old_executor_root = executor_root(host_root, old_owner)
+    runtime_path, runtime = load_runtime_record(host_root, container_id)
+    recovery_path, recovery = load_recovery_record(host_root, old_owner, container_id)
+    old_runtime_generation = int(runtime["record"]["generation"])
+    assert runtime["record"]["state"]["status"] == "running"
+    assert int(runtime["record"]["state"]["pid"]) == int(recovery["init"]["pid"])
+    assert int(recovery["target"]["generation"]) == old_runtime_generation
+    old_launcher = require_live_identity("old OCI launcher", recovery["launcher"])
+    old_init = require_live_identity("old OCI init", recovery["init"])
+    assert recovery_path.is_file()
+
+    os.kill(old_owner_identity[0], signal.SIGKILL)
+    wait_identity_gone("old OCI owner", old_owner_identity)
+    wait_identity_gone("old OCI launcher", old_launcher)
+    wait_identity_gone("old OCI init", old_init)
+
+    # Every synchronous SDK request launches a distinct `a3s-box sdk-bridge`
+    # process. This inspection therefore forces a fresh Box process to reclaim
+    # the stale endpoint and reconcile the stopped OCI tombstone.
+    assert not sandbox.is_running(), "owner-death reconciliation still reports the Sandbox running"
+    assert sandbox.state == "stopped", "owner-death reconciliation did not persist stopped"
+    assert sandbox.generation == old_box_generation, "owner-death changed the Box generation"
+
+    new_owner = load_owner_record(host_root)
+    new_owner_identity = (int(new_owner["pid"]), int(new_owner["pid_start_time"]))
+    assert new_owner_identity != old_owner_identity, "replacement OCI owner reused the old identity"
+    for field in ("runtime_path", "runtime_sha256", "agent_path", "agent_sha256", "socket_path"):
+        assert new_owner[field] == old_owner[field], f"replacement OCI owner changed {field}"
+    new_socket_metadata = (host_root / "runtime.sock").stat()
+    new_socket_identity = (new_socket_metadata.st_dev, new_socket_metadata.st_ino)
+    assert new_socket_identity != old_socket_identity, "stale OCI socket was not rebound"
+    os.close(old_socket_descriptor)
+    assert not runtime_path.exists(), "stopped OCI generation remained after Box reconciliation"
+    assert not old_executor_root.exists(), "old OCI executor root remained after stopped-only delete"
+
+    # A second fresh Box process must build exactly the next Box and OCI
+    # generations rather than replaying the terminated workload.
+    sandbox.restart(
+        operation_id=f"python-owner-death-restart-{sandbox.id}",
+        stop_timeout=5,
+    )
+    assert sandbox.generation == old_box_generation + 1
+    assert sandbox.is_running(), "replacement Sandbox generation is not running"
+    new_runtime_path, new_runtime = load_runtime_record(host_root, container_id)
+    _, new_recovery = load_recovery_record(host_root, new_owner, container_id)
+    new_runtime_generation = int(new_runtime["record"]["generation"])
+    assert new_runtime["record"]["state"]["status"] == "running"
+    assert new_runtime_generation == old_runtime_generation + 1
+    assert int(new_recovery["target"]["generation"]) == new_runtime_generation
+    new_init = require_live_identity("replacement OCI init", new_recovery["init"])
+    assert new_init != old_init, "replacement Sandbox reused the terminated init identity"
+    assert new_runtime_path.is_file()
+
+    report = {
+        "schema_version": "a3s.box.native-linux-owner-recovery.v1",
+        "status": "available",
+        "platform": "linux",
+        "sandbox_id": sandbox.id,
+        "runtime_container_id": container_id,
+        "old_box_generation": old_box_generation,
+        "new_box_generation": sandbox.generation,
+        "old_runtime_generation": old_runtime_generation,
+        "new_runtime_generation": new_runtime_generation,
+        "old_owner": {"pid": old_owner_identity[0], "start_time_ticks": old_owner_identity[1]},
+        "new_owner": {"pid": new_owner_identity[0], "start_time_ticks": new_owner_identity[1]},
+        "old_init": {"pid": old_init[0], "start_time_ticks": old_init[1]},
+        "new_init": {"pid": new_init[0], "start_time_ticks": new_init[1]},
+        "old_owner_gone": True,
+        "old_launcher_gone": True,
+        "old_init_gone": True,
+        "socket_rebound": True,
+        "stopped_without_invented_exit_status": True,
+        "old_generation_deleted": True,
+        "old_executor_root_removed": True,
+        "replacement_generation_running": True,
+    }
+    report_path = os.environ.get("A3S_BOX_OCI_OWNER_RECOVERY_REPORT")
+    if report_path:
+        destination = Path(report_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(
+        "owner-recovery "
+        f"owner={old_owner_identity[0]}->{new_owner_identity[0]} "
+        f"box-generation={old_box_generation}->{sandbox.generation} "
+        f"runtime-generation={old_runtime_generation}->{new_runtime_generation}"
+    )
 
 client = A3SBoxClient()
 isolation = os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"]
@@ -213,6 +425,8 @@ try:
                     raise AssertionError("active restored Sandbox did not fence snapshot deletion")
             assert Sandbox.delete_filesystem_snapshot(snapshot.snapshot_id)
             assert Sandbox.filesystem_snapshot_size(snapshot.snapshot_id) is None
+        if isolation == "sandbox":
+            exercise_owner_death_recovery(sandbox)
         previous_generation = sandbox.generation
         sandbox.stop()
         assert not sandbox.is_running()

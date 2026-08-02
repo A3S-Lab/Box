@@ -46,7 +46,9 @@ Box now:
 
 - resolves every new `sandbox` request to `ExecutionBackend::A3sOci`;
 - exposes no public Sandbox runtime selector;
-- starts one authenticated A3S OCI native Linux owner per Box generation;
+- reuses one authenticated, identity-fenced A3S OCI multi-container Native
+  Linux owner across Box processes while binding each Sandbox to an exact OCI
+  generation;
 - packages the pinned `a3s-oci` and `a3s-oci-agent` artifacts in Linux
   releases;
 - records exact runtime and agent digests with the durable generation;
@@ -59,7 +61,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`aac259224e89bef2b546fd0f8755ef1ba79570ce`, which retains the qualified
+`a6cdae7163db941aa1eae5a5d74c75c6ccc32b60`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
@@ -114,7 +116,11 @@ must:
 5. cover image management, named volumes, files, logs, metrics, pause/resume,
    exact CPU/memory/PID enforcement, stop/restart, filesystem snapshots, and
    complete cleanup;
-6. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
+6. kill the exact OCI owner under a running Sandbox, prove the launcher and init
+   terminate, then use distinct Box processes to rebind the endpoint, reconcile
+   stopped-only state without a synthetic exit status, delete the old
+   generation, and restart exactly the next Box and OCI generations;
+7. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
    remains.
 
 ### Native configuration matrix

@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: a6f6242caf927f404f7e1f7f143fd3a350ce23b6
+  A3S_OCI_RUNTIME_REV: a6cdae7163db941aa1eae5a5d74c75c6ccc32b60
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -395,6 +395,7 @@ jobs:
       A3S_BOX_OCI_RUNTIME_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci
       A3S_BOX_OCI_AGENT_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci-agent
       A3S_BOX_OCI_HOST_ROOT: /tmp/a3s-box-production-oci-host
+      A3S_BOX_OCI_OWNER_RECOVERY_REPORT: /tmp/a3s-box-native-owner-recovery.json
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
@@ -530,6 +531,7 @@ jobs:
               A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
+              A3S_BOX_OCI_OWNER_RECOVERY_REPORT="$A3S_BOX_OCI_OWNER_RECOVERY_REPORT" \
               A3S_BOX_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box" \
               A3S_BOX_SHIM_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box-shim" \
               A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init" \
@@ -537,6 +539,30 @@ jobs:
               PYTHON=python3 \
               GO=go \
               scripts/local-sdk-smoke.sh sandbox
+          test -s "$A3S_BOX_OCI_OWNER_RECOVERY_REPORT"
+          jq --exit-status \
+            '.schema_version == "a3s.box.native-linux-owner-recovery.v1"
+             and .status == "available" and .platform == "linux"
+             and (.sandbox_id | length > 0)
+             and (.runtime_container_id == ("a3s-box-" + .sandbox_id))
+             and (.new_box_generation == (.old_box_generation + 1))
+             and (.new_runtime_generation == (.old_runtime_generation + 1))
+             and (.old_owner.pid > 0) and (.new_owner.pid > 0)
+             and (.old_init.pid > 0) and (.new_init.pid > 0)
+             and (.old_owner != .new_owner) and (.old_init != .new_init)
+             and .old_owner_gone and .old_launcher_gone and .old_init_gone
+             and .socket_rebound and .stopped_without_invented_exit_status
+             and .old_generation_deleted and .old_executor_root_removed
+             and .replacement_generation_running' \
+            "$A3S_BOX_OCI_OWNER_RECOVERY_REPORT" >/dev/null
+      - name: Upload native OCI owner-recovery evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: a3s-box-native-owner-recovery
+          path: ${{ env.A3S_BOX_OCI_OWNER_RECOVERY_REPORT }}
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify cleanup
         if: always()
         run: |

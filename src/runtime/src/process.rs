@@ -81,7 +81,7 @@ pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u6
         return false;
     };
     linux_process_identity_from_stat(&stat).is_some_and(|(state, start_time)| {
-        state != 'Z'
+        is_linux_process_state_running(state)
             && expected_start_time
                 .map(|expected| expected == start_time)
                 .unwrap_or(true)
@@ -191,6 +191,11 @@ fn linux_process_identity_from_stat(stat: &str) -> Option<(char, u64)> {
     Some((state, start_time))
 }
 
+#[cfg(target_os = "linux")]
+const fn is_linux_process_state_running(state: char) -> bool {
+    !matches!(state, 'Z' | 'X' | 'x')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,9 +235,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn parses_zombie_state_for_completion_waiters() {
-        let stat = "123 (completed worker) Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
-        assert_eq!(linux_process_identity_from_stat(stat), Some(('Z', 4242)));
+    fn classifies_zombie_and_dead_states_as_completed() {
+        for state in ['Z', 'X', 'x'] {
+            let stat = format!(
+                "123 (completed worker) {state} 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242"
+            );
+            assert_eq!(linux_process_identity_from_stat(&stat), Some((state, 4242)));
+            assert!(!is_linux_process_state_running(state));
+        }
+        for state in ['R', 'S', 'D', 'T', 't', 'I'] {
+            assert!(is_linux_process_state_running(state));
+        }
     }
 
     #[cfg(target_os = "linux")]

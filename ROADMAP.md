@@ -114,7 +114,7 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`a6f6242caf927f404f7e1f7f143fd3a350ce23b6` adds the matching long-lived,
+`a6cdae7163db941aa1eae5a5d74c75c6ccc32b60` adds the matching long-lived,
 multi-container Native Linux host owner. Box now first validates the exact
 managed home and durably prepares snapshot-lower, named-volume, and network
 ownership. Its production provider then prepares the product-owned rootfs,
@@ -141,6 +141,12 @@ of requiring Box guest sockets. The blocking native-Linux CI invocation now
 passes the Rust, Python, TypeScript, and Go Sandbox suites through this exact
 composition, including lifecycle, exec, filesystem, route-aware stats,
 pause/resume, snapshot restore, restart, and cleanup.
+That blocking gate also sends `SIGKILL` to the exact recorded Native Linux OCI
+owner while a real Sandbox generation is running. It verifies the owner,
+launcher, and init identities terminate; a fresh Box SDK-bridge process then
+rebinds a distinct owner and reconciles the exact runtime tombstone as stopped
+without a fabricated exit code before deleting only that stopped generation.
+A second fresh Box process restarts exactly the next Box and OCI generations.
 
 The same adapter now routes memory-retaining pause and resume through exact
 SDK targets. Every freezer mutation first requires the advertised operation,
@@ -216,6 +222,9 @@ later gates.
 - [x] Exercise the production composition on native Linux through the blocking
   real-host Rust, Python, TypeScript, and Go SDK lifecycle, session, snapshot,
   restart, and cleanup gate.
+- [x] Kill the real Native Linux owner under a running Sandbox and prove fresh
+  Box processes reconcile stopped-only state, exact cleanup, endpoint rebinding,
+  and next-generation restart without inventing terminal evidence.
 - [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
@@ -232,10 +241,11 @@ host service and journal reopen across processes. OCI Runtime now exposes the
 long-lived Native Linux owner, and Box now supplies fail-closed mixed-backend
 routing, verified product-resource preparation, a direct-process production
 bundle provider, protected owner startup, and explicit CLI/SDK construction.
-The real-host Native Linux production composition now passes. The remaining
-unchecked gates are owner/Box process restart on the real driver and the
-equivalent WHPX path; deterministic process evidence is not promoted as
-platform-driver evidence.
+The real-host Native Linux production composition and owner/Box process restart
+gate now pass. The remaining B1 platform gate is the equivalent WHPX production
+path; the deterministic live-session fixtures are not promoted as proof that a
+real driver can transparently retain process or filesystem sessions after its
+owner dies.
 
 ### B2 - Interactive And Observable Execution
 

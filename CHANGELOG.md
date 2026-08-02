@@ -41,8 +41,19 @@ All notable changes to A3S Box will be documented in this file.
   signal, wait, container reconciliation, and cleanup. The cross-process log
   records exactly one create, start, and exec. OCI Runtime independently proves
   the same session operations through its real durable `HostRuntimeService`.
-  Production owner wiring and real native Linux/WHPX driver qualification
-  remain open.
+  Real-driver transparent live-session retention and WHPX production
+  composition remain open.
+- **Native Linux production owner-death recovery.** The blocking SDK gate now
+  sends `SIGKILL` to the exact identity-fenced OCI owner while a real Sandbox
+  generation is running and proves its launcher and init identities terminate.
+  A subsequent synchronous SDK request runs in a fresh Box bridge process,
+  rebinds a distinct authenticated owner and socket, and reconciles the exact
+  runtime generation as stopped. The OCI adapter accepts unavailable wait
+  evidence only after the runtime has authoritatively reported that stopped
+  state, persists no fabricated exit code, performs stopped-only deletion and
+  cleans the old executor root. Another fresh Box process then restarts exactly
+  the next Box and OCI generations; CI retains a versioned JSON evidence
+  artifact for the complete transition.
 - **Retained local OCI runtime connection recovery.** Box now pins the SDK
   transport that preserves one logical `RuntimeClient` across a broken local
   stream. The request that observes the disconnect still fails without hidden
