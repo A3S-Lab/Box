@@ -329,6 +329,7 @@ fn is_prunable_box_record(record: &BoxRecord) -> bool {
     matches!(record.status.as_str(), "created" | "stopped" | "dead")
 }
 
+#[cfg(unix)]
 fn require_active(record: &BoxRecord, action: &str) -> Result<()> {
     if record.is_active() {
         return Ok(());
@@ -440,6 +441,7 @@ fn terminate_recorded_process(record: &BoxRecord) {
 #[cfg(not(unix))]
 fn terminate_recorded_process(_record: &BoxRecord) {}
 
+#[cfg(unix)]
 fn stopped_exit_code(
     previous_exit_code: Option<i32>,
     outcome: StopOutcome,
@@ -502,6 +504,7 @@ async fn wait_for_exit_or_kill(pid: u32, timeout_secs: u64) -> StopOutcome {
     }
 }
 
+#[cfg(unix)]
 fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) {
     detach_volumes(paths, &record.volume_names, &record.id);
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));

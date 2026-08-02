@@ -19,11 +19,17 @@ use a3s_box_core::config::{BoxConfig, PoolConfig, ResourceConfig};
 use a3s_box_core::event::EventEmitter;
 #[cfg(not(windows))]
 use a3s_box_runtime::pool::client::{read_frame, run_client, stop_client, write_frame};
+#[cfg(not(windows))]
 use a3s_box_runtime::pool::{
-    PoolClientRun, PoolImageStat, PoolLeaseExecRequest, PoolLeaseReleaseRequest,
-    PoolLeaseReleaseResponse, PoolLeaseRequest, PoolLeaseResponse, PoolRequest, PoolRunRequest,
-    PoolRunResponse, PoolStats, PoolStatusResponse, PoolStopResponse, WarmPool,
+    PoolClientRun, PoolLeaseReleaseRequest, PoolLeaseReleaseResponse, PoolLeaseResponse,
+    PoolStopResponse,
 };
+#[cfg(any(not(windows), test))]
+use a3s_box_runtime::pool::{
+    PoolImageStat, PoolLeaseExecRequest, PoolLeaseRequest, PoolRequest, PoolRunRequest,
+    PoolRunResponse, PoolStatusResponse,
+};
+use a3s_box_runtime::pool::{PoolStats, WarmPool};
 
 /// Default Unix socket the `pool` daemon listens on.
 pub(crate) const DEFAULT_SOCKET: &str = "/tmp/a3s-box-pool.sock";
@@ -43,6 +49,7 @@ pub(crate) struct PoolAutoStartConfig {
 }
 
 impl PoolAutoStartConfig {
+    #[cfg(any(not(windows), test))]
     fn start_args(&self) -> Vec<String> {
         let mut args = vec![
             "pool".to_string(),
@@ -343,6 +350,7 @@ fn keepalive_cmd() -> Vec<String> {
 /// Build the `spawn-main` JSON spec for a deferred-mode pool command (executable +
 /// args + a standard PATH so the binary resolves like a normal container main,
 /// plus optional user/workdir and extra env from the request).
+#[cfg(any(not(windows), test))]
 fn deferred_spec_json(req: &PoolRunRequest) -> Vec<u8> {
     let mut env: Vec<(String, String)> = vec![(
         "PATH".to_string(),
@@ -388,7 +396,9 @@ fn parse_warm_spec(entry: &str, default_size: usize) -> Result<(String, usize), 
 #[derive(Clone)]
 struct PoolEntry {
     pool: std::sync::Arc<WarmPool>,
+    #[cfg(not(windows))]
     sem: std::sync::Arc<tokio::sync::Semaphore>,
+    #[cfg(not(windows))]
     max_size: usize,
 }
 
@@ -415,6 +425,7 @@ impl PoolKey {
         }
     }
 
+    #[cfg(any(not(windows), test))]
     fn from_request(image: String, req: &PoolRunRequest) -> Self {
         Self {
             image,
@@ -424,6 +435,7 @@ impl PoolKey {
         }
     }
 
+    #[cfg(not(windows))]
     fn from_lease(image: String, req: &PoolLeaseRequest) -> Self {
         Self {
             image,
@@ -433,6 +445,7 @@ impl PoolKey {
         }
     }
 
+    #[cfg(any(not(windows), test))]
     fn label(&self) -> String {
         if self.volumes.is_empty()
             && self.vcpus == DEFAULT_POOL_VCPUS
@@ -495,6 +508,7 @@ struct PoolRegistry {
     pools: tokio::sync::Mutex<std::collections::HashMap<PoolKey, PoolEntry>>,
     #[cfg(not(windows))]
     leases: tokio::sync::Mutex<std::collections::HashMap<String, LeasedVm>>,
+    #[cfg(not(windows))]
     default_image: Option<String>,
     size: usize,
     max: usize,
@@ -565,7 +579,9 @@ impl PoolRegistry {
         let pool = std::sync::Arc::new(pool);
         let entry = PoolEntry {
             pool,
+            #[cfg(not(windows))]
             sem: std::sync::Arc::new(tokio::sync::Semaphore::new(max_size)),
+            #[cfg(not(windows))]
             max_size,
         };
         pools.insert(key, entry.clone());
@@ -580,6 +596,7 @@ impl PoolRegistry {
     /// Lease pools with boot-time volumes are usually build-stage rootfs mounts:
     /// unique, short-lived, and useful only to the single holder. Do not pre-warm
     /// a whole pool for those keys; acquire will cold-fill exactly the VM needed.
+    #[cfg(not(windows))]
     fn lease_min_idle(&self, key: &PoolKey) -> usize {
         if key.volumes.is_empty() {
             self.size
@@ -589,18 +606,17 @@ impl PoolRegistry {
     }
 
     /// Resolve the image for a request: the requested one, else the daemon default.
+    #[cfg(not(windows))]
     fn resolve_image(&self, requested: Option<String>) -> Option<String> {
         requested.or_else(|| self.default_image.clone())
     }
 
     /// Stop replenishment and destroy idle VMs across all pools (shutdown).
+    #[cfg(not(windows))]
     async fn drain_all(&self) {
-        #[cfg(not(windows))]
-        {
-            let mut leases = self.leases.lock().await;
-            for (_, leased) in leases.drain() {
-                let _ = leased.vm.lock().await.destroy().await;
-            }
+        let mut leases = self.leases.lock().await;
+        for (_, leased) in leases.drain() {
+            let _ = leased.vm.lock().await.destroy().await;
         }
 
         let pools = self.pools.lock().await;
@@ -611,6 +627,7 @@ impl PoolRegistry {
     }
 
     /// Snapshot live per-image stats, sorted by image name.
+    #[cfg(not(windows))]
     async fn stats(&self) -> Vec<PoolImageStat> {
         let pools = {
             let pools = self.pools.lock().await;
@@ -619,7 +636,6 @@ impl PoolRegistry {
                 .map(|(key, entry)| (key.clone(), entry.clone()))
                 .collect::<Vec<_>>()
         };
-        #[cfg(not(windows))]
         let leased_by_key = {
             let leases = self.leases.lock().await;
             let mut counts = std::collections::HashMap::<PoolKey, usize>::new();
@@ -632,10 +648,7 @@ impl PoolRegistry {
         for (key, entry) in pools {
             let s = entry.pool.stats().await;
             let active = entry.max_size.saturating_sub(entry.sem.available_permits());
-            #[cfg(not(windows))]
             let leased = leased_by_key.get(&key).copied().unwrap_or(0);
-            #[cfg(windows)]
-            let leased = 0;
             out.push(PoolImageStat {
                 image: key.image.clone(),
                 pool: key.label(),
@@ -804,6 +817,7 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         #[cfg(not(windows))]
         leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        #[cfg(not(windows))]
         default_image: args.image.clone(),
         size: args.size,
         max: args.max,

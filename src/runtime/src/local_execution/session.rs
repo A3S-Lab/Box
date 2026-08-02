@@ -188,7 +188,7 @@ impl LocalExecutionManager {
             .open_stream()
             .await
             .map_err(|error| session_error(execution_id, "connect exec", error))?;
-        self.require_same_runtime(&record, execution_id, generation)
+        self.require_same_runtime(record, execution_id, generation)
             .await?;
         Ok((client, stream))
     }

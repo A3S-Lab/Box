@@ -2724,6 +2724,7 @@ fn configure_child_process(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)] // mirrors the cohesive Unix child-process setup parameters
 fn configure_child_process(
     _command: &mut std::process::Command,
     _rootfs: Option<&str>,

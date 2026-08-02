@@ -2000,6 +2000,7 @@ fn apply_run_cache_mount_metadata(target: &Path, mount: &RunCacheMount) -> Resul
     Ok(())
 }
 
+#[cfg(unix)]
 fn print_run_output(output: &std::process::Output, quiet: bool) {
     print_output_parts(&output.stdout, &output.stderr, quiet);
 }
@@ -2018,6 +2019,7 @@ fn print_output_parts(stdout: &[u8], stderr: &[u8], quiet: bool) {
     }
 }
 
+#[cfg(unix)]
 fn run_command_failed_error(command: &str, output: &std::process::Output) -> BoxError {
     let exit = output
         .status
@@ -2902,11 +2904,14 @@ mod tests {
     use super::super::super::dockerfile::{
         Instruction, RunBindMount, RunCacheMount, RunCacheSharing, RunCommand, RunTmpfsMount,
     };
+    #[cfg(unix)]
+    use super::run_command_failed_error;
     use super::{
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
-        instruction_to_string, run_command_failed_error, shell_command_in_workdir,
+        instruction_to_string, shell_command_in_workdir,
     };
     use crate::oci::build::engine::{BuildConfig, BuildNetworkPolicy, BuildState};
+    #[cfg(unix)]
     use a3s_box_core::error::BoxError;
     use std::collections::HashMap;
     use std::path::PathBuf;

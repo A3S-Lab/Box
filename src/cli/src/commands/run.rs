@@ -495,7 +495,7 @@ enum ForegroundStopReason {
 #[cfg(unix)]
 type ForegroundTerminateSignal = Option<tokio::signal::unix::Signal>;
 #[cfg(not(unix))]
-type ForegroundTerminateSignal = ();
+struct ForegroundTerminateSignal;
 
 #[cfg(unix)]
 const FOREGROUND_SIGINT: i32 = libc::SIGINT;
@@ -524,7 +524,9 @@ fn foreground_terminate_signal() -> ForegroundTerminateSignal {
 }
 
 #[cfg(not(unix))]
-fn foreground_terminate_signal() -> ForegroundTerminateSignal {}
+fn foreground_terminate_signal() -> ForegroundTerminateSignal {
+    ForegroundTerminateSignal
+}
 
 #[cfg(unix)]
 async fn recv_foreground_terminate(signal: &mut ForegroundTerminateSignal) {

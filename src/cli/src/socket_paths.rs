@@ -52,7 +52,7 @@ pub fn sibling(record: &BoxRecord, socket_name: &str) -> PathBuf {
 pub fn exec(record: &BoxRecord) -> PathBuf {
     #[cfg(windows)]
     {
-        return PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&record.id));
+        PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&record.id))
     }
 
     #[cfg(not(windows))]

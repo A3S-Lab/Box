@@ -3,12 +3,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
-    ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
+    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId,
+    ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
     ExecutionSnapshotId, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
     OperationId, ReconcileOutcome, RestartExecutionOptions, SnapshotImageConfig,
 };
+#[cfg(unix)]
+use a3s_box_core::{ExecEvent, ExecRequest, ExecutionSessionManager};
+#[cfg(not(windows))]
+use a3s_box_core::{ExecutionRecordPolicy, ExecutionRestartPolicy};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 

@@ -213,11 +213,10 @@ impl PoolLeaseClient {
 
 impl Drop for PoolLeaseClient {
     fn drop(&mut self) {
-        if self.released {
-            return;
-        }
         #[cfg(not(windows))]
-        release_client_blocking_best_effort(&self.socket, &self.lease_id);
+        if !self.released {
+            release_client_blocking_best_effort(&self.socket, &self.lease_id);
+        }
     }
 }
 

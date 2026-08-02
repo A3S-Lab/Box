@@ -1478,8 +1478,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_prepare_windows_guest_rejects_smp() {
-        let mut spec = InstanceSpec::default();
-        spec.vcpus = 2;
+        let spec = InstanceSpec {
+            vcpus: 2,
+            ..InstanceSpec::default()
+        };
 
         let error = prepare_windows_guest(&spec).unwrap_err().to_string();
         assert!(error.contains("WHPX"));
@@ -1502,9 +1504,11 @@ mod tests {
             fs::write(rootfs.join(name), b"stale").unwrap();
         }
 
-        let mut spec = InstanceSpec::default();
-        spec.vcpus = 1;
-        spec.rootfs_path = rootfs.clone();
+        let spec = InstanceSpec {
+            vcpus: 1,
+            rootfs_path: rootfs.clone(),
+            ..InstanceSpec::default()
+        };
         prepare_windows_guest(&spec).unwrap();
 
         for name in [
@@ -1536,9 +1540,11 @@ mod tests {
             Err(error) => panic!("failed to create stream symlink: {error}"),
         }
 
-        let mut spec = InstanceSpec::default();
-        spec.vcpus = 1;
-        spec.rootfs_path = rootfs;
+        let spec = InstanceSpec {
+            vcpus: 1,
+            rootfs_path: rootfs,
+            ..InstanceSpec::default()
+        };
         prepare_windows_guest(&spec).unwrap();
 
         assert_eq!(fs::read(&host_target).unwrap(), b"host secret");

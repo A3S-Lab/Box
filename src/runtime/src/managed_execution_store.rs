@@ -668,6 +668,7 @@ fn transition_generation(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::sync::{Arc, Barrier};
 
     use a3s_box_core::{CreateExecutionRequest, ExecutionIsolation, ExecutionSnapshotId};

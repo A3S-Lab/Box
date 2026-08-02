@@ -516,6 +516,7 @@ pub enum StopOutcome {
     ForceKilled,
 }
 
+#[cfg(unix)]
 impl StopOutcome {
     fn inferred_exit_code(self, stop_signal: i32) -> Option<i32> {
         match self {

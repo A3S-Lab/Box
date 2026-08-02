@@ -66,10 +66,10 @@ async fn pause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
     #[cfg(windows)]
     {
         let _ = pid;
-        return Err(crate::platform::unsupported_command(
+        Err(crate::platform::unsupported_command(
             "pause",
             "host process suspension support",
-        ));
+        ))
     }
 
     #[cfg(unix)]

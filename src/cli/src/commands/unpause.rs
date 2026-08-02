@@ -65,10 +65,10 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
     #[cfg(windows)]
     {
         let _ = pid;
-        return Err(crate::platform::unsupported_command(
+        Err(crate::platform::unsupported_command(
             "unpause",
             "host process resume support",
-        ));
+        ))
     }
 
     #[cfg(unix)]

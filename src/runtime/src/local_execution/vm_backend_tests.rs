@@ -321,6 +321,7 @@ async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_clea
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
     let rootfs = record.box_dir.join("rootfs");
     std::fs::create_dir_all(&rootfs).unwrap();
+    #[cfg(windows)]
     std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
     let exit_polls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));

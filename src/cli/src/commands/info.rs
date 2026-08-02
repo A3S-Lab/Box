@@ -14,8 +14,11 @@ const PNPM_CACHE_VOLUME_NAME: &str = "a3s-cache-pnpm";
 const NPM_CACHE_VOLUME_NAME: &str = "a3s-cache-npm";
 const PACKAGE_CACHE_SIZE_ENV: &str = "A3S_BOX_INFO_CACHE_SIZE";
 const PACKAGE_CACHE_SIZE_BUDGET: Duration = Duration::from_millis(500);
+#[cfg(not(windows))]
 const DEFAULT_POOL_SOCKET: &str = "/tmp/a3s-box-pool.sock";
+#[cfg(not(windows))]
 const RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_RUN_POOL_SOCKET";
+#[cfg(not(windows))]
 const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
 
 #[derive(Args)]

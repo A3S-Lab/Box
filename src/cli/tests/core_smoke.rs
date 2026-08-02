@@ -21,7 +21,9 @@
 //!   virtio-fs tar test (default: 900; never shorter than the general timeout)
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:latest";
@@ -34,11 +36,13 @@ struct CommandResult {
     code: Option<i32>,
 }
 
+#[cfg(unix)]
 struct BackgroundCommand {
     child: Option<Child>,
     args: String,
 }
 
+#[cfg(unix)]
 impl BackgroundCommand {
     fn assert_running(&mut self) {
         let status = {
@@ -79,6 +83,7 @@ impl BackgroundCommand {
     }
 }
 
+#[cfg(unix)]
 impl Drop for BackgroundCommand {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -180,6 +185,7 @@ impl CoreSmoke {
             .unwrap_or_else(|e| panic!("{e}"))
     }
 
+    #[cfg(unix)]
     fn spawn_background(&self, args: &[&str]) -> BackgroundCommand {
         eprintln!("    $ a3s-box {}  # background", args.join(" "));
 
@@ -214,6 +220,7 @@ impl CoreSmoke {
         result.stdout
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fails(&self, args: &[&str], expected: &str) -> CommandResult {
         let result = self.output(args);
         assert!(
@@ -519,6 +526,7 @@ impl CoreSmoke {
         panic!("timeout waiting for {name} to become terminal\nlast inspect:\n{last}");
     }
 
+    #[cfg(unix)]
     fn wait_for_named_health(&self, name: &str, expected: &str) -> serde_json::Value {
         let start = Instant::now();
         let mut last = String::new();
@@ -539,6 +547,7 @@ impl CoreSmoke {
         panic!("timeout waiting for {name} health={expected}\nlast inspect:\n{last}");
     }
 
+    #[cfg(unix)]
     fn wait_for_named_restart(
         &self,
         monitor: &mut BackgroundCommand,
@@ -653,11 +662,13 @@ impl Drop for NamedVolumeCleanup<'_> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct NetworkCleanup<'a> {
     smoke: &'a CoreSmoke,
     name: String,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for NetworkCleanup<'_> {
     fn drop(&mut self) {
         self.smoke
@@ -864,6 +875,7 @@ fn json_string_field<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
         .unwrap_or_else(|| panic!("inspect JSON missing string field {field}: {value}"))
 }
 
+#[cfg(unix)]
 fn json_u64_field(value: &serde_json::Value, field: &str) -> u64 {
     value
         .get(field)

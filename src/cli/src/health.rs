@@ -177,7 +177,7 @@ fn health_worker_lock_path(box_id: &str, generation: i64) -> PathBuf {
         .join(format!("{box_id}.{generation}.health.lock"))
 }
 
-#[cfg(any(not(windows), test))]
+#[cfg(not(windows))]
 fn health_generation(record: &BoxRecord) -> Option<i64> {
     record
         .started_at

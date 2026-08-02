@@ -1137,6 +1137,7 @@ impl VmManager {
         })
     }
 
+    #[cfg(unix)]
     fn read_file_from_offset(path: &Path, offset: u64) -> Vec<u8> {
         use std::io::{Read, Seek, SeekFrom};
 
