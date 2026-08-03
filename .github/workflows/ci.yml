@@ -824,6 +824,10 @@ jobs:
           sudo chmod 0666 /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src
+          key: hosted-kvm-real
       # NOTE: no Swatinem/rust-cache here — fetching that action from
       # codeload.github.com times out on this runner's network, which fails
       # "Set up job". The self-hosted runner keeps a warm cargo registry, and
@@ -893,6 +897,10 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
+          sudo chown root:root \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
+          sudo chmod 0700 \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
           runtime_profile_log="$RUNNER_TEMP/runtime-microvm-profiles.log"
           set +e
           sudo env \
