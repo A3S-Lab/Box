@@ -95,7 +95,7 @@ pub(super) fn creation_request_for(
         workdir: spec.process.working_directory.clone(),
         volumes,
         extra_env,
-        network: NetworkMode::None,
+        network: compile_network_mode(&spec.network.mode)?,
         tmpfs,
         resource_limits: ResourceLimits {
             pids_limit: Some(u64::from(spec.resources.pids)),
@@ -186,15 +186,7 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
             spec.isolation
         )]));
     }
-    if !matches!(
-        spec.network.mode,
-        RuntimeNetworkMode::None | RuntimeNetworkMode::Service
-    ) {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
-            "network_mode:{:?}",
-            spec.network.mode
-        )]));
-    }
+    compile_network_mode(&spec.network.mode)?;
     if spec
         .network
         .ports
@@ -216,6 +208,16 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
         (RuntimeUnitClass::Task, RestartPolicy::Always) => Err(RuntimeError::InvalidRequest(
             "Runtime Tasks cannot use an always restart policy".into(),
         )),
+    }
+}
+
+fn compile_network_mode(mode: &RuntimeNetworkMode) -> RuntimeResult<NetworkMode> {
+    match mode {
+        RuntimeNetworkMode::None => Ok(NetworkMode::None),
+        RuntimeNetworkMode::Service => Ok(NetworkMode::Tsi),
+        unsupported => Err(RuntimeError::UnsupportedCapabilities(vec![format!(
+            "network_mode:{unsupported:?}"
+        )])),
     }
 }
 
