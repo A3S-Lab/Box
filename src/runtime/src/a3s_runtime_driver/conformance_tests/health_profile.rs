@@ -10,7 +10,9 @@ use super::{require, Result};
 const HTTP_HEALTH_SERVICE: &str = concat!(
     "rm -f /tmp/r17-health-http-request; ",
     "while :; do ",
-    "{ printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; } ",
+    // Keep netcat's stdin open after sending the response so BusyBox cannot
+    // exit on local EOF before it has consumed the request from the socket.
+    "{ printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; sleep 1; } ",
     "| nc -l -p 18080 >> /tmp/r17-health-http-request; ",
     "done",
 );
