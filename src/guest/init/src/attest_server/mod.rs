@@ -8,7 +8,7 @@
 //! ## Protocol
 //!
 //! 1. Server generates a P-384 key pair on startup
-//! 2. Server obtains an SNP report with SHA-384(public_key) as report_data
+//! 2. Server obtains an SNP report bound to the TLS key and optional Runtime spec
 //! 3. Server creates a self-signed X.509 cert embedding the report
 //! 4. Client connects, TLS handshake delivers the cert
 //! 5. Client's custom verifier extracts and verifies the SNP report
@@ -32,6 +32,9 @@ pub const ATTEST_VSOCK_PORT: u32 = a3s_transport::ports::TEE_CHANNEL;
 /// Size of the report_data field in the SNP report request.
 #[cfg(any(target_os = "linux", test))]
 pub(super) const SNP_USER_DATA_SIZE: usize = 64;
+
+#[cfg(any(target_os = "linux", test))]
+const RUNTIME_BINDING_SIZE: usize = 32;
 
 /// OID for the SNP attestation report extension.
 #[cfg(any(target_os = "linux", test))]
@@ -165,12 +168,15 @@ fn generate_ratls_config(
     let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384)
         .map_err(|e| format!("Failed to generate key pair: {}", e))?;
 
-    // Hash public key to create report_data (first 64 bytes of SHA-256)
+    // Bind the first half of report_data to the ephemeral TLS key. Runtime
+    // providers additionally reserve the second half for the immutable spec.
     let pub_key_der = key_pair.public_key_der();
     let hash = Sha256::digest(&pub_key_der);
     let mut report_data = [0u8; SNP_USER_DATA_SIZE];
-    let copy_len = hash.len().min(SNP_USER_DATA_SIZE);
-    report_data[..copy_len].copy_from_slice(&hash[..copy_len]);
+    report_data[..RUNTIME_BINDING_SIZE].copy_from_slice(&hash[..RUNTIME_BINDING_SIZE]);
+    if let Some(binding) = runtime_attestation_binding()? {
+        report_data[RUNTIME_BINDING_SIZE..].copy_from_slice(&binding);
+    }
 
     // Get attestation report
     let (report_bytes, cert_chain_json) = if handlers::is_simulate_mode() {
@@ -222,4 +228,42 @@ fn generate_ratls_config(
         .map_err(|e| format!("Failed to create TLS config: {}", e))?;
 
     Ok((config, cert_der, snp_report))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn runtime_attestation_binding() -> Result<Option<[u8; RUNTIME_BINDING_SIZE]>, String> {
+    match std::env::var(a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV) {
+        Ok(value) => parse_runtime_attestation_binding(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{} must contain canonical lowercase SHA-256 hex",
+            a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV
+        )),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_runtime_attestation_binding(value: &str) -> Result<[u8; RUNTIME_BINDING_SIZE], String> {
+    if value.len() != RUNTIME_BINDING_SIZE * 2
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{} must contain canonical lowercase SHA-256 hex",
+            a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV
+        ));
+    }
+
+    let mut binding = [0u8; RUNTIME_BINDING_SIZE];
+    for (index, output) in binding.iter_mut().enumerate() {
+        let offset = index * 2;
+        *output = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|_| {
+            format!(
+                "{} must contain canonical lowercase SHA-256 hex",
+                a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV
+            )
+        })?;
+    }
+    Ok(binding)
 }

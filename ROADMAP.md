@@ -69,9 +69,14 @@ The current implementation has two execution paths:
 The provider-neutral Runtime conformance fixture now selects either concrete
 Box isolation explicitly. Hosted Linux continues to run every advertised
 profile through Sandbox. The self-hosted KVM workflow is wired to run every
-advertised Runtime profile through real MicroVMs: Base, Recovery, Networking,
-Mounts, Health, Resources, Logs, Exec, Security, and Outputs. It also exercises
-an authenticated private-registry pull. The suite includes client/provider
+ordinary advertised Runtime profile through real MicroVMs: Base, Recovery,
+Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs. A
+second explicitly simulated SEV-SNP run adds the capability-triggered Evidence
+profile and checks the exact Runtime spec and semantics binding, live RA-TLS
+certificate/report, immutable artifact digest, same-generation continuity,
+driver reconstruction, tamper rejection, confidential Task completion, the
+attestation-before-execution gate, and cleanup. It also exercises an
+authenticated private-registry pull. The suite includes client/provider
 restart, external process loss, endpoint relay and cleanup, read-only and
 ephemeral mount behavior, bounded exec, durable logs, exact outputs, resource
 limits, hostile-input rejection, least privilege, Secret nondisclosure,
@@ -81,8 +86,11 @@ guest mount namespace as appropriate. Resource evidence reads the Sandbox
 control/workload hierarchy or the MicroVM's persisted sizing plus guest cgroup
 as appropriate. Security evidence reads the Sandbox OCI/process boundary or
 the exact MicroVM shim identity plus guest security state and staged non-secret
-manifest as appropriate. This wiring is not certification while the repository
-`KVM_CI` gate is disabled; executed KVM evidence remains open.
+manifest as appropriate. Simulation remains visibly distinct from hardware.
+The separately armed `integration-sev-snp` job requires an AMD SEV-SNP runner
+and a pinned launch measurement; neither unexecuted workflow wiring nor
+simulation is hardware certification. Executed KVM and SEV-SNP evidence
+therefore remain open while their repository gates are disabled.
 
 This split remains supported while migration is in progress, but it is not the
 target architecture. New platform execution features belong in OCI Runtime and

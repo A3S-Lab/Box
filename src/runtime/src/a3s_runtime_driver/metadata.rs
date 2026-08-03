@@ -13,7 +13,7 @@ use crate::{BoxRecord, ManagedExecutionState};
 
 use super::artifact::RuntimeStoragePlan;
 use super::mapping::{creation_request_for, labels_as_hash_map};
-use super::BoxRuntimeDriver;
+use super::{BoxRuntimeDriver, BoxRuntimeSevSnpConfig};
 
 pub(super) const MANAGED_LABEL: &str = "a3s.runtime.managed";
 pub(super) const PROVIDER_LABEL: &str = "a3s.runtime.provider";
@@ -88,6 +88,7 @@ impl BoxRuntimeDriver {
             &record,
             spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         self.artifact_storage.validate_record(spec, &record).await?;
@@ -158,6 +159,7 @@ pub(super) fn validate_record_for_spec(
     record: &BoxRecord,
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
+    sev_snp: Option<&BoxRuntimeSevSnpConfig>,
     secret_root: &Path,
 ) -> RuntimeResult<()> {
     validate_owned_record(record, &spec.unit_id)?;
@@ -169,7 +171,8 @@ pub(super) fn validate_record_for_spec(
     // compares it with the exact plan required by the live Artifact port and
     // Box VolumeStore.
     let storage = RuntimeStoragePlan::from_request(spec, &metadata.request)?;
-    let expected_request = creation_request_for(spec, execution_isolation, secret_root, &storage)?;
+    let expected_request =
+        creation_request_for(spec, execution_isolation, sev_snp, secret_root, &storage)?;
     let actual_request = serde_json::to_value(&metadata.request)
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
     let expected_request = serde_json::to_value(&expected_request)

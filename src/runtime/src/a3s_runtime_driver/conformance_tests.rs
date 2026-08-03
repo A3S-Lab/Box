@@ -6,6 +6,7 @@
 //! single-threaded test selection are all release-gate prerequisites.
 
 mod cases;
+mod evidence_profile;
 mod exec_profile;
 mod fixture;
 mod health_profile;
@@ -22,13 +23,15 @@ mod security_profile;
 
 use std::fmt::Display;
 
-use a3s_box_core::ExecutionIsolation;
+use a3s_box_core::{config::SevSnpGeneration, ExecutionIsolation};
 use a3s_runtime::{
     required_runtime_profiles, verify_runtime_profiles, RuntimeClient, RuntimeConformanceProfile,
     RuntimeError, RuntimeResult,
 };
 
 use self::fixture::BoxRuntimeConformanceFixture;
+use super::BoxRuntimeSevSnpConfig;
+use crate::tee::AttestationPolicy;
 
 type Result<T> = RuntimeResult<T>;
 
@@ -76,15 +79,28 @@ fn box_runtime_passes_all_advertised_profiles() {
                 .enable_all()
                 .build()
                 .expect("R17 Tokio runtime must start");
-            runtime.block_on(run_all_advertised_profiles(ExecutionIsolation::Sandbox));
+            runtime.block_on(run_all_advertised_profiles(
+                ExecutionIsolation::Sandbox,
+                None,
+            ));
         })
         .expect("R17 runner thread must start");
     runner.join().expect("R17 runner thread must not panic");
 }
 
-async fn run_all_advertised_profiles(execution_isolation: ExecutionIsolation) {
-    let fixture = BoxRuntimeConformanceFixture::from_environment(execution_isolation)
-        .expect("R17 Box conformance preflight must pass");
+async fn run_all_advertised_profiles(
+    execution_isolation: ExecutionIsolation,
+    sev_snp: Option<BoxRuntimeSevSnpConfig>,
+) {
+    let attestation_expected = sev_snp.is_some();
+    let fixture = match sev_snp {
+        Some(config) => BoxRuntimeConformanceFixture::from_environment_with_sev_snp(
+            execution_isolation,
+            Some(config),
+        ),
+        None => BoxRuntimeConformanceFixture::from_environment(execution_isolation),
+    }
+    .expect("R17 Box conformance preflight must pass");
     let client = fixture.primary_client();
     let capabilities = client
         .capabilities()
@@ -92,7 +108,7 @@ async fn run_all_advertised_profiles(execution_isolation: ExecutionIsolation) {
         .expect("R17 Box capabilities must be available");
     let required = required_runtime_profiles(&capabilities)
         .expect("R17 Box capabilities must derive valid profiles");
-    let expected = [
+    let mut expected = [
         RuntimeConformanceProfile::Base,
         RuntimeConformanceProfile::Recovery,
         RuntimeConformanceProfile::Networking,
@@ -105,7 +121,10 @@ async fn run_all_advertised_profiles(execution_isolation: ExecutionIsolation) {
         RuntimeConformanceProfile::Outputs,
     ]
     .into_iter()
-    .collect();
+    .collect::<std::collections::BTreeSet<_>>();
+    if attestation_expected {
+        expected.insert(RuntimeConformanceProfile::Evidence);
+    }
     assert_eq!(
         required, expected,
         "R17 must execute every profile activated by Box capabilities"
@@ -143,10 +162,93 @@ fn box_runtime_microvm_passes_all_advertised_profiles() {
                 .enable_all()
                 .build()
                 .expect("R17 MicroVM Tokio runtime must start");
-            runtime.block_on(run_all_advertised_profiles(ExecutionIsolation::Microvm));
+            runtime.block_on(run_all_advertised_profiles(
+                ExecutionIsolation::Microvm,
+                None,
+            ));
         })
         .expect("R17 MicroVM runner thread must start");
     runner
         .join()
         .expect("R17 MicroVM runner thread must not panic");
+}
+
+#[test]
+#[ignore = "requires a dedicated A3S OS KVM MicroVM certification home"]
+fn box_runtime_sev_snp_simulated_passes_all_advertised_profiles() {
+    run_confidential_profiles(
+        "a3s-box-r17-sev-snp-simulated",
+        BoxRuntimeSevSnpConfig {
+            generation: SevSnpGeneration::Milan,
+            simulate: true,
+            attestation_policy: AttestationPolicy::default(),
+        },
+    );
+}
+
+#[test]
+#[ignore = "requires a dedicated AMD SEV-SNP hardware certification home"]
+fn box_runtime_sev_snp_hardware_passes_all_advertised_profiles() {
+    run_confidential_profiles(
+        "a3s-box-r17-sev-snp-hardware",
+        hardware_sev_snp_config().expect("R17 SEV-SNP hardware policy must be explicit"),
+    );
+}
+
+fn run_confidential_profiles(thread_name: &str, config: BoxRuntimeSevSnpConfig) {
+    let thread_name = thread_name.to_owned();
+    let runner = std::thread::Builder::new()
+        .name(thread_name)
+        .stack_size(R17_RUNNER_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("a3s-box-r17-sev-snp-worker")
+                .thread_stack_size(R17_WORKER_STACK_BYTES)
+                .enable_all()
+                .build()
+                .expect("R17 SEV-SNP Tokio runtime must start");
+            runtime.block_on(run_all_advertised_profiles(
+                ExecutionIsolation::Microvm,
+                Some(config),
+            ));
+        })
+        .expect("R17 SEV-SNP runner thread must start");
+    runner
+        .join()
+        .expect("R17 SEV-SNP runner thread must not panic");
+}
+
+fn hardware_sev_snp_config() -> Result<BoxRuntimeSevSnpConfig> {
+    let generation =
+        match std::env::var("A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_GENERATION").as_deref() {
+            Ok("milan") => SevSnpGeneration::Milan,
+            Ok("genoa") => SevSnpGeneration::Genoa,
+            _ => {
+                return Err(failure(
+                    "A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_GENERATION must be exactly milan or genoa",
+                ))
+            }
+        };
+    let measurement = std::env::var("A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_MEASUREMENT")
+        .map_err(|_| {
+            failure(
+                "A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_MEASUREMENT must pin the expected launch measurement",
+            )
+        })?;
+    require(
+        measurement.len() == 96
+            && measurement
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_MEASUREMENT must be 96 lowercase hex characters",
+    )?;
+    Ok(BoxRuntimeSevSnpConfig {
+        generation,
+        simulate: false,
+        attestation_policy: AttestationPolicy {
+            expected_measurement: Some(measurement),
+            ..AttestationPolicy::default()
+        },
+    })
 }

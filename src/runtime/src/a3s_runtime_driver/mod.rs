@@ -1,6 +1,7 @@
 //! A3S Runtime provider adapter for Box isolation backends.
 
 mod artifact;
+mod attestation;
 mod exec;
 mod health;
 mod lifecycle;
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use a3s_box_core::config::SevSnpGeneration;
 use a3s_box_core::ExecutionPortConnector;
 use a3s_runtime::contract::{
     HealthCheckKind, IsolationLevel, MountKind, NetworkMode, ResourceControl, RuntimeActionRequest,
@@ -28,9 +30,11 @@ use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
 use crate::local_execution::TransientRegistryAuthBroker;
+use crate::tee::AttestationPolicy;
 use crate::{ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
 
 use self::artifact::ArtifactStorageOwner;
+use self::attestation::AttestationArtifactOwner;
 use self::secret::SecretMaterializationOwner;
 use self::service_endpoints::ServiceEndpointOwner;
 
@@ -70,6 +74,20 @@ impl Default for BoxRuntimeDriverConfig {
     }
 }
 
+/// Explicit AMD SEV-SNP policy for a confidential Box Runtime provider.
+///
+/// Hardware mode is the secure default. Simulation is advertised distinctly
+/// and is accepted only when the caller opts in with `simulate: true`.
+#[derive(Debug, Clone, Default)]
+pub struct BoxRuntimeSevSnpConfig {
+    /// CPU generation used to build the guest firmware configuration.
+    pub generation: SevSnpGeneration,
+    /// Accept a simulated SNP report instead of requiring genuine hardware.
+    pub simulate: bool,
+    /// Policy enforced during the RA-TLS attestation handshake.
+    pub attestation_policy: AttestationPolicy,
+}
+
 /// Concrete A3S Runtime driver backed by a configured Box isolation backend.
 pub struct BoxRuntimeDriver {
     provider_id: ProviderId,
@@ -78,6 +96,8 @@ pub struct BoxRuntimeDriver {
     port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
     execution_isolation: ExecutionIsolation,
+    sev_snp: Option<BoxRuntimeSevSnpConfig>,
+    attestation: AttestationArtifactOwner,
     artifact_storage: ArtifactStorageOwner,
     secret_materialization: SecretMaterializationOwner,
     transient_registry_auth: Option<TransientRegistryAuthBroker>,
@@ -90,6 +110,18 @@ impl BoxRuntimeDriver {
     /// Shared-kernel execution is never selected as an automatic fallback.
     pub fn new(config: BoxRuntimeDriverConfig) -> RuntimeResult<Self> {
         Self::new_with_isolation(config, ExecutionIsolation::Microvm)
+    }
+
+    /// Create a Runtime driver that explicitly supports AMD SEV-SNP
+    /// confidential MicroVMs in addition to ordinary MicroVM sandboxes.
+    pub fn new_confidential(
+        config: BoxRuntimeDriverConfig,
+        sev_snp: BoxRuntimeSevSnpConfig,
+    ) -> RuntimeResult<Self> {
+        validate_sev_snp_config(&sev_snp)?;
+        let mut driver = Self::new(config)?;
+        driver.sev_snp = Some(sev_snp);
+        Ok(driver)
     }
 
     /// Create a Runtime driver with an explicit concrete Box isolation
@@ -157,6 +189,8 @@ impl BoxRuntimeDriver {
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
+            sev_snp: None,
+            attestation: AttestationArtifactOwner::default(),
             artifact_storage,
             secret_materialization,
             transient_registry_auth,
@@ -169,13 +203,38 @@ impl BoxRuntimeDriver {
         self.execution_isolation
     }
 
+    pub(super) fn sev_snp_config(&self) -> Option<&BoxRuntimeSevSnpConfig> {
+        self.sev_snp.as_ref()
+    }
+
+    #[cfg(test)]
+    fn with_attestation_transport(
+        mut self,
+        transport: Arc<dyn self::attestation::BoxAttestationTransport>,
+    ) -> Self {
+        self.attestation = AttestationArtifactOwner::with_transport(transport);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_attested_main_starter(
+        mut self,
+        starter: Arc<dyn self::attestation::BoxAttestedMainStarter>,
+    ) -> Self {
+        self.attestation = self.attestation.with_main_starter(starter);
+        self
+    }
+
     pub(super) async fn provider_build(&self) -> RuntimeResult<String> {
         self.provider_build
             .get_or_try_init(|| async {
                 let execution_isolation = self.execution_isolation;
+                let sev_snp_simulated = self.sev_snp.as_ref().map(|config| config.simulate);
                 let provider_build = tokio::time::timeout(
                     self.config.control_timeout,
-                    tokio::task::spawn_blocking(move || probe_provider_build(execution_isolation)),
+                    tokio::task::spawn_blocking(move || {
+                        probe_provider_build(execution_isolation, sev_snp_simulated)
+                    }),
                 )
                 .await
                 .map_err(|_| {
@@ -223,16 +282,29 @@ fn production_manager(
     (manager, broker)
 }
 
-fn probe_provider_build(execution_isolation: ExecutionIsolation) -> Result<String, String> {
-    match execution_isolation {
+fn probe_provider_build(
+    execution_isolation: ExecutionIsolation,
+    sev_snp_simulated: Option<bool>,
+) -> Result<String, String> {
+    let provider_build = match execution_isolation {
         ExecutionIsolation::Microvm => {
             let support = crate::host_check::check_virtualization_support()
                 .map_err(|error| format!("microVM unavailable: {error}"))?;
-            Ok(format!(
+            if sev_snp_simulated == Some(false) {
+                let tee = crate::tee::check_sev_snp_support()
+                    .map_err(|error| format!("SEV-SNP capability probe failed: {error}"))?;
+                if !tee.available {
+                    return Err(format!(
+                        "SEV-SNP unavailable: {}",
+                        tee.reason.unwrap_or_else(|| "unknown reason".into())
+                    ));
+                }
+            }
+            format!(
                 "a3s-box/{} isolation/microvm hypervisor/{}",
                 env!("CARGO_PKG_VERSION"),
                 support.backend
-            ))
+            )
         }
         ExecutionIsolation::Sandbox => {
             let snapshot = crate::sandbox::probe_sandbox_capabilities_for(
@@ -246,14 +318,19 @@ fn probe_provider_build(execution_isolation: ExecutionIsolation) -> Result<Strin
             let runtime = snapshot.a3s_oci.ok_or_else(|| {
                 "shared-kernel capability probe returned no A3S OCI artifacts".to_string()
             })?;
-            Ok(format!(
+            format!(
                 "a3s-box/{} isolation/sandbox a3s-oci/sha256:{} agent/sha256:{}",
                 env!("CARGO_PKG_VERSION"),
                 &runtime.runtime_sha256[..16],
                 &runtime.agent_sha256[..16]
-            ))
+            )
         }
-    }
+    };
+    Ok(match sev_snp_simulated {
+        Some(true) => format!("{provider_build} tee/sev-snp-simulated"),
+        Some(false) => format!("{provider_build} tee/sev-snp-hardware"),
+        None => provider_build,
+    })
 }
 
 fn validate_config(config: &BoxRuntimeDriverConfig) -> RuntimeResult<()> {
@@ -300,6 +377,31 @@ fn validate_config(config: &BoxRuntimeDriverConfig) -> RuntimeResult<()> {
     Ok(())
 }
 
+fn validate_sev_snp_config(config: &BoxRuntimeSevSnpConfig) -> RuntimeResult<()> {
+    if config
+        .attestation_policy
+        .expected_measurement
+        .as_ref()
+        .is_some_and(|measurement| {
+            measurement.len() != 96
+                || !measurement
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(RuntimeError::InvalidRequest(
+            "Box Runtime SEV-SNP measurement must be a canonical lowercase SHA-384 hex value"
+                .into(),
+        ));
+    }
+    if config.attestation_policy.max_report_age_secs.is_some() {
+        return Err(RuntimeError::InvalidRequest(
+            "Box Runtime SEV-SNP RA-TLS artifacts do not support report-age policy".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl RuntimeDriver for BoxRuntimeDriver {
     fn provider_id(&self) -> &ProviderId {
@@ -324,9 +426,16 @@ impl RuntimeDriver for BoxRuntimeDriver {
         if self.artifact_storage.artifact_configured() {
             features.push(RuntimeFeature::OutputArtifacts);
         }
+        if self.sev_snp.is_some() {
+            features.push(RuntimeFeature::Attestation);
+        }
         let mut mount_kinds = vec![MountKind::Volume, MountKind::Tmpfs];
         if self.artifact_storage.artifact_configured() {
             mount_kinds.insert(0, MountKind::Artifact);
+        }
+        let mut isolation_levels = vec![IsolationLevel::Sandbox];
+        if self.sev_snp.is_some() {
+            isolation_levels.push(IsolationLevel::Confidential);
         }
         let capabilities = RuntimeCapabilities {
             schema: RuntimeCapabilities::SCHEMA.into(),
@@ -336,7 +445,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()],
             // Runtime 0.2 uses `Sandbox` as the provider-neutral isolation
             // class. `execution_isolation` selects Box's concrete backend.
-            isolation_levels: vec![IsolationLevel::Sandbox],
+            isolation_levels,
             network_modes: vec![NetworkMode::None, NetworkMode::Service],
             mount_kinds,
             health_check_kinds: vec![

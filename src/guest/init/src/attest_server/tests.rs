@@ -44,6 +44,22 @@ fn test_oid_constants() {
 }
 
 #[test]
+fn test_runtime_attestation_binding_is_canonical_sha256() {
+    let value = "ab".repeat(RUNTIME_BINDING_SIZE);
+    assert_eq!(
+        parse_runtime_attestation_binding(&value).unwrap(),
+        [0xabu8; RUNTIME_BINDING_SIZE]
+    );
+    for invalid in [
+        "ab",
+        &"AB".repeat(RUNTIME_BINDING_SIZE),
+        &"gg".repeat(RUNTIME_BINDING_SIZE),
+    ] {
+        assert!(parse_runtime_attestation_binding(invalid).is_err());
+    }
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn test_guid_bytes() {
     let guid = snp::guid_bytes("63da758d-e664-4564-adc5-f4b93be8accd");

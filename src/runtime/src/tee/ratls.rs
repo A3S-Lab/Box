@@ -134,7 +134,7 @@ fn compute_cert_pubkey_hash(cert_der: &[u8]) -> Result<[u8; PUBKEY_HASH_SIZE]> {
 /// it in `report_data[0..32]`. This function recomputes the hash from the
 /// certificate and checks it matches, preventing MITM attacks where an
 /// attacker replays a valid report in a different certificate.
-fn verify_pubkey_binding(cert_der: &[u8], report: &[u8]) -> Result<bool> {
+pub(crate) fn verify_pubkey_binding(cert_der: &[u8], report: &[u8]) -> Result<bool> {
     if report.len() < 0x50 + 64 {
         return Err(BoxError::AttestationError(
             "Report too short to extract report_data for key binding".to_string(),

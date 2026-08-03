@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use a3s_box_core::config::{SevSnpGeneration, TeeConfig};
 use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
 use a3s_box_core::{ExecutionIsolation, ExecutionManager};
 use a3s_runtime::contract::{
@@ -11,7 +12,7 @@ use a3s_runtime::contract::{
 };
 use a3s_runtime::RuntimeDriver;
 
-use super::mapping::{creation_request, operation};
+use super::mapping::{creation_request, creation_request_with_sev_snp, operation};
 use super::metadata::validate_record_for_spec;
 use super::*;
 
@@ -70,6 +71,17 @@ fn driver(directory: &tempfile::TempDir) -> BoxRuntimeDriver {
         task_poll_interval: Duration::from_millis(5),
     })
     .unwrap()
+}
+
+fn simulated_sev_snp() -> BoxRuntimeSevSnpConfig {
+    BoxRuntimeSevSnpConfig {
+        generation: SevSnpGeneration::Milan,
+        simulate: true,
+        attestation_policy: crate::tee::AttestationPolicy {
+            require_no_debug: false,
+            ..Default::default()
+        },
+    }
 }
 
 #[test]
@@ -172,6 +184,146 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
             RuntimeFeature::Exec,
         ]
     );
+}
+
+#[tokio::test]
+async fn confidential_capabilities_require_explicit_sev_snp_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let confidential_driver = BoxRuntimeDriver::new_confidential(
+        BoxRuntimeDriverConfig {
+            home_dir: directory.path().join("home"),
+            secret_root: directory.path().join("runtime-secrets"),
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        simulated_sev_snp(),
+    )
+    .unwrap();
+    confidential_driver
+        .provider_build
+        .set("a3s-box/test isolation/microvm hypervisor/test tee/sev-snp-simulated".into())
+        .unwrap();
+
+    let capabilities = confidential_driver.capabilities().await.unwrap();
+    assert_eq!(
+        capabilities.isolation_levels,
+        vec![IsolationLevel::Sandbox, IsolationLevel::Confidential]
+    );
+    assert!(capabilities.features.contains(&RuntimeFeature::Attestation));
+
+    let standard = driver(&directory);
+    standard
+        .provider_build
+        .set("a3s-box/test isolation/microvm hypervisor/test".into())
+        .unwrap();
+    let standard_capabilities = standard.capabilities().await.unwrap();
+    assert_eq!(
+        standard_capabilities.isolation_levels,
+        vec![IsolationLevel::Sandbox]
+    );
+    assert!(!standard_capabilities
+        .features
+        .contains(&RuntimeFeature::Attestation));
+}
+
+#[test]
+fn confidential_configuration_rejects_unverifiable_policy_shapes() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = || BoxRuntimeDriverConfig {
+        home_dir: directory.path().join("home"),
+        secret_root: directory.path().join("runtime-secrets"),
+        control_timeout: Duration::from_secs(2),
+        task_poll_interval: Duration::from_millis(5),
+    };
+
+    let mut noncanonical = simulated_sev_snp();
+    noncanonical.attestation_policy.expected_measurement = Some("AB".repeat(48));
+    assert!(matches!(
+        BoxRuntimeDriver::new_confidential(config(), noncanonical),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("canonical lowercase")
+    ));
+
+    let mut unsupported_age = simulated_sev_snp();
+    unsupported_age.attestation_policy.max_report_age_secs = Some(60);
+    assert!(matches!(
+        BoxRuntimeDriver::new_confidential(config(), unsupported_age),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("report-age")
+    ));
+}
+
+#[test]
+fn confidential_mapping_is_exact_and_never_changes_sandbox_requests() {
+    let confidential = simulated_sev_snp();
+    let mut confidential_spec = spec(RuntimeUnitClass::Service);
+    confidential_spec.isolation = IsolationLevel::Confidential;
+
+    let request =
+        creation_request_with_sev_snp(&confidential_spec, TEST_EXECUTION_ISOLATION, &confidential)
+            .unwrap();
+    assert_eq!(request.config.isolation, ExecutionIsolation::Microvm);
+    assert!(request.config.deferred_main);
+    assert_eq!(
+        request.config.tee,
+        TeeConfig::SevSnp {
+            workload_id: confidential_spec.unit_id.clone(),
+            generation: SevSnpGeneration::Milan,
+            simulate: true,
+        }
+    );
+    assert_eq!(
+        request
+            .config
+            .extra_env
+            .iter()
+            .find(|(key, _)| key == a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV)
+            .map(|(_, value)| value.as_str()),
+        confidential_spec.digest().unwrap().strip_prefix("sha256:")
+    );
+
+    let sandbox_spec = spec(RuntimeUnitClass::Service);
+    let request =
+        creation_request_with_sev_snp(&sandbox_spec, TEST_EXECUTION_ISOLATION, &confidential)
+            .unwrap();
+    assert_eq!(request.config.tee, TeeConfig::None);
+    assert!(!request.config.deferred_main);
+    assert!(!request
+        .config
+        .extra_env
+        .iter()
+        .any(|(key, _)| key == a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV));
+
+    let mut reserved = confidential_spec.clone();
+    reserved.process.environment.insert(
+        a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV.into(),
+        "caller-controlled".into(),
+    );
+    assert!(matches!(
+        creation_request_with_sev_snp(&reserved, TEST_EXECUTION_ISOLATION, &confidential),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("reserved Box key")
+    ));
+
+    let mut reserved_secret = confidential_spec.clone();
+    reserved_secret.secrets.push(SecretReference {
+        name: "reserved-binding".into(),
+        reference: "secret://provider/reserved-binding/v1".into(),
+        target: SecretTarget::Environment {
+            variable: a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV.into(),
+        },
+    });
+    assert!(matches!(
+        creation_request_with_sev_snp(
+            &reserved_secret,
+            TEST_EXECUTION_ISOLATION,
+            &confidential
+        ),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("reserved Box key")
+    ));
+
+    assert!(matches!(
+        creation_request(&confidential_spec, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::UnsupportedCapabilities(missing))
+            if missing == vec!["isolation:Confidential"]
+    ));
 }
 
 #[test]
@@ -585,6 +737,7 @@ async fn metadata_tamper_is_rejected_fail_closed() {
         &record,
         &spec,
         TEST_EXECUTION_ISOLATION,
+        None,
         &driver.config.secret_root,
     )
     .unwrap();
@@ -597,6 +750,7 @@ async fn metadata_tamper_is_rejected_fail_closed() {
             &record,
             &spec,
             TEST_EXECUTION_ISOLATION,
+            None,
             &driver.config.secret_root,
         ),
         Err(RuntimeError::Protocol(message)) if message.contains("identity") || message.contains("intent")
@@ -629,6 +783,7 @@ async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
             &record,
             &spec,
             ExecutionIsolation::Microvm,
+            None,
             &driver.config.secret_root,
         ),
         Err(RuntimeError::Protocol(message)) if message.contains("creation intent")

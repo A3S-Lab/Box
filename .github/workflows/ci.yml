@@ -1086,6 +1086,19 @@ jobs:
             cargo test --locked --release -p a3s-box-runtime --lib \
               box_runtime_microvm_passes_all_advertised_profiles \
               -- --ignored --nocapture --test-threads=1
+      - name: Certify simulated SEV-SNP Runtime evidence through a real MicroVM
+        run: |
+          unset A3S_DEPS_STUB
+          cd src
+          A3S_HOME="$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" \
+            A3S_BOX_RUNTIME_CONFORMANCE=1 \
+            A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
+            A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
+            A3S_REGISTRY_PROTOCOL=http \
+            RUST_MIN_STACK=33554432 \
+            cargo test --locked --release -p a3s-box-runtime --lib \
+              box_runtime_sev_snp_simulated_passes_all_advertised_profiles \
+              -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       - name: Foreground latency — cached no-op p50 regression gate
         env:
@@ -1177,4 +1190,100 @@ jobs:
               cleanup_status=1
           fi
           sudo rm -rf -- "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME"
+          exit "$cleanup_status"
+
+  # Real SEV-SNP is deliberately separate from the ordinary KVM lane. The
+  # simulated Evidence profile above verifies protocol wiring but is never
+  # accepted as hardware security evidence.
+  integration-sev-snp:
+    name: Integration (hardware SEV-SNP)
+    needs: [fmt, clippy, test]
+    if: github.event_name != 'pull_request' && vars.SEV_SNP_CI == 'true'
+    runs-on: [self-hosted, linux, kvm, sev-snp]
+    timeout-minutes: 120
+    env:
+      A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS || 'docker.io=docker.m.daocloud.io' }}
+      A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME: /tmp/a3s-runtime-conformance-sev-snp-${{ github.run_id }}-${{ github.run_attempt }}
+      A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_GENERATION: ${{ vars.SEV_SNP_CI_GENERATION }}
+      A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_MEASUREMENT: ${{ vars.SEV_SNP_CI_EXPECTED_MEASUREMENT }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      - name: Use the runner's existing Rust toolchain
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
+      - name: Verify hardware SEV-SNP capability and pinned policy
+        run: |
+          test -c /dev/kvm
+          test -c /dev/sev
+          test -r /sys/module/kvm_amd/parameters/sev_snp
+          grep -Eq '^(Y|1)$' /sys/module/kvm_amd/parameters/sev_snp
+          case "$A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_GENERATION" in
+            milan|genoa) ;;
+            *) echo '::error::SEV_SNP_CI_GENERATION must be milan or genoa'; exit 1 ;;
+          esac
+          printf '%s' "$A3S_BOX_RUNTIME_CONFORMANCE_SEV_SNP_MEASUREMENT" \
+            | grep -Eq '^[0-9a-f]{96}$'
+      - name: Build real SEV-SNP Runtime artifacts
+        run: |
+          unset A3S_DEPS_STUB
+          cd src
+          cargo build --locked --release -p a3s-box-guest-init \
+            --target x86_64-unknown-linux-musl
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-shim
+      - name: Prepare dedicated SEV-SNP conformance home
+        run: |
+          unset A3S_DEPS_STUB
+          test ! -e "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME"
+          install -d -m 0755 "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/bin"
+          install -m 0755 src/target/release/a3s-box-shim \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/bin/a3s-box-shim"
+          install -m 0755 \
+            src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/bin/a3s-box-guest-init"
+          install -d -m 0700 \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/runtime-secrets"
+          sudo mount -t tmpfs \
+            -o size=16m,mode=0700,nosuid,nodev,noexec \
+            a3s-runtime-sev-snp-secrets \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/runtime-secrets"
+          sudo chown "$(id -u):$(id -g)" \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/runtime-secrets"
+          A3S_HOME="$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME" \
+            src/target/release/a3s-box pull \
+              'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+      - name: Certify hardware SEV-SNP Runtime evidence
+        run: |
+          unset A3S_DEPS_STUB
+          cd src
+          A3S_HOME="$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME" \
+            A3S_BOX_RUNTIME_CONFORMANCE=1 \
+            A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
+            A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
+            A3S_REGISTRY_PROTOCOL=http \
+            RUST_MIN_STACK=33554432 \
+            cargo test --locked --release -p a3s-box-runtime --lib \
+              box_runtime_sev_snp_hardware_passes_all_advertised_profiles \
+              -- --ignored --nocapture --test-threads=1
+      - name: Clean SEV-SNP conformance home
+        if: always()
+        run: |
+          cleanup_status=0
+          leaked_pids="$(
+            pgrep -f "a3s-box-shim.*$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME" || true
+          )"
+          if [ -n "$leaked_pids" ]; then
+            ps -fp $leaked_pids || true
+            sudo kill -KILL $leaked_pids || true
+            cleanup_status=1
+          fi
+          if mountpoint -q \
+            "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/runtime-secrets"; then
+            sudo umount \
+              "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME/runtime-secrets" || \
+              cleanup_status=1
+          fi
+          sudo rm -rf -- "$A3S_RUNTIME_SEV_SNP_CONFORMANCE_HOME"
           exit "$cleanup_status"

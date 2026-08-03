@@ -223,6 +223,11 @@ pub fn set_deferred_main_spec(
 /// exit code. A CAS makes only the first spawn-main win.
 #[cfg(target_os = "linux")]
 fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
+    let uses_stashed_spec = frame.is_none();
+    if let Some(pid) = idempotent_stashed_main_pid(uses_stashed_spec, container_pid()) {
+        return Ok(pid);
+    }
+
     // Use the command carried in the frame (the pool path — a pre-warmed VM gets
     // its per-request command here), else the one stashed at boot from BOX_EXEC_*
     // (the `run` path, where the command is known at boot).
@@ -286,6 +291,9 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     }
 
     // Idempotency: claim the sentinel (-1 → -2 pending); a second spawn-main loses.
+    // Concurrent triggers still race on the sentinel CAS. Once the real PID is
+    // published, a repeated bare trigger returns it above and is acknowledged
+    // without spawning a duplicate main.
     if CONTAINER_PID
         .compare_exchange(-1, -2, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -308,6 +316,10 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
             Err(format!("spawn failed: {e}"))
         }
     }
+}
+
+fn idempotent_stashed_main_pid(uses_stashed_spec: bool, current_pid: i32) -> Option<i32> {
+    (uses_stashed_spec && current_pid > 0).then_some(current_pid)
 }
 
 /// Maximum payload bytes per streamed exec chunk.
@@ -3119,6 +3131,14 @@ mod tests {
             command
         };
         command.spawn().expect("spawn long-running test child")
+    }
+
+    #[test]
+    fn only_a_repeated_stashed_main_trigger_is_idempotent() {
+        assert_eq!(idempotent_stashed_main_pid(true, 42), Some(42));
+        assert_eq!(idempotent_stashed_main_pid(false, 42), None);
+        assert_eq!(idempotent_stashed_main_pid(true, -1), None);
+        assert_eq!(idempotent_stashed_main_pid(true, -2), None);
     }
 
     #[cfg(target_os = "linux")]
