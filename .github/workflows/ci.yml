@@ -893,6 +893,8 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
+          runtime_profile_log="$RUNNER_TEMP/runtime-microvm-profiles.log"
+          set +e
           A3S_HOME="$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" \
             A3S_BOX_RUNTIME_CONFORMANCE=1 \
             A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
@@ -901,7 +903,20 @@ jobs:
             RUST_MIN_STACK=33554432 \
             cargo test --locked --release -p a3s-box-runtime --lib \
               box_runtime_microvm_passes_all_advertised_profiles \
-              -- --ignored --nocapture --test-threads=1
+              -- --ignored --nocapture --test-threads=1 \
+              2>&1 | tee "$runtime_profile_log"
+          runtime_profile_status="${PIPESTATUS[0]}"
+          set -e
+          if ((runtime_profile_status != 0)); then
+            runtime_profile_summary="$(
+              tail -n 120 "$runtime_profile_log" \
+                | sed 's/%/%25/g' \
+                | paste -sd '|' - \
+                | cut -c1-60000
+            )"
+            echo "::error title=Runtime MicroVM profile failure::$runtime_profile_summary"
+            exit "$runtime_profile_status"
+          fi
       # Keep the cached foreground no-op inside a bounded production envelope.
       - name: Foreground latency — cached no-op p50 regression gate
         if: ${{ false }}
