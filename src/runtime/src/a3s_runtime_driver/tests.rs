@@ -203,7 +203,7 @@ fn mapping_preserves_digest_resources_timeout_and_hardening() {
 }
 
 #[test]
-fn mapping_uses_tsi_only_for_runtime_services() {
+fn mapping_keeps_none_and_service_on_the_isolated_vsock_path() {
     let none = spec(RuntimeUnitClass::Task);
     assert_eq!(
         creation_request(&none, TEST_EXECUTION_ISOLATION)
@@ -220,7 +220,7 @@ fn mapping_uses_tsi_only_for_runtime_services() {
             .unwrap()
             .config
             .network,
-        a3s_box_core::NetworkMode::Tsi
+        a3s_box_core::NetworkMode::None
     );
 }
 

@@ -213,8 +213,10 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
 
 fn compile_network_mode(mode: &RuntimeNetworkMode) -> RuntimeResult<NetworkMode> {
     match mode {
-        RuntimeNetworkMode::None => Ok(NetworkMode::None),
-        RuntimeNetworkMode::Service => Ok(NetworkMode::Tsi),
+        // Runtime Service reachability is provided by the generation-fenced
+        // vsock connector. Enabling TSI here would redirect the guest-side
+        // loopback connection to the host instead of the local workload.
+        RuntimeNetworkMode::None | RuntimeNetworkMode::Service => Ok(NetworkMode::None),
         unsupported => Err(RuntimeError::UnsupportedCapabilities(vec![format!(
             "network_mode:{unsupported:?}"
         )])),
