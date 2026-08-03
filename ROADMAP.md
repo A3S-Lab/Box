@@ -68,18 +68,21 @@ The current implementation has two execution paths:
 
 The provider-neutral Runtime conformance fixture now selects either concrete
 Box isolation explicitly. Hosted Linux continues to run every advertised
-profile through Sandbox. The self-hosted KVM workflow is wired to run Runtime
-Base plus Recovery, Networking, Mounts, Health, Logs, Exec, and Outputs through
-real MicroVMs, including client/provider restart, external process loss,
-endpoint relay and cleanup, read-only and ephemeral mount behavior, bounded
-exec, durable logs, exact outputs, resource limits, duplicate-resource
-rejection, and final inventory equality. Mount evidence reads the concrete
-Sandbox OCI bundle or the persisted MicroVM intent plus guest mount namespace
-as appropriate. Resource evidence reads the Sandbox control/workload hierarchy
-or the MicroVM's persisted sizing plus guest cgroup as appropriate. This wiring
-is not certification while the repository `KVM_CI` gate is disabled;
-MicroVM-specific Security oracles and executed evidence for every wired profile
-remain open.
+profile through Sandbox. The self-hosted KVM workflow is wired to run every
+advertised Runtime profile through real MicroVMs: Base, Recovery, Networking,
+Mounts, Health, Resources, Logs, Exec, Security, and Outputs. It also exercises
+an authenticated private-registry pull. The suite includes client/provider
+restart, external process loss, endpoint relay and cleanup, read-only and
+ephemeral mount behavior, bounded exec, durable logs, exact outputs, resource
+limits, hostile-input rejection, least privilege, Secret nondisclosure,
+duplicate-resource rejection, and final inventory equality. Mount evidence
+reads the concrete Sandbox OCI bundle or the persisted MicroVM intent plus
+guest mount namespace as appropriate. Resource evidence reads the Sandbox
+control/workload hierarchy or the MicroVM's persisted sizing plus guest cgroup
+as appropriate. Security evidence reads the Sandbox OCI/process boundary or
+the exact MicroVM shim identity plus guest security state and staged non-secret
+manifest as appropriate. This wiring is not certification while the repository
+`KVM_CI` gate is disabled; executed KVM evidence remains open.
 
 This split remains supported while migration is in progress, but it is not the
 target architecture. New platform execution features belong in OCI Runtime and

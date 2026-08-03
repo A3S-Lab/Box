@@ -1,10 +1,7 @@
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
-use a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST;
 use a3s_runtime::contract::{
     NetworkMode, RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
     SecretReference, SecretTarget,
@@ -45,7 +42,7 @@ pub(super) async fn run(
     )?;
     let record = fixture.record_for(&service.spec).await?;
     verify_digest_pin(&record, &service.spec)?;
-    verify_least_privilege(&record)?;
+    super::security_evidence::verify_provider_least_privilege(fixture, &record, &running)?;
     verify_workload_least_privilege(fixture, client, &service.spec).await?;
     metadata_tamper_fails_closed(fixture, client, &service.spec, &record.id).await?;
     namespace_separation(fixture).await?;
@@ -207,44 +204,11 @@ async fn secret_nondisclosure(
     .map_err(|error| super::external("encode Secret creation intent", error))?;
     let boxes = std::fs::read(fixture.home_dir.join("boxes.json"))
         .map_err(|error| super::external("read Box state for Secret nondisclosure", error))?;
-    let bundle_directory = record.box_dir.join("sandbox/bundle");
-    let oci = std::fs::read(bundle_directory.join("config.json"))
-        .map_err(|error| super::external("read Secret Sandbox OCI configuration", error))?;
-    let oci_spec: serde_json::Value = serde_json::from_slice(&oci)
-        .map_err(|error| super::external("decode Secret Sandbox OCI configuration", error))?;
-    let rootfs_path = oci_spec
-        .pointer("/root/path")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| super::protocol("Secret Sandbox OCI configuration omitted root.path"))?;
-    let rootfs_path = if Path::new(rootfs_path).is_absolute() {
-        Path::new(rootfs_path).to_path_buf()
-    } else {
-        bundle_directory.join(rootfs_path)
-    };
-    let staged_environment =
-        std::fs::read(rootfs_path.join(RUNTIME_ENV_PATH.trim_start_matches('/')))
-            .map_err(|error| super::external("read Secret Sandbox staged environment", error))?;
-    for (label, bytes) in [
-        ("managed creation intent", creation_intent.as_slice()),
-        ("boxes.json", boxes.as_slice()),
-        ("Sandbox OCI configuration", oci.as_slice()),
-        ("Sandbox staged environment", staged_environment.as_slice()),
-    ] {
-        let value = String::from_utf8_lossy(bytes);
-        require(
-            !value.contains(SECRET_ENV_VALUE) && !value.contains(SECRET_FILE_VALUE),
-            format!("{label} persisted Secret plaintext"),
-        )?;
-    }
-    require(
-        String::from_utf8_lossy(&oci).contains(&format!("BOX_EXEC_ENV_FILE={RUNTIME_ENV_PATH}")),
-        "Sandbox OCI configuration omitted the protected environment staging pointer",
-    )?;
-    require(
-        String::from_utf8_lossy(&staged_environment)
-            .lines()
-            .any(|line| line.starts_with(&format!("{SECRET_ENVIRONMENT_MANIFEST}="))),
-        "Sandbox staged environment omitted the non-secret environment binding manifest",
+    super::security_evidence::verify_secret_persistence(
+        fixture,
+        &record,
+        &creation_intent,
+        &boxes,
     )?;
 
     let calls_before_reconstruction = fixture.secret_materialization_calls();
@@ -375,123 +339,6 @@ fn verify_digest_pin(
     )
 }
 
-fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
-    const BOOTSTRAP_CAPABILITIES: [&str; 11] = [
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_FSETID",
-        "CAP_KILL",
-        "CAP_NET_ADMIN",
-        "CAP_NET_BIND_SERVICE",
-        "CAP_SETGID",
-        "CAP_SETPCAP",
-        "CAP_SETUID",
-        "CAP_SYS_CHROOT",
-    ];
-    const BOOTSTRAP_CAPABILITY_MASK: u64 = 0x415fb;
-
-    let path = record.box_dir.join("sandbox/bundle/config.json");
-    let config: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&path)
-            .map_err(|error| super::external("read Sandbox OCI configuration", error))?,
-    )
-    .map_err(|error| super::external("decode Sandbox OCI configuration", error))?;
-    require(
-        config
-            .pointer("/process/noNewPrivileges")
-            .and_then(|v| v.as_bool())
-            == Some(true),
-        "Sandbox OCI process did not enable no-new-privileges",
-    )?;
-    let expected = BOOTSTRAP_CAPABILITIES.into_iter().collect::<BTreeSet<_>>();
-    for set in ["bounding", "effective", "permitted"] {
-        let actual = config
-            .pointer(&format!("/process/capabilities/{set}"))
-            .and_then(|value| value.as_array())
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str())
-                    .collect::<BTreeSet<_>>()
-            });
-        require(
-            actual.as_ref() == Some(&expected),
-            format!("Sandbox OCI bootstrap capability set {set} changed: actual={actual:?}"),
-        )?;
-    }
-    for set in ["inheritable", "ambient"] {
-        require(
-            config
-                .pointer(&format!("/process/capabilities/{set}"))
-                .and_then(|value| value.as_array())
-                .is_some_and(Vec::is_empty),
-            format!("Sandbox OCI capability set {set} is not empty"),
-        )?;
-    }
-    require(
-        config.pointer("/linux/seccomp/defaultAction").is_some(),
-        "Sandbox OCI configuration omitted seccomp",
-    )?;
-    let namespaces = config
-        .pointer("/linux/namespaces")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| super::protocol("Sandbox OCI namespaces are missing"))?;
-    for required in ["user", "mount", "pid", "ipc", "uts", "network", "cgroup"] {
-        require(
-            namespaces.iter().any(|namespace| {
-                namespace.get("type").and_then(|value| value.as_str()) == Some(required)
-            }),
-            format!("Sandbox OCI configuration omitted the {required} namespace"),
-        )?;
-    }
-    let mappings = config
-        .pointer("/linux/uidMappings")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| super::protocol("Sandbox OCI UID mappings are missing"))?;
-    require(
-        mappings.iter().any(|mapping| {
-            mapping.get("containerID").and_then(|value| value.as_u64()) == Some(0)
-                && mapping.get("hostID").and_then(|value| value.as_u64()) != Some(0)
-        }),
-        "Sandbox container root maps to host root",
-    )?;
-    require(
-        config
-            .pointer("/linux/cgroupsPath")
-            .and_then(|value| value.as_str())
-            == Some(format!("a3s-box/{}", record.id).as_str()),
-        "Sandbox OCI cgroup path is not execution-scoped",
-    )?;
-
-    let pid = record
-        .pid
-        .ok_or_else(|| super::protocol("running Sandbox record has no init PID"))?;
-    let status = std::fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("status"))
-        .map_err(|error| super::external("read Sandbox init process status", error))?;
-    require(
-        status.lines().any(|line| line == "NoNewPrivs:\t1"),
-        "Sandbox init process does not have no_new_privs",
-    )?;
-    let effective = status
-        .lines()
-        .find_map(|line| line.strip_prefix("CapEff:\t"))
-        .ok_or_else(|| super::protocol("Sandbox init process has no CapEff evidence"))?;
-    let effective = u64::from_str_radix(effective, 16)
-        .map_err(|error| super::external("decode Sandbox init CapEff", error))?;
-    require(
-        effective & !BOOTSTRAP_CAPABILITY_MASK == 0,
-        format!("Sandbox init process escaped its bootstrap capability set: {effective:#x}"),
-    )?;
-    let host_uid = status
-        .lines()
-        .find_map(|line| line.strip_prefix("Uid:\t"))
-        .and_then(|line| line.split_whitespace().next())
-        .and_then(|value| value.parse::<u32>().ok())
-        .ok_or_else(|| super::protocol("Sandbox init process has no host UID evidence"))?;
-    require(host_uid != 0, "Sandbox init process runs as host root")
-}
-
 async fn verify_workload_least_privilege(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
@@ -505,7 +352,8 @@ async fn verify_workload_least_privilege(
                 "/bin/sh".into(),
                 "-c".into(),
                 "awk '$1 == \"CapInh:\" || $1 == \"CapPrm:\" || \
-                 $1 == \"CapEff:\" || $1 == \"CapBnd:\" || $1 == \"CapAmb:\" \
+                 $1 == \"CapEff:\" || $1 == \"CapBnd:\" || $1 == \"CapAmb:\" || \
+                 $1 == \"NoNewPrivs:\" || $1 == \"Seccomp:\" \
                  { print $1 \"=\" $2 }' /proc/self/status"
                     .into(),
             ],
@@ -513,21 +361,27 @@ async fn verify_workload_least_privilege(
         ))
         .await
         .map_err(|error| super::external("execute workload capability probe", error))?;
-    let capabilities = output
+    let status = output
         .stdout
         .lines()
         .filter_map(|line| line.split_once('='))
-        .collect::<Vec<_>>();
+        .collect::<BTreeMap<_, _>>();
     require(
         output.exit_code == 0
             && output.stderr.is_empty()
             && !output.truncated
-            && capabilities.len() == 5
-            && capabilities
-                .iter()
-                .all(|(_, value)| value.bytes().all(|byte| byte == b'0')),
+            && status.len() == 7
+            && ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"]
+                .into_iter()
+                .all(|field| {
+                    status
+                        .get(field)
+                        .is_some_and(|value| value.bytes().all(|byte| byte == b'0'))
+                })
+            && status.get("NoNewPrivs:") == Some(&"1")
+            && status.get("Seccomp:") == Some(&"2"),
         format!(
-            "Sandbox workload retained capabilities: exit_code={} stdout={:?} stderr={:?}",
+            "provider workload escaped its least-privilege policy: exit_code={} stdout={:?} stderr={:?}",
             output.exit_code, output.stdout, output.stderr
         ),
     )
@@ -593,7 +447,7 @@ async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<
             control_timeout: Duration::from_secs(120),
             task_poll_interval: Duration::from_millis(25),
         },
-        a3s_box_core::ExecutionIsolation::Sandbox,
+        fixture.driver.execution_isolation(),
     )?);
     fixture.register_driver(sibling_driver.clone());
     let sibling_state = Arc::new(FileRuntimeStateStore::new(&sibling_state_root));

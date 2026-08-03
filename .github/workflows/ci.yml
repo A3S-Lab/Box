@@ -859,7 +859,7 @@ jobs:
             cargo test --locked --release -p a3s-box-sdk --test local_sandbox \
               local_sandbox_exercises_real_runtime \
               -- --ignored --nocapture --test-threads=1
-      - name: Certify supported Runtime profiles through real MicroVMs
+      - name: Certify all advertised Runtime profiles through real MicroVMs
         run: |
           unset A3S_DEPS_STUB
           cd src
@@ -867,9 +867,10 @@ jobs:
             A3S_BOX_RUNTIME_CONFORMANCE=1 \
             A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
             A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
+            A3S_REGISTRY_PROTOCOL=http \
             RUST_MIN_STACK=33554432 \
             cargo test --locked --release -p a3s-box-runtime --lib \
-              box_runtime_microvm_passes_supported_profiles \
+              box_runtime_microvm_passes_all_advertised_profiles \
               -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       - name: Foreground latency — cached no-op p50 regression gate
