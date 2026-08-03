@@ -901,6 +901,13 @@ jobs:
             "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
           sudo chmod 0700 \
             "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
+          libkrunfw_dir="$(
+            find target/release/build \
+              -name 'libkrunfw.so.5' \
+              -printf '%h\n' \
+              -quit
+          )"
+          test -f "$libkrunfw_dir/libkrunfw.so.5"
           runtime_profile_log="$RUNNER_TEMP/runtime-microvm-profiles.log"
           set +e
           sudo env \
@@ -908,6 +915,7 @@ jobs:
             HOME="$HOME" \
             CARGO_HOME="$HOME/.cargo" \
             RUSTUP_HOME="$HOME/.rustup" \
+            LD_LIBRARY_PATH="$libkrunfw_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             A3S_HOME="$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" \
             A3S_BOX_RUNTIME_CONFORMANCE=1 \
             A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
