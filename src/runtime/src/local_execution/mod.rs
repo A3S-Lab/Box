@@ -55,9 +55,9 @@ pub use backend::{
     LocalExecutionTermination,
 };
 pub use oci_backend::{
-    oci_isolation_request, OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend,
-    OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
-    OCI_RUNTIME_BINDING_SCHEMA_VERSION,
+    oci_isolation_request, OciBundlePreparationContext, OciBundleProvider, OciLifecycleAdapter,
+    OciLocalExecutionBackend, OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint,
+    OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 #[cfg(feature = "vm")]
 pub use oci_migration::NativeLinuxOciMigrationConfig;

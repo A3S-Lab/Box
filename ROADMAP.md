@@ -105,6 +105,17 @@ exec dispatch. OCI Runtime independently proves the same process target through
 its durable `HostRuntimeService` and operation journal across two processes.
 Real-driver promotion and production cutover gates remain below.
 
+The SDK boundary now also gives every bundle provider the exact runtime
+container ID, create operation context, requested isolation, and negotiated
+attachment capabilities before product mutation. A provider opting into
+`dev.a3s.bundle-handoff` resolves only
+`bundle-handoffs/<container>/<create-operation>/bundle`, binds that path and
+annotation into the submitted attachment digest, and fails before Box state or
+bundle preparation if the runtime does not advertise version 1. The same
+operation context is then sent unchanged in SDK `create`; Box never predicts
+the independently allocated runtime generation. This closes the product/runtime
+contract seam but does not claim the real Windows production lifecycle gate.
+
 The backend-neutral manager now also has one durable migration router with
 three explicit creation policies: retain both current paths, route only
 Sandbox through the unified OCI adapter, or route both isolation choices.
@@ -114,13 +125,15 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`a6cdae7163db941aa1eae5a5d74c75c6ccc32b60` adds the matching long-lived,
-multi-container Native Linux host owner. Box now first validates the exact
-managed home and durably prepares snapshot-lower, named-volume, and network
-ownership. Its production provider then prepares the product-owned rootfs,
-mounts, resources, DNS/hostname files and OCI bundle while compiling the image
-process directly, without the legacy guest-init FD 3/4/5 contract. It resolves
-PATH, working directory, named or numeric users/groups, supplementary groups,
+`0451739d15795be5829a4774198e276f861561be` retains the matching long-lived,
+multi-container Native Linux host owner and adds the generation-safe bundle
+handoff used by the preparation context above. Box now first validates the
+exact managed home and durably prepares snapshot-lower, named-volume, and
+network ownership. Its production provider then prepares the product-owned
+rootfs, mounts, resources, DNS/hostname files and OCI bundle while compiling
+the image process directly, without the legacy guest-init FD 3/4/5 contract.
+It resolves PATH, working directory, named or numeric users/groups,
+supplementary groups,
 HOME and capabilities against the prepared rootfs before mutation is handed to
 Runtime. A provably failed launch rolls back every preparation-owned effect;
 unknown launch ownership retains them for exact reconciliation.
@@ -227,6 +240,9 @@ later gates.
   cleanup, endpoint rebinding, and next-generation restart without inventing
   terminal evidence.
 - [ ] Exercise the same Box-owned minimal bundle on Windows/WHPX.
+  - [x] Negotiate the required handoff extension and bind provider preparation
+    to the exact runtime container/create-operation path without coupling Box
+    and runtime generations.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.

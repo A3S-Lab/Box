@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +28,7 @@ use a3s_oci_sdk::{
     ProcessesRequest, ReadOutputRequest, ResizeRequest, Result as OciResult, RuntimeClient,
     RuntimeEvent, RuntimeEventKind, RuntimeInfo, RuntimeOperation, SignalProcessRequest,
     StartRequest, StateRequest, StatsRequest, TerminalSize, UpdateRequest, WaitProcessRequest,
-    WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION,
+    WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION, RUNTIME_BUNDLE_HANDOFF_MOVE_V1,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
@@ -126,6 +127,14 @@ impl FakeRuntimeService {
         let mut service = Self::launch_ready();
         let mut info = serde_json::to_value(&service.info).expect("encode runtime info");
         info["attachments"]["schemas"] = json!([]);
+        service.info = serde_json::from_value(info).expect("decode runtime info");
+        service
+    }
+
+    fn with_bundle_handoff() -> Self {
+        let mut service = Self::launch_ready();
+        let mut info = serde_json::to_value(&service.info).expect("encode runtime info");
+        info["attachments"]["extensions"][RUNTIME_BUNDLE_HANDOFF_EXTENSION] = json!([1]);
         service.info = serde_json::from_value(info).expect("decode runtime info");
         service
     }
@@ -1265,7 +1274,11 @@ struct FakeBundleProvider {
 
 #[async_trait]
 impl OciBundleProvider for FakeBundleProvider {
-    async fn prepare(&self, record: &BoxRecord) -> ExecutionManagerResult<OciPreparedExecution> {
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        _context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution> {
         self.prepares.fetch_add(1, Ordering::SeqCst);
         *self
             .last_box_dir
@@ -1320,6 +1333,81 @@ impl OciBundleProvider for FakeBundleProvider {
     async fn cleanup(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.cleanups.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+struct RuntimeBundleHandoffProvider {
+    runtime_root: PathBuf,
+    preflights: AtomicUsize,
+    prepares: AtomicUsize,
+}
+
+impl RuntimeBundleHandoffProvider {
+    fn new(runtime_root: PathBuf) -> Self {
+        Self {
+            runtime_root,
+            preflights: AtomicUsize::new(0),
+            prepares: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl OciBundleProvider for RuntimeBundleHandoffProvider {
+    fn preflight(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<()> {
+        self.preflights.fetch_add(1, Ordering::SeqCst);
+        if record.isolation != ExecutionIsolation::Microvm {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "runtime bundle handoff fixture requires MicroVM isolation".to_string(),
+            ));
+        }
+        context
+            .runtime_bundle_handoff_directory(&self.runtime_root)
+            .map(|_| ())
+    }
+
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution> {
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        let directory = context.runtime_bundle_handoff_directory(&self.runtime_root)?;
+        std::fs::create_dir_all(directory.join("rootfs")).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to create portable bundle handoff: {error}"
+            ))
+        })?;
+        let config = json!({
+            "ociVersion": "1.3.0",
+            "process": {
+                "terminal": false,
+                "user": { "uid": 0, "gid": 0 },
+                "args": ["/bin/true"],
+                "cwd": "/"
+            },
+            "root": { "path": "rootfs", "readonly": false },
+            "annotations": {
+                RUNTIME_BUNDLE_HANDOFF_EXTENSION: RUNTIME_BUNDLE_HANDOFF_MOVE_V1
+            }
+        });
+        let config = serde_json::to_string_pretty(&config)
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        std::fs::write(directory.join("config.json"), config.as_bytes()).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to write portable bundle handoff: {error}"
+            ))
+        })?;
+        let bundle = OciBundle::from_json(directory, config)
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        let mut prepared = OciPreparedExecution::new(bundle, record.console_log.clone())?
+            .with_runtime_bundle_handoff(context, &self.runtime_root)?;
+        prepared.anonymous_volumes = record.anonymous_volumes.clone();
+        Ok(prepared)
     }
 }
 
@@ -1555,6 +1643,82 @@ async fn preflight_requires_attachment_v1_before_store_or_preparation() {
     assert!(!manager.state_path().exists());
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
     assert!(service.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn bundle_handoff_capability_fails_before_store_or_preparation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(RuntimeBundleHandoffProvider::new(
+        directory.path().join("oci-runtime"),
+    ));
+    let manager = manager_with_provider(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let operation = box_operation("missing-bundle-handoff-create");
+
+    let error = manager
+        .create(
+            request("missing-bundle-handoff", ExecutionIsolation::Microvm),
+            &operation,
+        )
+        .await
+        .expect_err("handoff-unaware runtime must fail before mutation");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains(RUNTIME_BUNDLE_HANDOFF_EXTENSION)
+    ));
+    assert!(!manager.state_path().exists());
+    assert_eq!(provider.preflights.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
+    assert!(service.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn bundle_handoff_uses_the_exact_context_sent_to_runtime_create() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let runtime_root = directory.path().join("oci-runtime");
+    let service = Arc::new(FakeRuntimeService::with_bundle_handoff());
+    let provider = Arc::new(RuntimeBundleHandoffProvider::new(runtime_root.clone()));
+    let manager = manager_with_provider(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let operation = box_operation("bundle-handoff-create");
+
+    let lease = manager
+        .create_and_start(
+            request("bundle-handoff", ExecutionIsolation::Microvm),
+            &operation,
+        )
+        .await
+        .expect("launch handoff-backed execution");
+
+    let creates = service.create_requests();
+    assert_eq!(creates.len(), 1);
+    let create = &creates[0];
+    let expected_directory = a3s_oci_sdk::runtime_bundle_handoff_directory(
+        &runtime_root,
+        &create.id,
+        &create.context.operation_id,
+    )
+    .expect("exact handoff path");
+    assert_eq!(create.bundle.directory(), expected_directory);
+    assert!(create.attachments.uses_runtime_bundle_handoff());
+    assert_eq!(
+        create.id,
+        runtime_container_id(&lease.execution_id).expect("runtime container ID")
+    );
+    assert_ne!(lease.generation.get(), RUNTIME_GENERATION.0);
+    assert!(provider.preflights.load(Ordering::SeqCst) >= 2);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -4128,6 +4292,15 @@ fn manager(
     endpoint: OciRuntimeEndpoint,
     service: Arc<FakeRuntimeService>,
     provider: Arc<FakeBundleProvider>,
+) -> LocalExecutionManager {
+    manager_with_provider(directory, endpoint, service, provider)
+}
+
+fn manager_with_provider(
+    directory: &tempfile::TempDir,
+    endpoint: OciRuntimeEndpoint,
+    service: Arc<FakeRuntimeService>,
+    provider: Arc<dyn OciBundleProvider>,
 ) -> LocalExecutionManager {
     let runtime_service: Arc<dyn OciRuntimeService> = service;
     let backend = OciLocalExecutionBackend::from_client(

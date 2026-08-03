@@ -8,7 +8,9 @@ use a3s_box_core::{
 use a3s_oci_sdk::{CreateAttachments, IoMode, OciBundle, ProcessIo};
 use async_trait::async_trait;
 
-use super::{OciBundleProvider, OciPreparedExecution, VmLocalExecutionBackend};
+use super::{
+    OciBundlePreparationContext, OciBundleProvider, OciPreparedExecution, VmLocalExecutionBackend,
+};
 use crate::sandbox::probe_sandbox_capabilities_for;
 use crate::BoxRecord;
 
@@ -50,7 +52,11 @@ impl NativeLinuxOciBundleProvider {
 
 #[async_trait]
 impl OciBundleProvider for NativeLinuxOciBundleProvider {
-    async fn prepare(&self, record: &BoxRecord) -> ExecutionManagerResult<OciPreparedExecution> {
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        _context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution> {
         if record.isolation != ExecutionIsolation::Sandbox {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "native Linux OCI migration only prepares Sandbox executions, got {:?}",
