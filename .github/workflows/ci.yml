@@ -908,6 +908,9 @@ jobs:
               -quit
           )"
           test -f "$libkrunfw_dir/libkrunfw.so.5"
+          sudo cp -a "$libkrunfw_dir"/libkrunfw.so* /usr/local/lib/
+          sudo ldconfig
+          ldconfig -p | grep -F 'libkrunfw.so.5'
           runtime_profile_log="$RUNNER_TEMP/runtime-microvm-profiles.log"
           set +e
           sudo env \
