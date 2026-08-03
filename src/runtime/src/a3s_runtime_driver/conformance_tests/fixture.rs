@@ -211,6 +211,7 @@ pub(super) fn output_digest(files: &BTreeMap<String, Vec<u8>>) -> String {
 
 #[derive(Debug, Clone, Default)]
 struct SeenResource {
+    unit_id: Option<String>,
     pid: Option<u32>,
     pid_start_time: Option<u64>,
     cgroup_path: Option<PathBuf>,
@@ -485,12 +486,17 @@ impl BoxRuntimeConformanceFixture {
         let entry = seen
             .entry((home.to_path_buf(), record.id.clone()))
             .or_default();
+        entry.unit_id = record.labels.get(UNIT_LABEL).cloned();
         entry.pid = record.pid;
         entry.pid_start_time = record.pid_start_time;
-        if let Some(pid) = record.pid {
-            if let Some(path) = crate::sandbox::capability::process_cgroup_v2_path(pid) {
-                entry.cgroup_path = Some(path);
+        if record.isolation.is_sandbox() {
+            if let Some(pid) = record.pid {
+                if let Some(path) = crate::sandbox::capability::process_cgroup_v2_path(pid) {
+                    entry.cgroup_path = Some(path);
+                }
             }
+        } else {
+            entry.cgroup_path = Some(PathBuf::from("/sys/fs/cgroup/a3s-box").join(&record.id));
         }
         #[cfg(target_os = "linux")]
         if let Ok(Some(runtime)) =
@@ -565,10 +571,10 @@ impl BoxRuntimeConformanceFixture {
                 ),
             ] {
                 if let Some(pid) = pid {
-                    if crate::process::is_process_alive_with_identity(pid, start_time) {
+                    if crate::process::is_process_running_with_identity(pid, start_time) {
                         entries.insert(
                             format!("process:{kind}:{}:{id}", home.display()),
-                            pid.to_string(),
+                            format!("pid={pid} unit_id={:?}", resource.unit_id),
                         );
                     }
                 }
