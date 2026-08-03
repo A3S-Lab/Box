@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/hosted-kvm-validation-20260803]
     tags: ['v*']
   pull_request:
     branches: [main]
