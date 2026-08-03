@@ -1,13 +1,17 @@
 use std::path::Path;
 use std::time::Duration;
 
+use a3s_box_core::ExecutionIsolation;
 use a3s_runtime::contract::{RestartPolicy, RuntimeMount, RuntimeMountSource, RuntimeUnitState};
 use a3s_runtime::RuntimeClient;
 
 use super::fixture::BoxRuntimeConformanceFixture;
+#[cfg(target_os = "linux")]
+use super::mounts_evidence::sandbox_private_artifact_alias;
+use super::mounts_evidence::{
+    require_bind_config, require_live_tmpfs_mount, require_tmpfs_config, TMPFS_SIZE_BYTES,
+};
 use super::{require, Result};
-
-const TMPFS_SIZE_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
@@ -50,12 +54,12 @@ async fn private_read_only_artifact(
     let record = fixture.record_for(&service.spec).await?;
     wait_for_file(
         &record.box_dir.join("workspace/r17-private-artifact-ready"),
-        "Sandbox did not read the private Artifact attachment",
+        "provider workload did not read the private Artifact attachment",
     )
     .await?;
     require(
         !fixture.private_artifact_source().join("forbidden").exists(),
-        "Sandbox wrote through the read-only private Artifact attachment",
+        "provider workload wrote through the read-only private Artifact attachment",
     )?;
     require(
         std::fs::metadata(fixture.private_artifact_root())
@@ -67,49 +71,27 @@ async fn private_read_only_artifact(
         "Box changed the caller-owned private Artifact root permissions",
     )?;
 
-    let alias_root = crate::sandbox::sandbox_mount_alias_root(&fixture.home_dir, &record.id);
-    let bundle: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(record.box_dir.join("sandbox/bundle/config.json"))
-            .map_err(|error| super::external("read private Artifact OCI bundle", error))?,
-    )
-    .map_err(|error| super::external("decode private Artifact OCI bundle", error))?;
-    let alias = bundle["mounts"]
-        .as_array()
-        .and_then(|mounts| {
-            mounts
-                .iter()
-                .find(|mount| mount["destination"].as_str() == Some(TARGET))
-        })
-        .and_then(|mount| mount["source"].as_str())
-        .map(Path::new)
-        .ok_or_else(|| super::protocol("private Artifact OCI mount has no source"))?;
-    require(
-        alias.parent() == Some(alias_root.as_path()) && alias.is_dir(),
-        "private Artifact did not use its Box-owned attachment alias",
-    )?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|error| super::external("read private Artifact mountinfo", error))?;
-    require(
-        mountinfo.lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            fields.nth(4) == alias.to_str()
-                && fields
-                    .next()
-                    .is_some_and(|options| options.split(',').any(|option| option == "ro"))
-        }),
-        "Box-owned private Artifact alias is not a read-only host mount",
-    )?;
+    require_bind_config(&record, TARGET, true)?;
+    let attachment_alias = match fixture.driver.execution_isolation() {
+        ExecutionIsolation::Sandbox => {
+            Some(sandbox_private_artifact_alias(fixture, &record, TARGET)?)
+        }
+        ExecutionIsolation::Microvm => None,
+    };
 
     fixture
         .remove_unit(client, &service.spec, "mount-private-artifact")
         .await?;
-    require(
-        !alias_root.exists()
-            && !std::fs::read_to_string("/proc/self/mountinfo")
-                .map_err(|error| super::external("re-read private Artifact mountinfo", error))?
-                .contains(alias.to_string_lossy().as_ref()),
-        "private Artifact removal retained a Box attachment alias",
-    )
+    if let Some((alias_root, alias)) = attachment_alias {
+        require(
+            !alias_root.exists()
+                && !std::fs::read_to_string("/proc/self/mountinfo")
+                    .map_err(|error| super::external("re-read private Artifact mountinfo", error))?
+                    .contains(alias.to_string_lossy().as_ref()),
+            "private Artifact removal retained a Box attachment alias",
+        )?;
+    }
+    Ok(())
 }
 
 async fn persistent_volume_reuse(
@@ -328,22 +310,51 @@ async fn mount_cleanup(
     require_live_tmpfs_mount(&record, TARGET, false)?;
     let pid = record
         .pid
-        .ok_or_else(|| super::protocol("tmpfs cleanup fixture has no Sandbox init PID"))?;
-    let mountinfo =
-        std::fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("mountinfo"))
-            .map_err(|error| super::external("read tmpfs cleanup mount namespace", error))?;
-    require(
-        mountinfo
-            .lines()
-            .any(|line| line.contains(&format!(" {TARGET} ")) && line.contains(" - tmpfs ")),
-        "running Sandbox did not expose the requested tmpfs mount",
-    )?;
+        .ok_or_else(|| super::protocol("tmpfs cleanup fixture has no provider owner PID"))?;
+    let log_worker = match fixture.driver.execution_isolation() {
+        ExecutionIsolation::Sandbox => {
+            let mountinfo =
+                std::fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("mountinfo"))
+                    .map_err(|error| {
+                        super::external("read tmpfs cleanup mount namespace", error)
+                    })?;
+            require(
+                mountinfo.lines().any(|line| {
+                    line.contains(&format!(" {TARGET} ")) && line.contains(" - tmpfs ")
+                }),
+                "running Sandbox did not expose the requested tmpfs mount",
+            )?;
+            Some(require_log_worker_identity(fixture, &record)?)
+        }
+        ExecutionIsolation::Microvm => {
+            let visible = client
+                .exec(&fixture.cases.exec(
+                    "mount-cleanup-visible",
+                    &service.spec,
+                    vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "awk '$5 == \"{TARGET}\" && $0 ~ / - tmpfs / {{ found=1 }} END {{ exit found ? 0 : 1 }}' /proc/self/mountinfo"
+                        ),
+                    ],
+                    5_000,
+                ))
+                .await?;
+            require(
+                visible.exit_code == 0 && visible.stderr.is_empty(),
+                format!(
+                    "running MicroVM did not expose the requested tmpfs mount: exit_code={} stdout={:?} stderr={:?}",
+                    visible.exit_code, visible.stdout, visible.stderr
+                ),
+            )?;
+            None
+        }
+    };
     let pid_start_time = record
         .pid_start_time
-        .ok_or_else(|| super::protocol("tmpfs cleanup fixture has no init PID start time"))?;
+        .ok_or_else(|| super::protocol("tmpfs cleanup fixture has no owner PID start time"))?;
     let box_dir = record.box_dir.clone();
-    let (log_worker_pid, log_worker_pid_start_time) =
-        require_log_worker_identity(fixture, &record)?;
 
     fixture
         .remove_unit(client, &service.spec, "mount-cleanup")
@@ -352,13 +363,15 @@ async fn mount_cleanup(
         !crate::process::is_process_alive_with_identity(pid, Some(pid_start_time)),
         "tmpfs owner process survived Runtime removal",
     )?;
-    require(
-        !crate::process::is_process_alive_with_identity(
-            log_worker_pid,
-            Some(log_worker_pid_start_time),
-        ),
-        "tmpfs log worker survived Runtime removal",
-    )?;
+    if let Some((log_worker_pid, log_worker_pid_start_time)) = log_worker {
+        require(
+            !crate::process::is_process_alive_with_identity(
+                log_worker_pid,
+                Some(log_worker_pid_start_time),
+            ),
+            "tmpfs log worker survived Runtime removal",
+        )?;
+    }
     require(
         fixture
             .driver
@@ -426,83 +439,4 @@ async fn wait_for_file(path: &Path, message: &str) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-}
-
-fn require_bind_config(record: &crate::BoxRecord, target: &str, read_only: bool) -> Result<()> {
-    let bundle = record.box_dir.join("sandbox/bundle/config.json");
-    let value: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&bundle)
-            .map_err(|error| super::external("read Volume Sandbox OCI configuration", error))?,
-    )
-    .map_err(|error| super::external("decode Volume Sandbox OCI configuration", error))?;
-    let mount = value["mounts"]
-        .as_array()
-        .and_then(|mounts| {
-            mounts
-                .iter()
-                .find(|mount| mount["destination"].as_str() == Some(target))
-        })
-        .ok_or_else(|| super::protocol("Sandbox OCI configuration omitted the Runtime Volume"))?;
-    let options = mount["options"]
-        .as_array()
-        .ok_or_else(|| super::protocol("Runtime Volume has no OCI mount options"))?;
-    let expected_mode = if read_only { "ro" } else { "rw" };
-    require(
-        mount["type"] == "bind"
-            && options.iter().any(|option| option == "rbind")
-            && options.iter().any(|option| option == expected_mode),
-        "Sandbox OCI bind mount did not preserve Runtime Volume access mode",
-    )
-}
-
-fn require_tmpfs_config(record: &crate::BoxRecord, target: &str, read_only: bool) -> Result<()> {
-    let config = &record
-        .managed_execution
-        .as_ref()
-        .ok_or_else(|| super::protocol("tmpfs fixture lost managed metadata"))?
-        .request
-        .config;
-    let expected = format!(
-        "{target}:size={TMPFS_SIZE_BYTES},{}",
-        if read_only { "ro" } else { "rw" }
-    );
-    require(
-        config.tmpfs == vec![expected],
-        "Runtime tmpfs intent changed before provider launch",
-    )
-}
-
-fn require_live_tmpfs_mount(
-    record: &crate::BoxRecord,
-    target: &str,
-    read_only: bool,
-) -> Result<()> {
-    require_tmpfs_config(record, target, read_only)?;
-    let bundle = record.box_dir.join("sandbox/bundle/config.json");
-    let value: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&bundle)
-            .map_err(|error| super::external("read tmpfs Sandbox OCI configuration", error))?,
-    )
-    .map_err(|error| super::external("decode tmpfs Sandbox OCI configuration", error))?;
-    let mount = value["mounts"]
-        .as_array()
-        .and_then(|mounts| {
-            mounts
-                .iter()
-                .find(|mount| mount["destination"].as_str() == Some(target))
-        })
-        .ok_or_else(|| super::protocol("Sandbox OCI configuration omitted the Runtime tmpfs"))?;
-    let options = mount["options"]
-        .as_array()
-        .ok_or_else(|| super::protocol("Runtime tmpfs has no OCI mount options"))?;
-    let expected_mode = if read_only { "ro" } else { "rw" };
-    let expected_size = format!("size={TMPFS_SIZE_BYTES}");
-    require(
-        mount["type"] == "tmpfs"
-            && options.iter().any(|option| option == expected_mode)
-            && options
-                .iter()
-                .any(|option| option.as_str() == Some(expected_size.as_str())),
-        "Sandbox OCI tmpfs did not preserve size and access mode",
-    )
 }

@@ -10,6 +10,7 @@ mod exec_profile;
 mod fixture;
 mod health_profile;
 mod logs_profile;
+mod mounts_evidence;
 mod mounts_profile;
 mod networking_profile;
 mod outputs_profile;
@@ -129,7 +130,7 @@ async fn run_all_advertised_profiles() {
 
 #[test]
 #[ignore = "requires a dedicated A3S OS KVM MicroVM certification home"]
-fn box_runtime_microvm_passes_base_and_portable_profiles() {
+fn box_runtime_microvm_passes_supported_profiles() {
     let runner = std::thread::Builder::new()
         .name("a3s-box-r17-microvm".into())
         .stack_size(R17_RUNNER_STACK_BYTES)
@@ -141,7 +142,7 @@ fn box_runtime_microvm_passes_base_and_portable_profiles() {
                 .enable_all()
                 .build()
                 .expect("R17 MicroVM Tokio runtime must start");
-            runtime.block_on(run_microvm_base_and_portable_profiles());
+            runtime.block_on(run_microvm_supported_profiles());
         })
         .expect("R17 MicroVM runner thread must start");
     runner
@@ -149,7 +150,7 @@ fn box_runtime_microvm_passes_base_and_portable_profiles() {
         .expect("R17 MicroVM runner thread must not panic");
 }
 
-async fn run_microvm_base_and_portable_profiles() {
+async fn run_microvm_supported_profiles() {
     let fixture = BoxRuntimeConformanceFixture::from_environment(ExecutionIsolation::Microvm)
         .expect("R17 MicroVM conformance preflight must pass");
     let client = fixture.primary_client();
@@ -164,14 +165,13 @@ async fn run_microvm_base_and_portable_profiles() {
         for profile in [
             RuntimeConformanceProfile::Recovery,
             RuntimeConformanceProfile::Networking,
+            RuntimeConformanceProfile::Mounts,
             RuntimeConformanceProfile::Health,
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
             RuntimeConformanceProfile::Outputs,
         ] {
-            let evidence = fixture
-                .run_profile(&client, &capabilities, profile)
-                .await?;
+            let evidence = fixture.run_profile(&client, &capabilities, profile).await?;
             require(
                 evidence.profile == profile,
                 format!(
@@ -192,6 +192,6 @@ async fn run_microvm_base_and_portable_profiles() {
     cleanup.expect("R17 MicroVM cleanup must succeed");
     assert_eq!(inventory_after, inventory_before);
     execution.expect(
-        "R17 MicroVM Base, Recovery, Networking, Health, Logs, Exec, and Outputs profiles must pass",
+        "R17 MicroVM Base, Recovery, Networking, Mounts, Health, Logs, Exec, and Outputs profiles must pass",
     );
 }
