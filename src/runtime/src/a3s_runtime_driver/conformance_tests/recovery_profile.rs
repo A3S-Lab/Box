@@ -260,9 +260,7 @@ async fn provider_restart(
     let RuntimeInspection::Found { observation, .. } =
         restarted.inspect(&request.spec.unit_id).await?
     else {
-        return Err(super::protocol(
-            "provider restart lost a running Service",
-        ));
+        return Err(super::protocol("provider restart lost a running Service"));
     };
     require(
         observation.state == RuntimeUnitState::Running
@@ -409,11 +407,7 @@ async fn delete_external_resource(
             let box_dir = record.box_dir.clone();
             let cleanup_id = record.id.clone();
             tokio::task::spawn_blocking(move || {
-                crate::vm::reap::cleanup_recorded_sandbox_runtime_in(
-                    &home,
-                    &box_dir,
-                    &cleanup_id,
-                )
+                crate::vm::reap::cleanup_recorded_sandbox_runtime_in(&home, &box_dir, &cleanup_id)
             })
             .await
             .map_err(|error| super::external("join external Sandbox deletion", error))?

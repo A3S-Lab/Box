@@ -305,8 +305,8 @@ impl BoxRuntimeConformanceFixture {
         });
         let driver = Arc::new(
             BoxRuntimeDriver::new_with_isolation(config, execution_isolation)?
-            .with_secret_materializer(secret_materializer.clone())
-            .with_artifact_port(artifact_port.clone()),
+                .with_secret_materializer(secret_materializer.clone())
+                .with_artifact_port(artifact_port.clone()),
         );
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
@@ -784,10 +784,7 @@ fn set_private_artifact_modes(_root: &Path, _source: &Path) -> Result<()> {
     ))
 }
 
-fn validate_runtime_assets(
-    home_dir: &Path,
-    execution_isolation: ExecutionIsolation,
-) -> Result<()> {
+fn validate_runtime_assets(home_dir: &Path, execution_isolation: ExecutionIsolation) -> Result<()> {
     for binary in ["a3s-box-guest-init", "a3s-box-shim"] {
         let path = home_dir.join("bin").join(binary);
         require(
