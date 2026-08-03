@@ -1942,6 +1942,16 @@ fn build_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    // guest-init itself retains private runtime controls so it can secure
+    // later sessions. Explicitly mask every inherited control before adding
+    // workload environment; skipping request entries alone would still leak
+    // the parent process's A3S_SEC_* values through Command inheritance.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| key.starts_with("A3S_SEC_")) {
+            command.env_remove(key);
+        }
+    }
+
     if spec.stdin_data.is_some() || spec.stdin_streaming {
         command.stdin(std::process::Stdio::piped());
     }
@@ -3469,6 +3479,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["hello".to_string()]
         );
+    }
+
+    #[test]
+    fn test_build_command_consumes_private_security_environment() {
+        let (command, _) = build_command(
+            ExecCommandSpec {
+                cmd: &["true".to_string()],
+                timeout_ns: 0,
+                env: &[
+                    "PUBLIC_VALUE=visible".to_string(),
+                    "A3S_SEC_SECCOMP=default".to_string(),
+                    "A3S_SEC_NO_NEW_PRIVS=1".to_string(),
+                    "A3S_SEC_CAP_DROP=ALL".to_string(),
+                ],
+                working_dir: None,
+                rootfs: None,
+                stdin_data: None,
+                stdin_streaming: false,
+                user: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "PUBLIC_VALUE" && value == Some(std::ffi::OsStr::new("visible"))
+        }));
+        assert!(!command.get_envs().any(|(key, value)| {
+            key.to_string_lossy().starts_with("A3S_SEC_") && value.is_some()
+        }));
     }
 
     #[test]

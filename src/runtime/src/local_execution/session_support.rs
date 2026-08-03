@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId};
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, SecurityConfig,
+};
 
 use crate::BoxRecord;
 
@@ -41,6 +43,60 @@ pub(super) fn inherit_container_environment(
             .map(|(key, value)| format!("{key}={value}")),
     );
     request.extend(malformed);
+}
+
+/// Apply the creation-time security policy to a legacy guest exec/PTY request.
+///
+/// A MicroVM's guest-init control plane is intentionally more privileged than
+/// its workloads. Every later process must therefore receive the same private
+/// `A3S_SEC_*` controls as the main process. Request and container environment
+/// entries cannot override these runtime-owned values, and the guest filters
+/// them before the workload observes its environment.
+pub(super) fn inherit_execution_security_environment(
+    record: &BoxRecord,
+    request: &mut Vec<String>,
+) -> ExecutionManagerResult<()> {
+    let security = if let Some(metadata) = record.managed_execution.as_ref() {
+        let config = &metadata.request.config;
+        SecurityConfig::from_options(
+            &config.security_opt,
+            &config.cap_add,
+            &config.cap_drop,
+            config.privileged,
+        )
+    } else {
+        SecurityConfig::from_options(
+            &record.security_opt,
+            &record.cap_add,
+            &record.cap_drop,
+            record.privileged,
+        )
+    };
+    security
+        .validate()
+        .map_err(ExecutionManagerError::InvalidRequest)?;
+
+    let mut merged = BTreeMap::new();
+    let mut malformed = Vec::new();
+    for entry in std::mem::take(request) {
+        if let Some((key, value)) = entry.split_once('=') {
+            if !key.starts_with("A3S_SEC_") {
+                merged.insert(key.to_string(), value.to_string());
+            }
+        } else {
+            malformed.push(entry);
+        }
+    }
+    for (key, value) in security.to_env_vars() {
+        merged.insert(key, value);
+    }
+    request.extend(
+        merged
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    request.extend(malformed);
+    Ok(())
 }
 
 /// Record only environment key names at the final host-to-runtime boundary.

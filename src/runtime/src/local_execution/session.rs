@@ -13,6 +13,7 @@ use async_trait::async_trait;
 
 use super::session_support::{
     debug_session_environment, has_oci_runtime, inherit_container_environment,
+    inherit_execution_security_environment,
 };
 use super::LocalExecutionManager;
 use crate::{
@@ -33,6 +34,9 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .require_running_record(execution_id, generation)
             .await?;
         inherit_container_environment(&record.env, &mut request.env);
+        if !has_oci_runtime(&record) {
+            inherit_execution_security_environment(&record, &mut request.env)?;
+        }
         debug_session_environment(
             execution_id,
             generation,
@@ -64,6 +68,9 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .require_running_record(execution_id, generation)
             .await?;
         inherit_container_environment(&record.env, &mut request.env);
+        if !has_oci_runtime(&record) {
+            inherit_execution_security_environment(&record, &mut request.env)?;
+        }
         debug_session_environment(
             execution_id,
             generation,
@@ -100,6 +107,9 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .require_running_record(execution_id, generation)
             .await?;
         inherit_container_environment(&record.env, &mut request.env);
+        if !has_oci_runtime(&record) {
+            inherit_execution_security_environment(&record, &mut request.env)?;
+        }
         debug_session_environment(
             execution_id,
             generation,

@@ -361,9 +361,16 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
             }
 
             // Apply environment variables
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(|key| key.starts_with("A3S_SEC_")) {
+                    std::env::remove_var(key);
+                }
+            }
             for entry in &request.env {
                 if let Some((key, value)) = entry.split_once('=') {
-                    std::env::set_var(key, value);
+                    if !key.starts_with("A3S_SEC_") {
+                        std::env::set_var(key, value);
+                    }
                 }
             }
             if !request

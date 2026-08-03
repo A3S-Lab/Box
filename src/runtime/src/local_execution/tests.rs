@@ -640,7 +640,7 @@ async fn start_rejects_a_persisted_health_check_before_claim_or_backend() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn process_session_inherits_environment_from_persisted_record() {
+async fn process_session_inherits_environment_and_enforces_persisted_security() {
     let (_directory, manager, _backend) = harness();
     let execution_id = ExecutionId::new("execution-session-environment").unwrap();
     let operation_id = operation("operation-session-environment");
@@ -649,6 +649,8 @@ async fn process_session_inherits_environment_from_persisted_record() {
         ("OFFICIAL_CLIENT".to_string(), "python-sync".to_string()),
         ("OVERRIDE".to_string(), "container".to_string()),
     ];
+    create_request.config.cap_drop = vec!["ALL".to_string()];
+    create_request.config.security_opt = vec!["no-new-privileges".to_string()];
     let record = build_managed_record(
         &manager.home_dir,
         &execution_id,
@@ -732,7 +734,10 @@ async fn process_session_inherits_environment_from_persisted_record() {
                 request_id: None,
                 cmd: vec!["env".to_string()],
                 timeout_ns: 1_000_000_000,
-                env: vec!["OVERRIDE=request".to_string()],
+                env: vec![
+                    "OVERRIDE=request".to_string(),
+                    "A3S_SEC_NO_NEW_PRIVS=0".to_string(),
+                ],
                 working_dir: None,
                 rootfs: None,
                 stdin: None,
@@ -746,7 +751,13 @@ async fn process_session_inherits_environment_from_persisted_record() {
     let forwarded = request_receiver.await.unwrap();
     assert_eq!(
         forwarded.env,
-        ["OFFICIAL_CLIENT=python-sync", "OVERRIDE=request"]
+        [
+            "A3S_SEC_CAP_DROP=ALL",
+            "A3S_SEC_NO_NEW_PRIVS=1",
+            "A3S_SEC_SECCOMP=default",
+            "OFFICIAL_CLIENT=python-sync",
+            "OVERRIDE=request",
+        ]
     );
     assert!(forwarded.streaming);
     assert!(matches!(
