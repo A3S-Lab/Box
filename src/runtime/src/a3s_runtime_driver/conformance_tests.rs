@@ -167,6 +167,7 @@ async fn run_microvm_supported_profiles() {
             RuntimeConformanceProfile::Networking,
             RuntimeConformanceProfile::Mounts,
             RuntimeConformanceProfile::Health,
+            RuntimeConformanceProfile::Resources,
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
             RuntimeConformanceProfile::Outputs,
@@ -192,6 +193,6 @@ async fn run_microvm_supported_profiles() {
     cleanup.expect("R17 MicroVM cleanup must succeed");
     assert_eq!(inventory_after, inventory_before);
     execution.expect(
-        "R17 MicroVM Base, Recovery, Networking, Mounts, Health, Logs, Exec, and Outputs profiles must pass",
+        "R17 MicroVM Base, Recovery, Networking, Mounts, Health, Resources, Logs, Exec, and Outputs profiles must pass",
     );
 }
