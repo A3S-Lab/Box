@@ -23,9 +23,10 @@ use libkrun_sys::{krun_add_net_unixstream, krun_split_irqchip};
 #[cfg(unix)]
 use libkrun_sys::{krun_add_virtio_console_default, krun_disable_implicit_console};
 use libkrun_sys::{
-    krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_init_log, krun_set_console_output,
-    krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root, krun_set_vm_config,
-    krun_set_workdir, krun_setgid, krun_setuid, krun_start_enter,
+    krun_add_virtiofs, krun_add_vsock, krun_create_ctx, krun_disable_implicit_vsock, krun_free_ctx,
+    krun_init_log, krun_set_console_output, krun_set_env, krun_set_exec, krun_set_rlimits,
+    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid,
+    krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -278,6 +279,15 @@ impl KrunContext {
             "krun_add_vsock_port2",
             krun_add_vsock_port2(self.ctx_id, port, socket_path_c.as_ptr(), listen),
         )
+    }
+
+    /// Retain the explicit vsock device used for Box IPC without enabling TSI.
+    pub unsafe fn disable_tsi(&self) -> Result<()> {
+        check_status(
+            "krun_disable_implicit_vsock",
+            krun_disable_implicit_vsock(self.ctx_id),
+        )?;
+        check_status("krun_add_vsock", krun_add_vsock(self.ctx_id, 0))
     }
 
     /// Configure TSI port mappings for the VM.

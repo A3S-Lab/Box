@@ -545,6 +545,7 @@ impl VmManager {
             // legacy no-guest-init path uses the shim's set_uid.
             user: if has_guest_init { None } else { user },
             network: None, // Network config is set by CLI when --network is specified
+            disable_tsi: matches!(&self.config.network, a3s_box_core::NetworkMode::None),
             resource_limits: self.config.resource_limits.clone(),
             log_config: self.log_config.clone(),
             // KSM page-merging: config field, or the A3S_BOX_KSM env override.
@@ -995,6 +996,30 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(env_value(&spec, "A3S_VIRTIOFS_CACHE"), Some("always"));
+    }
+
+    #[test]
+    fn test_build_instance_spec_disables_tsi_only_for_network_none() {
+        let none_dir = tempdir().unwrap();
+        let none_layout = test_layout(none_dir.path(), Some(test_oci_config(None, None)), true);
+        let mut none_vm = test_vm_manager(BoxConfig {
+            network: a3s_box_core::NetworkMode::None,
+            ..Default::default()
+        });
+        assert!(
+            none_vm
+                .build_instance_spec(&none_layout)
+                .unwrap()
+                .disable_tsi
+        );
+
+        let tsi_dir = tempdir().unwrap();
+        let tsi_layout = test_layout(tsi_dir.path(), Some(test_oci_config(None, None)), true);
+        let mut tsi_vm = test_vm_manager(BoxConfig {
+            network: a3s_box_core::NetworkMode::Tsi,
+            ..Default::default()
+        });
+        assert!(!tsi_vm.build_instance_spec(&tsi_layout).unwrap().disable_tsi);
     }
 
     #[test]

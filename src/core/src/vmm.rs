@@ -181,6 +181,10 @@ pub struct InstanceSpec {
     #[serde(default)]
     pub network: Option<NetworkInstanceConfig>,
 
+    /// Disable TSI socket interception while retaining explicit vsock IPC.
+    #[serde(default)]
+    pub disable_tsi: bool,
+
     /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls).
     #[serde(default)]
     pub resource_limits: ResourceLimits,
@@ -218,6 +222,7 @@ impl Default for InstanceSpec {
             port_map: Vec::new(),
             user: None,
             network: None,
+            disable_tsi: false,
             resource_limits: ResourceLimits::default(),
             log_config: crate::log::LogConfig::default(),
         }
@@ -425,7 +430,22 @@ mod tests {
         assert!(spec.tee_config.is_none());
         assert!(spec.user.is_none());
         assert!(spec.network.is_none());
+        assert!(!spec.disable_tsi);
         assert!(spec.console_output.is_none());
+    }
+
+    #[test]
+    fn test_instance_spec_missing_disable_tsi_keeps_legacy_default() {
+        let mut value = serde_json::to_value(InstanceSpec::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("disable_tsi")
+            .unwrap();
+
+        let spec: InstanceSpec = serde_json::from_value(value).unwrap();
+
+        assert!(!spec.disable_tsi);
     }
 
     #[test]
@@ -459,6 +479,7 @@ mod tests {
             port_map: vec!["8080:80".to_string()],
             user: Some("1000:1000".to_string()),
             network: None,
+            disable_tsi: true,
             resource_limits: ResourceLimits::default(),
             log_config: crate::log::LogConfig::default(),
         };
@@ -482,6 +503,7 @@ mod tests {
         );
         assert_eq!(deserialized.port_map, vec!["8080:80"]);
         assert_eq!(deserialized.user, Some("1000:1000".to_string()));
+        assert!(deserialized.disable_tsi);
     }
 
     #[test]
