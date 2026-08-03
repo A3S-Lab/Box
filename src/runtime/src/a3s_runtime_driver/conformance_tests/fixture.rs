@@ -886,6 +886,26 @@ fn emit_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
     for (label, path) in [
         ("console stdout", record.console_log.clone()),
         ("console stderr", stderr_console),
+        (
+            "MicroVM shim stdout",
+            record.box_dir.join("logs/shim.stdout.log"),
+        ),
+        (
+            "MicroVM shim stderr",
+            record.box_dir.join("logs/shim.stderr.log"),
+        ),
+        (
+            "MicroVM init",
+            record.box_dir.join("logs/init-rust.log"),
+        ),
+        (
+            "MicroVM root init",
+            record.box_dir.join("rootfs/init-rust.log"),
+        ),
+        (
+            "MicroVM root var-log init",
+            record.box_dir.join("rootfs/var/log/init-rust.log"),
+        ),
         ("Sandbox init", record.box_dir.join("logs/sandbox-init.log")),
         (
             "Sandbox log worker",
