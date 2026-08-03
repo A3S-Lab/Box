@@ -932,8 +932,15 @@ jobs:
           runtime_profile_status="${PIPESTATUS[0]}"
           set -e
           if ((runtime_profile_status != 0)); then
+            runtime_profile_errors="$(
+              grep -E \
+                'R17 profile failure|R17 (HTTP|TCP) health probe|panicked at|test result:' \
+                "$runtime_profile_log" \
+                | tail -n 80 \
+                || true
+            )"
             runtime_profile_summary="$(
-              tail -n 120 "$runtime_profile_log" \
+              { printf '%s\n' "$runtime_profile_errors"; tail -n 80 "$runtime_profile_log"; } \
                 | sed 's/%/%25/g' \
                 | paste -sd '|' - \
                 | cut -c1-60000
