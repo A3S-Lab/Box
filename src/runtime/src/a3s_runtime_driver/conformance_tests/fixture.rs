@@ -894,10 +894,7 @@ fn emit_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
             "MicroVM shim stderr",
             record.box_dir.join("logs/shim.stderr.log"),
         ),
-        (
-            "MicroVM init",
-            record.box_dir.join("logs/init-rust.log"),
-        ),
+        ("MicroVM init", record.box_dir.join("logs/init-rust.log")),
         (
             "MicroVM root init",
             record.box_dir.join("rootfs/init-rust.log"),
