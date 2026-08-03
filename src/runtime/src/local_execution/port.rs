@@ -129,6 +129,7 @@ impl LocalExecutionManager {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
 struct PortForwardFrame {
     kind: u8,
     stream_id: u32,
