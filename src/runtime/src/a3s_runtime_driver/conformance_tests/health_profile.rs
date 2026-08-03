@@ -61,6 +61,14 @@ async fn http_probe_reaches_the_generation_fenced_service(
                     "sleep 0.1; i=$((i + 1)); ",
                     "done; ",
                     "[ -s /tmp/r17-health-http-request ] || exit 17; ",
+                    // The first one-shot netcat exits after the startup probe.
+                    // Wait for the loop to bind its successor before exec's
+                    // post-command health observation opens a second stream.
+                    "i=0; ",
+                    "until awk '$2 ~ /:46A0$/ && $4 == \"0A\" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp; do ",
+                    "[ \"$i\" -lt 50 ] || exit 18; ",
+                    "sleep 0.1; i=$((i + 1)); ",
+                    "done; ",
                     "head -n 1 /tmp/r17-health-http-request | tr -d '\\r'",
                 )
                 .into(),
