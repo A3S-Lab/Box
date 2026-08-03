@@ -768,12 +768,11 @@ jobs:
   # Until both are done this job is SKIPPED (inert) and never blocks a PR.
   integration-kvm:
     name: Integration (real microVM, KVM)
-    needs: [fmt, clippy, test, sdk-packages, sdk-local-sandbox]
     # Never execute arbitrary pull-request code on a persistent self-hosted
     # runner. After review, maintainers can dispatch this workflow against the
     # PR branch explicitly.
-    if: github.event_name != 'pull_request' && vars.KVM_CI == 'true'
-    runs-on: [self-hosted, linux, kvm]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/hosted-kvm-validation-20260803'
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     # The runner has no direct docker.io egress (CN network), so the smoke
     # tests pull alpine/busybox through a mirror. The image keeps its canonical
@@ -796,6 +795,27 @@ jobs:
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
+      - name: Install hosted KVM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libclang-dev libssl-dev musl-tools patchelf \
+            pkg-config protobuf-compiler
+          crictl_version=v1.36.0
+          crictl_archive="crictl-${crictl_version}-linux-amd64.tar.gz"
+          crictl_url="https://github.com/kubernetes-sigs/cri-tools/releases/download/${crictl_version}"
+          curl --fail --location --silent --show-error \
+            --output "/tmp/${crictl_archive}" \
+            "${crictl_url}/${crictl_archive}"
+          curl --fail --location --silent --show-error \
+            --output "/tmp/${crictl_archive}.sha256" \
+            "${crictl_url}/${crictl_archive}.sha256"
+          (
+            cd /tmp
+            sha256sum --check "${crictl_archive}.sha256"
+          )
+          sudo tar -C /usr/local/bin -xzf "/tmp/${crictl_archive}" crictl
+          sudo chmod 0666 /dev/kvm
       # NOTE: no Swatinem/rust-cache here — fetching that action from
       # codeload.github.com times out on this runner's network, which fails
       # "Set up job". The self-hosted runner keeps a warm cargo registry, and
