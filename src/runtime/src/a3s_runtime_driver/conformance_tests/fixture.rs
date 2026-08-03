@@ -610,8 +610,8 @@ impl BoxRuntimeConformanceFixture {
             };
             for record in records {
                 self.remember(&driver.config.home_dir, &record);
-                if record.exit_code.is_none() {
-                    emit_missing_exit_diagnostics(&driver.config.home_dir, &record);
+                if record.exit_code != Some(0) {
+                    emit_exit_diagnostics(&driver.config.home_dir, &record);
                 }
                 let unit_id = record
                     .labels
@@ -865,7 +865,7 @@ fn remove_empty_directory(path: &Path) {
     let _ = std::fs::remove_dir(path);
 }
 
-fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
+fn emit_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
     let unit_id = record.labels.get(UNIT_LABEL).map(String::as_str);
     let volumes = record
         .managed_execution
@@ -873,7 +873,7 @@ fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
         .map(|metadata| metadata.request.config.volumes.as_slice())
         .unwrap_or_default();
     eprintln!(
-        "R17 missing-exit diagnostics: unit_id={unit_id:?} id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?} volumes={volumes:?}",
+        "R17 unsuccessful-exit diagnostics: unit_id={unit_id:?} id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?} volumes={volumes:?}",
         record.id,
         record.status,
         record.pid,
