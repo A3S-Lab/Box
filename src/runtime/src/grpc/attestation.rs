@@ -163,6 +163,13 @@ pub struct RaTlsAttestationClient {
     socket_path: PathBuf,
 }
 
+/// Report and exact peer certificate proven by one live RA-TLS session.
+#[derive(Debug, Clone)]
+pub(crate) struct RaTlsAttestationEvidence {
+    pub(crate) report: AttestationReport,
+    pub(crate) certificate_der: Vec<u8>,
+}
+
 impl RaTlsAttestationClient {
     /// Create a new RA-TLS attestation client for the given socket path.
     pub fn new(socket_path: &Path) -> Self {
@@ -252,14 +259,32 @@ impl RaTlsAttestationClient {
     /// HTTP); the signed report is carried in the server's TLS certificate and
     /// is extracted here after the handshake.
     pub async fn fetch_report(&self, allow_simulated: bool) -> Result<AttestationReport> {
+        self.fetch_report_with_policy(crate::tee::AttestationPolicy::default(), allow_simulated)
+            .await
+    }
+
+    /// Fetch the signed report while enforcing the caller's RA-TLS policy.
+    pub async fn fetch_report_with_policy(
+        &self,
+        policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<AttestationReport> {
+        Ok(self
+            .fetch_evidence_with_policy(policy, allow_simulated)
+            .await?
+            .report)
+    }
+
+    /// Fetch the report together with the peer certificate whose private key
+    /// was proven during this live TLS handshake.
+    pub(crate) async fn fetch_evidence_with_policy(
+        &self,
+        policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<RaTlsAttestationEvidence> {
         use a3s_box_core::tee::{AttestRequest, AttestRoute};
 
-        let mut tls_stream = connect_ratls(
-            &self.socket_path,
-            crate::tee::AttestationPolicy::default(),
-            allow_simulated,
-        )
-        .await?;
+        let mut tls_stream = connect_ratls(&self.socket_path, policy, allow_simulated).await?;
 
         // Exchange a Status frame so the handshake (and report extraction)
         // completes against a live server.
@@ -282,7 +307,12 @@ impl RaTlsAttestationClient {
                     "RA-TLS server presented no certificate to extract a report from".to_string(),
                 )
             })?;
-        crate::tee::ratls::extract_report_from_cert(cert.as_ref())
+        let certificate_der = cert.as_ref().to_vec();
+        let report = crate::tee::ratls::extract_report_from_cert(&certificate_der)?;
+        Ok(RaTlsAttestationEvidence {
+            report,
+            certificate_der,
+        })
     }
 }
 

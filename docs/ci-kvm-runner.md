@@ -13,6 +13,11 @@ gap: it links **real** libkrun and runs the `#[ignore]` integration suite plus
 the `crictl` CRI smoke test against an actual microVM. It is **inert until you
 arm it**, so it never blocks a PR on a repo without a KVM runner.
 
+The same job runs the Runtime Evidence profile with a simulated SEV-SNP report
+inside a real MicroVM. This checks provider wiring and fail-closed behavior, but
+it is never hardware evidence. Hardware qualification is owned by the separate
+`integration-sev-snp` job described below.
+
 This short CI gate is a prerequisite, not a substitute, for the `G2`, `R24`,
 and `E72` profiles in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md).
@@ -75,6 +80,13 @@ that PR branch to run the same gate before merge.
    advisory lock (`flock` on `boxes.json.lock`) across separate processes — the
    unit tests only race in-process threads. A lost update fails the gate.
 
+8. Runs every ordinary advertised Runtime profile, then repeats the provider
+   suite with explicit simulated SEV-SNP support so the capability-triggered
+   Evidence profile cannot be omitted. The Evidence profile covers both a
+   finite confidential Task and a long-lived confidential Service; each boots
+   IDLE and releases its main process only after the generation-bound RA-TLS
+   artifact is validated and durably published.
+
 For the deeper `critest` conformance suite (73/7/17) and the snapshot-fork /
 warm-pool benchmarks, see [`cri-conformance.md`](./cri-conformance.md) and the
 `bench/` harness.
@@ -85,3 +97,27 @@ Standard GitHub-hosted runners do not expose `/dev/kvm`; nested virtualization
 is unavailable, so libkrun cannot create a VM. A self-hosted runner on a host
 with KVM (the same kind of box used for manual conformance runs) is the only way
 to exercise the real runtime in CI.
+
+## Arming hardware SEV-SNP certification
+
+Register a trusted AMD SEV-SNP host with these labels:
+
+```
+self-hosted, linux, kvm, sev-snp
+```
+
+The runner user must be able to access `/dev/kvm` and `/dev/sev`, and
+`/sys/module/kvm_amd/parameters/sev_snp` must report `Y` or `1`. Configure these
+repository variables:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `SEV_SNP_CI` | `true` | Activates the trusted hardware-only job. |
+| `SEV_SNP_CI_GENERATION` | `milan` or `genoa` | Selects the exact guest firmware generation. |
+| `SEV_SNP_CI_EXPECTED_MEASUREMENT` | 96 lowercase hexadecimal characters | Pins the expected SHA-384 launch measurement. |
+
+The job rejects simulated reports, requires the live RA-TLS certificate and its
+public-key binding, verifies the AMD report chain and pinned policy, repeats
+live verification after driver reconstruction, rejects a tampered persisted
+artifact, and requires exact cleanup. The job is skipped for pull requests and
+when `SEV_SNP_CI` is not armed. A skipped job is not certification evidence.

@@ -37,7 +37,7 @@ pub struct AttestationRequest {
 ///
 /// Contains the raw hardware-signed SNP report and the certificate
 /// chain needed to verify the report's signature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestationReport {
     /// Raw SNP attestation report bytes (1184 bytes, signed by VCEK).
     pub report: Vec<u8>,
@@ -52,7 +52,7 @@ pub struct AttestationReport {
 /// Certificate chain for SNP report verification.
 ///
 /// Verification order: report signature → VCEK → ASK → ARK (AMD root).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertificateChain {
     /// VCEK (Versioned Chip Endorsement Key) certificate, DER-encoded.
     /// Signs the attestation report. Unique per chip + TCB version.
@@ -71,7 +71,7 @@ pub struct CertificateChain {
 }
 
 /// Platform information extracted from the SNP report.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformInfo {
     /// SNP report version.
     pub version: u32,
@@ -94,7 +94,7 @@ pub struct PlatformInfo {
 }
 
 /// TCB (Trusted Computing Base) version components.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TcbVersion {
     /// Boot loader SVN.
     pub boot_loader: u8,

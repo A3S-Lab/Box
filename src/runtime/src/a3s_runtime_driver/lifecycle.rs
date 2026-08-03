@@ -1,11 +1,13 @@
 //! Runtime lifecycle projection over Box's durable local execution manager.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use a3s_box_core::{ExecutionManager, KillOutcome, ReconcileOutcome};
 use a3s_runtime::contract::{
-    RestartPolicy, RuntimeActionRequest, RuntimeFailure, RuntimeInspection, RuntimeObservation,
-    RuntimeRemoval, RuntimeUnitClass, RuntimeUnitSpec, RuntimeUnitState,
+    IsolationLevel, RestartPolicy, RuntimeActionRequest, RuntimeEvidence, RuntimeFailure,
+    RuntimeInspection, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass, RuntimeUnitSpec,
+    RuntimeUnitState,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use sha2::{Digest, Sha256};
@@ -27,7 +29,12 @@ impl BoxRuntimeDriver {
     ) -> RuntimeResult<RuntimeObservation> {
         // Complete the side-effect-free validation pass before storage
         // preparation can materialize a caller view or create a named Volume.
-        validate_creation_spec(spec, self.execution_isolation, &self.config.secret_root)?;
+        validate_creation_spec(
+            spec,
+            self.execution_isolation,
+            self.sev_snp_config(),
+            &self.config.secret_root,
+        )?;
         self.secret_materialization.require_configured_for(spec)?;
         self.artifact_storage.require_configured_for(spec)?;
         let mut record = self.find_generation(spec).await?;
@@ -47,6 +54,7 @@ impl BoxRuntimeDriver {
                 let request = creation_request_for(
                     spec,
                     self.execution_isolation,
+                    self.sev_snp_config(),
                     &self.config.secret_root,
                     &storage,
                 )?;
@@ -73,6 +81,7 @@ impl BoxRuntimeDriver {
                     &record,
                     spec,
                     self.execution_isolation,
+                    self.sev_snp_config(),
                     &self.config.secret_root,
                 )?;
                 self.artifact_storage.validate_record(spec, &record).await?;
@@ -86,13 +95,27 @@ impl BoxRuntimeDriver {
         // has a durable provider identity. A retry resumes any partial cleanup.
         self.retire_stale_generations(spec, &record.id).await?;
 
-        match spec.class {
-            RuntimeUnitClass::Task => self.wait_for_task(spec, record).await,
+        // A confidential guest is intentionally booted IDLE. Its first live
+        // observation acquires and persists attestation, then releases the main
+        // process. This must happen before a Task wait or a Service health probe.
+        let attested_running = if spec.isolation == IsolationLevel::Confidential {
+            Some(self.observation(spec, &record, None, None).await?)
+        } else {
+            None
+        };
+
+        let observation = match spec.class {
+            RuntimeUnitClass::Task => self.wait_for_task(spec, record).await?,
             RuntimeUnitClass::Service if spec.health.is_some() => {
-                self.wait_for_service_health(spec, record).await
+                self.wait_for_service_health(spec, record).await?
             }
-            RuntimeUnitClass::Service => self.observation(spec, &record, None, None).await,
-        }
+            RuntimeUnitClass::Service => match attested_running {
+                Some(observation) => observation,
+                None => self.observation(spec, &record, None, None).await?,
+            },
+        };
+        super::attestation::validate_continuity(current, &observation)?;
+        Ok(observation)
     }
 
     pub(super) async fn inspect_unit(
@@ -126,6 +149,7 @@ impl BoxRuntimeDriver {
             record
         };
         let observation = self.observe_service_health(&unit.spec, &record).await?;
+        super::attestation::validate_continuity(&unit.observation, &observation)?;
         Ok(RuntimeInspection::Found {
             schema: RuntimeInspection::SCHEMA.into(),
             observation: Box::new(observation),
@@ -177,8 +201,11 @@ impl BoxRuntimeDriver {
             .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
             .await;
 
-        self.observation(&unit.spec, &record, Some(RuntimeUnitState::Stopped), None)
-            .await
+        let observation = self
+            .observation(&unit.spec, &record, Some(RuntimeUnitState::Stopped), None)
+            .await?;
+        super::attestation::validate_continuity(&unit.observation, &observation)?;
+        Ok(observation)
     }
 
     pub(super) async fn remove_unit(
@@ -223,6 +250,7 @@ impl BoxRuntimeDriver {
             &record,
             spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         self.artifact_storage.validate_record(spec, &record).await?;
@@ -340,6 +368,9 @@ impl BoxRuntimeDriver {
                 }
                 if should_restart(spec, &record)? {
                     record = self.restart_record(spec, record).await?;
+                    if spec.isolation == IsolationLevel::Confidential {
+                        self.observation(spec, &record, None, None).await?;
+                    }
                     continue;
                 }
                 return self.observation(spec, &record, None, None).await;
@@ -407,6 +438,7 @@ impl BoxRuntimeDriver {
             &record,
             spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         self.artifact_storage.validate_record(spec, &record).await?;
@@ -492,6 +524,7 @@ impl BoxRuntimeDriver {
             &remaining[0],
             spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         self.artifact_storage
@@ -625,6 +658,7 @@ impl BoxRuntimeDriver {
             record,
             spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         self.artifact_storage.validate_record(spec, record).await?;
@@ -662,6 +696,35 @@ impl BoxRuntimeDriver {
         } else {
             Vec::new()
         };
+        let provider_build = self.provider_build().await?;
+        let provider_attestation = self
+            .bounded(
+                "SEV-SNP attestation",
+                self.attestation
+                    .reference_for(spec, record, self.sev_snp_config()),
+            )
+            .await?;
+        let mut claims = BTreeMap::from([
+            (
+                "a3s.box.execution-isolation".into(),
+                match self.execution_isolation {
+                    a3s_box_core::ExecutionIsolation::Microvm => "microvm".into(),
+                    a3s_box_core::ExecutionIsolation::Sandbox => "sandbox".into(),
+                },
+            ),
+            (
+                "a3s.box.execution-generation".into(),
+                metadata.generation.get().to_string(),
+            ),
+        ]);
+        if spec.isolation == a3s_runtime::contract::IsolationLevel::Confidential {
+            let mode = if self.sev_snp_config().is_some_and(|config| config.simulate) {
+                "sev-snp-simulated"
+            } else {
+                "sev-snp-hardware"
+            };
+            claims.insert("a3s.box.tee".into(), mode.into());
+        }
         let observation = RuntimeObservation {
             schema: RuntimeObservation::SCHEMA.into(),
             unit_id: spec.unit_id.clone(),
@@ -670,15 +733,20 @@ impl BoxRuntimeDriver {
             class: spec.class,
             state,
             provider_resource_id: Some(record.id.clone()),
-            provider_build: Some(self.provider_build().await?),
+            provider_build: Some(provider_build.clone()),
             observed_at_ms,
             started_at_ms,
             finished_at_ms,
             health: None,
             outputs,
             usage: None,
-            evidence: None,
-            provider_attestation: None,
+            evidence: Some(RuntimeEvidence {
+                provider_build,
+                spec_digest: spec.digest().map_err(RuntimeError::Protocol)?,
+                semantics_profile_digest: spec.semantics_profile_digest.clone(),
+                claims,
+            }),
+            provider_attestation,
             failure,
         };
         if spec.class == RuntimeUnitClass::Service {

@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use a3s_box_core::config::SevSnpGeneration;
 use a3s_box_core::{
     ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionState, KillOutcome,
@@ -13,19 +14,24 @@ use a3s_runtime::contract::{
     RuntimeNetworkSpec, RuntimeObservation, RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
     RuntimeUnitState, SecretReference,
 };
-use a3s_runtime::RuntimeUnitRecord;
+use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Semaphore};
 
 use crate::local_execution::TransientRegistryAuthBroker;
+use crate::tee::{
+    build_simulated_report, parse_platform_info, AttestationPolicy, AttestationReport,
+    CertificateChain,
+};
 use crate::{
     BoxRecord, LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager,
     LocalExecutionObservation,
 };
 
+use super::attestation::{BoxAttestationPayload, BoxAttestationTransport};
 use super::{
-    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
-    BoxSecretMaterializationError, BoxSecretMaterializer, OCI_IMAGE_MANIFEST,
+    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxRuntimeSevSnpConfig,
+    BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer, OCI_IMAGE_MANIFEST,
 };
 
 #[derive(Clone)]
@@ -422,12 +428,124 @@ impl BoxSecretMaterializer for DriverFakeSecretMaterializer {
     }
 }
 
+#[derive(Default)]
+pub(super) struct DriverFakeAttestationTransport {
+    calls: AtomicUsize,
+    fail_next: AtomicBool,
+    epoch: AtomicUsize,
+}
+
+impl DriverFakeAttestationTransport {
+    pub(super) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn rotate(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl BoxAttestationTransport for DriverFakeAttestationTransport {
+    async fn fetch_report(
+        &self,
+        _socket_path: &Path,
+        _policy: &AttestationPolicy,
+        allow_simulated: bool,
+        expected_runtime_binding: &[u8; 32],
+    ) -> RuntimeResult<BoxAttestationPayload> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeError::ProviderUnavailable(
+                "injected RA-TLS fixture failure".into(),
+            ));
+        }
+        if !allow_simulated {
+            return Err(RuntimeError::ProviderUnavailable(
+                "fixture exposes only simulated SEV-SNP reports".into(),
+            ));
+        }
+        let mut report_data = [0u8; 64];
+        report_data[..8].copy_from_slice(&(self.epoch.load(Ordering::SeqCst) as u64).to_be_bytes());
+        report_data[32..].copy_from_slice(expected_runtime_binding);
+        let report = build_simulated_report(&report_data);
+        Ok(BoxAttestationPayload {
+            report: AttestationReport {
+                platform: parse_platform_info(&report).unwrap(),
+                report,
+                cert_chain: CertificateChain::default(),
+            },
+            certificate_der: Vec::new(),
+        })
+    }
+}
+
 pub(super) fn fake_driver(
     directory: &tempfile::TempDir,
 ) -> (BoxRuntimeDriver, Arc<DriverFakeBackend>) {
     let backend = Arc::new(DriverFakeBackend::default());
     let driver = fake_driver_with_backend(directory, backend.clone());
     (driver, backend)
+}
+
+pub(super) fn fake_confidential_driver(
+    directory: &tempfile::TempDir,
+) -> (
+    BoxRuntimeDriver,
+    Arc<DriverFakeBackend>,
+    Arc<DriverFakeAttestationTransport>,
+) {
+    let backend = Arc::new(DriverFakeBackend::default());
+    let transport = Arc::new(DriverFakeAttestationTransport::default());
+    let driver = fake_confidential_driver_with_backend_and_attestation(
+        directory,
+        backend.clone(),
+        transport.clone(),
+    );
+    (driver, backend, transport)
+}
+
+pub(super) fn fake_confidential_driver_with_backend_and_attestation<B>(
+    directory: &tempfile::TempDir,
+    backend: Arc<B>,
+    transport: Arc<DriverFakeAttestationTransport>,
+) -> BoxRuntimeDriver
+where
+    B: LocalExecutionBackend + 'static,
+{
+    let home_dir = directory.path().join("home");
+    let manager = LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend);
+    let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+    let mut driver = BoxRuntimeDriver::with_manager_connector_and_materializer(
+        BoxRuntimeDriverConfig {
+            secret_root: home_dir.join("runtime-secrets"),
+            home_dir,
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        manager,
+        connector,
+        a3s_box_core::ExecutionIsolation::Microvm,
+        None,
+        None,
+        Some(TransientRegistryAuthBroker::default()),
+    )
+    .unwrap()
+    .with_attestation_transport(transport);
+    driver.sev_snp = Some(BoxRuntimeSevSnpConfig {
+        generation: SevSnpGeneration::Milan,
+        simulate: true,
+        attestation_policy: AttestationPolicy::default(),
+    });
+    driver
+        .provider_build
+        .set("a3s-box/test isolation/microvm hypervisor/test tee/sev-snp-simulated".into())
+        .unwrap();
+    driver
 }
 
 pub(super) fn fake_driver_with_backend<B>(

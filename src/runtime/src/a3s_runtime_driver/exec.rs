@@ -45,6 +45,7 @@ impl BoxRuntimeDriver {
             &record,
             &unit.spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         let (execution_id, generation, _) = local_identity(&record)?;
@@ -72,6 +73,7 @@ impl BoxRuntimeDriver {
             &record,
             &unit.spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         let (_, refreshed_generation, state) = local_identity(&record)?;
@@ -129,9 +131,11 @@ impl BoxRuntimeDriver {
             &record,
             &unit.spec,
             self.execution_isolation,
+            self.sev_snp_config(),
             &self.config.secret_root,
         )?;
         let observation = self.observe_service_health(&unit.spec, &record).await?;
+        super::attestation::validate_continuity(&unit.observation, &observation)?;
         let result = RuntimeExecResult {
             schema: RuntimeExecResult::SCHEMA.into(),
             request_id: request.request_id.clone(),

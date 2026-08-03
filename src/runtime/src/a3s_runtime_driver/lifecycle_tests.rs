@@ -1,18 +1,67 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_runtime::contract::{
     RestartPolicy, RuntimeFeature, RuntimeInspection, RuntimeUnitClass, RuntimeUnitState,
     SecretReference, SecretTarget,
 };
-use a3s_runtime::{RuntimeDriver, RuntimeError};
+use a3s_runtime::{RuntimeDriver, RuntimeError, RuntimeResult};
+use async_trait::async_trait;
 
+use super::attestation::{attestation_path, BoxAttestedMainStarter};
 use super::metadata::GENERATION_LABEL;
 use super::test_support::{
-    accepted, action, fake_driver, fake_driver_with_backend,
+    accepted, action, fake_confidential_driver,
+    fake_confidential_driver_with_backend_and_attestation, fake_driver, fake_driver_with_backend,
     fake_driver_with_backend_and_secret_materializer, fake_driver_with_secret_materializer,
     runtime_spec, unit, unknown, DriverFakeBackend, DriverFakeSecretMaterializer,
 };
+use crate::BoxRecord;
+
+struct DeferredTaskMainStarter {
+    backend: Arc<DriverFakeBackend>,
+    exit_codes: Mutex<VecDeque<i32>>,
+    calls: AtomicUsize,
+}
+
+impl DeferredTaskMainStarter {
+    fn new(backend: Arc<DriverFakeBackend>, exit_codes: impl IntoIterator<Item = i32>) -> Self {
+        Self {
+            backend,
+            exit_codes: Mutex::new(exit_codes.into_iter().collect()),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BoxAttestedMainStarter for DeferredTaskMainStarter {
+    async fn start(&self, record: &BoxRecord) -> RuntimeResult<()> {
+        let generation = record
+            .managed_execution
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Protocol("fixture execution lost metadata".into()))?
+            .generation;
+        if !attestation_path(record, generation).is_file() {
+            return Err(RuntimeError::Protocol(
+                "confidential main was released before attestation persistence".into(),
+            ));
+        }
+        let exit_code =
+            self.exit_codes.lock().unwrap().pop_front().ok_or_else(|| {
+                RuntimeError::Protocol("fixture main was released too often".into())
+            })?;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.backend.finish(&record.id, exit_code);
+        Ok(())
+    }
+}
 
 fn tmpfs_secret_root() -> (tempfile::TempDir, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -331,6 +380,186 @@ async fn service_replay_reopens_the_same_identity_and_stop_remove_are_idempotent
         .unwrap();
     assert!(replayed_removal.already_absent);
     assert!(reopened.manager.managed_records().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn confidential_service_persists_replays_and_validates_attestation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend, transport) = fake_confidential_driver(&directory);
+    let mut spec = runtime_spec("confidential-replay", 1, RuntimeUnitClass::Service);
+    spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    let attestation = running
+        .provider_attestation
+        .as_ref()
+        .expect("confidential observation must contain attestation")
+        .clone();
+    assert_eq!(
+        attestation.media_type,
+        super::attestation::ATTESTATION_MEDIA_TYPE
+    );
+    assert!(attestation.uri.starts_with("a3s-box-attestation://"));
+    assert_eq!(transport.calls(), 1);
+    assert_eq!(backend.starts(), 1);
+    let evidence = running.evidence.as_ref().unwrap();
+    assert_eq!(
+        evidence.claims.get("a3s.box.tee").map(String::as_str),
+        Some("sev-snp-simulated")
+    );
+    assert!(evidence.provider_build.contains("tee/sev-snp-simulated"));
+
+    let record = driver
+        .manager
+        .managed_records()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let execution_generation = record.managed_execution.as_ref().unwrap().generation;
+    let path = super::attestation::attestation_path(&record, execution_generation);
+    assert!(path.is_file());
+
+    let reopened = fake_confidential_driver_with_backend_and_attestation(
+        &directory,
+        backend.clone(),
+        transport.clone(),
+    );
+    let replayed = reopened.apply(&spec, &running).await.unwrap();
+    assert_eq!(replayed.provider_attestation.as_ref(), Some(&attestation));
+    assert_eq!(transport.calls(), 2);
+    assert_eq!(backend.starts(), 1);
+
+    std::fs::write(&path, b"{}").unwrap();
+    assert!(matches!(
+        reopened.inspect(&unit(spec, replayed)).await,
+        Err(RuntimeError::Protocol(message)) if message.contains("persisted SEV-SNP attestation")
+    ));
+    assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn confidential_task_is_attested_before_each_deferred_main_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend, transport) = fake_confidential_driver(&directory);
+    let starter = Arc::new(DeferredTaskMainStarter::new(backend.clone(), [17, 0]));
+    let driver = driver.with_attested_main_starter(starter.clone());
+    let mut spec = runtime_spec("confidential-task", 1, RuntimeUnitClass::Task);
+    spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+    spec.restart = RestartPolicy::OnFailure { max_retries: 1 };
+
+    let succeeded = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+
+    assert_eq!(succeeded.state, RuntimeUnitState::Succeeded);
+    assert!(succeeded.provider_attestation.is_some());
+    assert_eq!(starter.calls(), 2);
+    assert_eq!(transport.calls(), 2);
+    assert_eq!(backend.starts(), 2);
+    assert_eq!(
+        succeeded
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.claims.get("a3s.box.execution-generation"))
+            .map(String::as_str),
+        Some("2")
+    );
+}
+
+#[tokio::test]
+async fn confidential_attestation_failure_retries_without_recreating_the_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend, transport) = fake_confidential_driver(&directory);
+    let mut spec = runtime_spec(
+        "confidential-attestation-retry",
+        1,
+        RuntimeUnitClass::Service,
+    );
+    spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+    transport.fail_next();
+
+    assert!(matches!(
+        driver.apply(&spec, &accepted(&spec)).await,
+        Err(RuntimeError::ProviderUnavailable(message))
+            if message.contains("injected RA-TLS fixture failure")
+    ));
+    assert_eq!(backend.starts(), 1);
+    assert_eq!(transport.calls(), 1);
+
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    assert_eq!(running.state, RuntimeUnitState::Running);
+    assert!(running.provider_attestation.is_some());
+    assert_eq!(backend.starts(), 1);
+    assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn confidential_service_rejects_valid_but_non_live_persisted_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, _backend, transport) = fake_confidential_driver(&directory);
+    let mut spec = runtime_spec("confidential-live-evidence", 1, RuntimeUnitClass::Service);
+    spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+
+    let record = driver.manager.managed_records().await.unwrap().remove(0);
+    let generation = record.managed_execution.as_ref().unwrap().generation;
+    let path = super::attestation::attestation_path(&record, generation);
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut report_data = [0u8; 64];
+    report_data[0] = 0x7f;
+    let binding = hex::decode(spec.digest().unwrap().strip_prefix("sha256:").unwrap()).unwrap();
+    report_data[32..].copy_from_slice(&binding);
+    let report = crate::tee::build_simulated_report(&report_data);
+    document["report"]["platform"] =
+        serde_json::to_value(crate::tee::parse_platform_info(&report).unwrap()).unwrap();
+    document["report"]["report"] = serde_json::to_value(report).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+    assert!(matches!(
+        driver.inspect(&unit(spec, running)).await,
+        Err(RuntimeError::Protocol(message))
+            if message.contains("live SEV-SNP attestation changed")
+    ));
+    assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn confidential_restart_rotates_attestation_with_execution_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend, transport) = fake_confidential_driver(&directory);
+    let mut spec = runtime_spec("confidential-restart", 1, RuntimeUnitClass::Service);
+    spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    let first_attestation = running.provider_attestation.clone().unwrap();
+    let provider_id = running.provider_resource_id.clone().unwrap();
+
+    backend.finish(&provider_id, 17);
+    transport.rotate();
+    let inspection = driver.inspect(&unit(spec, running)).await.unwrap();
+    let RuntimeInspection::Found { observation, .. } = inspection else {
+        panic!("restartable confidential Service disappeared")
+    };
+
+    assert_eq!(observation.state, RuntimeUnitState::Running);
+    assert_eq!(
+        observation.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
+    assert_ne!(
+        observation.provider_attestation.as_ref(),
+        Some(&first_attestation)
+    );
+    assert_eq!(
+        observation
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.claims.get("a3s.box.execution-generation"))
+            .map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(transport.calls(), 2);
+    assert_eq!(backend.starts(), 2);
 }
 
 #[tokio::test]

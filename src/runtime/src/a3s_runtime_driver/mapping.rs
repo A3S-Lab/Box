@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use a3s_box_core::config::TeeConfig;
 use a3s_box_core::log::LogConfig;
 use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
+use a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionIsolation, ExecutionRecordPolicy,
     ExecutionRestartPolicy, NetworkMode, ResourceConfig, ResourceLimits,
@@ -19,7 +21,7 @@ use url::Position;
 use super::artifact::RuntimeStoragePlan;
 use super::metadata::{managed_labels, operation_id};
 use super::secret::secret_file;
-use super::{OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
+use super::{BoxRuntimeSevSnpConfig, OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
 
 const CPU_PERIOD_US: u64 = 100_000;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
@@ -28,13 +30,14 @@ const SECRET_GUEST_ROOT: &str = "/.a3s-box-secrets";
 pub(super) fn creation_request_for(
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
+    sev_snp: Option<&BoxRuntimeSevSnpConfig>,
     secret_root: &Path,
     storage: &RuntimeStoragePlan,
 ) -> RuntimeResult<CreateExecutionRequest> {
     spec.validate().map_err(RuntimeError::InvalidRequest)?;
     storage.validate_for(spec)?;
     validate_provider_unit_id(&spec.unit_id)?;
-    validate_supported_shape(spec)?;
+    validate_supported_shape(spec, execution_isolation, sev_snp)?;
     let spec_digest = spec.digest().map_err(RuntimeError::InvalidRequest)?;
     let memory_mb = spec.resources.memory_bytes.div_ceil(BYTES_PER_MIB);
     let memory_mb = u32::try_from(memory_mb).map_err(|_| {
@@ -81,9 +84,30 @@ pub(super) fn creation_request_for(
         extra_env.push((SECRET_ENVIRONMENT_MANIFEST.into(), manifest));
     }
 
+    let tee = match spec.isolation {
+        a3s_runtime::contract::IsolationLevel::Sandbox => TeeConfig::None,
+        a3s_runtime::contract::IsolationLevel::Confidential => {
+            let sev_snp = sev_snp.ok_or_else(|| {
+                RuntimeError::UnsupportedCapabilities(vec!["isolation:Confidential".into()])
+            })?;
+            let binding = spec_digest.strip_prefix("sha256:").ok_or_else(|| {
+                RuntimeError::Protocol(
+                    "Box confidential execution requires a SHA-256 Runtime spec digest".into(),
+                )
+            })?;
+            extra_env.push((RUNTIME_ATTESTATION_BINDING_ENV.into(), binding.into()));
+            TeeConfig::SevSnp {
+                workload_id: spec.unit_id.clone(),
+                generation: sev_snp.generation,
+                simulate: sev_snp.simulate,
+            }
+        }
+        _ => unreachable!("unsupported isolation was rejected before Box mapping"),
+    };
     let config = BoxConfig {
         image: image_reference(&spec.artifact)?,
         isolation: execution_isolation,
+        tee,
         resources: ResourceConfig {
             vcpus,
             memory_mb,
@@ -107,6 +131,7 @@ pub(super) fn creation_request_for(
                 .then_some(spec.resources.memory_bytes),
             ..Default::default()
         },
+        deferred_main: spec.isolation == a3s_runtime::contract::IsolationLevel::Confidential,
         persistent: true,
         cap_drop: vec!["ALL".into()],
         security_opt: vec!["no-new-privileges".into()],
@@ -145,6 +170,23 @@ pub(super) fn creation_request(
     creation_request_for(
         spec,
         execution_isolation,
+        None,
+        Path::new("/run/a3s-box/runtime-secrets"),
+        &storage,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn creation_request_with_sev_snp(
+    spec: &RuntimeUnitSpec,
+    execution_isolation: ExecutionIsolation,
+    sev_snp: &BoxRuntimeSevSnpConfig,
+) -> RuntimeResult<CreateExecutionRequest> {
+    let storage = RuntimeStoragePlan::empty(spec)?;
+    creation_request_for(
+        spec,
+        execution_isolation,
+        Some(sev_snp),
         Path::new("/run/a3s-box/runtime-secrets"),
         &storage,
     )
@@ -156,10 +198,11 @@ pub(super) fn creation_request(
 pub(super) fn validate_creation_spec(
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
+    sev_snp: Option<&BoxRuntimeSevSnpConfig>,
     secret_root: &Path,
 ) -> RuntimeResult<()> {
     let storage = RuntimeStoragePlan::empty(spec)?;
-    creation_request_for(spec, execution_isolation, secret_root, &storage).map(|_| ())
+    creation_request_for(spec, execution_isolation, sev_snp, secret_root, &storage).map(|_| ())
 }
 
 pub(super) fn operation(spec: &RuntimeUnitSpec) -> RuntimeResult<a3s_box_core::OperationId> {
@@ -170,7 +213,20 @@ pub(super) fn operation(spec: &RuntimeUnitSpec) -> RuntimeResult<a3s_box_core::O
     )
 }
 
-fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
+fn validate_supported_shape(
+    spec: &RuntimeUnitSpec,
+    execution_isolation: ExecutionIsolation,
+    sev_snp: Option<&BoxRuntimeSevSnpConfig>,
+) -> RuntimeResult<()> {
+    if spec
+        .process
+        .environment
+        .contains_key(RUNTIME_ATTESTATION_BINDING_ENV)
+    {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "Runtime process environment cannot use reserved Box key {RUNTIME_ATTESTATION_BINDING_ENV:?}"
+        )));
+    }
     if !matches!(
         spec.artifact.media_type.as_str(),
         OCI_IMAGE_MANIFEST | OCI_IMAGE_INDEX
@@ -180,7 +236,14 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
             spec.artifact.media_type
         )]));
     }
-    if spec.isolation != a3s_runtime::contract::IsolationLevel::Sandbox {
+    let isolation_supported = match spec.isolation {
+        a3s_runtime::contract::IsolationLevel::Sandbox => true,
+        a3s_runtime::contract::IsolationLevel::Confidential => {
+            execution_isolation == ExecutionIsolation::Microvm && sev_snp.is_some()
+        }
+        _ => false,
+    };
+    if !isolation_supported {
         return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
             "isolation:{:?}",
             spec.isolation
@@ -260,6 +323,14 @@ fn compile_secret_inputs(
         })?;
         let destination = match &secret.target {
             SecretTarget::Environment { variable } => {
+                if matches!(
+                    variable.as_str(),
+                    SECRET_ENVIRONMENT_MANIFEST | RUNTIME_ATTESTATION_BINDING_ENV
+                ) {
+                    return Err(RuntimeError::InvalidRequest(format!(
+                        "Runtime Secret environment target cannot use reserved Box key {variable:?}"
+                    )));
+                }
                 if spec.process.environment.contains_key(variable) {
                     return Err(RuntimeError::InvalidRequest(format!(
                         "Runtime Secret environment target {variable:?} conflicts with a literal process value"

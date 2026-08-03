@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 /// Vsock port for the attestation server.
 pub const ATTEST_VSOCK_PORT: u32 = a3s_transport::ports::TEE_CHANNEL;
 
+/// Guest environment key carrying the SHA-256 Runtime specification binding.
+///
+/// The RA-TLS server places these 32 bytes in the second half of SNP
+/// `report_data`; the first half remains bound to the ephemeral TLS key.
+pub const RUNTIME_ATTESTATION_BINDING_ENV: &str = "A3S_RUNTIME_ATTESTATION_BINDING";
+
 // ---------------------------------------------------------------------------
 // TEE self-detection API
 // ---------------------------------------------------------------------------

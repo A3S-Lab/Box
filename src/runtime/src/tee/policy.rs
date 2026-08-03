@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Each field is optional — only set fields are checked. This allows
 /// flexible policies from "accept any valid report" to strict
 /// production requirements.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestationPolicy {
     /// Expected launch measurement (SHA-384 of initial guest memory).
     /// Hex-encoded, 96 characters (48 bytes). If set, the report's
@@ -60,7 +60,7 @@ impl Default for AttestationPolicy {
 }
 
 /// Minimum TCB (Trusted Computing Base) version requirements.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MinTcbPolicy {
     /// Minimum boot loader SVN.
     #[serde(default)]

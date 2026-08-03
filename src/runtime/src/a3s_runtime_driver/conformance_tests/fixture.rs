@@ -21,8 +21,8 @@ use a3s_box_core::ExecutionIsolation;
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
     BoxArtifactPort, BoxArtifactPortError, BoxRegistryCredential, BoxRuntimeDriver,
-    BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
-    BoxSecretMaterializer,
+    BoxRuntimeDriverConfig, BoxRuntimeSevSnpConfig, BoxSecretMaterial,
+    BoxSecretMaterializationError, BoxSecretMaterializer,
 };
 use super::cases::CaseFactory;
 use super::{
@@ -226,6 +226,7 @@ pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) state: Arc<FileRuntimeStateStore>,
     pub(super) cases: CaseFactory,
     execution_isolation: ExecutionIsolation,
+    sev_snp: Option<BoxRuntimeSevSnpConfig>,
     base_case: a3s_runtime::RuntimeBaseConformanceCase,
     secret_materializer: Arc<ConformanceSecretMaterializer>,
     artifact_port: Arc<ConformanceArtifactPort>,
@@ -239,6 +240,13 @@ pub(super) struct BoxRuntimeConformanceFixture {
 
 impl BoxRuntimeConformanceFixture {
     pub(super) fn from_environment(execution_isolation: ExecutionIsolation) -> Result<Self> {
+        Self::from_environment_with_sev_snp(execution_isolation, None)
+    }
+
+    pub(super) fn from_environment_with_sev_snp(
+        execution_isolation: ExecutionIsolation,
+        sev_snp: Option<BoxRuntimeSevSnpConfig>,
+    ) -> Result<Self> {
         require(
             std::env::var("A3S_BOX_RUNTIME_CONFORMANCE").as_deref() == Ok("1"),
             "set A3S_BOX_RUNTIME_CONFORMANCE=1 to acknowledge the destructive R17 suite",
@@ -262,6 +270,10 @@ impl BoxRuntimeConformanceFixture {
             "A3S_HOME must already be canonical and must not be a symlink",
         )?;
         validate_runtime_assets(&home_dir, execution_isolation)?;
+        require(
+            sev_snp.is_none() || execution_isolation == ExecutionIsolation::Microvm,
+            "SEV-SNP Runtime conformance requires the MicroVM execution backend",
+        )?;
 
         let state_root = home_dir.join("runtime-state");
         require(
@@ -304,7 +316,7 @@ impl BoxRuntimeConformanceFixture {
             cleanups: Mutex::new(Vec::new()),
         });
         let driver = Arc::new(
-            BoxRuntimeDriver::new_with_isolation(config, execution_isolation)?
+            runtime_driver(config, execution_isolation, sev_snp.as_ref())?
                 .with_secret_materializer(secret_materializer.clone())
                 .with_artifact_port(artifact_port.clone()),
         );
@@ -315,6 +327,7 @@ impl BoxRuntimeConformanceFixture {
             state,
             cases,
             execution_isolation,
+            sev_snp,
             base_case,
             secret_materializer,
             artifact_port,
@@ -341,9 +354,10 @@ impl BoxRuntimeConformanceFixture {
 
     pub(super) fn restarted_driver(&self) -> Result<Arc<BoxRuntimeDriver>> {
         let driver = Arc::new(
-            BoxRuntimeDriver::new_with_isolation(
+            runtime_driver(
                 driver_config(self.home_dir.clone()),
                 self.execution_isolation,
+                self.sev_snp.as_ref(),
             )?
             .with_secret_materializer(self.secret_materializer.clone())
             .with_artifact_port(self.artifact_port.clone()),
@@ -368,6 +382,10 @@ impl BoxRuntimeConformanceFixture {
 
     pub(super) fn private_artifact_root(&self) -> &Path {
         &self.private_artifact_root
+    }
+
+    pub(super) fn sev_snp_config(&self) -> Option<&BoxRuntimeSevSnpConfig> {
+        self.sev_snp.as_ref()
     }
 
     pub(super) fn output_captures(&self) -> Vec<ConformanceOutputCapture> {
@@ -395,7 +413,7 @@ impl BoxRuntimeConformanceFixture {
         home_dir: PathBuf,
     ) -> Result<Arc<BoxRuntimeDriver>> {
         let driver = Arc::new(
-            BoxRuntimeDriver::new_with_isolation(
+            runtime_driver(
                 BoxRuntimeDriverConfig {
                     secret_root: self.home_dir.join("runtime-secrets"),
                     home_dir,
@@ -403,6 +421,7 @@ impl BoxRuntimeConformanceFixture {
                     task_poll_interval: Duration::from_millis(25),
                 },
                 self.execution_isolation,
+                self.sev_snp.as_ref(),
             )?
             .with_secret_materializer(self.secret_materializer.clone()),
         );
@@ -700,7 +719,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
     }
 
     fn available_profiles(&self) -> BTreeSet<RuntimeConformanceProfile> {
-        BTreeSet::from([
+        let mut profiles = BTreeSet::from([
             RuntimeConformanceProfile::Recovery,
             RuntimeConformanceProfile::Networking,
             RuntimeConformanceProfile::Mounts,
@@ -710,7 +729,11 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Exec,
             RuntimeConformanceProfile::Security,
             RuntimeConformanceProfile::Outputs,
-        ])
+        ]);
+        if self.sev_snp.is_some() {
+            profiles.insert(RuntimeConformanceProfile::Evidence);
+        }
+        profiles
     }
 
     async fn inventory(&self) -> RuntimeResult<RuntimeConformanceInventory> {
@@ -737,6 +760,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await,
             RuntimeConformanceProfile::Security => super::security_profile::run(self, client).await,
             RuntimeConformanceProfile::Outputs => super::outputs_profile::run(self, client).await,
+            RuntimeConformanceProfile::Evidence => super::evidence_profile::run(self, client).await,
             unsupported => {
                 return Err(RuntimeError::Protocol(format!(
                     "Box R17 fixture cannot execute unexpected {} profile",
@@ -764,6 +788,17 @@ fn driver_config(home_dir: PathBuf) -> BoxRuntimeDriverConfig {
         home_dir,
         control_timeout: Duration::from_secs(120),
         task_poll_interval: Duration::from_millis(25),
+    }
+}
+
+fn runtime_driver(
+    config: BoxRuntimeDriverConfig,
+    execution_isolation: ExecutionIsolation,
+    sev_snp: Option<&BoxRuntimeSevSnpConfig>,
+) -> Result<BoxRuntimeDriver> {
+    match sev_snp {
+        Some(configured) => BoxRuntimeDriver::new_confidential(config, configured.clone()),
+        None => BoxRuntimeDriver::new_with_isolation(config, execution_isolation),
     }
 }
 
