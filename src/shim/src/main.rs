@@ -753,6 +753,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         }
     }
 
+    if spec.disable_tsi {
+        tracing::info!("Disabling TSI socket interception for isolated networking");
+        ctx.disable_tsi()?;
+    }
+
     // Configure exec communication channel
     #[cfg(not(target_os = "windows"))]
     {

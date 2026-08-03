@@ -119,7 +119,7 @@ pub(super) fn creation_request_for(
         workdir: spec.process.working_directory.clone(),
         volumes,
         extra_env,
-        network: NetworkMode::None,
+        network: compile_network_mode(&spec.network.mode)?,
         tmpfs,
         resource_limits: ResourceLimits {
             pids_limit: Some(u64::from(spec.resources.pids)),
@@ -249,15 +249,7 @@ fn validate_supported_shape(
             spec.isolation
         )]));
     }
-    if !matches!(
-        spec.network.mode,
-        RuntimeNetworkMode::None | RuntimeNetworkMode::Service
-    ) {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
-            "network_mode:{:?}",
-            spec.network.mode
-        )]));
-    }
+    compile_network_mode(&spec.network.mode)?;
     if spec
         .network
         .ports
@@ -279,6 +271,18 @@ fn validate_supported_shape(
         (RuntimeUnitClass::Task, RestartPolicy::Always) => Err(RuntimeError::InvalidRequest(
             "Runtime Tasks cannot use an always restart policy".into(),
         )),
+    }
+}
+
+fn compile_network_mode(mode: &RuntimeNetworkMode) -> RuntimeResult<NetworkMode> {
+    match mode {
+        // Runtime Service reachability is provided by the generation-fenced
+        // vsock connector. Enabling TSI here would redirect the guest-side
+        // loopback connection to the host instead of the local workload.
+        RuntimeNetworkMode::None | RuntimeNetworkMode::Service => Ok(NetworkMode::None),
+        unsupported => Err(RuntimeError::UnsupportedCapabilities(vec![format!(
+            "network_mode:{unsupported:?}"
+        )])),
     }
 }
 

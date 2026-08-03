@@ -9,10 +9,20 @@ use super::{require, Result};
 
 const HTTP_HEALTH_SERVICE: &str = concat!(
     "rm -f /tmp/r17-health-http-request; ",
-    "while :; do ",
-    "{ printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; } ",
-    "| nc -l -p 18080 >> /tmp/r17-health-http-request; ",
-    "done",
+    "cat > /tmp/r17-health-http-handler <<'R17_HTTP_HANDLER'\n",
+    "#!/bin/sh\n",
+    "IFS= read -r request_line || exit 1\n",
+    "while IFS= read -r header; do\n",
+    "  [ \"$header\" = \"$(printf '\\r')\" ] && break\n",
+    "done\n",
+    "printf '%s\\n' \"$request_line\" >> /tmp/r17-health-http-request\n",
+    "printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'\n",
+    "R17_HTTP_HANDLER\n",
+    "chmod 0700 /tmp/r17-health-http-handler; ",
+    // BusyBox nc keeps the listener bound and forks one handler per stream
+    // when listen mode is repeated with -e. The handler consumes the request
+    // before responding, so the path assertion cannot race a local EOF.
+    "exec nc -ll -p 18080 -e /tmp/r17-health-http-handler",
 );
 
 pub(super) async fn run(

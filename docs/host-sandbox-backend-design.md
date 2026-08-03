@@ -211,6 +211,15 @@ reconstructed from the durable execution on apply or inspect; stop, removal,
 provider loss, generation replacement, and driver drop close it. This does not
 grant workload egress and does not advertise UDP or named networking.
 
+The Linux MicroVM provider preserves the same Runtime contract without TSI.
+For `none` and `service`, the shim disables libkrun socket interception but
+keeps an explicit vsock device for Box control channels. The local execution
+connector opens the VM's private port-forward socket, completes the bounded
+guest protocol handshake, and relays bytes to the workload's loopback listener.
+The connector revalidates the execution backend, process identity, generation,
+and socket path after connecting so a stale VM can never receive a new
+generation's Service traffic.
+
 The pinned A3S OCI Runtime is nevertheless qualified for private, exact-host,
 and donor-shared namespace operations. That gate validates namespace identity,
 ownership, and cleanup in the runtime layer before Box considers exposing a

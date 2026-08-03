@@ -143,14 +143,25 @@ impl BoxRuntimeDriver {
                     RuntimeHealthState::Unhealthy,
                     Some(format!("HTTP probe returned status {status}")),
                 ),
-                Ok(Err(_)) => (
-                    RuntimeHealthState::Unhealthy,
-                    Some(probe_message("HTTP probe failed")),
-                ),
-                Err(_) => (
-                    RuntimeHealthState::Unhealthy,
-                    Some(probe_message("HTTP probe timed out")),
-                ),
+                Ok(Err(_error)) => {
+                    #[cfg(test)]
+                    eprintln!(
+                        "R17 HTTP health probe error: unit_id={} error={_error}",
+                        spec.unit_id
+                    );
+                    (
+                        RuntimeHealthState::Unhealthy,
+                        Some(probe_message("HTTP probe failed")),
+                    )
+                }
+                Err(_) => {
+                    #[cfg(test)]
+                    eprintln!("R17 HTTP health probe timeout: unit_id={}", spec.unit_id);
+                    (
+                        RuntimeHealthState::Unhealthy,
+                        Some(probe_message("HTTP probe timed out")),
+                    )
+                }
             },
             HealthProbe::Tcp { port } => {
                 match tokio::time::timeout(
@@ -163,14 +174,25 @@ impl BoxRuntimeDriver {
                         drop(stream);
                         (RuntimeHealthState::Healthy, None)
                     }
-                    Ok(Err(_)) => (
-                        RuntimeHealthState::Unhealthy,
-                        Some(probe_message("TCP probe failed")),
-                    ),
-                    Err(_) => (
-                        RuntimeHealthState::Unhealthy,
-                        Some(probe_message("TCP probe timed out")),
-                    ),
+                    Ok(Err(_error)) => {
+                        #[cfg(test)]
+                        eprintln!(
+                            "R17 TCP health probe error: unit_id={} error={_error}",
+                            spec.unit_id
+                        );
+                        (
+                            RuntimeHealthState::Unhealthy,
+                            Some(probe_message("TCP probe failed")),
+                        )
+                    }
+                    Err(_) => {
+                        #[cfg(test)]
+                        eprintln!("R17 TCP health probe timeout: unit_id={}", spec.unit_id);
+                        (
+                            RuntimeHealthState::Unhealthy,
+                            Some(probe_message("TCP probe timed out")),
+                        )
+                    }
                 }
             }
             HealthProbe::Command { command } => {

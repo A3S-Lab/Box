@@ -247,7 +247,7 @@ runtime mutation instead of being stored and silently weakened.
 | Workloads | create, start, stop, restart, kill, pause, wait, inspect, exec, attach, PTY, live process inventory, health, and restart policy |
 | Images and builds | pull, push, tag, save/load, verified layers, selected Dockerfile/Containerfile builds, content-addressed cache, and signed-image policy |
 | Storage | bind mounts, named volumes, tmpfs, copy, diff, export, commit, filesystem snapshots, and copy-on-write restore |
-| Networking and Compose | TSI, named bridges, peer discovery, TCP publication, generation-fenced Sandbox forwarding, and a bounded ACL/YAML Compose subset |
+| Networking and Compose | TSI, named bridges, peer discovery, TCP publication, generation-fenced Runtime Service forwarding on Sandbox and MicroVM, and a bounded ACL/YAML Compose subset |
 | Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
@@ -316,7 +316,7 @@ error before dispatch.
 
 | Path | Current evidence | Boundary that remains visible |
 | --- | --- | --- |
-| Linux MicroVM | Primary local path through KVM/libkrun; self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gate when `KVM_CI=true` | Hosted CI cannot prove a real KVM boot when the enrolled runner is absent |
+| Linux MicroVM | Primary local path through KVM/libkrun; all advertised A3S Runtime provider profiles plus self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | Full release evidence still requires the enrolled self-hosted KVM runner and the longer `G2`/`R24` profiles |
 | macOS MicroVM | Apple Silicon/HVF build and packaging path | Real Apple Silicon/HVF release validation remains a separate host gate; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route | Shared-kernel preview; VM-only controls are rejected |
