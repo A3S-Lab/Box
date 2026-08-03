@@ -1,9 +1,9 @@
 //! Opt-in real-provider certification for the Box Sandbox Runtime driver.
 //!
-//! This module is deliberately compiled only for tests and its single test is
-//! ignored by default. The exact test name, explicit acknowledgement variable,
-//! dedicated home, pinned runtime artifacts, pinned image, and single-threaded test
-//! selection are all release-gate prerequisites.
+//! This module is deliberately compiled only for tests and its destructive
+//! tests are ignored by default. The exact test name, explicit acknowledgement
+//! variable, dedicated home, pinned runtime artifacts, pinned image, and
+//! single-threaded test selection are all release-gate prerequisites.
 
 mod cases;
 mod exec_profile;
@@ -20,9 +20,10 @@ mod security_profile;
 
 use std::fmt::Display;
 
+use a3s_box_core::ExecutionIsolation;
 use a3s_runtime::{
-    required_runtime_profiles, verify_runtime_profiles, RuntimeClient, RuntimeConformanceProfile,
-    RuntimeError, RuntimeResult,
+    required_runtime_profiles, verify_runtime_base, verify_runtime_profiles, RuntimeClient,
+    RuntimeConformanceFixture, RuntimeConformanceProfile, RuntimeError, RuntimeResult,
 };
 
 use self::fixture::BoxRuntimeConformanceFixture;
@@ -80,7 +81,7 @@ fn box_runtime_passes_all_advertised_profiles() {
 }
 
 async fn run_all_advertised_profiles() {
-    let fixture = BoxRuntimeConformanceFixture::from_environment()
+    let fixture = BoxRuntimeConformanceFixture::from_environment(ExecutionIsolation::Sandbox)
         .expect("R17 Box conformance preflight must pass");
     let client = fixture.primary_client();
     let capabilities = client
@@ -124,4 +125,51 @@ async fn run_all_advertised_profiles() {
     private_registry_profile::run(&fixture)
         .await
         .expect("R17 authenticated private-registry pull must pass");
+}
+
+#[test]
+#[ignore = "requires a dedicated A3S OS KVM MicroVM certification home"]
+fn box_runtime_microvm_passes_base_and_recovery_profiles() {
+    let runner = std::thread::Builder::new()
+        .name("a3s-box-r17-microvm".into())
+        .stack_size(R17_RUNNER_STACK_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("a3s-box-r17-microvm-worker")
+                .thread_stack_size(R17_WORKER_STACK_BYTES)
+                .enable_all()
+                .build()
+                .expect("R17 MicroVM Tokio runtime must start");
+            runtime.block_on(run_microvm_base_and_recovery_profiles());
+        })
+        .expect("R17 MicroVM runner thread must start");
+    runner
+        .join()
+        .expect("R17 MicroVM runner thread must not panic");
+}
+
+async fn run_microvm_base_and_recovery_profiles() {
+    let fixture = BoxRuntimeConformanceFixture::from_environment(ExecutionIsolation::Microvm)
+        .expect("R17 MicroVM conformance preflight must pass");
+    let client = fixture.primary_client();
+    let inventory_before = fixture
+        .inventory()
+        .await
+        .expect("R17 MicroVM baseline inventory must be available");
+
+    let execution: Result<()> = async {
+        verify_runtime_base(&client, fixture.base_case()).await?;
+        recovery_profile::run(&fixture, &client).await
+    }
+    .await;
+
+    let cleanup = fixture.cleanup().await;
+    let inventory_after = fixture
+        .inventory()
+        .await
+        .expect("R17 MicroVM final inventory must be available");
+    cleanup.expect("R17 MicroVM cleanup must succeed");
+    assert_eq!(inventory_after, inventory_before);
+    execution.expect("R17 MicroVM Base and Recovery profiles must pass");
 }

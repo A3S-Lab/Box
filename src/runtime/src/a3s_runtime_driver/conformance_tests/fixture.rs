@@ -16,6 +16,8 @@ use a3s_runtime::{
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+use a3s_box_core::ExecutionIsolation;
+
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
     BoxArtifactPort, BoxArtifactPortError, BoxRegistryCredential, BoxRuntimeDriver,
@@ -223,6 +225,7 @@ pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) driver: Arc<BoxRuntimeDriver>,
     pub(super) state: Arc<FileRuntimeStateStore>,
     pub(super) cases: CaseFactory,
+    execution_isolation: ExecutionIsolation,
     base_case: a3s_runtime::RuntimeBaseConformanceCase,
     secret_materializer: Arc<ConformanceSecretMaterializer>,
     artifact_port: Arc<ConformanceArtifactPort>,
@@ -235,7 +238,7 @@ pub(super) struct BoxRuntimeConformanceFixture {
 }
 
 impl BoxRuntimeConformanceFixture {
-    pub(super) fn from_environment() -> Result<Self> {
+    pub(super) fn from_environment(execution_isolation: ExecutionIsolation) -> Result<Self> {
         require(
             std::env::var("A3S_BOX_RUNTIME_CONFORMANCE").as_deref() == Ok("1"),
             "set A3S_BOX_RUNTIME_CONFORMANCE=1 to acknowledge the destructive R17 suite",
@@ -258,7 +261,7 @@ impl BoxRuntimeConformanceFixture {
             canonical_home == home_dir,
             "A3S_HOME must already be canonical and must not be a symlink",
         )?;
-        validate_runtime_assets(&home_dir)?;
+        validate_runtime_assets(&home_dir, execution_isolation)?;
 
         let state_root = home_dir.join("runtime-state");
         require(
@@ -301,10 +304,7 @@ impl BoxRuntimeConformanceFixture {
             cleanups: Mutex::new(Vec::new()),
         });
         let driver = Arc::new(
-            BoxRuntimeDriver::new_with_isolation(
-                config,
-                a3s_box_core::ExecutionIsolation::Sandbox,
-            )?
+            BoxRuntimeDriver::new_with_isolation(config, execution_isolation)?
             .with_secret_materializer(secret_materializer.clone())
             .with_artifact_port(artifact_port.clone()),
         );
@@ -314,6 +314,7 @@ impl BoxRuntimeConformanceFixture {
             driver: driver.clone(),
             state,
             cases,
+            execution_isolation,
             base_case,
             secret_materializer,
             artifact_port,
@@ -342,7 +343,7 @@ impl BoxRuntimeConformanceFixture {
         let driver = Arc::new(
             BoxRuntimeDriver::new_with_isolation(
                 driver_config(self.home_dir.clone()),
-                a3s_box_core::ExecutionIsolation::Sandbox,
+                self.execution_isolation,
             )?
             .with_secret_materializer(self.secret_materializer.clone())
             .with_artifact_port(self.artifact_port.clone()),
@@ -401,7 +402,7 @@ impl BoxRuntimeConformanceFixture {
                     control_timeout: Duration::from_secs(120),
                     task_poll_interval: Duration::from_millis(25),
                 },
-                a3s_box_core::ExecutionIsolation::Sandbox,
+                self.execution_isolation,
             )?
             .with_secret_materializer(self.secret_materializer.clone()),
         );
@@ -783,7 +784,29 @@ fn set_private_artifact_modes(_root: &Path, _source: &Path) -> Result<()> {
     ))
 }
 
-fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
+fn validate_runtime_assets(
+    home_dir: &Path,
+    execution_isolation: ExecutionIsolation,
+) -> Result<()> {
+    for binary in ["a3s-box-guest-init", "a3s-box-shim"] {
+        let path = home_dir.join("bin").join(binary);
+        require(
+            path.is_file(),
+            format!("required R17 binary is missing: {}", path.display()),
+        )?;
+    }
+
+    match execution_isolation {
+        ExecutionIsolation::Microvm => {
+            crate::host_check::check_virtualization_support()
+                .map_err(|error| failure(format!("R17 MicroVM preflight failed: {error}")))?;
+            Ok(())
+        }
+        ExecutionIsolation::Sandbox => validate_sandbox_runtime_assets(home_dir),
+    }
+}
+
+fn validate_sandbox_runtime_assets(home_dir: &Path) -> Result<()> {
     let mut artifacts = Vec::new();
     for (variable, binary) in [
         ("A3S_BOX_OCI_RUNTIME_PATH", "a3s-oci"),
@@ -804,13 +827,6 @@ fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
             format!("{variable} must equal A3S_HOME/bin/{binary}"),
         )?;
         artifacts.push(canonical_configured);
-    }
-    for binary in ["a3s-box-guest-init", "a3s-box-shim"] {
-        let path = home_dir.join("bin").join(binary);
-        require(
-            path.is_file(),
-            format!("required R17 binary is missing: {}", path.display()),
-        )?;
     }
     let snapshot = crate::sandbox::probe_sandbox_capabilities_for(
         a3s_box_core::ExecutionBackend::A3sOci,

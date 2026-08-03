@@ -66,6 +66,16 @@ The current implementation has two execution paths:
   guest init, VM controller, and platform-specific integration.
 - Explicit Linux Sandbox workloads use A3S OCI Runtime through the pinned SDK.
 
+The provider-neutral Runtime conformance fixture now selects either concrete
+Box isolation explicitly. Hosted Linux continues to run every advertised
+profile through Sandbox. The self-hosted KVM workflow is wired to run the
+mandatory Runtime Base and Recovery oracles through real MicroVMs, including
+client/provider restart, external process loss, single replacement, duplicate
+resource rejection, and exact cleanup. This wiring is not certification while
+the repository `KVM_CI` gate is disabled, and the capability-triggered MicroVM
+Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs
+profiles remain open.
+
 This split remains supported while migration is in progress, but it is not the
 target architecture. New platform execution features belong in OCI Runtime and
 must not introduce a third Box execution path.

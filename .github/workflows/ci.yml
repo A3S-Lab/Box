@@ -774,13 +774,14 @@ jobs:
     # PR branch explicitly.
     if: github.event_name != 'pull_request' && vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
-    timeout-minutes: 75
+    timeout-minutes: 120
     # The runner has no direct docker.io egress (CN network), so the smoke
     # tests pull alpine/busybox through a mirror. The image keeps its canonical
     # docker.io identity; only the fetch is redirected. Override per-runner with
     # the KVM_CI_REGISTRY_MIRRORS repo variable.
     env:
       A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS || 'docker.io=docker.m.daocloud.io' }}
+      A3S_RUNTIME_MICROVM_CONFORMANCE_HOME: /tmp/a3s-runtime-conformance-microvm-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
@@ -798,7 +799,7 @@ jobs:
       # NOTE: no Swatinem/rust-cache here — fetching that action from
       # codeload.github.com times out on this runner's network, which fails
       # "Set up job". The self-hosted runner keeps a warm cargo registry, and
-      # the 75-min budget covers a cold libkrun build.
+      # the 120-min budget covers a cold libkrun build and Runtime recovery.
       - name: Verify /dev/kvm is present
         run: |
           if [ ! -e /dev/kvm ]; then
@@ -814,6 +815,27 @@ jobs:
           cd src
           cargo build --locked --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
           cargo build --locked --release -p a3s-box-cli -p a3s-box-cri -p a3s-box-shim
+      - name: Prepare dedicated Runtime MicroVM conformance home
+        run: |
+          unset A3S_DEPS_STUB
+          test ! -e "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME"
+          install -d -m 0755 "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/bin"
+          install -m 0755 src/target/release/a3s-box-shim \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/bin/a3s-box-shim"
+          install -m 0755 \
+            src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/bin/a3s-box-guest-init"
+          install -d -m 0700 \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
+          sudo mount -t tmpfs \
+            -o size=16m,mode=0700,nosuid,nodev,noexec \
+            a3s-runtime-microvm-secrets \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
+          sudo chown "$(id -u):$(id -g)" \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"
+          A3S_HOME="$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" \
+            src/target/release/a3s-box pull \
+              'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
       - name: Core smoke — real boot + exec over virtio-fs
         run: |
           unset A3S_DEPS_STUB
@@ -836,6 +858,18 @@ jobs:
             A3S_BOX_SDK_SMOKE_ISOLATION=microvm \
             cargo test --locked --release -p a3s-box-sdk --test local_sandbox \
               local_sandbox_exercises_real_runtime \
+              -- --ignored --nocapture --test-threads=1
+      - name: Certify Runtime Base and Recovery through real MicroVMs
+        run: |
+          unset A3S_DEPS_STUB
+          cd src
+          A3S_HOME="$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" \
+            A3S_BOX_RUNTIME_CONFORMANCE=1 \
+            A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
+            A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
+            RUST_MIN_STACK=33554432 \
+            cargo test --locked --release -p a3s-box-runtime --lib \
+              box_runtime_microvm_passes_base_and_recovery_profiles \
               -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       - name: Foreground latency — cached no-op p50 regression gate
@@ -909,3 +943,23 @@ jobs:
           unset A3S_DEPS_STUB
           cd src
           cargo test --locked --release -p a3s-box-sdk --features pipeline-cli --test soak_kvm -- --ignored --nocapture --test-threads=1
+      - name: Clean Runtime MicroVM conformance home
+        if: always()
+        run: |
+          cleanup_status=0
+          leaked_pids="$(
+            pgrep -f "a3s-box-shim.*$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME" || true
+          )"
+          if [ -n "$leaked_pids" ]; then
+            ps -fp $leaked_pids || true
+            sudo kill -KILL $leaked_pids || true
+            cleanup_status=1
+          fi
+          if mountpoint -q \
+            "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets"; then
+            sudo umount \
+              "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME/runtime-secrets" || \
+              cleanup_status=1
+          fi
+          sudo rm -rf -- "$A3S_RUNTIME_MICROVM_CONFORMANCE_HOME"
+          exit "$cleanup_status"

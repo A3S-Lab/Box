@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::{ExecutionManager, OperationId};
+use a3s_box_core::{ExecutionIsolation, ExecutionManager, OperationId};
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
 use a3s_runtime::{
     RuntimeClient, RuntimeDriver, RuntimeError, RuntimeRequestState, RuntimeStateStore,
 };
 
-use crate::ManagedExecutionState;
+use crate::{BoxRecord, ManagedExecutionState};
 
 use super::super::mapping::{creation_request, operation};
 use super::super::metadata::{local_identity, now_ms};
@@ -50,18 +50,18 @@ async fn partial_creation_replays_same_provider_identity(
             &operation(&request.spec)?,
         )
         .await
-        .map_err(|error| super::external("reserve partial Sandbox creation", error))?;
+        .map_err(|error| super::external("reserve partial provider creation", error))?;
     let provider_id = provider_reservation.execution_id.to_string();
     let created = fixture
         .driver
         .manager
         .managed_record(&provider_reservation.execution_id)
         .await
-        .map_err(|error| super::external("load partial Sandbox creation", error))?
-        .ok_or_else(|| super::protocol("partial Sandbox creation was not durable"))?;
+        .map_err(|error| super::external("load partial provider creation", error))?
+        .ok_or_else(|| super::protocol("partial provider creation was not durable"))?;
     require(
         local_identity(&created)?.2 == ManagedExecutionState::Created,
-        "partial Sandbox creation advanced before Runtime replay",
+        "partial provider creation advanced before Runtime replay",
     )?;
 
     let restarted_driver = fixture.restarted_driver()?;
@@ -170,7 +170,7 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
         }
     })
     .await
-    .map_err(|_| super::failure("cancellation fixture did not reach a running Sandbox"))??;
+    .map_err(|_| super::failure("cancellation fixture did not reach a running provider unit"))??;
 
     let provider_id = provider_record.id.clone();
     apply.abort();
@@ -261,13 +261,13 @@ async fn provider_restart(
         restarted.inspect(&request.spec.unit_id).await?
     else {
         return Err(super::protocol(
-            "provider restart lost a running Sandbox Service",
+            "provider restart lost a running Service",
         ));
     };
     require(
         observation.state == RuntimeUnitState::Running
             && observation.provider_resource_id == provider_id,
-        "provider restart changed running Sandbox identity",
+        "provider restart changed running provider identity",
     )?;
     fixture
         .remove_unit(&restarted, &request.spec, "recovery-provider-restart")
@@ -288,15 +288,7 @@ async fn external_deletion_and_single_replacement(
         .clone()
         .ok_or_else(|| super::protocol("external-loss fixture returned no provider identity"))?;
     let record = fixture.record_for(&first_request.spec).await?;
-    let home = fixture.home_dir.clone();
-    let box_dir = record.box_dir.clone();
-    let cleanup_id = record.id.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::vm::reap::cleanup_recorded_sandbox_runtime_in(&home, &box_dir, &cleanup_id)
-    })
-    .await
-    .map_err(|error| super::external("join external deletion", error))?
-    .map_err(|error| super::external("delete external Sandbox resource", error))?;
+    delete_external_resource(fixture, &record).await?;
 
     let restarted_driver = fixture.restarted_driver()?;
     let restarted = fixture.client_with(restarted_driver, fixture.state.clone());
@@ -367,13 +359,13 @@ async fn duplicate_resource_detection(
             &injection_operation,
         )
         .await
-        .map_err(|error| super::external("reserve duplicate Sandbox", error))?;
+        .map_err(|error| super::external("reserve duplicate provider unit", error))?;
     fixture
         .driver
         .manager
         .start(&reservation.execution_id, reservation.generation)
         .await
-        .map_err(|error| super::external("start duplicate Sandbox", error))?;
+        .map_err(|error| super::external("start duplicate provider unit", error))?;
 
     let error = client.inspect(&request.spec.unit_id).await.unwrap_err();
     require(
@@ -391,8 +383,8 @@ async fn duplicate_resource_detection(
         .manager
         .managed_record(&reservation.execution_id)
         .await
-        .map_err(|error| super::external("load duplicate Sandbox", error))?
-        .ok_or_else(|| super::protocol("duplicate Sandbox disappeared before cleanup"))?;
+        .map_err(|error| super::external("load duplicate provider unit", error))?
+        .ok_or_else(|| super::protocol("duplicate provider unit disappeared before cleanup"))?;
     fixture
         .driver
         .retire_record(injected, &request.spec.unit_id)
@@ -405,4 +397,73 @@ async fn duplicate_resource_detection(
     fixture
         .remove_unit(client, &request.spec, "recovery-duplicate")
         .await
+}
+
+async fn delete_external_resource(
+    fixture: &BoxRuntimeConformanceFixture,
+    record: &BoxRecord,
+) -> Result<()> {
+    match fixture.driver.execution_isolation() {
+        ExecutionIsolation::Sandbox => {
+            let home = fixture.home_dir.clone();
+            let box_dir = record.box_dir.clone();
+            let cleanup_id = record.id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::vm::reap::cleanup_recorded_sandbox_runtime_in(
+                    &home,
+                    &box_dir,
+                    &cleanup_id,
+                )
+            })
+            .await
+            .map_err(|error| super::external("join external Sandbox deletion", error))?
+            .map_err(|error| super::external("delete external Sandbox resource", error))
+        }
+        ExecutionIsolation::Microvm => delete_external_microvm(record).await,
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn delete_external_microvm(record: &BoxRecord) -> Result<()> {
+    let pid = record
+        .pid
+        .ok_or_else(|| super::protocol("external-loss MicroVM has no host PID"))?;
+    let start_time = record
+        .pid_start_time
+        .ok_or_else(|| super::protocol("external-loss MicroVM has no host PID identity"))?;
+    let stopped = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        if !crate::process::is_process_alive_with_identity(pid, Some(start_time)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "external-loss MicroVM process identity is not running",
+            ));
+        }
+        let raw_pid = i32::try_from(pid).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "external-loss MicroVM PID exceeds the host signal range",
+            )
+        })?;
+        // SAFETY: the dedicated conformance fixture recorded this PID and its
+        // Linux start-time identity, which was revalidated immediately above.
+        if unsafe { libc::kill(raw_pid, libc::SIGKILL) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(crate::process::wait_for_process_stop_with_identity(
+            pid,
+            start_time,
+            Duration::from_secs(10),
+        ))
+    })
+    .await
+    .map_err(|error| super::external("join external MicroVM deletion", error))?
+    .map_err(|error| super::external("delete external MicroVM resource", error))?;
+    require(stopped, "external-loss MicroVM did not stop after SIGKILL")
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn delete_external_microvm(_record: &BoxRecord) -> Result<()> {
+    Err(super::failure(
+        "external MicroVM loss certification currently requires Linux",
+    ))
 }
