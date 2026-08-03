@@ -13,8 +13,8 @@ This package provides the actual runtime implementation for A3S Box, including:
 - **gRPC Communication**: Guest agent health checking over Unix socket
 - **Filesystem Operations**: virtio-fs mount management
 - **Metrics Collection**: Runtime metrics and monitoring
-- **A3S Runtime Provider**: generation-fenced Tasks and Services over the
-  explicit Linux Sandbox backend
+- **A3S Runtime Provider**: generation-fenced Tasks and Services over Linux
+  MicroVM and explicit Sandbox backends
 - **Transient Secrets**: caller-authorized environment and file Secret
   materialization without durable plaintext
 
@@ -43,6 +43,12 @@ instead of creating a second Box lifecycle path. The driver owns provider
 identity, generation fencing, recovery, Service endpoints, health observations,
 logs, exec, resource controls, and cleanup.
 
+Both Linux isolation paths implement the same advertised Runtime profile set.
+`NetworkMode::None` and `NetworkMode::Service` remain loopback-only and do not
+grant workload egress. A MicroVM retains explicit vsock IPC without libkrun TSI
+socket interception; Runtime Service listeners relay to the declared guest TCP
+ports through the generation-fenced execution connector.
+
 Callers that need Runtime Secrets compose the driver with exactly one
 `BoxSecretMaterializer`:
 
@@ -63,8 +69,8 @@ let driver = BoxRuntimeDriver::new_with_isolation(config, ExecutionIsolation::Sa
 The configured `secret_root` must already be a canonical provider-owned `0700`
 Linux tmpfs mount. Box never creates it and never falls back to disk. The caller
 owns reference authorization and transport; Box owns only node-local
-materialization, deterministic read-only Sandbox mounts, recovery validation,
-log redaction, and lifecycle cleanup.
+materialization, deterministic isolation-specific read-only mounts, recovery
+validation, log redaction, and lifecycle cleanup.
 
 Environment, file, and registry credential targets are supported. Environment
 values use a non-sensitive `A3S_BOX_SECRET_ENV_V1` binding manifest that Guest

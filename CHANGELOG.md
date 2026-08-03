@@ -21,6 +21,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Linux/KVM MicroVM qualification for the shared A3S Runtime provider.**
+  `BoxRuntimeDriver` now runs its complete advertised Base, Recovery,
+  Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs
+  profile set through real MicroVMs, followed by the authenticated private
+  registry case and an exact cleanup inventory. Runtime `none` and `service`
+  networking disable libkrun TSI interception while retaining explicit vsock
+  IPC; TCP Service endpoints use the same generation-fenced connector as the
+  Sandbox backend. The connector bounds frames, validates the live execution
+  generation before and after connection, and rejects guest protocol errors.
 - **Native Linux aarch64 production-owner qualification.** Box revision
   `a16772c3` now runs the same pinned OCI Runtime `a6cdae7` revision on native
   x86_64 and aarch64 Ubuntu hosts, builds the architecture-matched musl guest
