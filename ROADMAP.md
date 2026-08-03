@@ -68,13 +68,14 @@ The current implementation has two execution paths:
 
 The provider-neutral Runtime conformance fixture now selects either concrete
 Box isolation explicitly. Hosted Linux continues to run every advertised
-profile through Sandbox. The self-hosted KVM workflow is wired to run the
-mandatory Runtime Base and Recovery oracles through real MicroVMs, including
-client/provider restart, external process loss, single replacement, duplicate
-resource rejection, and exact cleanup. This wiring is not certification while
-the repository `KVM_CI` gate is disabled, and the capability-triggered MicroVM
-Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs
-profiles remain open.
+profile through Sandbox. The self-hosted KVM workflow is wired to run Runtime
+Base plus the portable Recovery, Networking, Health, Logs, Exec, and Outputs
+profiles through real MicroVMs, including client/provider restart, external
+process loss, endpoint relay and cleanup, bounded exec, durable logs, exact
+outputs, duplicate-resource rejection, and final inventory equality. This
+wiring is not certification while the repository `KVM_CI` gate is disabled;
+MicroVM-specific Mounts, Resources, and Security oracles and executed evidence
+for every wired profile remain open.
 
 This split remains supported while migration is in progress, but it is not the
 target architecture. New platform execution features belong in OCI Runtime and

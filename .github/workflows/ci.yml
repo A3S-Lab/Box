@@ -859,7 +859,7 @@ jobs:
             cargo test --locked --release -p a3s-box-sdk --test local_sandbox \
               local_sandbox_exercises_real_runtime \
               -- --ignored --nocapture --test-threads=1
-      - name: Certify Runtime Base and Recovery through real MicroVMs
+      - name: Certify portable Runtime profiles through real MicroVMs
         run: |
           unset A3S_DEPS_STUB
           cd src
@@ -869,7 +869,7 @@ jobs:
             A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
             RUST_MIN_STACK=33554432 \
             cargo test --locked --release -p a3s-box-runtime --lib \
-              box_runtime_microvm_passes_base_and_recovery_profiles \
+              box_runtime_microvm_passes_base_and_portable_profiles \
               -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       - name: Foreground latency — cached no-op p50 regression gate

@@ -129,7 +129,7 @@ async fn run_all_advertised_profiles() {
 
 #[test]
 #[ignore = "requires a dedicated A3S OS KVM MicroVM certification home"]
-fn box_runtime_microvm_passes_base_and_recovery_profiles() {
+fn box_runtime_microvm_passes_base_and_portable_profiles() {
     let runner = std::thread::Builder::new()
         .name("a3s-box-r17-microvm".into())
         .stack_size(R17_RUNNER_STACK_BYTES)
@@ -141,7 +141,7 @@ fn box_runtime_microvm_passes_base_and_recovery_profiles() {
                 .enable_all()
                 .build()
                 .expect("R17 MicroVM Tokio runtime must start");
-            runtime.block_on(run_microvm_base_and_recovery_profiles());
+            runtime.block_on(run_microvm_base_and_portable_profiles());
         })
         .expect("R17 MicroVM runner thread must start");
     runner
@@ -149,7 +149,7 @@ fn box_runtime_microvm_passes_base_and_recovery_profiles() {
         .expect("R17 MicroVM runner thread must not panic");
 }
 
-async fn run_microvm_base_and_recovery_profiles() {
+async fn run_microvm_base_and_portable_profiles() {
     let fixture = BoxRuntimeConformanceFixture::from_environment(ExecutionIsolation::Microvm)
         .expect("R17 MicroVM conformance preflight must pass");
     let client = fixture.primary_client();
@@ -160,7 +160,27 @@ async fn run_microvm_base_and_recovery_profiles() {
 
     let execution: Result<()> = async {
         verify_runtime_base(&client, fixture.base_case()).await?;
-        recovery_profile::run(&fixture, &client).await
+        let capabilities = client.capabilities().await?;
+        for profile in [
+            RuntimeConformanceProfile::Recovery,
+            RuntimeConformanceProfile::Networking,
+            RuntimeConformanceProfile::Health,
+            RuntimeConformanceProfile::Logs,
+            RuntimeConformanceProfile::Exec,
+            RuntimeConformanceProfile::Outputs,
+        ] {
+            let evidence = fixture
+                .run_profile(&client, &capabilities, profile)
+                .await?;
+            require(
+                evidence.profile == profile,
+                format!(
+                    "R17 MicroVM {} profile returned mismatched evidence",
+                    profile.as_str()
+                ),
+            )?;
+        }
+        Ok(())
     }
     .await;
 
@@ -171,5 +191,7 @@ async fn run_microvm_base_and_recovery_profiles() {
         .expect("R17 MicroVM final inventory must be available");
     cleanup.expect("R17 MicroVM cleanup must succeed");
     assert_eq!(inventory_after, inventory_before);
-    execution.expect("R17 MicroVM Base and Recovery profiles must pass");
+    execution.expect(
+        "R17 MicroVM Base, Recovery, Networking, Health, Logs, Exec, and Outputs profiles must pass",
+    );
 }
