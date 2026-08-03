@@ -1,7 +1,7 @@
 //! Public-SDK-only A3S OCI lifecycle boundary for managed local execution.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_box_core::{
@@ -17,16 +17,20 @@ use a3s_box_core::{
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
-    ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, CreateAttachments,
-    CreateRequest, DeleteMode, DeleteRequest, DriverKind, ErrorCode, EventsRequest, ExitStatus,
-    FileOp as OciFileOp, FileRequest as OciFileRequest, FileResponse as OciFileResponse,
-    FilesystemEntry as OciFilesystemEntry, FilesystemEntryKind as OciFilesystemEntryKind,
-    FilesystemOp as OciFilesystemOp, FilesystemRequest as OciFilesystemRequest,
-    FilesystemResponse as OciFilesystemResponse, IoMode, IsolationClass, IsolationRequest,
-    KillRequest, LinuxResources, LocalIpcEndpoint, OciBundle, OperationContext,
-    OperationId as OciOperationId, ProcessIo, ProcessRecord, ProcessesRequest, RuntimeClient,
-    RuntimeEventKind, RuntimeInfo, RuntimeOperation, Signal, StartRequest, StateRequest,
-    StatsRequest, UpdateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1, MAX_FILE_TRANSFER_BYTES,
+    runtime_bundle_handoff_directory as sdk_runtime_bundle_handoff_directory,
+    AttachmentCapabilities, ContainerId, ContainerOperationRequest, ContainerRecord,
+    ContainerTarget, CreateAttachments, CreateRequest, DeleteMode, DeleteRequest, DriverKind,
+    ErrorCode, EventsRequest, ExitStatus, FileOp as OciFileOp, FileRequest as OciFileRequest,
+    FileResponse as OciFileResponse, FilesystemEntry as OciFilesystemEntry,
+    FilesystemEntryKind as OciFilesystemEntryKind, FilesystemOp as OciFilesystemOp,
+    FilesystemRequest as OciFilesystemRequest, FilesystemResponse as OciFilesystemResponse, IoMode,
+    IsolationClass, IsolationRequest, KillRequest, LinuxResources, LocalIpcEndpoint, OciBundle,
+    OperationContext, OperationId as OciOperationId, ProcessIo, ProcessRecord, ProcessesRequest,
+    RuntimeClient, RuntimeEventKind, RuntimeInfo, RuntimeOperation, Signal, StartRequest,
+    StateRequest, StatsRequest, UpdateRequest, WaitRequest, ATTACHMENT_SCHEMA_V1,
+    MAX_FILE_TRANSFER_BYTES, RUNTIME_BUNDLE_HANDOFF_BUNDLE_DIRECTORY,
+    RUNTIME_BUNDLE_HANDOFF_EXTENSION, RUNTIME_BUNDLE_HANDOFF_EXTENSION_VERSION,
+    RUNTIME_BUNDLE_HANDOFF_ROOT_DIRECTORY,
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -233,6 +237,100 @@ impl OciRuntimeBinding {
     }
 }
 
+/// Stable runtime identities and negotiated capabilities available to product preparation.
+#[derive(Debug, Clone)]
+pub struct OciBundlePreparationContext {
+    runtime_container_id: ContainerId,
+    create_context: OperationContext,
+    isolation: IsolationRequest,
+    attachment_capabilities: AttachmentCapabilities,
+    execution_generation: ExecutionGeneration,
+    operation_seed: BoxOperationId,
+}
+
+impl OciBundlePreparationContext {
+    /// Exact runtime container identity derived from the Box execution identity.
+    pub fn runtime_container_id(&self) -> &ContainerId {
+        &self.runtime_container_id
+    }
+
+    /// Exact create operation context that will be sent to OCI Runtime.
+    pub fn create_context(&self) -> &OperationContext {
+        &self.create_context
+    }
+
+    /// Minimum isolation requested from OCI Runtime.
+    pub fn isolation(&self) -> &IsolationRequest {
+        &self.isolation
+    }
+
+    /// Attachment extensions advertised by the connected runtime service.
+    pub fn attachment_capabilities(&self) -> &AttachmentCapabilities {
+        &self.attachment_capabilities
+    }
+
+    /// Resolve the only operation-scoped directory accepted for bundle ownership handoff.
+    pub fn runtime_bundle_handoff_directory(
+        &self,
+        runtime_root: impl AsRef<Path>,
+    ) -> ExecutionManagerResult<PathBuf> {
+        if !self.attachment_capabilities.supports_extension(
+            RUNTIME_BUNDLE_HANDOFF_EXTENSION,
+            RUNTIME_BUNDLE_HANDOFF_EXTENSION_VERSION,
+        ) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "A3S OCI Runtime does not advertise {RUNTIME_BUNDLE_HANDOFF_EXTENSION} version {RUNTIME_BUNDLE_HANDOFF_EXTENSION_VERSION}"
+            )));
+        }
+        sdk_runtime_bundle_handoff_directory(
+            runtime_root,
+            &self.runtime_container_id,
+            &self.create_context.operation_id,
+        )
+        .map_err(|error| sdk_error("resolve bundle handoff", error))
+    }
+
+    /// Verify that a claimed handoff directory has the exact negotiated suffix.
+    pub fn validate_runtime_bundle_handoff_directory(
+        &self,
+        directory: &Path,
+    ) -> ExecutionManagerResult<()> {
+        let operation_directory = directory.parent();
+        let container_directory = operation_directory.and_then(Path::parent);
+        let handoff_root = container_directory.and_then(Path::parent);
+        let runtime_root = handoff_root.and_then(Path::parent);
+        let exact_shape = directory.is_absolute()
+            && directory.file_name().and_then(|name| name.to_str())
+                == Some(RUNTIME_BUNDLE_HANDOFF_BUNDLE_DIRECTORY)
+            && operation_directory
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some(self.create_context.operation_id.as_str())
+            && container_directory
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some(self.runtime_container_id.as_str())
+            && handoff_root
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some(RUNTIME_BUNDLE_HANDOFF_ROOT_DIRECTORY);
+        let Some(runtime_root) = runtime_root.filter(|_| exact_shape) else {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "A3S OCI bundle handoff does not match the exact runtime/container/create-operation layout: {}",
+                directory.display()
+            )));
+        };
+        let expected = self.runtime_bundle_handoff_directory(runtime_root)?;
+        if directory != expected {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "A3S OCI bundle handoff path is not normalized: {}",
+                directory.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Product-owned OCI bundle and host bookkeeping required before lifecycle launch.
 #[derive(Debug, Clone)]
 pub struct OciPreparedExecution {
@@ -273,10 +371,42 @@ impl OciPreparedExecution {
         })
     }
 
-    fn validate_for(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+    /// Bind a portable bundle prepared at the negotiated operation-scoped handoff path.
+    pub fn with_runtime_bundle_handoff(
+        mut self,
+        context: &OciBundlePreparationContext,
+        runtime_root: impl AsRef<Path>,
+    ) -> ExecutionManagerResult<Self> {
+        let expected = context.runtime_bundle_handoff_directory(runtime_root)?;
+        if self.bundle.directory() != expected {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "A3S OCI bundle handoff must use exact operation path {}: {}",
+                expected.display(),
+                self.bundle.directory().display()
+            )));
+        }
+        self.attachments = self
+            .attachments
+            .clone()
+            .with_runtime_bundle_handoff(&self.bundle)
+            .map_err(|error| sdk_error("prepare bundle handoff", error))?;
+        self.attachments
+            .validate(&self.bundle)
+            .map_err(|error| sdk_error("validate bundle handoff", error))?;
+        Ok(self)
+    }
+
+    fn validate_for(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<()> {
         self.attachments
             .validate(&self.bundle)
             .map_err(|error| sdk_error("validate attachments", error))?;
+        if self.attachments.uses_runtime_bundle_handoff() {
+            context.validate_runtime_bundle_handoff_directory(self.bundle.directory())?;
+        }
         if self.console_log != record.console_log {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "A3S OCI preparation changed the durable console path for {}",
@@ -296,8 +426,21 @@ impl OciPreparedExecution {
 /// Product-owned preparation boundary consumed by the OCI lifecycle backend.
 #[async_trait]
 pub trait OciBundleProvider: Send + Sync {
+    /// Reject a runtime/provider mismatch before product or runtime mutation.
+    fn preflight(
+        &self,
+        _record: &BoxRecord,
+        _context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     /// Prepare one immutable OCI bundle after runtime capability preflight.
-    async fn prepare(&self, record: &BoxRecord) -> ExecutionManagerResult<OciPreparedExecution>;
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution>;
 
     /// Remove only Box-owned preparation artifacts after runtime cleanup.
     async fn cleanup(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
@@ -398,13 +541,11 @@ impl OciLifecycleAdapter {
         &self,
         info: &RuntimeInfo,
         execution_id: &ExecutionId,
-        execution_generation: ExecutionGeneration,
-        operation_seed: &BoxOperationId,
+        preparation: OciBundlePreparationContext,
         prepared: OciPreparedExecution,
-        isolation: ExecutionIsolation,
     ) -> ExecutionManagerResult<OciRuntimeLaunch> {
-        let id = runtime_container_id(execution_id)?;
-        let requested = oci_isolation_request(isolation);
+        let id = preparation.runtime_container_id.clone();
+        let requested = preparation.isolation.clone();
         let expected_config_digest = prepared.bundle.config_digest().to_string();
         let expected_attachments_digest = prepared
             .attachments
@@ -413,12 +554,7 @@ impl OciLifecycleAdapter {
         let created = self
             .client
             .create(CreateRequest {
-                context: operation_context(
-                    operation_seed.as_str(),
-                    execution_generation,
-                    "create",
-                    requested.class(),
-                )?,
+                context: preparation.create_context,
                 id: id.clone(),
                 bundle: prepared.bundle,
                 isolation: requested.clone(),
@@ -436,7 +572,7 @@ impl OciLifecycleAdapter {
         ) {
             self.cleanup_failed_launch(
                 execution_id,
-                execution_generation,
+                preparation.execution_generation,
                 &created,
                 requested.class(),
             )
@@ -449,8 +585,8 @@ impl OciLifecycleAdapter {
             .client
             .start(StartRequest {
                 context: operation_context(
-                    operation_seed.as_str(),
-                    execution_generation,
+                    preparation.operation_seed.as_str(),
+                    preparation.execution_generation,
                     "start",
                     requested.class(),
                 )?,
@@ -469,7 +605,7 @@ impl OciLifecycleAdapter {
         {
             self.cleanup_failed_launch(
                 execution_id,
-                execution_generation,
+                preparation.execution_generation,
                 &created,
                 requested.class(),
             )
@@ -1096,6 +1232,30 @@ impl OciLocalExecutionBackend {
         self.adapter.client()
     }
 
+    fn preparation_context(
+        &self,
+        record: &BoxRecord,
+        info: &RuntimeInfo,
+    ) -> ExecutionManagerResult<OciBundlePreparationContext> {
+        let execution_id = self.execution_id(record)?;
+        let metadata = self.metadata(record)?;
+        let isolation = oci_isolation_request(record.isolation);
+        let create_context = operation_context(
+            metadata.operation_id.as_str(),
+            metadata.generation,
+            "create",
+            isolation.class(),
+        )?;
+        Ok(OciBundlePreparationContext {
+            runtime_container_id: runtime_container_id(&execution_id)?,
+            create_context,
+            isolation,
+            attachment_capabilities: info.attachments.clone(),
+            execution_generation: metadata.generation,
+            operation_seed: metadata.operation_id.clone(),
+        })
+    }
+
     fn handle(
         &self,
         record: &BoxRecord,
@@ -1214,13 +1374,14 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
 
     async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.metadata(record)?;
-        self.adapter.require_isolation(record.isolation).await?;
-        Ok(())
+        let info = self.adapter.require_isolation(record.isolation).await?;
+        let context = self.preparation_context(record, &info)?;
+        self.provider.preflight(record, &context)
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let execution_id = self.execution_id(record)?;
-        let metadata = self.metadata(record)?;
+        self.metadata(record)?;
         if let Some((runtime, binding)) = self.current_runtime(record).await? {
             if *runtime.state.status() == ContainerState::Running {
                 return Ok(self.handle(
@@ -1240,6 +1401,8 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         }
 
         let info = self.adapter.require_isolation(record.isolation).await?;
+        let preparation = self.preparation_context(record, &info)?;
+        self.provider.preflight(record, &preparation)?;
         let resource_home = managed_resource_home(record)?;
         let resource_record = record.clone();
         let resources = tokio::task::spawn_blocking(move || {
@@ -1252,14 +1415,14 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 record.id
             ))
         })??;
-        let prepared = match self.provider.prepare(record).await {
+        let prepared = match self.provider.prepare(record, &preparation).await {
             Ok(prepared) => prepared,
             Err(error) => {
                 rollback_execution_resources(resources, record).await;
                 return Err(error);
             }
         };
-        if let Err(error) = prepared.validate_for(record) {
+        if let Err(error) = prepared.validate_for(record, &preparation) {
             let cleanup = self.provider.cleanup(record).await;
             rollback_execution_resources(resources, record).await;
             return match cleanup {
@@ -1273,14 +1436,7 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         let anonymous_volumes = prepared.anonymous_volumes.clone();
         let launch = self
             .adapter
-            .launch_preflighted(
-                &info,
-                &execution_id,
-                metadata.generation,
-                &metadata.operation_id,
-                prepared,
-                record.isolation,
-            )
+            .launch_preflighted(&info, &execution_id, preparation, prepared)
             .await;
         match launch {
             Ok(launch) if *launch.record.state.status() == ContainerState::Running => {
