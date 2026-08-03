@@ -203,6 +203,28 @@ fn mapping_preserves_digest_resources_timeout_and_hardening() {
 }
 
 #[test]
+fn mapping_uses_tsi_only_for_runtime_services() {
+    let none = spec(RuntimeUnitClass::Task);
+    assert_eq!(
+        creation_request(&none, TEST_EXECUTION_ISOLATION)
+            .unwrap()
+            .config
+            .network,
+        a3s_box_core::NetworkMode::None
+    );
+
+    let mut service = spec(RuntimeUnitClass::Service);
+    service.network.mode = NetworkMode::Service;
+    assert_eq!(
+        creation_request(&service, TEST_EXECUTION_ISOLATION)
+            .unwrap()
+            .config
+            .network,
+        a3s_box_core::NetworkMode::Tsi
+    );
+}
+
+#[test]
 fn runtime_health_does_not_enable_cli_or_image_health_policy() {
     let mut spec = spec(RuntimeUnitClass::Service);
     spec.network = RuntimeNetworkSpec {
