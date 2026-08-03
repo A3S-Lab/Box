@@ -751,6 +751,10 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             }
         };
         result.map_err(|error| {
+            eprintln!(
+                "R17 profile failure: profile={} error={error}",
+                profile.as_str()
+            );
             RuntimeError::Protocol(format!(
                 "Box R17 {} profile failed: {error}",
                 profile.as_str()
