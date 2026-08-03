@@ -9,12 +9,20 @@ use super::{require, Result};
 
 const HTTP_HEALTH_SERVICE: &str = concat!(
     "rm -f /tmp/r17-health-http-request; ",
-    "while :; do ",
-    // Keep netcat's stdin open after sending the response so BusyBox cannot
-    // exit on local EOF before it has consumed the request from the socket.
-    "{ printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; sleep 1; } ",
-    "| nc -l -p 18080 >> /tmp/r17-health-http-request; ",
-    "done",
+    "cat > /tmp/r17-health-http-handler <<'R17_HTTP_HANDLER'\n",
+    "#!/bin/sh\n",
+    "IFS= read -r request_line || exit 1\n",
+    "while IFS= read -r header; do\n",
+    "  [ \"$header\" = \"$(printf '\\r')\" ] && break\n",
+    "done\n",
+    "printf '%s\\n' \"$request_line\" >> /tmp/r17-health-http-request\n",
+    "printf 'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'\n",
+    "R17_HTTP_HANDLER\n",
+    "chmod 0700 /tmp/r17-health-http-handler; ",
+    // BusyBox nc keeps the listener bound and forks one handler per stream
+    // when listen mode is repeated with -e. The handler consumes the request
+    // before responding, so the path assertion cannot race a local EOF.
+    "exec nc -ll -p 18080 -e /tmp/r17-health-http-handler",
 );
 
 pub(super) async fn run(
@@ -63,14 +71,6 @@ async fn http_probe_reaches_the_generation_fenced_service(
                     "sleep 0.1; i=$((i + 1)); ",
                     "done; ",
                     "[ -s /tmp/r17-health-http-request ] || exit 17; ",
-                    // The first one-shot netcat exits after the startup probe.
-                    // Wait for the loop to bind its successor before exec's
-                    // post-command health observation opens a second stream.
-                    "i=0; ",
-                    "until awk '$2 ~ /:46A0$/ && $4 == \"0A\" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp; do ",
-                    "[ \"$i\" -lt 50 ] || exit 18; ",
-                    "sleep 0.1; i=$((i + 1)); ",
-                    "done; ",
                     "head -n 1 /tmp/r17-health-http-request | tr -d '\\r'",
                 )
                 .into(),
