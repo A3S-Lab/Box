@@ -19,7 +19,8 @@ pub const OCI_HOST_ROOT_ENV: &str = "A3S_BOX_OCI_HOST_ROOT";
 pub const OCI_RUNTIME_PATH_ENV: &str = "A3S_BOX_OCI_RUNTIME_PATH";
 pub const OCI_AGENT_PATH_ENV: &str = "A3S_BOX_OCI_AGENT_PATH";
 pub const OCI_WHPX_ENDPOINT_ENV: &str = "A3S_BOX_OCI_WHPX_ENDPOINT";
-pub const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
+#[cfg(test)]
+const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
 
 /// Explicit native-Linux owner and artifact selection for Sandbox migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
