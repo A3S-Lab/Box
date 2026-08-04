@@ -143,7 +143,7 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`6223f2b957f88d348a27b3542541261b1f0ffb55` retains the matching long-lived,
+`d806e0dd5bb917bd9ed429ef9af101655c400160` retains the matching long-lived,
 multi-container Native Linux host owner and adds the generation-safe bundle
 handoff used by the preparation context above. Box now first validates the
 exact managed home and durably prepares snapshot-lower, named-volume, and
