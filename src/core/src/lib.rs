@@ -32,6 +32,8 @@ pub mod vmm;
 pub mod volume;
 #[cfg(windows)]
 pub mod windows_file;
+#[cfg(windows)]
+pub mod windows_symlink;
 
 // Re-export commonly used types
 pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};

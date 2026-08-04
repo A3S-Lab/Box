@@ -10,7 +10,8 @@ runtime path.
 - hardware virtualization enabled in firmware;
 - Windows Hypervisor Platform enabled;
 - Windows Developer Mode enabled, or the A3S Box service identity granted
-  `SeCreateSymbolicLinkPrivilege`;
+  `SeCreateSymbolicLinkPrivilege` (A3S Box temporarily enables an assigned but
+  disabled privilege only while extracting an OCI layer);
 - the A3S Box Windows binaries and their matching runtime DLLs.
 
 Enable WHPX from an elevated PowerShell prompt, then restart Windows if the
@@ -21,7 +22,9 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
 Run `a3s-box info` before starting a workload. It should report both
-`Virtualization: WHPX` and `OCI symlink support: available`.
+`Virtualization: WHPX` and `OCI symlink support: available`. The probe uses the
+same scoped privilege implementation as layer extraction, so an assigned but
+initially disabled service-token privilege is reported accurately.
 
 Linux OCI images commonly contain symbolic links for paths such as `/bin`,
 dynamic loaders, and shared libraries. The Windows rootfs is backed by NTFS and
@@ -32,10 +35,12 @@ For developers** (called **Settings > System > For developers** before Windows
 Microsoft's [Developer Mode instructions](https://learn.microsoft.com/windows/advanced-settings/developer-mode)
 and [`CreateSymbolicLink` documentation](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createsymboliclinkw).
 
-If Developer Mode is disabled and the process lacks the privilege, image
-extraction fails with `ERROR_PRIVILEGE_NOT_HELD (1314)`. This is intentional:
-replacing a symbolic link with a copied file, hard link, or directory junction
-would change OCI layer, whiteout, and guest path-resolution semantics.
+If Developer Mode is disabled and the process token lacks the privilege, or the
+target directory denies link creation, image extraction fails with an explicit
+`ERROR_ACCESS_DENIED (5)` / `ERROR_PRIVILEGE_NOT_HELD (1314)` diagnostic. This
+is intentional: replacing a symbolic link with a copied file, hard link, or
+directory junction would change OCI layer, whiteout, and guest path-resolution
+semantics.
 
 ## Runtime package
 
@@ -191,6 +196,38 @@ The virtio-fs case intentionally scans 2,048 files five times with cache mode
 `none`. Real WHPX validation took 373 seconds on the host described above, so
 that test has an independent 900-second default budget. `-SkipVirtiofsStress`
 is suitable for a short functional rehearsal, not for release soak evidence.
+
+## Box-to-OCI Runtime product qualification
+
+The unified-runtime vertical slice has a separate, build-free hardware gate.
+Download the Box `windows-whpx` artifact and the pinned OCI Runtime
+`windows-whpx-qualification` and `guest-agents-musl` artifacts without renaming
+or removing their `artifact-manifest.json` files. Use the fixed Alpine 3.22.5
+x86_64 minirootfs archive, whose SHA-256 is
+`4b4daa9fe2fc696c4919c4412a4c3d3e770d8fb70292a004a2c72f5096175282`.
+
+```powershell
+.\scripts\windows-whpx-oci-qualification.ps1 `
+  -BoxArtifactDirectory C:\artifacts\box-windows `
+  -OciWindowsArtifactDirectory C:\artifacts\oci-windows `
+  -OciGuestArtifactDirectory C:\artifacts\oci-agents `
+  -RootfsArchive C:\images\alpine-minirootfs-3.22.5-x86_64.tar.gz
+```
+
+The runner verifies the checkout and pinned OCI source commits, requires the
+two OCI artifacts to share one workflow commit and run ID, and rehashes every
+input before staging it. It starts the protected named-pipe service, imports the
+rootfs into a dedicated Box home without registry access, and runs the public
+Box manager through idempotent create, manager reopen and reconcile, WHPX
+start/wait, exact exit code 23, and generation-fenced delete replay. Success
+also requires no Box execution directory, OCI generation share, bundle handoff,
+or A3S host process to remain. `report.json` and `summary.json` use the
+versioned `a3s.box.windows-whpx-oci-qualification.v1` and
+`a3s.box.windows-whpx-oci-qualification-run.v1` schemas respectively.
+Preparation and start have a 30-minute bound. On Windows, handoff validation
+accepts the ordinary and `\\?\` namespace spellings only when they name the
+same exact container/create-operation path; a different operation suffix or a
+filesystem alias remains invalid.
 
 ## Diagnostics and kernel override
 

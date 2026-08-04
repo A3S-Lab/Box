@@ -146,6 +146,16 @@ fn extract_layer_with_cap(
         BTreeMap::new()
     };
 
+    // Windows grants administrators SeCreateSymbolicLinkPrivilege but normally
+    // leaves it disabled in the process token. `tar` creates OCI links through
+    // `std::os::windows::fs::symlink_file`, which otherwise fails even though
+    // the service identity already owns the privilege. Keep the process-wide
+    // token mutation serialized and scoped to extraction; Developer Mode still
+    // works when the token does not contain the privilege.
+    #[cfg(windows)]
+    let _windows_symlink_guard =
+        a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+
     let entries = archive
         .entries()
         .map_err(|e| BoxError::OciImageError(format!("Failed to read layer entries: {e}")))?;
@@ -246,14 +256,17 @@ fn extract_layer_with_cap(
         } else {
             None
         };
+        #[cfg(windows)]
+        let entry_is_symlink = entry.header().entry_type().is_symlink();
         let unpacked = entry.unpack_in(target_dir).map_err(|e| {
             #[cfg(windows)]
-            if error_chain_has_raw_os_error(&e, WINDOWS_SYMLINK_PRIVILEGE_ERROR) {
+            if entry_is_symlink && windows_symlink_creation_was_denied(&e) {
                 return BoxError::OciImageError(format!(
                     "Failed to extract layer to {}: Windows cannot preserve OCI symlink {}: \
                      enable Developer Mode so a non-elevated process can create symbolic links, \
-                     or grant the service identity SeCreateSymbolicLinkPrivilege; flattening the \
-                     link would corrupt the image (ERROR_PRIVILEGE_NOT_HELD (1314)). See \
+                     or grant the service identity SeCreateSymbolicLinkPrivilege and allow the \
+                     target directory; flattening the link would corrupt the image \
+                     (ERROR_ACCESS_DENIED (5) or ERROR_PRIVILEGE_NOT_HELD (1314)). See \
                      https://learn.microsoft.com/windows/advanced-settings/developer-mode",
                     target_dir.display(),
                     path.display(),
@@ -717,7 +730,20 @@ fn collect_final_metadata(
 }
 
 #[cfg(windows)]
+const WINDOWS_SYMLINK_ACCESS_DENIED_ERROR: i32 = 5;
+
+#[cfg(windows)]
 const WINDOWS_SYMLINK_PRIVILEGE_ERROR: i32 = 1314;
+
+#[cfg(windows)]
+fn windows_symlink_creation_was_denied(error: &std::io::Error) -> bool {
+    [
+        WINDOWS_SYMLINK_ACCESS_DENIED_ERROR,
+        WINDOWS_SYMLINK_PRIVILEGE_ERROR,
+    ]
+    .into_iter()
+    .any(|code| error_chain_has_raw_os_error(error, code))
+}
 
 #[cfg(windows)]
 fn error_chain_has_raw_os_error(error: &std::io::Error, code: i32) -> bool {
@@ -843,6 +869,81 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_symlink_denial_classifies_access_and_privilege_errors() {
+        for code in [
+            WINDOWS_SYMLINK_ACCESS_DENIED_ERROR,
+            WINDOWS_SYMLINK_PRIVILEGE_ERROR,
+        ] {
+            assert!(windows_symlink_creation_was_denied(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+            assert!(windows_symlink_creation_was_denied(&std::io::Error::other(
+                format!("wrapped Windows symlink failure (os error {code})")
+            )));
+        }
+        assert!(!windows_symlink_creation_was_denied(
+            &std::io::Error::from_raw_os_error(206)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_layer_extraction_temporarily_enables_an_assigned_symlink_privilege() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let temp_dir = TempDir::new().unwrap();
+        let layer = temp_dir.path().join("symlink.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        let file = File::create(&layer).unwrap();
+        let mut builder = Builder::new(GzEncoder::new(file, Compression::default()));
+        let mut target_header = tar::Header::new_gnu();
+        target_header.set_size(7);
+        target_header.set_mode(0o644);
+        target_header.set_uid(0);
+        target_header.set_gid(0);
+        target_header.set_cksum();
+        builder
+            .append_data(&mut target_header, "target", b"payload".as_slice())
+            .unwrap();
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Symlink);
+        link_header.set_size(0);
+        link_header.set_mode(0o777);
+        link_header.set_uid(0);
+        link_header.set_gid(0);
+        builder
+            .append_link(&mut link_header, "link", "target")
+            .unwrap();
+        builder.finish().unwrap();
+        drop(builder);
+
+        match extract_layer_with_metadata(&layer, &target) {
+            Ok(()) => {
+                let link = target.join("link");
+                assert!(fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink());
+                assert_eq!(fs::read_link(link).unwrap(), PathBuf::from("target"));
+            }
+            Err(error)
+                if error.to_string().contains("ERROR_ACCESS_DENIED (5)")
+                    || error
+                        .to_string()
+                        .contains("ERROR_PRIVILEGE_NOT_HELD (1314)") =>
+            {
+                eprintln!(
+                    "skipping Windows symlink extraction test: the test identity has no symlink capability"
+                );
+            }
+            Err(error) => panic!("Windows layer extraction failed unexpectedly: {error}"),
+        }
+    }
 
     #[test]
     fn test_extract_layer_creates_target_directory() {

@@ -1402,7 +1402,8 @@ impl OciBundleProvider for RuntimeBundleHandoffProvider {
                 "failed to write portable bundle handoff: {error}"
             ))
         })?;
-        let bundle = OciBundle::from_json(directory, config)
+        let bundle = OciBundle::load(&directory)
+            .await
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
         let mut prepared = OciPreparedExecution::new(bundle, record.console_log.clone())?
             .with_runtime_bundle_handoff(context, &self.runtime_root)?;
@@ -1709,7 +1710,9 @@ async fn bundle_handoff_uses_the_exact_context_sent_to_runtime_create() {
         &create.id,
         &create.context.operation_id,
     )
-    .expect("exact handoff path");
+    .expect("exact handoff path")
+    .canonicalize()
+    .expect("canonical handoff path");
     assert_eq!(create.bundle.directory(), expected_directory);
     assert!(create.attachments.uses_runtime_bundle_handoff());
     assert_eq!(
@@ -1719,6 +1722,25 @@ async fn bundle_handoff_uses_the_exact_context_sent_to_runtime_create() {
     assert_ne!(lease.generation.get(), RUNTIME_GENERATION.0);
     assert!(provider.preflights.load(Ordering::SeqCst) >= 2);
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_handoff_comparison_accepts_only_the_verbatim_namespace_spelling() {
+    use std::path::Path;
+
+    assert!(exact_handoff_directory_matches(
+        Path::new(r"\\?\C:\runtime\bundle-handoffs\box-1\create-1\bundle"),
+        Path::new(r"C:\runtime\bundle-handoffs\box-1\create-1\bundle"),
+    ));
+    assert!(exact_handoff_directory_matches(
+        Path::new(r"\\?\UNC\server\share\runtime\bundle-handoffs\box-1\create-1\bundle"),
+        Path::new(r"\\server\share\runtime\bundle-handoffs\box-1\create-1\bundle"),
+    ));
+    assert!(!exact_handoff_directory_matches(
+        Path::new(r"\\?\C:\runtime\bundle-handoffs\box-1\create-2\bundle"),
+        Path::new(r"C:\runtime\bundle-handoffs\box-1\create-1\bundle"),
+    ));
 }
 
 #[tokio::test]

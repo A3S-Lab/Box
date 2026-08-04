@@ -184,9 +184,10 @@ fn print_host_mount_info() {
 fn print_rootfs_symlink_info(home: &Path) {
     match probe_windows_symlink_support(home) {
         Ok(()) => println!("OCI symlink support: available"),
-        Err(error) if error.raw_os_error() == Some(1314) => println!(
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => println!(
             "OCI symlink support: unavailable (enable Windows Developer Mode or grant \
-             SeCreateSymbolicLinkPrivilege; ERROR_PRIVILEGE_NOT_HELD (1314))"
+             SeCreateSymbolicLinkPrivilege and allow the target directory; \
+             ERROR_ACCESS_DENIED (5) or ERROR_PRIVILEGE_NOT_HELD (1314))"
         ),
         Err(error) => println!("OCI symlink support: unavailable (probe failed: {error})"),
     }
@@ -199,6 +200,7 @@ fn probe_windows_symlink_support(home: &Path) -> std::io::Result<()> {
         .prefix(".symlink-capability-")
         .tempdir_in(home)?;
     std::fs::write(directory.path().join("target"), b"probe")?;
+    let _guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
     std::os::windows::fs::symlink_file("target", directory.path().join("link"))
 }
 

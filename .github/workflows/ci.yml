@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: d806e0dd5bb917bd9ed429ef9af101655c400160
+  A3S_OCI_RUNTIME_REV: 08c145d8ce5d06d5f28587226be822a2ab43b299
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -719,12 +719,18 @@ jobs:
           ))
           cd src
           cargo build --locked --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
+          cargo build --locked --release -p a3s-box-runtime --no-default-features --features vm `
+            --example windows-whpx-oci-qualification --target x86_64-pc-windows-msvc
+          Copy-Item `
+            target/x86_64-pc-windows-msvc/release/examples/windows-whpx-oci-qualification.exe `
+            target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe
       - name: Verify Windows artifact bundle
         shell: pwsh
         run: |
           $required = @(
             'src/target/x86_64-pc-windows-msvc/release/a3s-box.exe',
             'src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe',
+            'src/target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe',
             'src/target/x86_64-pc-windows-msvc/release/krun.dll',
             'src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll'
           )
@@ -733,6 +739,28 @@ jobs:
               throw "Required Windows artifact is missing: $path"
             }
           }
+          $releaseDirectory = 'src/target/x86_64-pc-windows-msvc/release'
+          $files = foreach ($path in $required) {
+            $item = Get-Item -LiteralPath $path
+            [ordered]@{
+              name = $item.Name
+              size = $item.Length
+              sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          $manifest = [ordered]@{
+            schema_version = 'a3s.box.windows-whpx-qualification-artifact.v1'
+            source_commit = '${{ github.event.pull_request.head.sha || github.sha }}'
+            workflow_commit = '${{ github.sha }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            files = $files
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $releaseDirectory 'artifact-manifest.json'),
+            (ConvertTo-Json -InputObject $manifest -Depth 10),
+            (New-Object System.Text.UTF8Encoding($false))
+          )
       - name: Test native one-click installer
         shell: pwsh
         run: |
@@ -749,8 +777,10 @@ jobs:
           path: |
             src/target/x86_64-pc-windows-msvc/release/a3s-box.exe
             src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe
+            src/target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe
             src/target/x86_64-pc-windows-msvc/release/krun.dll
             src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
+            src/target/x86_64-pc-windows-msvc/release/artifact-manifest.json
 
   # ── Real microVM integration gate (self-hosted, /dev/kvm) ───────
   # The fmt/clippy/test/build jobs above all run in STUB mode

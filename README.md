@@ -235,6 +235,26 @@ $env:A3S_BOX_OCI_WHPX_ENDPOINT = '\\.\pipe\a3s-oci-box-qualification'
 a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
 ```
 
+For the exact product gate, download the Box `windows-whpx` artifact and the
+pinned OCI Runtime `windows-whpx-qualification` and `guest-agents-musl`
+artifacts, preserving each artifact's `artifact-manifest.json`, then run:
+
+```powershell
+.\scripts\windows-whpx-oci-qualification.ps1 `
+  -BoxArtifactDirectory C:\artifacts\box-windows `
+  -OciWindowsArtifactDirectory C:\artifacts\oci-windows `
+  -OciGuestArtifactDirectory C:\artifacts\oci-agents `
+  -RootfsArchive C:\images\alpine-minirootfs-3.22.5-x86_64.tar.gz
+```
+
+The runner accepts only artifacts whose source commits match this Box checkout
+and its exact OCI pin, requires both OCI bundles to come from one workflow run,
+and rechecks every size and SHA-256 digest. It then exercises replay-safe
+create, Box-manager reopen, start, wait, exact exit status, and delete through
+the named-pipe service on real WHPX. `summary.json` uses schema
+`a3s.box.windows-whpx-oci-qualification-run.v1` and records cleanup and process
+inventory together with both artifact manifests.
+
 This profile accepts only a fresh writable Linux amd64 rootfs, one vCPU,
 512 MiB, `network=none`, and no TEE, host mounts, volumes, devices, sidecars,
 Snapshot, custom security controls, or persistence. Box copies the prepared
