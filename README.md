@@ -255,6 +255,17 @@ the named-pipe service on real WHPX. `summary.json` uses schema
 `a3s.box.windows-whpx-oci-qualification-run.v1` and records cleanup and process
 inventory together with both artifact manifests.
 
+The first artifact-bound run passed on real x86_64 Windows/WHPX on August 4,
+2026, using Box `52a2cfe4ee6693c9cc3a88df1b922bc1825b2deb` from CI run
+[`30889251291`](https://github.com/A3S-Lab/Box/actions/runs/30889251291)
+and pinned OCI Runtime `08c145d8ce5d06d5f28587226be822a2ab43b299`
+from main run
+[`30881404238`](https://github.com/A3S-Lab/OCI-Runtime/actions/runs/30881404238).
+It observed `libkrun-whpx`/`dedicated-vm`, exit code 23, replay-safe recovery
+and deletion, complete lifecycle-directory cleanup, and zero residual A3S
+processes. This qualification-only composition remains explicit opt-in and is
+not enabled by default.
+
 This profile accepts only a fresh writable Linux amd64 rootfs, one vCPU,
 512 MiB, `network=none`, and no TEE, host mounts, volumes, devices, sidecars,
 Snapshot, custom security controls, or persistence. Box copies the prepared

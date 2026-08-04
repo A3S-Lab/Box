@@ -11,7 +11,8 @@ runtime path.
 - Windows Hypervisor Platform enabled;
 - Windows Developer Mode enabled, or the A3S Box service identity granted
   `SeCreateSymbolicLinkPrivilege` (A3S Box temporarily enables an assigned but
-  disabled privilege only while extracting an OCI layer);
+  disabled privilege only while probing the capability or extracting an OCI
+  layer);
 - the A3S Box Windows binaries and their matching runtime DLLs.
 
 Enable WHPX from an elevated PowerShell prompt, then restart Windows if the
@@ -228,6 +229,18 @@ Preparation and start have a 30-minute bound. On Windows, handoff validation
 accepts the ordinary and `\\?\` namespace spellings only when they name the
 same exact container/create-operation path; a different operation suffix or a
 filesystem alias remains invalid.
+
+The first artifact-bound product gate passed on real x86_64 Windows/WHPX on
+August 4, 2026. It used Box
+`52a2cfe4ee6693c9cc3a88df1b922bc1825b2deb` from CI run
+[`30889251291`](https://github.com/A3S-Lab/Box/actions/runs/30889251291)
+and pinned OCI Runtime `08c145d8ce5d06d5f28587226be822a2ab43b299`
+from main run
+[`30881404238`](https://github.com/A3S-Lab/OCI-Runtime/actions/runs/30881404238).
+The twelve-minute run observed the exact `libkrun-whpx`/`dedicated-vm`
+binding, running state, exit code 23, create and delete replay, manager-restart
+reconciliation, complete lifecycle-directory cleanup, and no residual A3S
+processes.
 
 ## Diagnostics and kernel override
 

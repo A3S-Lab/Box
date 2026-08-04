@@ -207,4 +207,13 @@ and its
 both completed successfully with the x86_64 and aarch64 real-host lanes. That
 later revision changes only the CI matrix, deterministic recovery conformance
 fixture, and plan documentation relative to the qualified production adapter.
-Later documentation-only commits do not replace either evidence revision.
+The Windows product-gate evidence is Box
+`52a2cfe4ee6693c9cc3a88df1b922bc1825b2deb`: its
+[pull-request CI run](https://github.com/A3S-Lab/Box/actions/runs/30889251291)
+produced the exact Windows binaries that passed the real x86_64 WHPX lifecycle
+against OCI Runtime `08c145d8ce5d06d5f28587226be822a2ab43b299` artifacts from
+[main run](https://github.com/A3S-Lab/OCI-Runtime/actions/runs/30881404238).
+The machine-readable reports recorded exact replay, manager restart, running
+state, exit code 23, `libkrun-whpx`/`dedicated-vm`, complete path cleanup, and
+zero residual processes.
+Later documentation-only commits do not replace these evidence revisions.

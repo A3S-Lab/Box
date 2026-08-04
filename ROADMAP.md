@@ -268,7 +268,7 @@ later gates.
     convert bounded rootfs metadata to the public OCI schema, and expose an
     explicit named-pipe qualification composition with a fail-closed feature
     profile.
-  - [ ] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
+  - [x] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
     delete gate and retain machine-readable evidence in blocking CI.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
@@ -301,6 +301,16 @@ retains the Developer Mode/fail-closed path so Linux OCI links are never
 flattened. Windows handoff validation treats only the
 ordinary and verbatim namespace spellings of the exact same operation path as
 equivalent, and the hardware executable bounds preparation/start at 30 minutes.
+The first artifact-bound gate passed on real x86_64 Windows/WHPX on August 4,
+2026: Box `52a2cfe4ee6693c9cc3a88df1b922bc1825b2deb` from CI run
+[`30889251291`](https://github.com/A3S-Lab/Box/actions/runs/30889251291)
+ran against pinned OCI Runtime
+`08c145d8ce5d06d5f28587226be822a2ab43b299` artifacts from main run
+[`30881404238`](https://github.com/A3S-Lab/OCI-Runtime/actions/runs/30881404238).
+The report recorded exact create replay, manager-restart reconciliation,
+`libkrun-whpx`/`dedicated-vm`, observed running state, exit code 23, replay-safe
+deletion, complete lifecycle-directory cleanup, and zero residual A3S
+processes.
 The deterministic live-session fixtures are
 still not proof that a real driver can transparently
 retain process or filesystem sessions after its owner dies.
