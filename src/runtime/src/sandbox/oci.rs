@@ -10,7 +10,9 @@ use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 use a3s_oci_sdk::{
     CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION, CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION,
     CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION, CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION,
-    CONTROL_WORKLOAD_CGROUP_LAYOUT_V1,
+    CONTROL_WORKLOAD_CGROUP_LAYOUT_V1, PORTABLE_ROOTFS_METADATA_ANNOTATION,
+    PORTABLE_ROOTFS_METADATA_SCHEMA_V1, RUNTIME_BUNDLE_HANDOFF_EXTENSION,
+    RUNTIME_BUNDLE_HANDOFF_MOVE_V1,
 };
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
@@ -25,6 +27,8 @@ use super::capability::{IdMapping, SandboxIdMappingPlan};
 
 /// OCI annotation schema for generated A3S Sandbox bundles.
 pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
+/// Qualification schema for a portable one-VM-per-container bundle.
+pub const PORTABLE_MICROVM_BUNDLE_SCHEMA: &str = "a3s.box.portable-microvm-bundle.v1";
 /// Baseline process count enforced even when the caller omits `--pids-limit`.
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
@@ -293,6 +297,85 @@ pub fn compile_runtime_owned_oci_spec(
     compile_spec(input, process, SandboxProcessOwner::RuntimeOwned)
 }
 
+/// Compile the bounded portable profile consumed by OCI Runtime's dedicated-VM driver.
+pub fn compile_portable_microvm_oci_spec(
+    box_id: &str,
+    hostname: &str,
+    runtime_process: &SandboxRuntimeProcess,
+) -> Result<Spec> {
+    validate_box_id(box_id)?;
+    validate_hostname(hostname)?;
+    validate_runtime_process_shape(runtime_process)?;
+
+    let user = UserBuilder::default()
+        .uid(runtime_process.uid)
+        .gid(runtime_process.gid)
+        .additional_gids(runtime_process.additional_gids.clone())
+        .build()
+        .map_err(oci_error)?;
+    let process = ProcessBuilder::default()
+        .terminal(false)
+        .user(user)
+        .args(runtime_process.args.clone())
+        .env(compile_runtime_environment(&runtime_process.environment)?)
+        .cwd(runtime_process.cwd.clone())
+        .capabilities(compile_workload_capabilities(
+            &[],
+            &runtime_process.dropped_capabilities,
+        )?)
+        .no_new_privileges(true)
+        .build()
+        .map_err(oci_error)?;
+    let linux = LinuxBuilder::default()
+        .namespaces(compile_portable_microvm_namespaces()?)
+        .cgroups_path(PathBuf::from(format!("a3s-box/{box_id}")))
+        .build()
+        .map_err(oci_error)?;
+    let mut annotations = HashMap::new();
+    annotations.insert(
+        "com.a3s.box.microvm.schema".to_string(),
+        PORTABLE_MICROVM_BUNDLE_SCHEMA.to_string(),
+    );
+    annotations.insert(
+        "com.a3s.box.isolation-class".to_string(),
+        "hardware-vm".to_string(),
+    );
+    annotations.insert(
+        "com.a3s.box.process-owner".to_string(),
+        "a3s-oci-runtime".to_string(),
+    );
+    annotations.insert(
+        RUNTIME_BUNDLE_HANDOFF_EXTENSION.to_string(),
+        RUNTIME_BUNDLE_HANDOFF_MOVE_V1.to_string(),
+    );
+    annotations.insert(
+        PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+        PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string(),
+    );
+
+    SpecBuilder::default()
+        .version("1.3.0".to_string())
+        .root(
+            RootBuilder::default()
+                .path(PathBuf::from("rootfs"))
+                .readonly(false)
+                .build()
+                .map_err(oci_error)?,
+        )
+        .mounts(vec![mount(
+            "/proc",
+            "proc",
+            "proc",
+            &["nosuid", "noexec", "nodev"],
+        )?])
+        .process(process)
+        .hostname(hostname.to_string())
+        .annotations(annotations)
+        .linux(linux)
+        .build()
+        .map_err(oci_error)
+}
+
 fn validate_bundle_input(input: &SandboxBundleSpec) -> Result<()> {
     validate_box_id(&input.box_id)?;
     validate_rootfs_path(&input.rootfs_path)?;
@@ -432,16 +515,7 @@ fn validate_runtime_process(
     process: &SandboxRuntimeProcess,
     id_mappings: &SandboxIdMappingPlan,
 ) -> Result<()> {
-    let executable = process.args.first().ok_or_else(|| {
-        BoxError::ConfigError("Sandbox runtime-owned process requires an executable".to_string())
-    })?;
-    validate_linux_absolute_normalized(Path::new(executable), "process executable")?;
-    if process.args.iter().any(|argument| argument.contains('\0')) {
-        return Err(BoxError::ConfigError(
-            "Sandbox process arguments must not contain NUL".to_string(),
-        ));
-    }
-    validate_linux_absolute_normalized(&process.cwd, "process working directory")?;
+    validate_runtime_process_shape(process)?;
     if process.uid > id_mappings.maximum_container_uid {
         return Err(BoxError::ConfigError(format!(
             "Sandbox process UID {} exceeds the mapped maximum {}",
@@ -456,6 +530,20 @@ fn validate_runtime_process(
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_runtime_process_shape(process: &SandboxRuntimeProcess) -> Result<()> {
+    let executable = process.args.first().ok_or_else(|| {
+        BoxError::ConfigError("Sandbox runtime-owned process requires an executable".to_string())
+    })?;
+    validate_linux_absolute_normalized(Path::new(executable), "process executable")?;
+    if process.args.iter().any(|argument| argument.contains('\0')) {
+        return Err(BoxError::ConfigError(
+            "Sandbox process arguments must not contain NUL".to_string(),
+        ));
+    }
+    validate_linux_absolute_normalized(&process.cwd, "process working directory")?;
     Ok(())
 }
 
@@ -601,6 +689,25 @@ fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
         LinuxNamespaceType::Uts,
         LinuxNamespaceType::Network,
         LinuxNamespaceType::Cgroup,
+    ]
+    .into_iter()
+    .map(|typ| {
+        LinuxNamespaceBuilder::default()
+            .typ(typ)
+            .build()
+            .map_err(oci_error)
+    })
+    .collect()
+}
+
+fn compile_portable_microvm_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
+    [
+        LinuxNamespaceType::Uts,
+        LinuxNamespaceType::Mount,
+        LinuxNamespaceType::Ipc,
+        LinuxNamespaceType::Network,
+        LinuxNamespaceType::Cgroup,
+        LinuxNamespaceType::Pid,
     ]
     .into_iter()
     .map(|typ| {
@@ -1557,6 +1664,38 @@ mod tests {
             additional_gids: vec![789],
             dropped_capabilities: vec!["SETUID".to_string()],
         }
+    }
+
+    #[test]
+    fn portable_microvm_compiler_uses_relative_root_and_no_user_namespace() {
+        let value = as_json(
+            &compile_portable_microvm_oci_spec("box-123", "box-123", &sample_runtime_process())
+                .unwrap(),
+        );
+
+        assert_eq!(value["ociVersion"], "1.3.0");
+        assert_eq!(value["root"]["path"], "rootfs");
+        assert_eq!(value["root"]["readonly"], false);
+        assert_eq!(
+            value["annotations"][PORTABLE_ROOTFS_METADATA_ANNOTATION],
+            PORTABLE_ROOTFS_METADATA_SCHEMA_V1
+        );
+        assert_eq!(
+            value["annotations"][RUNTIME_BUNDLE_HANDOFF_EXTENSION],
+            RUNTIME_BUNDLE_HANDOFF_MOVE_V1
+        );
+        assert_eq!(
+            value["annotations"]["com.a3s.box.isolation-class"],
+            "hardware-vm"
+        );
+        let namespaces = value["linux"]["namespaces"].as_array().unwrap();
+        assert!(namespaces
+            .iter()
+            .any(|namespace| namespace["type"] == "mount"));
+        assert!(!namespaces
+            .iter()
+            .any(|namespace| namespace["type"] == "user"));
+        assert_eq!(value["mounts"][0]["destination"], "/proc");
     }
 
     #[test]

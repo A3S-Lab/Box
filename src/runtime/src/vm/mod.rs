@@ -2,6 +2,7 @@
 
 mod layout;
 mod network;
+mod oci_microvm;
 mod ready;
 pub mod reap;
 mod sandbox;

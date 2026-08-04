@@ -52,7 +52,9 @@ never retried on the Box backend. On Linux, the CLI, machine bridge, and the
 async Rust SDK constructor can now opt new Sandbox records into the production
 bundle provider and long-lived pinned runtime owner with
 `A3S_BOX_OCI_MIGRATION=sandbox`. With the setting absent, current behavior is
-unchanged.
+unchanged. Windows x86_64 also has an explicit qualification-only
+`microvm`/`all` composition for the externally launched OCI Runtime WHPX
+service; it is not enabled by default and is not yet a production claim.
 
 > [!NOTE]
 > The current SDK-only Sandbox adapter now covers four exact-generation rails:
@@ -219,11 +221,37 @@ Rust applications select the same path with
 `from_home`, and `with_paths` constructors retain legacy behavior for API
 compatibility.
 
-Current opt-in limits are intentional: only new Linux Sandbox reservations are
-routed; `all`/MicroVM migration is rejected; image-declared anonymous volumes
-must be replaced by explicit named or bind mounts; and remaining socket-based
-CLI projections (`attach`, `cp`, `top`, `stats`, live `container-update`, plus
-init stdout/stderr projection into Box logs) are not yet promoted on this path.
+### Exercise the qualification-only WHPX handoff on Windows
+
+Start the pinned OCI Runtime `box-whpx-qualification-service` with its shim,
+protected runtime root, utility-VM rootfs, state root, named pipe, and readiness
+file. Then configure every Box process that owns the test record:
+
+```powershell
+$env:A3S_BOX_OCI_MIGRATION = 'microvm'
+$env:A3S_BOX_OCI_HOST_ROOT = 'C:\absolute\a3s-oci-runtime-root'
+$env:A3S_BOX_OCI_WHPX_ENDPOINT = '\\.\pipe\a3s-oci-box-qualification'
+
+a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
+```
+
+This profile accepts only a fresh writable Linux amd64 rootfs, one vCPU,
+512 MiB, `network=none`, and no TEE, host mounts, volumes, devices, sidecars,
+Snapshot, custom security controls, or persistence. Box copies the prepared
+rootfs into the exact operation-scoped SDK handoff, converts its image metadata
+to `a3s.oci.rootfs-metadata.v1`, emits a relative `rootfs` OCI specification
+without a user namespace, and atomically publishes the bundle. OCI Runtime
+then moves that bundle into the exact WHPX generation share. Missing extension
+support or any unqualified option fails before image preparation. The endpoint
+must be supplied explicitly so this experimental service can never activate by
+accident.
+
+Current Linux opt-in limits are intentional: only new Sandbox reservations are
+routed there; `all`/MicroVM migration is rejected on Linux; image-declared
+anonymous volumes must be replaced by explicit named or bind mounts; and
+remaining socket-based CLI projections (`attach`, `cp`, `top`, `stats`, live
+`container-update`, plus init stdout/stderr projection into Box logs) are not
+yet promoted on this path.
 The typed SDK lifecycle, exec/PTY, file/filesystem, process inventory, stats,
 events, resource update, pause/resume, wait, restart, and cleanup contracts do
 route through the exact OCI generation.

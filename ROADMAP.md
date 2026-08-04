@@ -143,7 +143,7 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`0451739d15795be5829a4774198e276f861561be` retains the matching long-lived,
+`6223f2b957f88d348a27b3542541261b1f0ffb55` retains the matching long-lived,
 multi-container Native Linux host owner and adds the generation-safe bundle
 handoff used by the preparation context above. Box now first validates the
 exact managed home and durably prepares snapshot-lower, named-volume, and
@@ -261,6 +261,12 @@ later gates.
   - [x] Negotiate the required handoff extension and bind provider preparation
     to the exact runtime container/create-operation path without coupling Box
     and runtime generations.
+  - [x] Produce the operation-scoped portable bundle from Box image policy,
+    convert bounded rootfs metadata to the public OCI schema, and expose an
+    explicit named-pipe qualification composition with a fail-closed feature
+    profile.
+  - [ ] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
+    delete gate and retain machine-readable evidence in blocking CI.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
@@ -277,10 +283,12 @@ long-lived Native Linux owner, and Box now supplies fail-closed mixed-backend
 routing, verified product-resource preparation, a direct-process production
 bundle provider, protected owner startup, and explicit CLI/SDK construction.
 The real-host Native Linux x86_64 and aarch64 production composition and
-owner/Box process restart lanes now pass. The remaining B1 platform gate is the
-equivalent WHPX production path; the deterministic live-session fixtures are
-not promoted as proof that a real driver can transparently retain process or
-filesystem sessions after its owner dies.
+owner/Box process restart lanes now pass. Box now also owns the portable WHPX
+bundle producer and explicit qualification-only named-pipe composition. The
+remaining B1 platform gate is execution of that exact path on a real WHPX host;
+the deterministic live-session fixtures are not promoted as proof that a real
+driver can transparently retain process or filesystem sessions after its owner
+dies.
 
 ### B2 - Interactive And Observable Execution
 

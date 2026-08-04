@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  A3S_OCI_RUNTIME_REV: 6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2
+  A3S_OCI_RUNTIME_REV: 6223f2b957f88d348a27b3542541261b1f0ffb55
 
 jobs:
   # ── Tests must pass before release ─────────────────────────────

@@ -16,6 +16,8 @@ mod oci_migration;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 mod oci_owner;
 #[cfg(feature = "vm")]
+pub(crate) mod oci_portable_rootfs;
+#[cfg(feature = "vm")]
 mod oci_production;
 mod oci_session;
 mod operations;
@@ -60,9 +62,9 @@ pub use oci_backend::{
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 #[cfg(feature = "vm")]
-pub use oci_migration::NativeLinuxOciMigrationConfig;
+pub use oci_migration::{NativeLinuxOciMigrationConfig, WindowsWhpxOciMigrationConfig};
 #[cfg(feature = "vm")]
-pub use oci_production::NativeLinuxOciBundleProvider;
+pub use oci_production::{NativeLinuxOciBundleProvider, WindowsWhpxOciBundleProvider};
 use record::{build_managed_record, status_from_record};
 pub use router::{LocalExecutionBackendRouter, OciMigrationPolicy};
 use store::RuntimeUpdate;

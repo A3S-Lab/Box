@@ -18,6 +18,8 @@ pub const OCI_MIGRATION_ENV: &str = "A3S_BOX_OCI_MIGRATION";
 pub const OCI_HOST_ROOT_ENV: &str = "A3S_BOX_OCI_HOST_ROOT";
 pub const OCI_RUNTIME_PATH_ENV: &str = "A3S_BOX_OCI_RUNTIME_PATH";
 pub const OCI_AGENT_PATH_ENV: &str = "A3S_BOX_OCI_AGENT_PATH";
+pub const OCI_WHPX_ENDPOINT_ENV: &str = "A3S_BOX_OCI_WHPX_ENDPOINT";
+pub const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
 
 /// Explicit native-Linux owner and artifact selection for Sandbox migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,56 @@ pub struct NativeLinuxOciMigrationConfig {
     service_root: PathBuf,
     runtime_path: Option<PathBuf>,
     agent_path: Option<PathBuf>,
+}
+
+/// Explicit connection to an externally owned qualification-only WHPX service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsWhpxOciMigrationConfig {
+    runtime_root: PathBuf,
+    endpoint: super::OciRuntimeEndpoint,
+}
+
+impl WindowsWhpxOciMigrationConfig {
+    pub fn new(
+        runtime_root: impl Into<PathBuf>,
+        endpoint: impl Into<String>,
+    ) -> ExecutionManagerResult<Self> {
+        let config = Self {
+            runtime_root: runtime_root.into(),
+            endpoint: super::OciRuntimeEndpoint::windows_named_pipe(endpoint)?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    pub fn endpoint(&self) -> &super::OciRuntimeEndpoint {
+        &self.endpoint
+    }
+
+    pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
+        parse_windows_environment(
+            std::env::var_os(OCI_MIGRATION_ENV),
+            std::env::var_os(OCI_HOST_ROOT_ENV),
+            std::env::var_os(OCI_WHPX_ENDPOINT_ENV),
+            home_dir,
+        )
+    }
+
+    fn validate(&self) -> ExecutionManagerResult<()> {
+        validate_absolute_normalized(&self.runtime_root, "WHPX OCI runtime root")?;
+        match &self.endpoint {
+            super::OciRuntimeEndpoint::WindowsNamedPipe { .. } => Ok(()),
+            super::OciRuntimeEndpoint::UnixSocket { .. } => {
+                Err(ExecutionManagerError::InvalidRequest(
+                    "WHPX OCI qualification requires a Windows named-pipe endpoint".to_string(),
+                ))
+            }
+        }
+    }
 }
 
 impl NativeLinuxOciMigrationConfig {
@@ -165,6 +217,61 @@ impl LocalExecutionManager {
         }
     }
 
+    /// Compose the retained backend with the externally launched Box/WHPX OCI service.
+    pub async fn with_windows_whpx_oci_qualification(
+        state_path: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        config: WindowsWhpxOciMigrationConfig,
+    ) -> ExecutionManagerResult<Self> {
+        Self::with_windows_whpx_oci_qualification_and_pull_progress(
+            state_path.into(),
+            home_dir.into(),
+            config,
+            None,
+        )
+        .await
+    }
+
+    async fn with_windows_whpx_oci_qualification_and_pull_progress(
+        state_path: PathBuf,
+        home_dir: PathBuf,
+        config: WindowsWhpxOciMigrationConfig,
+        pull_progress_fn: Option<crate::PullProgressFn>,
+    ) -> ExecutionManagerResult<Self> {
+        config.validate()?;
+
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            let mut provider =
+                super::WindowsWhpxOciBundleProvider::new(home_dir.clone(), config.runtime_root());
+            if let Some(progress) = pull_progress_fn.as_ref() {
+                provider = provider.with_pull_progress_fn(progress.clone());
+            }
+            let oci = Arc::new(
+                super::OciLocalExecutionBackend::connect(
+                    config.endpoint().clone(),
+                    Arc::new(provider),
+                )
+                .await?,
+            );
+            Ok(Self::with_oci_migration_backend_and_pull_progress(
+                state_path,
+                home_dir,
+                oci,
+                super::OciMigrationPolicy::AllViaOci,
+                pull_progress_fn,
+            ))
+        }
+
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        {
+            let _ = (state_path, home_dir, config, pull_progress_fn);
+            Err(ExecutionManagerError::Unavailable(
+                "Box/WHPX OCI qualification requires Windows x86_64".to_string(),
+            ))
+        }
+    }
+
     /// Select the production migration composition only when explicitly opted
     /// in through `A3S_BOX_OCI_MIGRATION=sandbox`.
     pub async fn with_configured_backend(
@@ -183,25 +290,55 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<Self> {
         let state_path = state_path.into();
         let home_dir = home_dir.into();
-        match NativeLinuxOciMigrationConfig::from_environment(&home_dir)? {
-            Some(config) => {
-                Self::with_native_linux_oci_migration_and_pull_progress(
-                    state_path,
-                    home_dir,
-                    config,
-                    pull_progress_fn,
-                )
-                .await
-            }
-            None => {
-                let mut backend = crate::local_execution::VmLocalExecutionBackend::new(&home_dir);
-                if let Some(progress) = pull_progress_fn {
-                    backend = backend.with_pull_progress_fn(progress);
+
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            return match WindowsWhpxOciMigrationConfig::from_environment(&home_dir)? {
+                Some(config) => {
+                    Self::with_windows_whpx_oci_qualification_and_pull_progress(
+                        state_path,
+                        home_dir,
+                        config,
+                        pull_progress_fn,
+                    )
+                    .await
                 }
-                Ok(Self::new(state_path, home_dir, Arc::new(backend)))
+                None => legacy_backend(state_path, home_dir, pull_progress_fn),
+            };
+        }
+
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        {
+            match NativeLinuxOciMigrationConfig::from_environment(&home_dir)? {
+                Some(config) => {
+                    Self::with_native_linux_oci_migration_and_pull_progress(
+                        state_path,
+                        home_dir,
+                        config,
+                        pull_progress_fn,
+                    )
+                    .await
+                }
+                None => legacy_backend(state_path, home_dir, pull_progress_fn),
             }
         }
     }
+}
+
+fn legacy_backend(
+    state_path: PathBuf,
+    home_dir: PathBuf,
+    pull_progress_fn: Option<crate::PullProgressFn>,
+) -> ExecutionManagerResult<LocalExecutionManager> {
+    let mut backend = crate::local_execution::VmLocalExecutionBackend::new(&home_dir);
+    if let Some(progress) = pull_progress_fn {
+        backend = backend.with_pull_progress_fn(progress);
+    }
+    Ok(LocalExecutionManager::new(
+        state_path,
+        home_dir,
+        Arc::new(backend),
+    ))
 }
 
 fn parse_environment(
@@ -254,6 +391,56 @@ fn parse_environment(
         }
     }
     Ok(Some(config))
+}
+
+fn parse_windows_environment(
+    mode: Option<OsString>,
+    runtime_root: Option<OsString>,
+    endpoint: Option<OsString>,
+    home_dir: &Path,
+) -> ExecutionManagerResult<Option<WindowsWhpxOciMigrationConfig>> {
+    let Some(mode) = mode.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let mode = mode.to_str().ok_or_else(|| {
+        ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_MIGRATION_ENV} must contain UTF-8 text"
+        ))
+    })?;
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "disabled" | "legacy" => return Ok(None),
+        "all" | "all-via-oci" | "microvm" | "microvm-via-oci" | "whpx" => {}
+        "1" | "true" | "on" | "sandbox" | "sandbox-via-oci" => {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "Windows OCI qualification supports only MicroVM/WHPX routing; use all or microvm"
+                    .to_string(),
+            ))
+        }
+        value => {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "unsupported {OCI_MIGRATION_ENV} value {value:?}; expected off, microvm, or all"
+            )))
+        }
+    }
+
+    let runtime_root = runtime_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_service_root(home_dir));
+    let endpoint = endpoint
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_WHPX_ENDPOINT_ENV} must be set explicitly for the qualification-only WHPX service"
+        ))
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "{OCI_WHPX_ENDPOINT_ENV} must contain UTF-8 text"
+            ))
+        })?;
+    WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
 }
 
 fn default_service_root(home_dir: &Path) -> PathBuf {
@@ -334,5 +521,29 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime_path(), Some(runtime.as_path()));
         assert_eq!(config.agent_path(), Some(agent.as_path()));
+    }
+
+    #[test]
+    fn windows_environment_requires_explicit_pipe_and_accepts_microvm() {
+        let home = absolute("a3s-oci-config-home");
+        assert!(
+            parse_windows_environment(Some(OsString::from("all")), None, None, &home,).is_err()
+        );
+
+        let config = parse_windows_environment(
+            Some(OsString::from("microvm")),
+            Some(absolute("a3s-oci-whpx-root").into_os_string()),
+            Some(OsString::from(DEFAULT_OCI_WHPX_ENDPOINT)),
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::windows_named_pipe(
+                DEFAULT_OCI_WHPX_ENDPOINT,
+            )
+            .unwrap()
+        );
     }
 }

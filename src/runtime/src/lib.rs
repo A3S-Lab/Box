@@ -86,6 +86,7 @@ pub use local_execution::{
 #[cfg(feature = "vm")]
 pub use local_execution::{
     NativeLinuxOciBundleProvider, NativeLinuxOciMigrationConfig, VmLocalExecutionBackend,
+    WindowsWhpxOciBundleProvider, WindowsWhpxOciMigrationConfig,
 };
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,

@@ -910,7 +910,7 @@ struct RuntimeGroupEntry {
     members: Vec<String>,
 }
 
-fn resolve_runtime_owned_process(
+pub(crate) fn resolve_runtime_owned_process(
     rootfs: &Path,
     instance_spec: &crate::vmm::InstanceSpec,
     dropped_capabilities: &[String],
