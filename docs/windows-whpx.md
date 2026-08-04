@@ -27,6 +27,11 @@ Run `a3s-box info` before starting a workload. It should report both
 same scoped privilege implementation as layer extraction, so an assigned but
 initially disabled service-token privilege is reported accurately.
 
+If the probe reports that `SeCreateSymbolicLinkPrivilege` is enabled but link
+creation is still denied, check the A3S home ACL and endpoint-protection policy.
+Allow the approved `a3s-box.exe` binary and its A3S home directory according to
+the organization's security policy; do not flatten or replace OCI links.
+
 Linux OCI images commonly contain symbolic links for paths such as `/bin`,
 dynamic loaders, and shared libraries. The Windows rootfs is backed by NTFS and
 served to the guest through virtio-fs, so A3S Box must preserve those entries as
@@ -217,12 +222,16 @@ x86_64 minirootfs archive, whose SHA-256 is
 
 The runner verifies the checkout and pinned OCI source commits, requires the
 two OCI artifacts to share one workflow commit and run ID, and rehashes every
-input before staging it. It starts the protected named-pipe service, imports the
-rootfs into a dedicated Box home without registry access, and runs the public
-Box manager through idempotent create, manager reopen and reconcile, WHPX
-start/wait, exact exit code 23, and generation-fenced delete replay. Success
-also requires no Box execution directory, OCI generation share, bundle handoff,
-or A3S host process to remain. `report.json` and `summary.json` use the
+input before staging it. Before starting the service, it runs `a3s-box info`
+from the staged artifact and requires `OCI symlink support: available`; the
+captured `box-info.stdout.log` distinguishes missing Windows capability from an
+ACL or endpoint-protection denial. It then starts the protected named-pipe
+service, imports the rootfs into a dedicated Box home without registry access,
+and runs the public Box manager through idempotent create, manager reopen and
+reconcile, WHPX start/wait, exact exit code 23, and generation-fenced delete
+replay. Success also requires no Box execution directory, OCI generation share,
+bundle handoff, or A3S host process to remain. `report.json` and `summary.json`
+use the
 versioned `a3s.box.windows-whpx-oci-qualification.v1` and
 `a3s.box.windows-whpx-oci-qualification-run.v1` schemas respectively.
 Preparation and start have a 30-minute bound. On Windows, handoff validation
@@ -241,6 +250,14 @@ The twelve-minute run observed the exact `libkrun-whpx`/`dedicated-vm`
 binding, running state, exit code 23, create and delete replay, manager-restart
 reconciliation, complete lifecycle-directory cleanup, and no residual A3S
 processes.
+
+The exact post-merge Box main artifact
+`aaf9e615ee8bb5e22a5214ca09d7e426701f2d58` from main CI run
+[`30898682738`](https://github.com/A3S-Lab/Box/actions/runs/30898682738)
+subsequently passed the same complete gate against the pinned OCI Runtime main
+artifacts. This verifies that the merge result, artifact manifest, and tested
+WHPX lifecycle all refer to published main revisions rather than only the PR
+head.
 
 ## Diagnostics and kernel override
 

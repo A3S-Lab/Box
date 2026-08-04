@@ -20,7 +20,7 @@ static WINDOWS_SYMLINK_PRIVILEGE_LOCK: Mutex<()> = Mutex::new(());
 pub struct WindowsSymlinkPrivilegeGuard {
     // Field order is intentional: restore the process privilege before
     // releasing the serialization lock.
-    _privilege: Option<WindowsTokenPrivilegeGuard>,
+    privilege: Option<WindowsTokenPrivilegeGuard>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -41,9 +41,31 @@ impl WindowsSymlinkPrivilegeGuard {
             }
         };
         Self {
-            _privilege: privilege,
+            privilege,
             _lock: lock,
         }
+    }
+
+    /// Whether the process token's assigned privilege was enabled for this scope.
+    ///
+    /// A `false` result does not rule out Developer Mode as an alternate way to
+    /// authorize symbolic-link creation.
+    pub fn assigned_privilege_enabled(&self) -> bool {
+        self.privilege.is_some()
+    }
+}
+
+/// Explain a denied symlink operation using the effective privilege state.
+#[doc(hidden)]
+pub fn denial_diagnostic(assigned_privilege_enabled: bool) -> &'static str {
+    if assigned_privilege_enabled {
+        "SeCreateSymbolicLinkPrivilege was enabled, but the target directory ACL or endpoint \
+         security denied symbolic-link creation; verify the target ACL and allow the approved \
+         A3S Box executable and target directory in endpoint security; ERROR_ACCESS_DENIED (5) \
+         or ERROR_PRIVILEGE_NOT_HELD (1314)"
+    } else {
+        "enable Windows Developer Mode or grant SeCreateSymbolicLinkPrivilege and allow the \
+         target directory; ERROR_ACCESS_DENIED (5) or ERROR_PRIVILEGE_NOT_HELD (1314)"
     }
 }
 
@@ -169,6 +191,18 @@ impl Drop for WindowsTokenPrivilegeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denial_diagnostic_distinguishes_endpoint_policy() {
+        let enabled = denial_diagnostic(true);
+        assert!(enabled.contains("SeCreateSymbolicLinkPrivilege was enabled"));
+        assert!(enabled.contains("endpoint security"));
+        assert!(!enabled.contains("enable Windows Developer Mode"));
+
+        let unavailable = denial_diagnostic(false);
+        assert!(unavailable.contains("enable Windows Developer Mode"));
+        assert!(unavailable.contains("grant SeCreateSymbolicLinkPrivilege"));
+    }
 
     #[test]
     fn acquired_scope_preserves_a_real_link_when_the_identity_is_capable() {

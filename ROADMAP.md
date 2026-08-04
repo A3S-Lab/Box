@@ -298,7 +298,10 @@ Windows layer extraction and `a3s-box info` share one serialized privilege
 scope which temporarily enables only an already assigned
 `SeCreateSymbolicLinkPrivilege`, restores the token immediately, and otherwise
 retains the Developer Mode/fail-closed path so Linux OCI links are never
-flattened. Windows handoff validation treats only the
+flattened. The hardware runner now preflights that exact staged binary before
+starting the runtime and distinguishes a missing privilege from ACL or endpoint
+security denial in both CLI and extraction diagnostics. Windows handoff
+validation treats only the
 ordinary and verbatim namespace spellings of the exact same operation path as
 equivalent, and the hardware executable bounds preparation/start at 30 minutes.
 The first artifact-bound gate passed on real x86_64 Windows/WHPX on August 4,
@@ -311,6 +314,14 @@ The report recorded exact create replay, manager-restart reconciliation,
 `libkrun-whpx`/`dedicated-vm`, observed running state, exit code 23, replay-safe
 deletion, complete lifecycle-directory cleanup, and zero residual A3S
 processes.
+
+The exact post-merge Box main artifact
+`aaf9e615ee8bb5e22a5214ca09d7e426701f2d58` from main CI run
+[`30898682738`](https://github.com/A3S-Lab/Box/actions/runs/30898682738)
+subsequently passed the same complete lifecycle gate against the pinned OCI
+Runtime main artifacts, binding final source, workflow, binary digests, and
+hardware evidence to main revisions.
+
 The deterministic live-session fixtures are
 still not proof that a real driver can transparently
 retain process or filesystem sessions after its owner dies.

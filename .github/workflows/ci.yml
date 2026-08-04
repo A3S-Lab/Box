@@ -724,6 +724,11 @@ jobs:
           Copy-Item `
             target/x86_64-pc-windows-msvc/release/examples/windows-whpx-oci-qualification.exe `
             target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe
+      - name: Test Windows symlink diagnostics
+        run: |
+          cd src
+          cargo test --locked -p a3s-box-core `
+            denial_diagnostic_distinguishes_endpoint_policy
       - name: Verify Windows artifact bundle
         shell: pwsh
         run: |

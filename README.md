@@ -249,9 +249,11 @@ artifacts, preserving each artifact's `artifact-manifest.json`, then run:
 
 The runner accepts only artifacts whose source commits match this Box checkout
 and its exact OCI pin, requires both OCI bundles to come from one workflow run,
-and rechecks every size and SHA-256 digest. It then exercises replay-safe
-create, Box-manager reopen, start, wait, exact exit status, and delete through
-the named-pipe service on real WHPX. `summary.json` uses schema
+and rechecks every size and SHA-256 digest. It first requires the staged
+`a3s-box.exe` to report `OCI symlink support: available`, with separate logs for
+missing privilege and ACL or endpoint-protection denials. It then exercises
+replay-safe create, Box-manager reopen, start, wait, exact exit status, and
+delete through the named-pipe service on real WHPX. `summary.json` uses schema
 `a3s.box.windows-whpx-oci-qualification-run.v1` and records cleanup and process
 inventory together with both artifact manifests.
 
@@ -265,6 +267,13 @@ It observed `libkrun-whpx`/`dedicated-vm`, exit code 23, replay-safe recovery
 and deletion, complete lifecycle-directory cleanup, and zero residual A3S
 processes. This qualification-only composition remains explicit opt-in and is
 not enabled by default.
+
+The exact post-merge main artifact `aaf9e615ee8bb5e22a5214ca09d7e426701f2d58`
+from main CI run
+[`30898682738`](https://github.com/A3S-Lab/Box/actions/runs/30898682738)
+subsequently passed the same complete gate against the pinned OCI Runtime main
+artifacts. Its manifest-bound `a3s-box.exe` SHA-256 was
+`31e98e73b325825bf1c49798cc9f51d744bf2502785b6651978947e312b5fa6b`.
 
 This profile accepts only a fresh writable Linux amd64 rootfs, one vCPU,
 512 MiB, `network=none`, and no TEE, host mounts, volumes, devices, sidecars,
