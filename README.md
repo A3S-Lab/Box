@@ -268,6 +268,13 @@ and deletion, complete lifecycle-directory cleanup, and zero residual A3S
 processes. This qualification-only composition remains explicit opt-in and is
 not enabled by default.
 
+The exact post-merge main artifact `aaf9e615ee8bb5e22a5214ca09d7e426701f2d58`
+from main CI run
+[`30898682738`](https://github.com/A3S-Lab/Box/actions/runs/30898682738)
+subsequently passed the same complete gate against the pinned OCI Runtime main
+artifacts. Its manifest-bound `a3s-box.exe` SHA-256 was
+`31e98e73b325825bf1c49798cc9f51d744bf2502785b6651978947e312b5fa6b`.
+
 This profile accepts only a fresh writable Linux amd64 rootfs, one vCPU,
 512 MiB, `network=none`, and no TEE, host mounts, volumes, devices, sidecars,
 Snapshot, custom security controls, or persistence. Box copies the prepared

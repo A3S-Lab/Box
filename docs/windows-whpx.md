@@ -251,6 +251,14 @@ binding, running state, exit code 23, create and delete replay, manager-restart
 reconciliation, complete lifecycle-directory cleanup, and no residual A3S
 processes.
 
+The exact post-merge Box main artifact
+`aaf9e615ee8bb5e22a5214ca09d7e426701f2d58` from main CI run
+[`30898682738`](https://github.com/A3S-Lab/Box/actions/runs/30898682738)
+subsequently passed the same complete gate against the pinned OCI Runtime main
+artifacts. This verifies that the merge result, artifact manifest, and tested
+WHPX lifecycle all refer to published main revisions rather than only the PR
+head.
+
 ## Diagnostics and kernel override
 
 The default WHPX boot path automatically selects the current reliable
