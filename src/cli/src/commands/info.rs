@@ -183,25 +183,53 @@ fn print_host_mount_info() {
 #[cfg(windows)]
 fn print_rootfs_symlink_info(home: &Path) {
     match probe_windows_symlink_support(home) {
-        Ok(()) => println!("OCI symlink support: available"),
-        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => println!(
-            "OCI symlink support: unavailable (enable Windows Developer Mode or grant \
-             SeCreateSymbolicLinkPrivilege and allow the target directory; \
-             ERROR_ACCESS_DENIED (5) or ERROR_PRIVILEGE_NOT_HELD (1314))"
+        WindowsSymlinkProbe::Available => println!("OCI symlink support: available"),
+        WindowsSymlinkProbe::Denied {
+            assigned_privilege_enabled,
+        } => println!(
+            "OCI symlink support: unavailable ({})",
+            a3s_box_core::windows_symlink::denial_diagnostic(assigned_privilege_enabled)
         ),
-        Err(error) => println!("OCI symlink support: unavailable (probe failed: {error})"),
+        WindowsSymlinkProbe::Failed(error) => {
+            println!("OCI symlink support: unavailable (probe failed: {error})")
+        }
     }
 }
 
 #[cfg(windows)]
-fn probe_windows_symlink_support(home: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(home)?;
-    let directory = tempfile::Builder::new()
+enum WindowsSymlinkProbe {
+    Available,
+    Denied { assigned_privilege_enabled: bool },
+    Failed(std::io::Error),
+}
+
+#[cfg(windows)]
+fn probe_windows_symlink_support(home: &Path) -> WindowsSymlinkProbe {
+    if let Err(error) = std::fs::create_dir_all(home) {
+        return WindowsSymlinkProbe::Failed(error);
+    }
+    let directory = match tempfile::Builder::new()
         .prefix(".symlink-capability-")
-        .tempdir_in(home)?;
-    std::fs::write(directory.path().join("target"), b"probe")?;
-    let _guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
-    std::os::windows::fs::symlink_file("target", directory.path().join("link"))
+        .tempdir_in(home)
+    {
+        Ok(directory) => directory,
+        Err(error) => return WindowsSymlinkProbe::Failed(error),
+    };
+    if let Err(error) = std::fs::write(directory.path().join("target"), b"probe") {
+        return WindowsSymlinkProbe::Failed(error);
+    }
+
+    let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+    let assigned_privilege_enabled = guard.assigned_privilege_enabled();
+    match std::os::windows::fs::symlink_file("target", directory.path().join("link")) {
+        Ok(()) => WindowsSymlinkProbe::Available,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => {
+            WindowsSymlinkProbe::Denied {
+                assigned_privilege_enabled,
+            }
+        }
+        Err(error) => WindowsSymlinkProbe::Failed(error),
+    }
 }
 
 #[cfg(not(windows))]

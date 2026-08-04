@@ -249,9 +249,11 @@ artifacts, preserving each artifact's `artifact-manifest.json`, then run:
 
 The runner accepts only artifacts whose source commits match this Box checkout
 and its exact OCI pin, requires both OCI bundles to come from one workflow run,
-and rechecks every size and SHA-256 digest. It then exercises replay-safe
-create, Box-manager reopen, start, wait, exact exit status, and delete through
-the named-pipe service on real WHPX. `summary.json` uses schema
+and rechecks every size and SHA-256 digest. It first requires the staged
+`a3s-box.exe` to report `OCI symlink support: available`, with separate logs for
+missing privilege and ACL or endpoint-protection denials. It then exercises
+replay-safe create, Box-manager reopen, start, wait, exact exit status, and
+delete through the named-pipe service on real WHPX. `summary.json` uses schema
 `a3s.box.windows-whpx-oci-qualification-run.v1` and records cleanup and process
 inventory together with both artifact manifests.
 

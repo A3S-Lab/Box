@@ -298,7 +298,10 @@ Windows layer extraction and `a3s-box info` share one serialized privilege
 scope which temporarily enables only an already assigned
 `SeCreateSymbolicLinkPrivilege`, restores the token immediately, and otherwise
 retains the Developer Mode/fail-closed path so Linux OCI links are never
-flattened. Windows handoff validation treats only the
+flattened. The hardware runner now preflights that exact staged binary before
+starting the runtime and distinguishes a missing privilege from ACL or endpoint
+security denial in both CLI and extraction diagnostics. Windows handoff
+validation treats only the
 ordinary and verbatim namespace spellings of the exact same operation path as
 equivalent, and the hardware executable bounds preparation/start at 30 minutes.
 The first artifact-bound gate passed on real x86_64 Windows/WHPX on August 4,

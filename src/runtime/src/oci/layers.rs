@@ -153,8 +153,10 @@ fn extract_layer_with_cap(
     // token mutation serialized and scoped to extraction; Developer Mode still
     // works when the token does not contain the privilege.
     #[cfg(windows)]
-    let _windows_symlink_guard =
+    let windows_symlink_guard =
         a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+    #[cfg(windows)]
+    let windows_symlink_privilege_enabled = windows_symlink_guard.assigned_privilege_enabled();
 
     let entries = archive
         .entries()
@@ -261,12 +263,12 @@ fn extract_layer_with_cap(
         let unpacked = entry.unpack_in(target_dir).map_err(|e| {
             #[cfg(windows)]
             if entry_is_symlink && windows_symlink_creation_was_denied(&e) {
+                let diagnostic = a3s_box_core::windows_symlink::denial_diagnostic(
+                    windows_symlink_privilege_enabled,
+                );
                 return BoxError::OciImageError(format!(
                     "Failed to extract layer to {}: Windows cannot preserve OCI symlink {}: \
-                     enable Developer Mode so a non-elevated process can create symbolic links, \
-                     or grant the service identity SeCreateSymbolicLinkPrivilege and allow the \
-                     target directory; flattening the link would corrupt the image \
-                     (ERROR_ACCESS_DENIED (5) or ERROR_PRIVILEGE_NOT_HELD (1314)). See \
+                     {diagnostic}; flattening the link would corrupt the image. See \
                      https://learn.microsoft.com/windows/advanced-settings/developer-mode",
                     target_dir.display(),
                     path.display(),

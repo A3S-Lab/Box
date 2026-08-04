@@ -54,6 +54,8 @@ $reportPath = Join-Path $outputRoot 'report.json'
 $summaryPath = Join-Path $outputRoot 'summary.json'
 $serviceStdoutPath = Join-Path $outputRoot 'oci-service.stdout.log'
 $serviceStderrPath = Join-Path $outputRoot 'oci-service.stderr.log'
+$infoStdoutPath = Join-Path $outputRoot 'box-info.stdout.log'
+$infoStderrPath = Join-Path $outputRoot 'box-info.stderr.log'
 $importStdoutPath = Join-Path $outputRoot 'box-import.stdout.log'
 $importStderrPath = Join-Path $outputRoot 'box-import.stderr.log'
 $qualificationStdoutPath = Join-Path $outputRoot 'qualification.stdout.log'
@@ -324,6 +326,7 @@ $serviceArguments = @(
 
 $service = $null
 $ready = $null
+$symlinkPreflight = $null
 $qualificationReport = $null
 $failure = $null
 $result = 'failed'
@@ -344,6 +347,42 @@ foreach ($name in @(
 }
 
 try {
+    $env:A3S_HOME = $boxHome
+    $infoProcess = Start-Process -FilePath $boxCli `
+        -ArgumentList 'info' `
+        -WorkingDirectory $boxBin `
+        -RedirectStandardOutput $infoStdoutPath `
+        -RedirectStandardError $infoStderrPath `
+        -WindowStyle Hidden -Wait -PassThru
+    $infoOutput = if (Test-Path -LiteralPath $infoStdoutPath -PathType Leaf) {
+        [string](Get-Content -LiteralPath $infoStdoutPath -Raw)
+    } else {
+        ''
+    }
+    $symlinkSupportLine = $infoOutput -split "`r?`n" |
+        Where-Object { $_ -like 'OCI symlink support:*' } |
+        Select-Object -First 1
+    if ($null -eq $symlinkSupportLine) {
+        $symlinkSupportLine = ''
+    }
+    $symlinkPreflight = [ordered]@{
+        exit_code = $infoProcess.ExitCode
+        status_line = $symlinkSupportLine
+        stdout = $infoStdoutPath
+        stderr = $infoStderrPath
+    }
+    if ($infoProcess.ExitCode -ne 0) {
+        throw "Staged Box capability preflight failed with exit code $($infoProcess.ExitCode); see $infoStdoutPath and $infoStderrPath"
+    }
+    if ($symlinkSupportLine -ne 'OCI symlink support: available') {
+        $diagnostic = if ([string]::IsNullOrWhiteSpace($symlinkSupportLine)) {
+            'the expected OCI symlink status was not emitted'
+        } else {
+            $symlinkSupportLine
+        }
+        throw "Staged Box binary cannot preserve Windows OCI symlinks: $diagnostic; see $infoStdoutPath and $infoStderrPath"
+    }
+
     $service = Start-Process -FilePath $ociCli `
         -ArgumentList (Join-QuotedNativeArguments -Arguments $serviceArguments) `
         -WorkingDirectory $ociBin `
@@ -374,7 +413,6 @@ try {
         throw 'OCI qualification readiness evidence does not match the launched owner.'
     }
 
-    $env:A3S_HOME = $boxHome
     $importProcess = Start-Process -FilePath $boxCli `
         -ArgumentList (Join-QuotedNativeArguments -Arguments @(
             'import', $rootfsArchive, $image
@@ -475,6 +513,7 @@ finally {
         box_artifact = $boxManifest
         oci_windows_artifact = $ociWindowsManifest
         oci_guest_artifact = $ociGuestManifest
+        symlink_preflight = $symlinkPreflight
         service_ready = $ready
         qualification = $qualificationReport
         residual_processes = $residual
