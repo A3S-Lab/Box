@@ -64,7 +64,7 @@ pub(crate) fn publish_portable_rootfs_metadata(rootfs: &Path) -> Result<()> {
         )));
     }
     let mut bytes = Vec::with_capacity(length as usize);
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_SOURCE_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(BoxError::IoError)?;
