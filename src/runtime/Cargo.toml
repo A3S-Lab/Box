@@ -16,6 +16,11 @@ name = "managed-sandbox-smoke"
 path = "examples/managed_sandbox_smoke.rs"
 required-features = ["vm"]
 
+[[example]]
+name = "windows-whpx-oci-qualification"
+path = "examples/windows_whpx_oci_qualification.rs"
+required-features = ["vm"]
+
 [features]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []

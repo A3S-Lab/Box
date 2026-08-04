@@ -378,7 +378,7 @@ impl OciPreparedExecution {
         runtime_root: impl AsRef<Path>,
     ) -> ExecutionManagerResult<Self> {
         let expected = context.runtime_bundle_handoff_directory(runtime_root)?;
-        if self.bundle.directory() != expected {
+        if !exact_handoff_directory_matches(self.bundle.directory(), &expected) {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "A3S OCI bundle handoff must use exact operation path {}: {}",
                 expected.display(),
@@ -421,6 +421,53 @@ impl OciPreparedExecution {
         }
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn exact_handoff_directory_matches(directory: &Path, expected: &Path) -> bool {
+    directory == expected
+}
+
+#[cfg(windows)]
+fn exact_handoff_directory_matches(directory: &Path, expected: &Path) -> bool {
+    // `OciBundle::load` resolves an existing directory with
+    // `std::fs::canonicalize`. Windows returns that same directory in the
+    // verbatim `\\?\C:\...` namespace, while the operation-scoped SDK path is
+    // intentionally constructed before publication as `C:\...`. Strip only
+    // that namespace spelling (including its UNC form); do not resolve either
+    // input here, because accepting a symlink alias would weaken the exact
+    // container/operation ownership boundary.
+    windows_path_without_verbatim_prefix(directory)
+        == windows_path_without_verbatim_prefix(expected)
+}
+
+#[cfg(windows)]
+fn windows_path_without_verbatim_prefix(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION_MARK: u16 = b'?' as u16;
+    const COLON: u16 = b':' as u16;
+    const UNC: [u16; 4] = [b'U' as u16, b'N' as u16, b'C' as u16, BACKSLASH];
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let Some(rest) = encoded.strip_prefix(&[BACKSLASH, BACKSLASH, QUESTION_MARK, BACKSLASH]) else {
+        return encoded;
+    };
+    let has_drive_prefix = rest.len() >= 3
+        && ((b'A' as u16..=b'Z' as u16).contains(&rest[0])
+            || (b'a' as u16..=b'z' as u16).contains(&rest[0]))
+        && rest[1] == COLON;
+    if has_drive_prefix {
+        return rest.to_vec();
+    }
+    if let Some(unc_rest) = rest.strip_prefix(&UNC) {
+        let mut normalized = Vec::with_capacity(unc_rest.len() + 2);
+        normalized.extend([BACKSLASH, BACKSLASH]);
+        normalized.extend_from_slice(unc_rest);
+        return normalized;
+    }
+    encoded
 }
 
 /// Product-owned preparation boundary consumed by the OCI lifecycle backend.

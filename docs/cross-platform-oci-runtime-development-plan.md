@@ -61,7 +61,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`d806e0dd5bb917bd9ed429ef9af101655c400160`, which retains the qualified
+`08c145d8ce5d06d5f28587226be822a2ab43b299`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. Runtime service startup
@@ -71,7 +71,10 @@ exact recorded driver's idempotent recovery hook and commits any legal state
 observation before serving. Windows additionally has a protected, local-only
 named-pipe SDK host listener ready for the WHPX driver, and utility-VM
 ownership can explicitly close every guest-agent client clone before reaping
-the guest and hypervisor shim. The shared session keeps one VM owner, lends
+the guest and hypervisor shim. Durable Native Linux owner recovery remains
+host-only; the utility-VM guest executor uses transient recovery state and does
+not attempt host journal writes before protocol negotiation. The shared
+session keeps one VM owner, lends
 clone-safe clients to concurrent operations, and returns one cached cleanup
 report to every shutdown caller. Native Linux and the new WHPX driver candidate
 share one eighteen-operation adapter. The candidate binds one VM to each exact
@@ -204,4 +207,13 @@ and its
 both completed successfully with the x86_64 and aarch64 real-host lanes. That
 later revision changes only the CI matrix, deterministic recovery conformance
 fixture, and plan documentation relative to the qualified production adapter.
-Later documentation-only commits do not replace either evidence revision.
+The Windows product-gate evidence is Box
+`52a2cfe4ee6693c9cc3a88df1b922bc1825b2deb`: its
+[pull-request CI run](https://github.com/A3S-Lab/Box/actions/runs/30889251291)
+produced the exact Windows binaries that passed the real x86_64 WHPX lifecycle
+against OCI Runtime `08c145d8ce5d06d5f28587226be822a2ab43b299` artifacts from
+[main run](https://github.com/A3S-Lab/OCI-Runtime/actions/runs/30881404238).
+The machine-readable reports recorded exact replay, manager restart, running
+state, exit code 23, `libkrun-whpx`/`dedicated-vm`, complete path cleanup, and
+zero residual processes.
+Later documentation-only commits do not replace these evidence revisions.
