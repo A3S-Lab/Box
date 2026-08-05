@@ -538,6 +538,34 @@ impl CoreSmoke {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn assert_shim_log_excludes(&self, name: &str, forbidden: &[&str]) {
+        let record = self.inspect_json(name);
+        let console_log = PathBuf::from(json_string_field(&record, "console_log"));
+        let log_dir = console_log.parent().unwrap_or_else(|| {
+            panic!(
+                "inspect console_log has no parent for {name}: {}",
+                console_log.display()
+            )
+        });
+        let shim_log_path = log_dir.join("shim.stderr.log");
+        let shim_log = std::fs::read_to_string(&shim_log_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read shim log for {name} at {}: {error}",
+                shim_log_path.display()
+            )
+        });
+
+        for marker in forbidden {
+            assert!(
+                !shim_log.contains(marker),
+                "shim log for {name} contained forbidden marker {marker:?}\npath: {}\n{}",
+                shim_log_path.display(),
+                shim_log
+            );
+        }
+    }
+
     fn wait_for_named_status(&self, name: &str, expected: &str) -> serde_json::Value {
         let start = Instant::now();
         let mut last = String::new();
@@ -1385,6 +1413,11 @@ exec nc -ll -p 6379 -e /tmp/a3s-pong"#,
         "echo EXEC_AFTER_PONG",
     ]);
     assert_contains(&exec, "EXEC_AFTER_PONG", "exec after TSI PONG");
+
+    smoke.assert_shim_log_excludes(
+        &smoke.name,
+        &["Backend(Internal(ENOBUFS))", "NETDEV WATCHDOG"],
+    );
 
     smoke.ok(&["rm", "-f", &smoke.name]);
 }

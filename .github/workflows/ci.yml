@@ -866,6 +866,78 @@ jobs:
             src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
             src/target/x86_64-pc-windows-msvc/release/artifact-manifest.json
 
+  # ── Real Apple Silicon/HVF published-port gate ───────────────────
+  # A hosted arm64 macOS runner is itself virtualized and cannot use HVF for a
+  # nested guest. Keep the published-port regression on a physical Apple
+  # Silicon runner so a source-only unit test cannot stand in for real virtio
+  # queue progress.
+  integration-hvf:
+    name: Integration (real microVM, Apple Silicon/HVF)
+    needs: [fmt, clippy, test, sdk-packages]
+    if: github.event_name != 'pull_request' && vars.HVF_CI == 'true'
+    runs-on: [self-hosted, macos, arm64, hvf]
+    timeout-minutes: 90
+    env:
+      A3S_BOX_SMOKE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      A3S_BOX_ALLOW_REGISTRY_PULL: "1"
+      A3S_BOX_SMOKE_TIMEOUT_SECS: "600"
+      A3S_REGISTRY_MIRRORS: ${{ vars.HVF_CI_REGISTRY_MIRRORS }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      - name: Verify physical Apple Silicon and HVF
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sysctl -n kern.hv_support)" = 1
+      - name: Use the runner's existing Rust toolchain
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl
+      - name: Build real host binaries and guest init
+        run: |
+          unset A3S_DEPS_STUB
+          cd src
+          cargo zigbuild --locked --release -p a3s-box-guest-init \
+            --target aarch64-unknown-linux-musl
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-shim
+          codesign --entitlements shim/entitlements.plist --force -s - \
+            target/release/a3s-box-shim
+      - name: Qualify repeated published-port traffic after TX backpressure
+        run: |
+          unset A3S_DEPS_STUB
+          evidence="$RUNNER_TEMP/a3s-box-hvf-published-port-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$evidence"
+          {
+            echo "box_revision=$GITHUB_SHA"
+            echo "libkrun_revision=$(git -C src/deps/libkrun-sys/vendor/libkrun rev-parse HEAD)"
+            echo "runner_arch=$(uname -m)"
+            echo "hvf=$(sysctl -n kern.hv_support)"
+          } > "$evidence/metadata.txt"
+          cd src
+          cargo test --locked --release -p a3s-box-cli --test core_smoke \
+            real_core_tsi_published_tcp_nonblocking_accept_and_exec \
+            -- --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$evidence/test.log"
+          echo "result=pass" > "$evidence/result.txt"
+      - name: Reject leaked qualification shims
+        if: always()
+        run: |
+          leaked="$(pgrep -f "$GITHUB_WORKSPACE/src/target/release/a3s-box-shim" || true)"
+          if [ -n "$leaked" ]; then
+            ps -fp $leaked || true
+            kill -KILL $leaked || true
+            echo "::error::Apple Silicon/HVF qualification left a shim behind"
+            exit 1
+          fi
+      - name: Upload Apple Silicon/HVF evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hvf-published-port-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a3s-box-hvf-published-port-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+
   # ── Real microVM integration gate (self-hosted, /dev/kvm) ───────
   # The fmt/clippy/test/build jobs above all run in STUB mode
   # (A3S_DEPS_STUB) and never boot a real microVM, so a runtime

@@ -404,7 +404,7 @@ error before dispatch.
 | Path | Current evidence | Boundary that remains visible |
 | --- | --- | --- |
 | Linux MicroVM | Primary local path through KVM/libkrun; all advertised A3S Runtime provider profiles plus self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | Full release evidence still requires the enrolled self-hosted KVM runner and the longer `G2`/`R24` profiles |
-| macOS MicroVM | Apple Silicon/HVF build and packaging path | Real Apple Silicon/HVF release validation remains a separate host gate; Intel macOS is unsupported |
+| macOS MicroVM | Apple Silicon/HVF build and packaging path plus an opt-in real-HVF published-port regression gate | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route | Shared-kernel preview; VM-only controls are rejected |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
