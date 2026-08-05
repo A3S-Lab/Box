@@ -92,11 +92,11 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
     prepare_marker_paths(&spec)?;
 
     if let Some(ready) = read_marker(&spec.ready_file)? {
+        let drained = read_marker(&spec.drained_file)?;
         if marker_matches(&spec, &ready) {
-            if read_marker(&spec.drained_file)?
-                .as_ref()
-                .is_some_and(|marker| marker_matches(&spec, marker))
-            {
+            if drained.as_ref().is_some_and(|marker| {
+                marker_matches(&spec, marker) && markers_identify_same_worker(&ready, marker)
+            }) {
                 return Ok(());
             }
             if marker_is_running(&ready) {
@@ -107,7 +107,17 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
                 spec.runtime_container_id, spec.runtime_generation
             )));
         }
-        if marker_is_running(&ready) {
+        if drained
+            .as_ref()
+            .is_some_and(|marker| markers_identify_same_worker(&ready, marker))
+        {
+            // Drain evidence is authoritative for the old generation. The
+            // worker may still be returning from main or awaiting reaping, but
+            // it can no longer write output or logging state and therefore
+            // cannot conflict with the next generation's projection.
+            remove_file_if_present(&spec.ready_file)?;
+            remove_file_if_present(&spec.drained_file)?;
+        } else if marker_is_running(&ready) {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: ExecutionId::new(record.id.clone())?,
                 message: format!(
@@ -115,8 +125,9 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
                     ready.runtime_container_id, ready.runtime_generation
                 ),
             });
+        } else {
+            remove_file_if_present(&spec.ready_file)?;
         }
-        remove_file_if_present(&spec.ready_file)?;
     }
 
     if let Some(drained) = read_marker(&spec.drained_file)? {
@@ -292,6 +303,13 @@ fn marker_matches(spec: &ManagedOciLogWorkerSpec, marker: &ManagedOciLogWorkerMa
         && marker.pid != 0
 }
 
+fn markers_identify_same_worker(
+    ready: &ManagedOciLogWorkerMarker,
+    drained: &ManagedOciLogWorkerMarker,
+) -> bool {
+    ready == drained && ready.pid != 0
+}
+
 fn marker_is_running(marker: &ManagedOciLogWorkerMarker) -> bool {
     crate::process::is_process_running_with_identity(marker.pid, marker.pid_start_time)
 }
@@ -370,9 +388,11 @@ mod tests {
         };
 
         assert!(marker_matches(&spec, &marker));
+        assert!(markers_identify_same_worker(&marker, &marker));
         let mut stale_box = marker.clone();
         stale_box.execution_generation -= 1;
         assert!(!marker_matches(&spec, &stale_box));
+        assert!(!markers_identify_same_worker(&marker, &stale_box));
         let mut stale_runtime = marker;
         stale_runtime.runtime_generation -= 1;
         assert!(!marker_matches(&spec, &stale_runtime));
