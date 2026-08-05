@@ -74,6 +74,7 @@ pub struct BoxStatsSummary {
     pub network_tx_bytes: u64,
     pub block_read_bytes: u64,
     pub block_write_bytes: u64,
+    pub pids_current: Option<u64>,
 }
 
 /// Local runtime diagnostics suitable for status bars and diagnostics panes.

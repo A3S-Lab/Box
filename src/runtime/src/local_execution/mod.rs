@@ -105,15 +105,41 @@ impl LocalExecutionManager {
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<BoxRecord> {
+        self.require_live_record(execution_id, generation, false)
+            .await
+    }
+
+    pub(super) async fn require_observable_record(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        self.require_live_record(execution_id, generation, true)
+            .await
+    }
+
+    async fn require_live_record(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        allow_paused: bool,
+    ) -> ExecutionManagerResult<BoxRecord> {
         let record = self
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
         support::require_generation(&record, execution_id, generation)?;
-        if support::managed_state(&record)? != ManagedExecutionState::Running {
+        let state = support::managed_state(&record)?;
+        if state != ManagedExecutionState::Running
+            && !(allow_paused && state == ManagedExecutionState::Paused)
+        {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id.clone(),
-                message: "execution is not running".to_string(),
+                message: if allow_paused {
+                    "execution is neither running nor paused".to_string()
+                } else {
+                    "execution is not running".to_string()
+                },
             });
         }
         if let Some(binding) = record
@@ -150,6 +176,26 @@ impl LocalExecutionManager {
         let current = self
             .require_running_record(execution_id, generation)
             .await?;
+        Self::validate_same_runtime(bound, &current, execution_id)
+    }
+
+    pub(super) async fn require_same_observable_runtime(
+        &self,
+        bound: &BoxRecord,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<()> {
+        let current = self
+            .require_observable_record(execution_id, generation)
+            .await?;
+        Self::validate_same_runtime(bound, &current, execution_id)
+    }
+
+    fn validate_same_runtime(
+        bound: &BoxRecord,
+        current: &BoxRecord,
+        execution_id: &ExecutionId,
+    ) -> ExecutionManagerResult<()> {
         if current.pid != bound.pid
             || current.pid_start_time != bound.pid_start_time
             || current.exec_socket_path != bound.exec_socket_path

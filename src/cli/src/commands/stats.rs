@@ -6,11 +6,13 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, System};
 
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
 use a3s_box_runtime::ExecClient;
+use a3s_box_sdk::{A3sBoxClient, A3sBoxPaths, BoxStatsSummary};
 
 use crate::output;
 use crate::resolve;
@@ -69,6 +71,27 @@ impl BoxStats {
 
     fn scaled_cpu_percent(&self) -> f64 {
         self.cpu_percent as f64 / self.cpus.max(1) as f64
+    }
+}
+
+impl From<BoxStatsSummary> for BoxStats {
+    fn from(stats: BoxStatsSummary) -> Self {
+        Self {
+            id: stats.id,
+            name: stats.name,
+            short_id: stats.short_id,
+            status: stats.status,
+            pid: stats.pid,
+            cpus: stats.cpus,
+            cpu_percent: stats.cpu_percent,
+            memory_bytes: stats.memory_bytes,
+            memory_limit_bytes: stats.memory_limit_bytes,
+            network_rx_bytes: stats.network_rx_bytes,
+            network_tx_bytes: stats.network_tx_bytes,
+            block_read_bytes: stats.block_read_bytes,
+            block_write_bytes: stats.block_write_bytes,
+            pids_current: stats.pids_current,
+        }
     }
 }
 
@@ -388,6 +411,7 @@ impl PcapEndian {
 
 pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut sys = System::new();
+    let mut runtime_client = None;
 
     loop {
         let state = StateFile::load_default()?;
@@ -406,6 +430,36 @@ pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> 
         // Collect stats for each active box.
         let mut stats = Vec::new();
         for record in &targets {
+            if record
+                .managed_execution
+                .as_ref()
+                .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
+            {
+                let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+                    format!("Box {} lost managed execution metadata", record.name)
+                })?;
+                if runtime_client.is_none() {
+                    let home = a3s_box_core::dirs_home();
+                    let manager = super::configured_local_execution_manager(&home).await?;
+                    runtime_client = Some(A3sBoxClient::with_execution_manager(
+                        A3sBoxPaths::from_home(home),
+                        Arc::new(manager),
+                    ));
+                }
+                let client = runtime_client.as_ref().ok_or_else(|| {
+                    format!("failed to initialize runtime stats for {}", record.name)
+                })?;
+                if let Some(summary) = client
+                    .get_sandbox_stats(
+                        &a3s_box_core::ExecutionId::new(record.id.clone())?,
+                        metadata.generation,
+                    )
+                    .await?
+                {
+                    stats.push(summary.into());
+                }
+                continue;
+            }
             if let Some(mut box_stats) = build_box_stats(&mut sys, record) {
                 if args.format == StatsFormat::Json {
                     box_stats.pids_current = collect_pids_current(record).await;
@@ -540,6 +594,34 @@ mod tests {
         assert_eq!(json["block_write_bytes"], 8192);
         assert_eq!(json["pids_current"], 7);
         assert_eq!(json["pids"]["current"], 7);
+    }
+
+    #[test]
+    fn managed_runtime_summary_preserves_exact_counters() {
+        let row = BoxStats::from(BoxStatsSummary {
+            id: "managed-id".to_string(),
+            short_id: "managed".to_string(),
+            name: "sandbox".to_string(),
+            status: "paused".to_string(),
+            pid: 42,
+            cpus: 4,
+            cpu_percent: 75.0,
+            cpu_percent_scaled: 18.75,
+            memory_bytes: 128,
+            memory_limit_bytes: 512,
+            memory_percent: 25.0,
+            network_rx_bytes: 1_024,
+            network_tx_bytes: 2_048,
+            block_read_bytes: 4_096,
+            block_write_bytes: 8_192,
+            pids_current: Some(3),
+        });
+
+        assert_eq!(row.status, "paused");
+        assert_eq!(row.pid, 42);
+        assert_eq!(row.block_read_bytes, 4_096);
+        assert_eq!(row.block_write_bytes, 8_192);
+        assert_eq!(row.pids_current, Some(3));
     }
 
     #[test]

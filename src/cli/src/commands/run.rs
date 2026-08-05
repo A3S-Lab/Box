@@ -907,10 +907,7 @@ fn run_context_uses_oci(ctx: &RunContext) -> bool {
     ctx.record
         .managed_execution
         .as_ref()
-        .is_some_and(|metadata| {
-            metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
-                || metadata.oci_runtime.is_some()
-        })
+        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
 }
 
 fn foreground_completion_message(

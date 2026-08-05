@@ -6,7 +6,6 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-use a3s_box_runtime::ExecClient;
 
 use crate::resolve;
 use crate::state::StateFile;
@@ -48,13 +47,6 @@ struct TopProcess {
 pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
-    let exec_socket_path = crate::socket_paths::require_runtime_socket(
-        record,
-        crate::socket_paths::RuntimeSocket::Exec,
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    let client = ExecClient::connect(&exec_socket_path).await?;
 
     let cmd = build_ps_command(args.format, &args.ps_args);
 
@@ -71,7 +63,7 @@ pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
         streaming: false,
     };
 
-    let output = client.exec_command(&request).await?;
+    let output = super::exec::execute_captured(record, request).await?;
 
     if !output.stderr.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);

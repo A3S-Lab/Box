@@ -516,6 +516,16 @@ impl ManagedExecutionMetadata {
         })
     }
 
+    /// Whether this durable record must dispatch through A3S OCI Runtime.
+    ///
+    /// Records written before `runtime_route` was introduced are identified by
+    /// their exact OCI binding. Callers must never fall back to a Box-owned
+    /// socket after either form of durable evidence selects OCI.
+    #[must_use]
+    pub fn is_oci_routed(&self) -> bool {
+        self.runtime_route == ManagedRuntimeRoute::OciSdk || self.oci_runtime.is_some()
+    }
+
     /// Validate deserialized metadata before it participates in reconciliation.
     pub fn validate(&self) -> a3s_box_core::Result<()> {
         if self.request.external_sandbox_id.trim().is_empty() {
@@ -917,6 +927,7 @@ mod tests {
         )
         .unwrap();
         metadata.runtime_route = ManagedRuntimeRoute::OciSdk;
+        assert!(metadata.is_oci_routed());
 
         let encoded = serde_json::to_value(&metadata).unwrap();
         assert_eq!(encoded["runtime_route"], "oci_sdk");
@@ -927,6 +938,7 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("runtime_route");
         let decoded: ManagedExecutionMetadata = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.runtime_route, ManagedRuntimeRoute::Unspecified);
+        assert!(!decoded.is_oci_routed());
     }
 
     #[test]

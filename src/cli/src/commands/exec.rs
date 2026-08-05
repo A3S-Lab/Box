@@ -79,8 +79,6 @@ pub(crate) async fn connect_pty_with_retry(
 
 pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::exec::ExecRequest;
-    use a3s_box_core::{ExecutionId, ExecutionSessionManager};
-    use a3s_box_runtime::ExecClient;
 
     let user = common::normalize_user_option(args.user.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -144,29 +142,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         streaming: false,
     };
 
-    let output = if oci_session {
-        let metadata = record
-            .managed_execution
-            .as_ref()
-            .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
-        let home = a3s_box_core::dirs_home();
-        let manager = super::configured_local_execution_manager(&home).await?;
-        manager
-            .execute(
-                &ExecutionId::new(record.id.clone())?,
-                metadata.generation,
-                request,
-            )
-            .await?
-    } else {
-        let exec_socket_path = crate::socket_paths::require_runtime_socket(
-            record,
-            crate::socket_paths::RuntimeSocket::Exec,
-        )
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        let client = ExecClient::connect(&exec_socket_path).await?;
-        client.exec_command(&request).await?
-    };
+    let output = execute_captured(record, request).await?;
     // Record that an exec happened (best-effort) before the exit-code branch
     // below may std::process::exit. The container command's own exit code is
     // separate from whether the exec was delivered.
@@ -194,11 +170,49 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub(super) async fn execute_captured(
+    record: &crate::state::BoxRecord,
+    request: a3s_box_core::exec::ExecRequest,
+) -> Result<a3s_box_core::exec::ExecOutput, Box<dyn std::error::Error>> {
+    use a3s_box_core::{ExecutionId, ExecutionSessionManager};
+
+    if uses_oci_session(record) {
+        if record.status != "running" {
+            return Err(format!("Box {} is not running", record.name).into());
+        }
+        let metadata = record
+            .managed_execution
+            .as_ref()
+            .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+        let home = a3s_box_core::dirs_home();
+        let manager = super::configured_local_execution_manager(&home).await?;
+        manager
+            .execute(
+                &ExecutionId::new(record.id.clone())?,
+                metadata.generation,
+                request,
+            )
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+    } else {
+        let exec_socket_path = crate::socket_paths::require_runtime_socket(
+            record,
+            crate::socket_paths::RuntimeSocket::Exec,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let client = a3s_box_runtime::ExecClient::connect(&exec_socket_path).await?;
+        client
+            .exec_command(&request)
+            .await
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+    }
+}
+
 fn uses_oci_session(record: &crate::state::BoxRecord) -> bool {
-    record.managed_execution.as_ref().is_some_and(|metadata| {
-        metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
-            || metadata.oci_runtime.is_some()
-    })
+    record
+        .managed_execution
+        .as_ref()
+        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
 }
 
 fn timeout_secs_to_ns(timeout_secs: u64) -> u64 {

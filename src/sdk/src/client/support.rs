@@ -732,6 +732,7 @@ fn build_box_stats(system: &System, record: &BoxRecord) -> Option<BoxStatsSummar
         network_tx_bytes: network.tx_bytes,
         block_read_bytes: disk.total_read_bytes,
         block_write_bytes: disk.total_written_bytes,
+        pids_current: None,
     })
 }
 
@@ -784,8 +785,17 @@ fn project_runtime_box_stats(
         memory_percent,
         network_rx_bytes: network.rx_bytes,
         network_tx_bytes: network.tx_bytes,
-        block_read_bytes: 0,
-        block_write_bytes: 0,
+        block_read_bytes: second
+            .metrics
+            .get(a3s_box_runtime::IO_READ_BYTES_METRIC)
+            .copied()
+            .unwrap_or_default(),
+        block_write_bytes: second
+            .metrics
+            .get(a3s_box_runtime::IO_WRITE_BYTES_METRIC)
+            .copied()
+            .unwrap_or_default(),
+        pids_current: Some(second.process_count),
     }
 }
 
@@ -848,12 +858,9 @@ fn read_log_source(source: LogSource, tail: usize) -> Result<Vec<BoxLogLine>> {
         let line = std::str::from_utf8(&buffer)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
             .trim_end_matches(['\n', '\r']);
-        let Some(decoded) = decode_log_line(
-            line,
-            source.structured,
-            runtime_filter.as_ref(),
-            complete,
-        ) else {
+        let Some(decoded) =
+            decode_log_line(line, source.structured, runtime_filter.as_ref(), complete)
+        else {
             continue;
         };
         lines.push(decoded);

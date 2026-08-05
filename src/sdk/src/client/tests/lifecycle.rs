@@ -91,13 +91,10 @@ impl a3s_box_core::ExecutionManager for RecordingExecutionManager {
         execution_id: &a3s_box_core::ExecutionId,
         generation: a3s_box_core::ExecutionGeneration,
     ) -> a3s_box_core::ExecutionManagerResult<a3s_box_core::ExecutionProcessInventory> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(LifecycleCall::Processes {
-                execution_id: execution_id.to_string(),
-                generation: generation.get(),
-            });
+        self.calls.lock().unwrap().push(LifecycleCall::Processes {
+            execution_id: execution_id.to_string(),
+            generation: generation.get(),
+        });
         Ok(a3s_box_core::ExecutionProcessInventory {
             execution_id: execution_id.clone(),
             generation,
@@ -147,7 +144,10 @@ impl a3s_box_core::ExecutionManager for RecordingExecutionManager {
                 peak_bytes: Some(300 * 1024 * 1024),
             },
             process_count: 1,
-            metrics: Default::default(),
+            metrics: std::collections::BTreeMap::from([
+                (a3s_box_runtime::IO_READ_BYTES_METRIC.to_string(), 4_096),
+                (a3s_box_runtime::IO_WRITE_BYTES_METRIC.to_string(), 8_192),
+            ]),
         })
     }
 
@@ -463,10 +463,8 @@ async fn oci_sandbox_stats_project_exact_runtime_counters() {
         reservation,
         lease,
     });
-    let client = A3sBoxClient::with_execution_manager(
-        A3sBoxPaths::from_home(temp.path()),
-        manager.clone(),
-    );
+    let client =
+        A3sBoxClient::with_execution_manager(A3sBoxPaths::from_home(temp.path()), manager.clone());
     let mut record = box_record(execution_id.as_str(), "api", "running");
     let mut metadata = ManagedExecutionMetadata::new(
         OperationId::new("sdk-runtime-stats-create").unwrap(),
@@ -496,6 +494,9 @@ async fn oci_sandbox_stats_project_exact_runtime_counters() {
     assert_eq!(stats.memory_bytes, 256 * 1024 * 1024);
     assert_eq!(stats.memory_limit_bytes, 512 * 1024 * 1024);
     assert_eq!(stats.memory_percent, 50.0);
+    assert_eq!(stats.block_read_bytes, 4_096);
+    assert_eq!(stats.block_write_bytes, 8_192);
+    assert_eq!(stats.pids_current, Some(1));
 
     let error = client
         .get_sandbox_stats(

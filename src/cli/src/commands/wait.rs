@@ -95,10 +95,10 @@ async fn wait_one(
 }
 
 fn uses_oci_runtime(record: &BoxRecord) -> bool {
-    record.managed_execution.as_ref().is_some_and(|metadata| {
-        metadata.runtime_route == a3s_box_runtime::ManagedRuntimeRoute::OciSdk
-            || metadata.oci_runtime.is_some()
-    })
+    record
+        .managed_execution
+        .as_ref()
+        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
 }
 
 fn archived_wait_exit_code(query: &str) -> Result<Option<i32>, String> {

@@ -741,7 +741,7 @@ impl OciRuntimeService for FakeRuntimeService {
                 peak_bytes: Some(72 * 1024 * 1024),
             },
             process_count: 1,
-            metrics: BTreeMap::from([("io.read_bytes".to_string(), 4096)]),
+            metrics: BTreeMap::from([(a3s_oci_sdk::IO_READ_BYTES_METRIC.to_string(), 4096)]),
         })
     }
 
@@ -3923,7 +3923,7 @@ async fn exact_generation_processes_stats_and_events_use_the_public_sdk() {
     assert_eq!(stats.execution_id, lease.execution_id);
     assert_eq!(stats.cpu.usage_ns, 100);
     assert_eq!(stats.memory.limit_bytes, Some(128 * 1024 * 1024));
-    assert_eq!(stats.metrics["io.read_bytes"], 4096);
+    assert_eq!(stats.metrics[a3s_oci_sdk::IO_READ_BYTES_METRIC], 4096);
     assert_eq!(service.stats_requests()[0].target, binding.target);
 
     let batch = manager
@@ -3953,6 +3953,45 @@ async fn exact_generation_processes_stats_and_events_use_the_public_sdk() {
     let request = &service.events_requests()[0];
     assert_eq!(request.container.as_ref(), Some(&binding.target));
     assert_eq!(request.wait_timeout_ms, Some(250));
+}
+
+#[tokio::test]
+async fn paused_exact_generation_remains_observable() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("paused-observable", ExecutionIsolation::Sandbox),
+            &box_operation("paused-observable-create"),
+        )
+        .await
+        .expect("initial launch");
+    manager
+        .pause(&lease.execution_id, lease.generation, true)
+        .await
+        .expect("pause exact generation");
+
+    let inventory = manager
+        .list_processes(&lease.execution_id, lease.generation)
+        .await
+        .expect("paused process inventory");
+    let stats = manager
+        .stats(&lease.execution_id, lease.generation)
+        .await
+        .expect("paused runtime stats");
+
+    assert_eq!(inventory.execution_id, lease.execution_id);
+    assert_eq!(inventory.generation, lease.generation);
+    assert_eq!(stats.execution_id, lease.execution_id);
+    assert_eq!(stats.generation, lease.generation);
+    assert_eq!(service.processes_requests().len(), 1);
+    assert_eq!(service.stats_requests().len(), 1);
 }
 
 #[tokio::test]

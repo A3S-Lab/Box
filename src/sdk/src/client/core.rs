@@ -218,7 +218,7 @@ impl A3sBoxClient {
 
     /// Collect the compatibility Sandbox stats shape from the record's exact
     /// lifecycle owner.
-    pub(crate) async fn get_sandbox_stats(
+    pub async fn get_sandbox_stats(
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
@@ -235,7 +235,7 @@ impl A3sBoxClient {
         let Some(metadata) = record.managed_execution.as_ref() else {
             return self.get_box_stats(execution_id.as_str());
         };
-        if metadata.runtime_route != ManagedRuntimeRoute::OciSdk {
+        if !metadata.is_oci_routed() {
             return self.get_box_stats(execution_id.as_str());
         }
         if metadata.generation != generation {
@@ -620,11 +620,11 @@ impl A3sBoxClient {
     ) -> Result<SnapshotSummary> {
         request.validate()?;
         let initial_state = self.load_state()?;
-        let record_id = resolve_required_record(&initial_state, box_query)?.id.clone();
-        let _lifecycle_lock = a3s_box_runtime::acquire_execution_lifecycle_lock(
-            &self.paths.home,
-            &record_id,
-        )?;
+        let record_id = resolve_required_record(&initial_state, box_query)?
+            .id
+            .clone();
+        let _lifecycle_lock =
+            a3s_box_runtime::acquire_execution_lifecycle_lock(&self.paths.home, &record_id)?;
         let state = self.load_state()?;
         let record = state
             .find_by_id(&record_id)

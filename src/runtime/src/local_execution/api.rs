@@ -102,12 +102,12 @@ impl ExecutionManager for LocalExecutionManager {
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionProcessInventory> {
         let record = self
-            .require_running_record(execution_id, expected_generation)
+            .require_observable_record(execution_id, expected_generation)
             .await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         let inventory = self.backend.list_processes(&record).await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         if inventory.execution_id != *execution_id || inventory.generation != expected_generation {
             return Err(ExecutionManagerError::Internal(format!(
@@ -125,12 +125,12 @@ impl ExecutionManager for LocalExecutionManager {
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionStats> {
         let record = self
-            .require_running_record(execution_id, expected_generation)
+            .require_observable_record(execution_id, expected_generation)
             .await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         let stats = self.backend.stats(&record).await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         if stats.execution_id != *execution_id || stats.generation != expected_generation {
             return Err(ExecutionManagerError::Internal(format!(
@@ -151,12 +151,12 @@ impl ExecutionManager for LocalExecutionManager {
         request.validate()?;
         let after_sequence = request.after_sequence;
         let record = self
-            .require_running_record(execution_id, expected_generation)
+            .require_observable_record(execution_id, expected_generation)
             .await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         let batch = self.backend.events(&record, request).await?;
-        self.require_same_runtime(&record, execution_id, expected_generation)
+        self.require_same_observable_runtime(&record, execution_id, expected_generation)
             .await?;
         if batch.execution_id != *execution_id || batch.generation != expected_generation {
             return Err(ExecutionManagerError::Internal(format!(

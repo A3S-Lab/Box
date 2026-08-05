@@ -143,9 +143,10 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`08c145d8ce5d06d5f28587226be822a2ab43b299` retains the matching long-lived,
+`2f0898902d1107e53e9e5464780a1e7a6f6e162d` retains the matching long-lived,
 multi-container Native Linux host owner and adds the generation-safe bundle
-handoff used by the preparation context above. The same revision keeps durable
+handoff used by the preparation context above, plus stable aggregate workload
+block-I/O metrics. The same revision keeps durable
 Native Linux owner recovery out of the transient utility-VM guest executor, so
 WHPX reaches protocol negotiation without attempting host-only journal writes.
 Box now first validates the
@@ -344,9 +345,12 @@ retain process or filesystem sessions after its owner dies.
   boundary.
 - [x] Preserve exact terminal status and Box/runtime generation fencing across
   backend recreation and keyed replay.
+- [x] Route CLI `top` and `stats` through the persisted OCI route, retaining
+  exact-generation process dispatch plus normalized CPU, memory, PID, network,
+  and block-I/O projection for running and paused workloads.
 - [ ] Route the remaining socket-oriented CLI projections (`attach`, `cp`,
-  `top`, `stats`, live `container-update`, and init stdout/stderr log
-  projection) through the persisted OCI route.
+  live `container-update`, and init stdout/stderr log projection) through the
+  persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
 
@@ -374,7 +378,8 @@ one exec dispatch. Native Linux and utility-VM driver reattachment on real
 hosts remains part of the unchecked exit gate. The production Linux smoke now
 drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
 route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
-command-specific projections listed above remain deliberately unchecked.
+CLI `top` and `stats` projections now share that exact route. Attach, copy,
+live update, and init-log projection remain deliberately unchecked.
 
 ### B3 - Storage And Networking Attachments
 

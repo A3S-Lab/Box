@@ -69,6 +69,7 @@ pub use a3s_runtime_driver::{
 };
 
 // Canonical local execution metadata
+pub use a3s_oci_sdk::{IO_READ_BYTES_METRIC, IO_WRITE_BYTES_METRIC};
 pub use box_record::{
     BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionOperation,
     ManagedExecutionState, ManagedResourceUpdateCompletion, ManagedRestartCompletion,

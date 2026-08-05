@@ -289,9 +289,11 @@ accident.
 Current Linux opt-in limits are intentional: only new Sandbox reservations are
 routed there; `all`/MicroVM migration is rejected on Linux; image-declared
 anonymous volumes must be replaced by explicit named or bind mounts; and
-remaining socket-based CLI projections (`attach`, `cp`, `top`, `stats`, live
+remaining socket-based CLI projections (`attach`, `cp`, live
 `container-update`, plus init stdout/stderr projection into Box logs) are not
-yet promoted on this path.
+yet promoted on this path. CLI `top` and `stats` now use the persisted OCI
+route, including exact-generation process dispatch and normalized
+CPU/memory/PID/block-I/O snapshots for running or paused workloads.
 The typed SDK lifecycle, exec/PTY, file/filesystem, process inventory, stats,
 events, resource update, pause/resume, wait, restart, and cleanup contracts do
 route through the exact OCI generation.
