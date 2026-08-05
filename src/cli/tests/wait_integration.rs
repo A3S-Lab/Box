@@ -51,3 +51,29 @@ fn wait_reads_auto_removed_terminal_archive() {
     ]);
     assert_eq!(output, "23\n0\n");
 }
+
+#[test]
+fn wait_timeout_fails_without_stopping_the_box() {
+    let cli = CliTest::new();
+    cli.ok(&[
+        "create",
+        "--name",
+        "waiting-job",
+        "docker.io/library/alpine:latest",
+        "--",
+        "sleep",
+        "60",
+    ]);
+
+    let started = std::time::Instant::now();
+    cli.fails(
+        &["wait", "waiting-job", "--timeout", "1", "--no-heartbeat"],
+        "timed out after 1s while waiting for waiting-job; the box was not stopped",
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    let inspect = cli.ok(&["inspect", "waiting-job"]);
+    assert!(inspect.contains("\"status\": \"created\""));
+    cli.ok(&["rm", "waiting-job"]);
+}

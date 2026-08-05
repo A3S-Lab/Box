@@ -109,6 +109,10 @@ pub struct ComposeWaitArgs {
     #[arg(long)]
     pub no_heartbeat: bool,
 
+    /// Maximum seconds to wait for all services; does not stop them on timeout
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+
     /// Limit the operation to these services
     #[arg(value_name = "SERVICE")]
     pub services: Vec<String>,
@@ -334,6 +338,7 @@ pub async fn execute_wait(
         boxes: ids(&boxes),
         heartbeat_interval: args.heartbeat_interval,
         no_heartbeat: args.no_heartbeat,
+        timeout: args.timeout,
     })
     .await
 }

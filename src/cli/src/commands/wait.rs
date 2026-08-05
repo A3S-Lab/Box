@@ -22,12 +22,33 @@ pub struct WaitArgs {
     /// Disable stderr keepalive messages while waiting
     #[arg(long)]
     pub no_heartbeat: bool,
+
+    /// Maximum seconds to wait for all boxes; does not stop them on timeout
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
 }
 
 pub async fn execute(args: WaitArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let timeout = wait_timeout(&args)?;
+    let deadline = timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+    if timeout.is_some() && deadline.is_none() {
+        return Err("--timeout is too large".into());
+    }
     let heartbeat_interval = wait_heartbeat_interval(&args);
     for query in &args.boxes {
-        wait_one(query, heartbeat_interval).await?;
+        match deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(deadline, wait_one(query, heartbeat_interval))
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "timed out after {}s while waiting for {query}; the box was not stopped",
+                            args.timeout.expect("validated timeout")
+                        )
+                    })??;
+            }
+            None => wait_one(query, heartbeat_interval).await?,
+        }
     }
     Ok(())
 }
@@ -110,6 +131,14 @@ fn wait_heartbeat_interval(args: &WaitArgs) -> Option<std::time::Duration> {
         None
     } else {
         Some(std::time::Duration::from_secs(args.heartbeat_interval))
+    }
+}
+
+fn wait_timeout(args: &WaitArgs) -> Result<Option<std::time::Duration>, &'static str> {
+    match args.timeout {
+        Some(0) => Err("--timeout must be greater than zero"),
+        Some(seconds) => Ok(Some(std::time::Duration::from_secs(seconds))),
+        None => Ok(None),
     }
 }
 
@@ -214,13 +243,34 @@ mod tests {
             boxes: vec!["box".to_string()],
             heartbeat_interval: 60,
             no_heartbeat: true,
+            timeout: None,
         })
         .is_none());
         assert!(wait_heartbeat_interval(&WaitArgs {
             boxes: vec!["box".to_string()],
             heartbeat_interval: 0,
             no_heartbeat: false,
+            timeout: None,
         })
         .is_none());
+    }
+
+    #[test]
+    fn test_wait_timeout_rejects_zero_and_accepts_positive_seconds() {
+        let mut args = WaitArgs {
+            boxes: vec!["box".to_string()],
+            heartbeat_interval: 60,
+            no_heartbeat: false,
+            timeout: Some(0),
+        };
+        assert_eq!(
+            wait_timeout(&args),
+            Err("--timeout must be greater than zero")
+        );
+        args.timeout = Some(7);
+        assert_eq!(
+            wait_timeout(&args),
+            Ok(Some(std::time::Duration::from_secs(7)))
+        );
     }
 }

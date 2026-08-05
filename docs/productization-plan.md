@@ -124,6 +124,10 @@ Current notes:
 - Foreground and interactive `run` cleanup now persists captured exit codes in
   the box record before marking it stopped, and `wait` prints that recorded code
   instead of always reporting success for stopped boxes.
+- `wait` and `compose wait` emit configurable stderr heartbeats and accept a
+  command-wide `--timeout SECONDS` for CI. Expiry returns a non-zero diagnostic
+  without stopping the workload, while auto-removed boxes retain their terminal
+  exit code for later waiters.
 - Invalid lifecycle mode combinations such as detached TTY runs are now rejected
   before the VM setup phase, so bad CLI combinations do not leave orphaned box
   state or booted VMs.
