@@ -743,7 +743,6 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Test vendored libkrun TX backpressure
-        if: runner.os == 'macOS'
         working-directory: src/deps/libkrun-sys/vendor/libkrun
         run: cargo test --locked -p devices --features net backpressure -- --nocapture
 
@@ -879,6 +878,7 @@ jobs:
     timeout-minutes: 90
     env:
       A3S_BOX_SMOKE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+      A3S_BOX_HVF_NODE_IMAGE: docker.io/library/node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
       A3S_BOX_ALLOW_REGISTRY_PULL: "1"
       A3S_BOX_SMOKE_TIMEOUT_SECS: "600"
       A3S_REGISTRY_MIRRORS: ${{ vars.HVF_CI_REGISTRY_MIRRORS }}
@@ -919,6 +919,31 @@ jobs:
             real_core_tsi_published_tcp_nonblocking_accept_and_exec \
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$evidence/test.log"
+      - name: Qualify interrupted auto-removal and archived wait status
+        run: |
+          unset A3S_DEPS_STUB
+          evidence="$RUNNER_TEMP/a3s-box-hvf-published-port-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cd src
+          cargo test --locked --release -p a3s-box-cli --test core_smoke \
+            real_core_foreground_auto_remove_handles_sigterm_and_archives_status \
+            -- --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$evidence/foreground-interruption.log"
+      - name: Qualify cold Corepack and bounded pnpm networking
+        run: |
+          unset A3S_DEPS_STUB
+          evidence="$RUNNER_TEMP/a3s-box-hvf-published-port-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          pnpm_home="$(mktemp -d "$RUNNER_TEMP/a3s-box-hvf-pnpm.XXXXXX")"
+          trap 'rm -rf -- "$pnpm_home"' EXIT
+          A3S_HOME="$pnpm_home" \
+            A3S_BOX="$GITHUB_WORKSPACE/src/target/release/a3s-box" \
+            PNPM_PROJECT="$GITHUB_WORKSPACE/bench/fixtures/pnpm" \
+            PNPM_IMAGE="$A3S_BOX_HVF_NODE_IMAGE" \
+            PNPM_RUNS=1 \
+            PNPM_TIMEOUT=600 \
+            PNPM_NODE_MODULES=tmpfs \
+            PNPM_LOG_DIR="$evidence/pnpm-logs" \
+            bash bench/bench.sh pnpm \
+            2>&1 | tee "$evidence/pnpm.log"
           echo "result=pass" > "$evidence/result.txt"
       - name: Reject leaked qualification shims
         if: always()

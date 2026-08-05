@@ -52,6 +52,7 @@ Tunables (env):
 | `PNPM_CACHE` | `1` | use `--package-cache pnpm`; set `0` for a cold store path |
 | `PNPM_CPUS` | `4` | CPUs assigned to pnpm boxes |
 | `PNPM_MEMORY` | `4g` | memory assigned to pnpm boxes |
+| `PNPM_TIMEOUT` | `900` | command-wide timeout in seconds for every pnpm box |
 | `PNPM_NODE_MODULES` | `both` | benchmark `project`, `tmpfs`, or `both` `node_modules` targets |
 | `PNPM_TMPFS_SIZE` | `4g` | tmpfs size for `/work/node_modules` when tmpfs mode is enabled |
 | `PNPM_RESET_A3S_CACHE` | `0` | set `1` to remove `a3s-cache-pnpm` before cold A3S samples |
@@ -88,7 +89,9 @@ Tunables (env):
   `corepack + pnpm` setup, `pnpm fetch` (registry download plus extraction/import
   into the pnpm store),
   offline install to project-mounted `node_modules`, offline install to tmpfs
-  `node_modules`, and full `pnpm install --frozen-lockfile`.
+  `node_modules`, and full `pnpm install --frozen-lockfile`. Every measured run
+  uses the command-wide `PNPM_TIMEOUT`, so a network or package-manager stall
+  fails the harness instead of leaving an unbounded workload.
 
 The pnpm benchmark intentionally separates the two likely slow paths:
 

@@ -31,6 +31,7 @@
 #   PNPM_CACHE   1 uses --package-cache pnpm, 0 disables it (default: 1)
 #   PNPM_CPUS    CPUs for pnpm boxes                  (default: 4)
 #   PNPM_MEMORY  memory for pnpm boxes                (default: 4g)
+#   PNPM_TIMEOUT command-wide timeout in seconds      (default: 900)
 #   PNPM_RESET_A3S_CACHE 1 removes a3s-cache-pnpm before cold A3S samples (default: 0)
 #
 # Exit code is non-zero if the leak assertion fails, so it is CI-gateable
@@ -58,6 +59,7 @@ PNPM_RUNS="${PNPM_RUNS:-3}"
 PNPM_CACHE="${PNPM_CACHE:-1}"
 PNPM_CPUS="${PNPM_CPUS:-4}"
 PNPM_MEMORY="${PNPM_MEMORY:-4g}"
+PNPM_TIMEOUT="${PNPM_TIMEOUT:-900}"
 PNPM_TMPFS_SIZE="${PNPM_TMPFS_SIZE:-4g}"
 PNPM_NODE_MODULES="${PNPM_NODE_MODULES:-both}"
 PNPM_LOG_DIR="${PNPM_LOG_DIR:-/tmp/a3s-bench-pnpm}"
@@ -508,7 +510,7 @@ bench_pnpm() {
   mkdir -p "$PNPM_LOG_DIR"
   "$A3S_BOX" pull "$PNPM_IMAGE" >/dev/null 2>&1 || true
 
-  echo "  config: project=$project cpus=$PNPM_CPUS memory=$PNPM_MEMORY package-cache=$PNPM_CACHE node_modules=$PNPM_NODE_MODULES reset-a3s-cache=$PNPM_RESET_A3S_CACHE"
+  echo "  config: project=$project cpus=$PNPM_CPUS memory=$PNPM_MEMORY timeout=${PNPM_TIMEOUT}s package-cache=$PNPM_CACHE node_modules=$PNPM_NODE_MODULES reset-a3s-cache=$PNPM_RESET_A3S_CACHE"
   echo "  logs:   $PNPM_LOG_DIR"
 
   local prepare_cmd fetch_cmd offline_cmd full_cmd
@@ -522,7 +524,7 @@ bench_pnpm() {
     local guest_cmd="$1"; shift
     local cache_args=()
     [ "$PNPM_CACHE" = "1" ] && cache_args=(--package-cache pnpm)
-    "$A3S_BOX" run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "${cache_args[@]}" "$@" "$PNPM_IMAGE" -- sh -lc "$guest_cmd" >"$log_file" 2>&1
+    "$A3S_BOX" run --rm --timeout "$PNPM_TIMEOUT" --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "${cache_args[@]}" "$@" "$PNPM_IMAGE" -- sh -lc "$guest_cmd" >"$log_file" 2>&1
   }
 
   MEASURED_SAMPLES=""
@@ -556,7 +558,7 @@ bench_pnpm() {
     local s e
 
     s=$(now_ms)
-    "$A3S_BOX" run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "$PNPM_IMAGE" -- true >/dev/null 2>&1
+    "$A3S_BOX" run --rm --timeout "$PNPM_TIMEOUT" --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "$PNPM_IMAGE" -- true >/dev/null 2>&1
     e=$(now_ms); boot_samples="$boot_samples $(( e - s ))"
   done
 

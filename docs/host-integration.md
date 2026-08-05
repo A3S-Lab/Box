@@ -285,6 +285,25 @@ through the host workspace mount. `--virtiofs-cache=always` is intended for
 release verification jobs where the host checkout is stable for the duration of
 the run; omit it or use `none` when host-side edits must be visible immediately.
 
+The software behavior reported by the July 2026 production workflows now has
+repository regression coverage:
+
+| Report | Covered behavior |
+| --- | --- |
+| [#164](https://github.com/A3S-Lab/Box/issues/164) | macOS netproxy has end-to-end outbound TCP and DNS-response tests; `wait` and `compose wait` add a command-wide timeout, periodic progress, and a non-zero bounded failure without terminating the workload. |
+| [#165](https://github.com/A3S-Lab/Box/issues/165) | Non-interactive normal and pooled runs suppress the Corepack download prompt unless explicitly overridden, while cold runtime startup emits phase-specific progress. |
+| [#166](https://github.com/A3S-Lab/Box/issues/166) | Dockerfile `WORKDIR` and declared/default/overridden `ARG` values reach `RUN`; a cached `scratch` rebuild must still export its copied layer; registry push exposes `--plain-http`, `--insecure`, and `--tls-verify=false`. |
+| [#167](https://github.com/A3S-Lab/Box/issues/167) | Foreground `run --rm` handles `SIGINT`/`SIGTERM`, removes the workload, preserves the signal-derived exit status, and lets a later bounded `wait` recover that archived status. |
+
+The deterministic CLI lane runs the build/export and wait regressions on every
+push. Real Unix signal cleanup remains part of the host-backed core smoke.
+These tests do not replace the issue-specific production-host reruns requested
+in [#164](https://github.com/A3S-Lab/Box/issues/164),
+[#165](https://github.com/A3S-Lab/Box/issues/165),
+[#166](https://github.com/A3S-Lab/Box/issues/166), and
+[#167](https://github.com/A3S-Lab/Box/issues/167); record those runs before
+closing the reports.
+
 For repeated short checks, run a warm-pool daemon with the same image, resource
 shape, and workspace mount, then either pass `--pool` explicitly or export
 `A3S_BOX_RUN_POOL_SOCKET` so compatible foreground `run --rm` commands use the

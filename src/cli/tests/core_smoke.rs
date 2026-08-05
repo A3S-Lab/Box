@@ -1197,6 +1197,8 @@ fn real_core_foreground_auto_remove_handles_sigterm_and_archives_status() {
     ]);
     smoke.wait_for_running();
     smoke.wait_for_logs("core-smoke-interrupt-ready");
+    let record = smoke.inspect_json(&smoke.name);
+    let box_id = json_string_field(&record, "id").to_string();
 
     let result = foreground.signal_and_output(libc::SIGTERM, Duration::from_secs(30));
     assert_eq!(result.code, Some(143), "foreground SIGTERM exit code");
@@ -1212,11 +1214,13 @@ fn real_core_foreground_auto_remove_handles_sigterm_and_archives_status() {
         !after_interrupt.contains(&smoke.name),
         "interrupted --rm box remained in state\n{after_interrupt}"
     );
-    assert_eq!(
-        smoke.ok(&["wait", &smoke.name, "--timeout", "5"]).trim(),
-        "143",
-        "wait must recover the archived interrupted status"
-    );
+    for query in [&smoke.name, &box_id] {
+        assert_eq!(
+            smoke.ok(&["wait", query, "--timeout", "5"]).trim(),
+            "143",
+            "wait must recover the archived interrupted status for {query}"
+        );
+    }
 }
 
 #[test]

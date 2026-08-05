@@ -50,6 +50,13 @@ fn wait_reads_auto_removed_terminal_archive() {
         "--no-heartbeat",
     ]);
     assert_eq!(output, "23\n0\n");
+
+    let by_id = cli.ok(&[
+        "wait",
+        "550e8400-e29b-41d4-a716-446655440010",
+        "--no-heartbeat",
+    ]);
+    assert_eq!(by_id, "23\n");
 }
 
 #[test]
