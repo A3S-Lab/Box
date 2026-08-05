@@ -33,13 +33,24 @@ pub struct AttachArgs {
 pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?.clone();
-    crate::socket_paths::require_running(&record, "attach to")
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let route = resolve_attach_route(&record, args.tty);
+    if route.is_managed() {
+        if record.status != "running" {
+            return Err(format!("Box {} is not running", record.name).into());
+        }
+    } else {
+        crate::socket_paths::require_running(&record, "attach to")
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    }
 
     // Interactive PTY mode
     if args.tty {
         #[cfg(not(windows))]
-        return execute_pty_attach(&record).await;
+        return match route {
+            AttachRoute::ManagedPty => execute_managed_pty_attach(&record).await,
+            AttachRoute::LegacyPty => execute_pty_attach(&record).await,
+            AttachRoute::ManagedLogs | AttachRoute::LegacyLogs => unreachable!(),
+        };
         #[cfg(windows)]
         return Err(crate::platform::unsupported_command(
             "attach -it",
@@ -47,6 +58,11 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
         ));
     }
 
+    let managed_target = if route == AttachRoute::ManagedLogs {
+        Some(prepare_managed_attach(&record).await?)
+    } else {
+        None
+    };
     let streams = attach_stream_sources(&record.box_dir, &record.console_log);
     if !streams.stdout.exists() {
         return Err(missing_console_log_message(&record.name, &streams.stdout).into());
@@ -89,9 +105,16 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
         );
     });
 
+    let exit_waiter = async {
+        if let Some(target) = managed_target.as_ref() {
+            wait_for_managed_attach_exit(target).await;
+        } else {
+            wait_for_attached_box_exit(&record).await;
+        }
+    };
     let end_reason = tokio::select! {
         _ = tokio::signal::ctrl_c() => AttachEndReason::UserDetached,
-        _ = wait_for_attached_box_exit(&record) => AttachEndReason::BoxExited,
+        _ = exit_waiter => AttachEndReason::BoxExited,
     };
 
     if end_reason == AttachEndReason::BoxExited {
@@ -133,6 +156,101 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
 enum AttachEndReason {
     UserDetached,
     BoxExited,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachRoute {
+    ManagedPty,
+    ManagedLogs,
+    LegacyPty,
+    LegacyLogs,
+}
+
+impl AttachRoute {
+    const fn is_managed(self) -> bool {
+        matches!(self, Self::ManagedPty | Self::ManagedLogs)
+    }
+}
+
+fn resolve_attach_route(record: &BoxRecord, tty: bool) -> AttachRoute {
+    let managed = record
+        .managed_execution
+        .as_ref()
+        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed);
+    match (managed, tty) {
+        (true, true) => AttachRoute::ManagedPty,
+        (true, false) => AttachRoute::ManagedLogs,
+        (false, true) => AttachRoute::LegacyPty,
+        (false, false) => AttachRoute::LegacyLogs,
+    }
+}
+
+struct ManagedAttachTarget {
+    manager: a3s_box_runtime::LocalExecutionManager,
+    execution_id: a3s_box_core::ExecutionId,
+    generation: a3s_box_core::ExecutionGeneration,
+}
+
+async fn prepare_managed_attach(
+    record: &BoxRecord,
+) -> Result<ManagedAttachTarget, Box<dyn std::error::Error>> {
+    use a3s_box_core::{ExecutionManager, ExecutionState};
+
+    let metadata = record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())?;
+    let generation = metadata.generation;
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+    let status = manager.inspect(&execution_id).await?;
+    if status.generation != generation || status.state != ExecutionState::Running {
+        return Err(format!(
+            "Box {} is not running at managed generation {}",
+            record.name,
+            generation.get()
+        )
+        .into());
+    }
+    Ok(ManagedAttachTarget {
+        manager,
+        execution_id,
+        generation,
+    })
+}
+
+async fn wait_for_managed_attach_exit(target: &ManagedAttachTarget) {
+    use a3s_box_core::{ExecutionManager, ExecutionManagerError};
+
+    let mut poll = tokio::time::interval(ATTACH_EXIT_POLL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        match target.manager.inspect(&target.execution_id).await {
+            Ok(status) if managed_status_keeps_attach_open(target.generation, &status) => {}
+            Ok(_) | Err(ExecutionManagerError::NotFound(_)) => return,
+            Err(ExecutionManagerError::Conflict { .. }) => return,
+            Err(error) => {
+                tracing::warn!(
+                    execution_id = %target.execution_id,
+                    %error,
+                    "Managed attach inspection failed; retaining the exact-generation attachment"
+                );
+            }
+        }
+    }
+}
+
+fn managed_status_keeps_attach_open(
+    generation: a3s_box_core::ExecutionGeneration,
+    status: &a3s_box_core::ExecutionStatus,
+) -> bool {
+    status.generation == generation
+        && matches!(
+            status.state,
+            a3s_box_core::ExecutionState::Running | a3s_box_core::ExecutionState::Paused
+        )
 }
 
 async fn wait_for_attached_box_exit(record: &BoxRecord) {
@@ -301,10 +419,133 @@ async fn execute_pty_attach(
     Ok(())
 }
 
+/// Open the compatibility attach shell through the exact managed OCI session.
+#[cfg(not(windows))]
+async fn execute_managed_pty_attach(
+    record: &crate::state::BoxRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::pty::PtyRequest;
+    use a3s_box_core::{ExecutionId, ExecutionSessionManager};
+
+    let metadata = record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let (cols, rows) = crate::terminal::size().unwrap_or((80, 24));
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+    let process = manager
+        .start_pty(
+            &ExecutionId::new(record.id.clone())?,
+            metadata.generation,
+            PtyRequest {
+                cmd: vec!["/bin/sh".to_string()],
+                env: vec![],
+                working_dir: None,
+                rootfs: None,
+                user: None,
+                cols,
+                rows,
+            },
+        )
+        .await?;
+    let exit_code = {
+        let _raw_mode = crate::terminal::raw_mode()?;
+        super::exec::run_managed_pty_session(process).await
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn managed_record() -> BoxRecord {
+        use a3s_box_core::config::BoxConfig;
+        use a3s_box_core::{CreateExecutionRequest, ExecutionGeneration, OperationId};
+
+        let mut record = crate::test_helpers::fixtures::make_record(
+            "managed-attach-id",
+            "managed-attach",
+            "running",
+            None,
+        );
+        let mut metadata = a3s_box_runtime::ManagedExecutionMetadata::new(
+            OperationId::new("managed-attach-create").unwrap(),
+            ExecutionGeneration::new(7).unwrap(),
+            CreateExecutionRequest {
+                external_sandbox_id: "managed-attach-external".to_string(),
+                config: BoxConfig {
+                    image: record.image.clone(),
+                    ..Default::default()
+                },
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.runtime_route = a3s_box_runtime::ManagedRuntimeRoute::OciSdk;
+        record.managed_execution = Some(metadata);
+        record
+    }
+
+    #[test]
+    fn persisted_oci_route_never_selects_a_legacy_attach_socket() {
+        let managed = managed_record();
+        assert_eq!(
+            resolve_attach_route(&managed, false),
+            AttachRoute::ManagedLogs
+        );
+        assert_eq!(
+            resolve_attach_route(&managed, true),
+            AttachRoute::ManagedPty
+        );
+
+        let legacy = crate::test_helpers::fixtures::make_record(
+            "legacy-attach-id",
+            "legacy-attach",
+            "running",
+            Some(std::process::id()),
+        );
+        assert_eq!(
+            resolve_attach_route(&legacy, false),
+            AttachRoute::LegacyLogs
+        );
+        assert_eq!(resolve_attach_route(&legacy, true), AttachRoute::LegacyPty);
+    }
+
+    #[test]
+    fn managed_attach_liveness_is_generation_fenced_without_a_host_pid() {
+        use a3s_box_core::{ExecutionGeneration, ExecutionState, ExecutionStatus};
+
+        let record = managed_record();
+        let metadata = record.managed_execution.as_ref().unwrap();
+        let mut status = ExecutionStatus {
+            execution_id: a3s_box_core::ExecutionId::new(record.id.clone()).unwrap(),
+            generation: metadata.generation,
+            state: ExecutionState::Running,
+            plan: metadata.plan.clone(),
+        };
+        assert!(managed_status_keeps_attach_open(
+            metadata.generation,
+            &status
+        ));
+        status.state = ExecutionState::Paused;
+        assert!(managed_status_keeps_attach_open(
+            metadata.generation,
+            &status
+        ));
+        status.generation = ExecutionGeneration::new(8).unwrap();
+        assert!(!managed_status_keeps_attach_open(
+            metadata.generation,
+            &status
+        ));
+    }
 
     #[test]
     fn missing_console_log_message_mentions_recovery_commands() {

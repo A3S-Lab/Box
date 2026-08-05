@@ -12,6 +12,8 @@ pub use lifecycle_lock::{
 mod logs;
 mod oci_backend;
 #[cfg(feature = "vm")]
+mod oci_log_projection;
+#[cfg(feature = "vm")]
 mod oci_migration;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 mod oci_owner;

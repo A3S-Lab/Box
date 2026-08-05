@@ -200,6 +200,18 @@ impl StateFile {
                 continue;
             }
 
+            // OCI-routed records deliberately do not persist a Box-owned host
+            // PID. Their exact runtime generation is reconciled through the
+            // lifecycle facade, so the compatibility PID sweep must never
+            // reinterpret the absent PID as workload death.
+            if record
+                .managed_execution
+                .as_ref()
+                .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
+            {
+                continue;
+            }
+
             let has_live_pid = is_record_pid_live(record);
             if !has_live_pid {
                 // guest-init writes the container exit code into the writable

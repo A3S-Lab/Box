@@ -1266,6 +1266,9 @@ impl OciRuntimeService for FakeRuntimeService {
 struct FakeBundleProvider {
     prepares: AtomicUsize,
     cleanups: AtomicUsize,
+    projection_ensures: AtomicUsize,
+    projection_drains: AtomicUsize,
+    fail_projection: AtomicBool,
     invalid_console: AtomicBool,
     expected_snapshot_lower: Mutex<Option<std::path::PathBuf>>,
     snapshot_lower_observed: AtomicBool,
@@ -1332,6 +1335,29 @@ impl OciBundleProvider for FakeBundleProvider {
 
     async fn cleanup(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.cleanups.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn ensure_log_projection(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.projection_ensures.fetch_add(1, Ordering::SeqCst);
+        if self.fail_projection.load(Ordering::SeqCst) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake managed OCI log projection is unavailable".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn wait_log_projection_drained(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.projection_drains.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -3583,6 +3609,48 @@ async fn lost_start_response_reconciles_the_existing_generation_without_duplicat
 }
 
 #[tokio::test]
+async fn log_projection_is_ready_before_start_and_created_state_recovers_without_duplicate_create()
+{
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    provider.fail_projection.store(true, Ordering::SeqCst);
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+    let operation = box_operation("projection-before-start-operation");
+
+    let error = manager
+        .create_and_start(
+            request("projection-before-start", ExecutionIsolation::Sandbox),
+            &operation,
+        )
+        .await
+        .expect_err("projection failure must stop before OCI start");
+    assert!(error.to_string().contains("log projection"));
+    assert_eq!(service.create_requests().len(), 1);
+    assert!(service.start_requests().is_empty());
+    assert!(provider.projection_ensures.load(Ordering::SeqCst) >= 1);
+
+    provider.fail_projection.store(false, Ordering::SeqCst);
+    let ReconcileOutcome::Ready(lease) = manager
+        .reconcile(&operation)
+        .await
+        .expect("created generation should resume after projection recovery")
+    else {
+        panic!("expected recovered execution to become ready")
+    };
+
+    assert_eq!(service.create_requests().len(), 1);
+    assert_eq!(service.start_requests().len(), 1);
+    assert_eq!(lease.generation, ExecutionGeneration::INITIAL);
+    assert!(provider.projection_ensures.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
 async fn lost_create_response_starts_the_existing_generation_without_duplicate_create() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
@@ -3749,6 +3817,7 @@ async fn reopened_backend_kills_with_persisted_signal_and_preserves_exact_exit()
     assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
     assert_eq!(service.container_count(), 0);
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.projection_drains.load(Ordering::SeqCst), 1);
     assert_eq!(record.exit_code, Some(143));
     assert_eq!(record.status, ManagedExecutionState::Stopped.as_status());
     assert!(record

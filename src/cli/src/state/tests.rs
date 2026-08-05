@@ -640,6 +640,45 @@ fn test_reconcile_running_without_pid() {
 }
 
 #[test]
+fn test_reconcile_leaves_oci_routed_record_without_host_pid_for_sdk_observation() {
+    use a3s_box_core::config::BoxConfig;
+    use a3s_box_core::{CreateExecutionRequest, ExecutionGeneration, OperationId};
+
+    let tmp = TempDir::new().unwrap();
+    let path = test_state_path(&tmp);
+    {
+        let mut sf = StateFile::load(&path).unwrap();
+        let mut record = sample_record("managed-no-pid-id", "managed_no_pid", "created");
+        record.status = "running".to_string();
+        record.pid = None;
+        let mut metadata = a3s_box_runtime::ManagedExecutionMetadata::new(
+            OperationId::new("managed-no-pid-create").unwrap(),
+            ExecutionGeneration::new(3).unwrap(),
+            CreateExecutionRequest {
+                external_sandbox_id: "managed-no-pid-external".to_string(),
+                config: BoxConfig {
+                    image: record.image.clone(),
+                    ..Default::default()
+                },
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.runtime_route = a3s_box_runtime::ManagedRuntimeRoute::OciSdk;
+        record.managed_execution = Some(metadata);
+        sf.records_mut().push(record);
+        sf.save().unwrap();
+    }
+
+    let sf = StateFile::load(&path).unwrap();
+    let record = sf.find_by_id("managed-no-pid-id").unwrap();
+    assert_eq!(record.status, "running");
+    assert!(record.pid.is_none());
+}
+
+#[test]
 fn test_reconcile_dead_running_box_removes_external_socket_dir() {
     let tmp = TempDir::new().unwrap();
     let path = test_state_path(&tmp);

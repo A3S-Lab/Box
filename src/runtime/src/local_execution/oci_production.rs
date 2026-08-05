@@ -178,6 +178,22 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
             .cleanup_runtime_owned_sandbox_bundle()
             .map_err(|error| preparation_error("cleanup bundle", error))
     }
+
+    async fn ensure_log_projection(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::ensure(record, binding).await
+    }
+
+    async fn wait_log_projection_drained(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::wait_drained(record, binding).await
+    }
 }
 
 #[async_trait]
@@ -300,6 +316,22 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         manager
             .cleanup_runtime_owned_microvm_bundle()
             .map_err(|error| whpx_preparation_error("cleanup bundle", error))
+    }
+
+    async fn ensure_log_projection(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::ensure(record, binding).await
+    }
+
+    async fn wait_log_projection_drained(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::wait_drained(record, binding).await
     }
 }
 

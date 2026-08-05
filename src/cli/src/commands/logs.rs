@@ -53,6 +53,7 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
+            let record = record.clone();
             let box_id = record.id.clone();
 
             // If logging is disabled, tell the user
@@ -63,12 +64,27 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+            let managed_target = if record_is_oci_routed(&record)
+                && matches!(record.status.as_str(), "running" | "paused")
+            {
+                Some(prepare_managed_log_target(&record).await?)
+            } else {
+                None
+            };
 
-            let Some(log_source) = resolve_log_source(record) else {
+            let Some(log_source) = resolve_log_source(&record) else {
                 if args.follow && record.status == "running" {
-                    match wait_for_log_source(&box_id).await? {
+                    match wait_for_log_source(&box_id, managed_target.as_ref()).await? {
                         Some(source) => {
-                            return stream_logs(&box_id, source, args, since, until).await;
+                            return stream_logs(
+                                &box_id,
+                                source,
+                                managed_target,
+                                args,
+                                since,
+                                until,
+                            )
+                            .await;
                         }
                         None => return Ok(()),
                     }
@@ -76,7 +92,7 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             };
 
-            stream_logs(&box_id, log_source, args, since, until).await
+            stream_logs(&box_id, log_source, managed_target, args, since, until).await
         }
         Err(resolve_error) => {
             let Some(archive) = crate::log_archive::resolve_archive(&args.r#box)? else {
@@ -87,7 +103,7 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
             };
             let mut args = args;
             args.follow = false;
-            stream_logs(&archive.id, log_source, args, since, until).await
+            stream_logs(&archive.id, log_source, None, args, since, until).await
         }
     }
 }
@@ -95,6 +111,7 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn stream_logs(
     box_id: &str,
     log_source: LogSource,
+    managed_target: Option<ManagedLogTarget>,
     args: LogsArgs,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
@@ -198,10 +215,13 @@ async fn stream_logs(
                     }
                     if should_exit_follow_at_eof(
                         box_id,
+                        managed_target.as_ref(),
                         &log_path,
                         &mut stopped_eof_len,
                         &mut stopped_eof_polls,
-                    ) {
+                    )
+                    .await
+                    {
                         return Ok(());
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(FOLLOW_POLL_MILLIS))
@@ -260,20 +280,25 @@ fn file_rotated(_open_meta: &std::fs::Metadata, _path: &std::path::Path) -> bool
     false
 }
 
-fn should_exit_follow_at_eof(
+async fn should_exit_follow_at_eof(
     box_id: &str,
+    managed_target: Option<&ManagedLogTarget>,
     log_path: &Path,
     stopped_eof_len: &mut Option<u64>,
     stopped_eof_polls: &mut u8,
 ) -> bool {
-    let box_running = StateFile::load_default()
-        .ok()
-        .and_then(|state| {
-            state
-                .find_by_id(box_id)
-                .map(|record| record.status == "running")
-        })
-        .unwrap_or(false);
+    let box_running = if let Some(target) = managed_target {
+        managed_log_target_is_live(target).await
+    } else {
+        StateFile::load_default()
+            .ok()
+            .and_then(|state| {
+                state
+                    .find_by_id(box_id)
+                    .map(|record| record.status == "running")
+            })
+            .unwrap_or(false)
+    };
     let len = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
     stopped_eof_is_stable(box_running, len, stopped_eof_len, stopped_eof_polls)
 }
@@ -349,6 +374,7 @@ fn resolve_archived_log_source_in(log_dir: &Path) -> Option<LogSource> {
 
 async fn wait_for_log_source(
     box_id: &str,
+    managed_target: Option<&ManagedLogTarget>,
 ) -> Result<Option<LogSource>, Box<dyn std::error::Error>> {
     loop {
         let state = StateFile::load_default()?;
@@ -358,11 +384,85 @@ async fn wait_for_log_source(
         if let Some(source) = resolve_log_source(record) {
             return Ok(Some(source));
         }
-        if record.status != "running" || record.log_config.driver == LogDriver::None {
+        let running = if let Some(target) = managed_target {
+            managed_log_target_is_live(target).await
+        } else {
+            record.status == "running"
+        };
+        if !running || record.log_config.driver == LogDriver::None {
             return Ok(None);
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+}
+
+#[derive(Clone)]
+struct ManagedLogTarget {
+    manager: a3s_box_runtime::LocalExecutionManager,
+    execution_id: a3s_box_core::ExecutionId,
+    generation: a3s_box_core::ExecutionGeneration,
+}
+
+fn record_is_oci_routed(record: &BoxRecord) -> bool {
+    record
+        .managed_execution
+        .as_ref()
+        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
+}
+
+async fn prepare_managed_log_target(
+    record: &BoxRecord,
+) -> Result<ManagedLogTarget, Box<dyn std::error::Error>> {
+    use a3s_box_core::ExecutionManager;
+
+    let metadata = record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())?;
+    let generation = metadata.generation;
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+    let status = manager.inspect(&execution_id).await?;
+    if status.generation != generation {
+        return Err(format!(
+            "Box {} changed from managed generation {} to {} while opening logs",
+            record.name,
+            generation.get(),
+            status.generation.get()
+        )
+        .into());
+    }
+    Ok(ManagedLogTarget {
+        manager,
+        execution_id,
+        generation,
+    })
+}
+
+async fn managed_log_target_is_live(target: &ManagedLogTarget) -> bool {
+    use a3s_box_core::{ExecutionManager, ExecutionManagerError, ExecutionState};
+
+    match target.manager.inspect(&target.execution_id).await {
+        Ok(status) => {
+            status.generation == target.generation
+                && matches!(
+                    status.state,
+                    ExecutionState::Running | ExecutionState::Paused
+                )
+        }
+        Err(ExecutionManagerError::NotFound(_)) | Err(ExecutionManagerError::Conflict { .. }) => {
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                execution_id = %target.execution_id,
+                %error,
+                "Managed log follow inspection failed; retaining the exact-generation stream"
+            );
+            true
+        }
     }
 }
 

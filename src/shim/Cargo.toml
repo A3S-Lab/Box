@@ -12,7 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 a3s-box-core = { path = "../core" }
+a3s-oci-sdk = { workspace = true }
 libkrun-sys = { version = "3.0", path = "../deps/libkrun-sys", package = "a3s-libkrun-sys" }
+
+# Async runtime used by the detached managed-OCI init log projector.
+tokio = { workspace = true }
 
 # CLI
 clap = { workspace = true }

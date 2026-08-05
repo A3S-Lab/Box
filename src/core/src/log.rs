@@ -138,6 +138,52 @@ pub struct SandboxLogWorkerSpec {
     pub ready_file: PathBuf,
 }
 
+/// Schema used to hand one managed OCI init-log projector its exact route.
+pub const MANAGED_OCI_LOG_WORKER_SCHEMA: &str = "a3s.box.managed-oci-log-worker.v1";
+
+/// Platform-local OCI Runtime endpoint consumed by the detached log worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ManagedOciLogEndpoint {
+    UnixSocket { path: PathBuf },
+    WindowsNamedPipe { name: String },
+}
+
+/// Immutable identity and product logging policy for one managed OCI init
+/// output projection.
+///
+/// The worker is a Box-owned auxiliary process. It reads raw output through
+/// the public OCI SDK, writes the conventional split console files, and feeds
+/// those files into Box's existing retention/redaction/log-driver boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedOciLogWorkerSpec {
+    pub schema: String,
+    pub box_id: String,
+    pub execution_generation: u64,
+    pub endpoint: ManagedOciLogEndpoint,
+    pub runtime_container_id: String,
+    pub runtime_generation: u64,
+    pub console_log: PathBuf,
+    pub log_config: LogConfig,
+    pub ready_file: PathBuf,
+    pub drained_file: PathBuf,
+}
+
+/// Generation-fenced readiness or drain evidence emitted by a managed OCI log
+/// worker. Linux includes a process start-time token so a stale PID cannot be
+/// mistaken for the original worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedOciLogWorkerMarker {
+    pub schema: String,
+    pub box_id: String,
+    pub execution_generation: u64,
+    pub runtime_container_id: String,
+    pub runtime_generation: u64,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_start_time: Option<u64>,
+}
+
 /// Parse a human-readable size string (e.g., "10m", "1g", "4096") into bytes.
 fn parse_size(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim().to_lowercase();

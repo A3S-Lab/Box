@@ -1,6 +1,7 @@
 //! Public-SDK-only A3S OCI lifecycle boundary for managed local execution.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -489,6 +490,26 @@ pub trait OciBundleProvider: Send + Sync {
         context: &OciBundlePreparationContext,
     ) -> ExecutionManagerResult<OciPreparedExecution>;
 
+    /// Ensure the Box-owned init-output projection is ready before OCI start.
+    /// Test and embedding providers may retain raw runtime output only.
+    async fn ensure_log_projection(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
+    /// Wait until the exact init stdout/stderr streams have reached EOF and
+    /// Box's configured log driver has consumed them.
+    async fn wait_log_projection_drained(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     /// Remove only Box-owned preparation artifacts after runtime cleanup.
     async fn cleanup(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
         Ok(())
@@ -584,13 +605,18 @@ impl OciLifecycleAdapter {
         Ok(())
     }
 
-    async fn launch_preflighted(
+    async fn launch_preflighted<BeforeStart, BeforeStartFuture>(
         &self,
         info: &RuntimeInfo,
         execution_id: &ExecutionId,
         preparation: OciBundlePreparationContext,
         prepared: OciPreparedExecution,
-    ) -> ExecutionManagerResult<OciRuntimeLaunch> {
+        before_start: BeforeStart,
+    ) -> ExecutionManagerResult<OciRuntimeLaunch>
+    where
+        BeforeStart: FnOnce(OciRuntimeBinding) -> BeforeStartFuture,
+        BeforeStartFuture: Future<Output = ExecutionManagerResult<()>>,
+    {
         let id = preparation.runtime_container_id.clone();
         let requested = preparation.isolation.clone();
         let expected_config_digest = prepared.bundle.config_digest().to_string();
@@ -626,6 +652,9 @@ impl OciLifecycleAdapter {
             .await;
             return Err(error);
         }
+
+        let created_binding = OciRuntimeBinding::from_record(self.endpoint.clone(), &id, &created)?;
+        before_start(created_binding).await?;
 
         let target = ContainerTarget::exact(id.clone(), created.generation);
         let started = match self
@@ -1362,6 +1391,10 @@ impl OciLocalExecutionBackend {
         let execution_id = self.execution_id(record)?;
         let generation = self.metadata(record)?.generation;
         let status = self.adapter.wait_stopped(runtime, binding).await?;
+        self.provider.ensure_log_projection(record, binding).await?;
+        self.provider
+            .wait_log_projection_drained(record, binding)
+            .await?;
         self.adapter
             .delete(&execution_id, generation, binding, DeleteMode::StoppedOnly)
             .await?;
@@ -1431,6 +1464,9 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         self.metadata(record)?;
         if let Some((runtime, binding)) = self.current_runtime(record).await? {
             if *runtime.state.status() == ContainerState::Running {
+                self.provider
+                    .ensure_log_projection(record, &binding)
+                    .await?;
                 return Ok(self.handle(
                     record,
                     binding,
@@ -1481,9 +1517,21 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         }
         let console_log = prepared.console_log.clone();
         let anonymous_volumes = prepared.anonymous_volumes.clone();
+        let provider = Arc::clone(&self.provider);
+        let projection_record = record.clone();
         let launch = self
             .adapter
-            .launch_preflighted(&info, &execution_id, preparation, prepared)
+            .launch_preflighted(
+                &info,
+                &execution_id,
+                preparation,
+                prepared,
+                move |binding| async move {
+                    provider
+                        .ensure_log_projection(&projection_record, &binding)
+                        .await
+                },
+            )
             .await;
         match launch {
             Ok(launch) if *launch.record.state.status() == ContainerState::Running => {
@@ -1550,6 +1598,9 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 ))
             )
         {
+            self.provider
+                .ensure_log_projection(record, &binding)
+                .await?;
             let info = self.adapter.require_isolation(record.isolation).await?;
             let launch = self
                 .adapter
@@ -1564,6 +1615,12 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 .await?;
             runtime = launch.record;
             binding = launch.binding;
+        }
+
+        if *runtime.state.status() == ContainerState::Running {
+            self.provider
+                .ensure_log_projection(record, &binding)
+                .await?;
         }
 
         match *runtime.state.status() {
@@ -1863,6 +1920,9 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 exit_code: record.exit_code,
             });
         };
+        self.provider
+            .ensure_log_projection(record, &binding)
+            .await?;
         let was_stopped = *runtime.state.status() == ContainerState::Stopped;
         let mut status = None;
         if !was_stopped {
@@ -1904,6 +1964,9 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
             Some(status) => status,
             None => self.adapter.wait(&binding, None).await?,
         };
+        self.provider
+            .wait_log_projection_drained(record, &binding)
+            .await?;
         self.adapter
             .delete(&execution_id, generation, &binding, DeleteMode::StoppedOnly)
             .await?;

@@ -13,6 +13,7 @@
 #![allow(clippy::result_large_err)]
 
 mod krun;
+mod managed_oci_log_worker;
 
 #[cfg(target_os = "windows")]
 use a3s_box_core::config::validate_vcpu_count;
@@ -61,6 +62,10 @@ struct Args {
     #[cfg(target_os = "linux")]
     #[arg(long, hide = true)]
     sandbox_log_worker_config: Option<String>,
+
+    /// Internal: project one exact managed OCI init process into Box logs.
+    #[arg(long, hide = true)]
+    managed_oci_log_worker_config: Option<String>,
 
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
@@ -138,6 +143,10 @@ fn maybe_enable_ksm_merge() {}
 
 fn run() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(config) = args.managed_oci_log_worker_config.as_deref() {
+        return managed_oci_log_worker::run(config);
+    }
 
     #[cfg(target_os = "linux")]
     if let Some(config) = args.sandbox_log_worker_config.as_deref() {
