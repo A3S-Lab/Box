@@ -49,14 +49,15 @@ pub(super) async fn wait_drained(
     loop {
         if read_marker(&spec.drained_file)?
             .as_ref()
-            .is_some_and(|marker| marker_matches(&spec, marker))
+            .is_some_and(|marker| marker_matches_runtime(&spec, marker))
         {
             return Ok(());
         }
 
         match read_marker(&spec.ready_file)? {
-            Some(marker) if marker_matches(&spec, &marker) && marker_is_running(&marker) => {}
-            Some(marker) if marker_matches(&spec, &marker) => {
+            Some(marker)
+                if marker_matches_runtime(&spec, &marker) && marker_is_running(&marker) => {}
+            Some(marker) if marker_matches_runtime(&spec, &marker) => {
                 return Err(ExecutionManagerError::Unavailable(format!(
                     "managed OCI log worker for {} generation {} exited before publishing drain evidence",
                     spec.runtime_container_id, spec.runtime_generation
@@ -93,9 +94,10 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
 
     if let Some(ready) = read_marker(&spec.ready_file)? {
         let drained = read_marker(&spec.drained_file)?;
-        if marker_matches(&spec, &ready) {
+        if marker_matches_runtime(&spec, &ready) {
             if drained.as_ref().is_some_and(|marker| {
-                marker_matches(&spec, marker) && markers_identify_same_worker(&ready, marker)
+                marker_matches_runtime(&spec, marker)
+                    && markers_identify_same_worker(&ready, marker)
             }) {
                 return Ok(());
             }
@@ -131,7 +133,7 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
     }
 
     if let Some(drained) = read_marker(&spec.drained_file)? {
-        if marker_matches(&spec, &drained) {
+        if marker_matches_runtime(&spec, &drained) {
             return Ok(());
         }
         remove_file_if_present(&spec.drained_file)?;
@@ -174,7 +176,7 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         if let Some(marker) = read_marker(&spec.ready_file)? {
-            if marker_matches(&spec, &marker)
+            if marker_matches_runtime(&spec, &marker)
                 && marker.pid == child.id()
                 && marker_is_running(&marker)
             {
@@ -294,10 +296,17 @@ fn read_marker(path: &Path) -> ExecutionManagerResult<Option<ManagedOciLogWorker
     })
 }
 
-fn marker_matches(spec: &ManagedOciLogWorkerSpec, marker: &ManagedOciLogWorkerMarker) -> bool {
+fn marker_matches_runtime(
+    spec: &ManagedOciLogWorkerSpec,
+    marker: &ManagedOciLogWorkerMarker,
+) -> bool {
+    // Box's control generation advances for in-place lifecycle operations such
+    // as pause and resume. Those operations do not replace the OCI init
+    // process or its output streams, so the projection remains owned by the
+    // same exact runtime generation. Keep execution_generation in the marker
+    // as audit evidence, but fence worker lifetime on runtime identity.
     marker.schema == MANAGED_OCI_LOG_WORKER_SCHEMA
         && marker.box_id == spec.box_id
-        && marker.execution_generation == spec.execution_generation
         && marker.runtime_container_id == spec.runtime_container_id
         && marker.runtime_generation == spec.runtime_generation
         && marker.pid != 0
@@ -374,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn markers_are_fenced_by_both_box_and_runtime_generation() {
+    fn markers_follow_runtime_generation_across_box_control_generations() {
         let directory = tempfile::tempdir().unwrap();
         let spec = spec(directory.path());
         let marker = ManagedOciLogWorkerMarker {
@@ -387,15 +396,18 @@ mod tests {
             pid_start_time: Some(99),
         };
 
-        assert!(marker_matches(&spec, &marker));
+        assert!(marker_matches_runtime(&spec, &marker));
         assert!(markers_identify_same_worker(&marker, &marker));
-        let mut stale_box = marker.clone();
-        stale_box.execution_generation -= 1;
-        assert!(!marker_matches(&spec, &stale_box));
-        assert!(!markers_identify_same_worker(&marker, &stale_box));
+        let mut earlier_box_generation = marker.clone();
+        earlier_box_generation.execution_generation -= 1;
+        assert!(marker_matches_runtime(&spec, &earlier_box_generation));
+        assert!(!markers_identify_same_worker(
+            &marker,
+            &earlier_box_generation
+        ));
         let mut stale_runtime = marker;
         stale_runtime.runtime_generation -= 1;
-        assert!(!marker_matches(&spec, &stale_runtime));
+        assert!(!marker_matches_runtime(&spec, &stale_runtime));
     }
 
     #[test]
