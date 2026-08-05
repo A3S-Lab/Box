@@ -375,6 +375,7 @@ fn build_pool_client_run(
     let memory_mb =
         parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
     let mut env = common::build_env_map(&args.common)?;
+    apply_run_env_defaults(args, &mut env);
     let mut volume_specs = args.common.volumes.clone();
     apply_package_caches(&args.package_cache, &mut volume_specs, &mut env);
     let (resolved_volumes, _) = resolve_volumes(&volume_specs)?;
@@ -407,7 +408,7 @@ use setup::setup_and_boot;
 #[cfg(test)]
 use setup::{
     build_box_config, build_execution_request, interactive_keepalive_entrypoint,
-    should_create_diff_baseline, RunRecordPolicy,
+    runtime_start_progress_message, should_create_diff_baseline, RunRecordPolicy,
 };
 
 // ============================================================================
@@ -997,6 +998,13 @@ fn apply_package_caches(
                     .or_insert_with(|| NPM_PREFER_OFFLINE_VALUE.to_string());
             }
         }
+    }
+}
+
+fn apply_run_env_defaults(args: &RunArgs, env: &mut std::collections::HashMap<String, String>) {
+    if !args.interactive {
+        env.entry(COREPACK_DOWNLOAD_PROMPT_ENV.to_string())
+            .or_insert_with(|| COREPACK_DOWNLOAD_PROMPT_VALUE.to_string());
     }
 }
 

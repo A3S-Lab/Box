@@ -43,6 +43,7 @@ pub(super) async fn setup_and_boot(
 
     let name = args.common.name.clone().unwrap_or_else(generate_name);
     let mut env = common::build_env_map(&args.common)?;
+    apply_run_env_defaults(args, &mut env);
     let port_map = common::normalize_port_maps(&args.common.publish)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let labels = common::parse_env_vars(&args.common.labels)
@@ -161,24 +162,28 @@ pub(super) async fn setup_and_boot(
         BoxRecord::make_short_id(&box_id)
     );
     let runtime_start = std::time::Instant::now();
-    let (generation, completed_record) =
-        match manager.start(&execution_id, reservation.generation).await {
-            Ok(lease) => (lease.generation, None),
-            Err(error) => match completed_start_record(&box_id) {
-                Ok(Some(record)) => (reservation.generation, Some(record)),
-                Ok(None) => {
-                    cleanup_failed_managed_run(&box_id);
-                    return Err(error.into());
-                }
-                Err(recovery_error) => {
-                    cleanup_failed_managed_run(&box_id);
-                    return Err(format!(
-                        "{error}; failed to inspect managed startup outcome: {recovery_error}"
-                    )
-                    .into());
-                }
-            },
-        };
+    let (generation, completed_record) = match await_runtime_start_progress(
+        manager.start(&execution_id, reservation.generation),
+        &name,
+    )
+    .await
+    {
+        Ok(lease) => (lease.generation, None),
+        Err(error) => match completed_start_record(&box_id) {
+            Ok(Some(record)) => (reservation.generation, Some(record)),
+            Ok(None) => {
+                cleanup_failed_managed_run(&box_id);
+                return Err(error.into());
+            }
+            Err(recovery_error) => {
+                cleanup_failed_managed_run(&box_id);
+                return Err(format!(
+                    "{error}; failed to inspect managed startup outcome: {recovery_error}"
+                )
+                .into());
+            }
+        },
+    };
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "cli.runtime_start",
         runtime_start.elapsed(),
@@ -236,6 +241,33 @@ pub(super) async fn setup_and_boot(
         create_start.elapsed(),
     );
     Ok(context)
+}
+
+async fn await_runtime_start_progress<F, T>(future: F, name: &str) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+    tokio::pin!(future);
+    let started = std::time::Instant::now();
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            output = &mut future => return output,
+            _ = heartbeat.tick() => {
+                eprintln!("{}", runtime_start_progress_message(name, started.elapsed().as_secs()));
+            }
+        }
+    }
+}
+
+pub(super) fn runtime_start_progress_message(name: &str, elapsed_seconds: u64) -> String {
+    format!(
+        "a3s-box run: still creating {name}; image is ready and runtime startup has taken {elapsed_seconds}s"
+    )
 }
 
 fn completed_start_record(box_id: &str) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {

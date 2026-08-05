@@ -388,7 +388,56 @@ fn test_build_pool_client_run_plumbs_supported_options() {
     assert!(req.exec);
     assert_eq!(req.timeout_ns, Some(45_000_000_000));
     assert_eq!(req.cmd, vec!["echo", "hello"]);
-    assert_eq!(req.env, vec!["A=cli", "B=cli", "C=file"]);
+    assert_eq!(
+        req.env,
+        vec![
+            "A=cli",
+            "B=cli",
+            "C=file",
+            "COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
+        ]
+    );
+}
+
+#[test]
+fn test_non_interactive_run_disables_corepack_prompts_by_default() {
+    let args = default_run_args();
+    let mut env = std::collections::HashMap::new();
+
+    apply_run_env_defaults(&args, &mut env);
+
+    assert_eq!(
+        env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
+        Some(COREPACK_DOWNLOAD_PROMPT_VALUE)
+    );
+}
+
+#[test]
+fn test_run_env_defaults_preserve_explicit_corepack_choice_and_interactive_mode() {
+    let args = default_run_args();
+    let mut env = std::collections::HashMap::from([(
+        COREPACK_DOWNLOAD_PROMPT_ENV.to_string(),
+        "1".to_string(),
+    )]);
+    apply_run_env_defaults(&args, &mut env);
+    assert_eq!(
+        env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
+        Some("1")
+    );
+
+    let mut interactive = default_run_args();
+    interactive.interactive = true;
+    let mut env = std::collections::HashMap::new();
+    apply_run_env_defaults(&interactive, &mut env);
+    assert!(!env.contains_key(COREPACK_DOWNLOAD_PROMPT_ENV));
+}
+
+#[test]
+fn test_runtime_start_progress_identifies_post_pull_phase() {
+    assert_eq!(
+        runtime_start_progress_message("cold-node", 30),
+        "a3s-box run: still creating cold-node; image is ready and runtime startup has taken 30s"
+    );
 }
 
 #[test]

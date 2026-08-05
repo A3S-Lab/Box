@@ -275,6 +275,11 @@ a3s-box run --rm --timeout 120 --cpus 4 --memory 8g \
 cache in the named `a3s-cache-pnpm` volume across `--rm` runs.
 For npm-only checks, use `--package-cache npm` to keep the npm cache in
 `a3s-cache-npm`.
+Non-interactive `run` commands also default
+`COREPACK_ENABLE_DOWNLOAD_PROMPT=0`, with an explicit `--env` value taking
+precedence. Image pulls report layer progress, and runtime startup emits a
+15-second stderr heartbeat after the image is ready so external CI timeouts can
+distinguish registry work from VM or Sandbox startup.
 `--tmpfs .../node_modules` prevents large dependency trees from being written
 through the host workspace mount. `--virtiofs-cache=always` is intended for
 release verification jobs where the host checkout is stable for the duration of
