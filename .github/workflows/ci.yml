@@ -703,6 +703,7 @@ jobs:
     name: Build Check (${{ matrix.target }})
     needs: [fmt, clippy, test, sdk-packages, sdk-local-sandbox]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: linux-x86_64
@@ -744,7 +745,9 @@ jobs:
 
       - name: Test vendored libkrun TX backpressure
         working-directory: src/deps/libkrun-sys/vendor/libkrun
-        run: cargo test --locked -p devices --features net backpressure -- --nocapture
+        run: |
+          touch init/init
+          cargo test --locked -p devices --features net backpressure -- --nocapture
 
       - name: Check compilation
         run: |
