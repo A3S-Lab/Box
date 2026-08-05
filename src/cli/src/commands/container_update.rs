@@ -17,6 +17,9 @@ use a3s_box_runtime::resize::{validate_update, validate_update_values, ResourceU
 #[cfg(not(windows))]
 use a3s_box_runtime::ExecClient;
 
+#[cfg(not(windows))]
+mod managed;
+
 use super::common;
 use crate::output::parse_memory;
 use crate::resolve;
@@ -72,11 +75,14 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     let initial_state = StateFile::load_default()?;
     let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
     drop(initial_state);
+    #[cfg(not(windows))]
+    let mut lifecycle_lock = Some(crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
+    #[cfg(windows)]
     let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     // Build the update from a fresh record only after waiting for any
-    // start/restart/commit operation. Keep the lock across validation, live
-    // guest application, and persistence so a boot cannot consume old limits
-    // while the durable record is switched to new limits.
+    // start/restart/commit operation. Legacy paths keep the lock across live
+    // guest application and persistence. The managed path transfers ownership
+    // to the execution manager below because it acquires the same lock itself.
     let mut state = StateFile::load_default()?;
     let record = state
         .find_by_id_mut(&box_id)
@@ -168,6 +174,16 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     validate_running_update(requires_live_apply, &update)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
+    #[cfg(not(windows))]
+    let managed_live_update = if requires_live_apply && update.has_tier2_changes() {
+        managed::resolve(record, &update)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let live_apply_record = record.clone();
+
     // Snapshot this box's owned fields BEFORE the (awaiting) live-apply below.
     // The final persist re-applies them via StateFile::modify (load-fresh under
     // the lock) instead of saving the full records vector loaded above — which,
@@ -180,45 +196,93 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     let mut live_tier2_applied = false;
     #[cfg(windows)]
     let live_tier2_applied = false;
+    #[cfg(not(windows))]
+    let mut managed_tier2_persisted = false;
+    #[cfg(windows)]
+    let managed_tier2_persisted = false;
+
+    // The managed execution manager and this CLI use the same cross-process
+    // lifecycle lock. All values needed below are owned now, so release the
+    // state snapshot before awaiting either backend.
+    drop(state);
 
     // If the box is running, apply the already-validated live changes through
     // exactly one backend-owned mechanism.
     if requires_live_apply && update.has_tier2_changes() {
         #[cfg(not(windows))]
         {
-            apply_live_tier2_update(record, &update)
-                .await
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            if let Some(target) = managed_live_update {
+                // `ExecutionManager::update_resources` acquires this exact
+                // lock itself and atomically persists its completed intent.
+                drop(lifecycle_lock.take());
+                let home = a3s_box_core::dirs_home();
+                let manager = super::configured_local_execution_manager(&home).await?;
+                managed::apply(&manager, &target)
+                    .await
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                managed_tier2_persisted = true;
+            } else {
+                apply_legacy_live_tier2_update(&live_apply_record, &update)
+                    .await
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            }
             live_tier2_applied = true;
         }
     }
 
-    // Persist this box's updated fields atomically (load-fresh under the lock),
-    // touching only the fields `update` owns so a concurrent writer is not lost.
-    let persist_result: Result<(), std::io::Error> = StateFile::modify(|s| {
-        let rec = s.find_by_id_mut(&box_id).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("box {name} was removed while applying its update"),
-            )
-        })?;
-        // Re-check under the state lock. An inactive box may have started, or
-        // an active box may have restarted onto a different execution, while
-        // the guest call was in flight. Never persist a limit that missed the
-        // execution which is now active.
-        validate_running_update(rec.is_active(), &update).map_err(std::io::Error::other)?;
-        validate_live_apply_target(&live_apply_baseline, rec, &update)
-            .map_err(std::io::Error::other)?;
-        apply_persisted_resource_update(rec, &update);
-        if restart_policy_updated {
-            rec.restart_policy = new_restart_policy.clone();
-            rec.max_restart_count = new_max_restart;
-        }
-        sync_managed_creation_intent(rec, restart_policy_updated).map_err(std::io::Error::other)?;
-        Ok::<(), std::io::Error>(())
-    });
+    #[cfg(not(windows))]
+    let _managed_policy_lock = if managed_tier2_persisted && restart_policy_updated {
+        Some(
+            crate::lifecycle::acquire_box_lifecycle_lock(&box_id)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    format!(
+                        "managed live resources for {name} were already applied and persisted, but the lifecycle lock for the remaining policy update could not be reacquired: {error}; retry the command"
+                    )
+                    .into()
+                })?,
+        )
+    } else {
+        None
+    };
+
+    // Managed live updates already committed their partial resource intent in
+    // the canonical store transaction. The CLI writes only remaining policy
+    // fields; legacy and stopped paths retain the existing atomic persistence.
+    let requires_cli_persist = !managed_tier2_persisted || restart_policy_updated;
+    let persist_result: Result<(), std::io::Error> = if requires_cli_persist {
+        StateFile::modify(|s| {
+            let rec = s.find_by_id_mut(&box_id).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("box {name} was removed while applying its update"),
+                )
+            })?;
+            if !managed_tier2_persisted {
+                // Re-check under the state lock. An inactive box may have
+                // started, or a legacy active box may have restarted while the
+                // guest call was in flight. Never persist a limit that missed
+                // the execution which is now active.
+                validate_running_update(rec.is_active(), &update).map_err(std::io::Error::other)?;
+                validate_live_apply_target(&live_apply_baseline, rec, &update)
+                    .map_err(std::io::Error::other)?;
+                apply_persisted_resource_update(rec, &update);
+            }
+            if restart_policy_updated {
+                rec.restart_policy = new_restart_policy.clone();
+                rec.max_restart_count = new_max_restart;
+            }
+            sync_managed_creation_intent(rec, restart_policy_updated)
+                .map_err(std::io::Error::other)?;
+            Ok::<(), std::io::Error>(())
+        })
+    } else {
+        Ok(())
+    };
     if let Err(error) = persist_result {
-        return Err(persist_update_error(&error, live_tier2_applied).into());
+        return Err(
+            persist_update_error(&error, live_tier2_applied, managed_tier2_persisted).into(),
+        );
     }
     println!("{name}");
 
@@ -226,7 +290,7 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
 }
 
 #[cfg(not(windows))]
-async fn apply_live_tier2_update(
+async fn apply_legacy_live_tier2_update(
     record: &crate::state::BoxRecord,
     update: &ResourceUpdate,
 ) -> Result<(), String> {
@@ -312,8 +376,16 @@ async fn apply_live_tier2_update(
     }
 }
 
-fn persist_update_error(error: &std::io::Error, live_tier2_applied: bool) -> String {
-    if live_tier2_applied {
+fn persist_update_error(
+    error: &std::io::Error,
+    live_tier2_applied: bool,
+    managed_tier2_persisted: bool,
+) -> String {
+    if managed_tier2_persisted {
+        format!(
+            "{error}; the managed live resource update was already applied and persisted, but the remaining policy changes were not; retry the command"
+        )
+    } else if live_tier2_applied {
         format!(
             "{error}; the guest accepted the live resource update before persistence failed, so running limits may have changed without a matching durable record; retry the update or restart the box"
         )
@@ -620,11 +692,22 @@ mod tests {
     fn post_apply_persistence_error_explains_possible_guest_drift() {
         let error = std::io::Error::new(std::io::ErrorKind::NotFound, "box was removed");
 
-        let message = persist_update_error(&error, true);
+        let message = persist_update_error(&error, true, false);
 
         assert!(message.contains("guest accepted the live resource update"));
         assert!(message.contains("without a matching durable record"));
         assert!(message.contains("retry the update or restart"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn managed_post_apply_error_reports_durable_resource_state() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "box was removed");
+
+        let message = persist_update_error(&error, true, true);
+
+        assert!(message.contains("already applied and persisted"));
+        assert!(message.contains("remaining policy changes were not"));
     }
 
     #[cfg(windows)]

@@ -352,9 +352,10 @@ retain process or filesystem sessions after its owner dies.
   exact-generation filesystem classification, bounded single-file transfer,
   directory archive execution, and Unix permission restoration without socket
   fallback.
-- [ ] Route the remaining socket-oriented CLI projections (`attach`, live
-  `container-update`, and init stdout/stderr log projection) through the
-  persisted OCI route.
+- [x] Route live CLI `container-update` through the persisted OCI route with
+  exact-generation, replay-safe resource intent and no socket fallback.
+- [ ] Route the remaining socket-oriented CLI projections (`attach` and init
+  stdout/stderr log projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
 
