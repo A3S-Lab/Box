@@ -61,11 +61,12 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`2f0898902d1107e53e9e5464780a1e7a6f6e162d`, which retains the qualified
+`9c3be8e126dda7ff7add5e6e88c427f68c7d6629`, which retains the qualified
 control/workload cgroup and read-only bind behavior and adds deterministic
 multi-driver registration, isolation selection, and durable recorded-driver
 routing required by the unified execution migration. It also publishes stable
-aggregate workload block-I/O byte metrics consumed by Box statistics. Runtime service startup
+aggregate workload block-I/O byte metrics consumed by Box statistics and
+isolates an aborted SDK connection from the shared host-service lifetime. Runtime service startup
 also fails closed when historical state references a missing driver or a
 driver whose advertised isolation has drifted. Startup then calls only the
 exact recorded driver's idempotent recovery hook and commits any legal state

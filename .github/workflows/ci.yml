@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 2f0898902d1107e53e9e5464780a1e7a6f6e162d
+  A3S_OCI_RUNTIME_REV: 9c3be8e126dda7ff7add5e6e88c427f68c7d6629
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -331,9 +331,20 @@ jobs:
           fi
           exit "$status"
       - name: Test deterministic CLI workflows
-        run: >-
-          cd src && cargo test --locked -p a3s-box-cli
-          --test command_coverage --test wait_integration
+        run: |
+          cd src
+          set +e
+          log="$RUNNER_TEMP/a3s-box-deterministic-cli-tests.log"
+          cargo test --locked -p a3s-box-cli +            --test command_coverage --test wait_integration +            2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if ((status != 0)); then
+            diagnostic="$(tail -c 3800 "$log")"
+            diagnostic="${diagnostic//'%'/'%25'}"
+            diagnostic="${diagnostic//$'\r'/'%0D'}"
+            diagnostic="${diagnostic//$'\n'/'%0A'}"
+            echo "::error title=Deterministic CLI workflow failure::$diagnostic"
+          fi
+          exit "$status"
       - name: Compile local SDK real-runtime smoke
         run: cd src && cargo test --locked -p a3s-box-sdk --test local_sandbox --no-run
 

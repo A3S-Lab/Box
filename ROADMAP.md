@@ -143,10 +143,11 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`2f0898902d1107e53e9e5464780a1e7a6f6e162d` retains the matching long-lived,
+`9c3be8e126dda7ff7add5e6e88c427f68c7d6629` retains the matching long-lived,
 multi-container Native Linux host owner and adds the generation-safe bundle
 handoff used by the preparation context above, plus stable aggregate workload
-block-I/O metrics. The same revision keeps durable
+block-I/O metrics. Connection-local protocol or disconnect failures no longer
+terminate that shared owner or its unrelated containers. The same revision keeps durable
 Native Linux owner recovery out of the transient utility-VM guest executor, so
 WHPX reaches protocol negotiation without attempting host-only journal writes.
 Box now first validates the
