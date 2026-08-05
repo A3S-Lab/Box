@@ -3972,24 +3972,24 @@ async fn paused_exact_generation_remains_observable() {
         )
         .await
         .expect("initial launch");
-    manager
+    let paused = manager
         .pause(&lease.execution_id, lease.generation, true)
         .await
         .expect("pause exact generation");
 
     let inventory = manager
-        .list_processes(&lease.execution_id, lease.generation)
+        .list_processes(&lease.execution_id, paused.generation)
         .await
         .expect("paused process inventory");
     let stats = manager
-        .stats(&lease.execution_id, lease.generation)
+        .stats(&lease.execution_id, paused.generation)
         .await
         .expect("paused runtime stats");
 
     assert_eq!(inventory.execution_id, lease.execution_id);
-    assert_eq!(inventory.generation, lease.generation);
+    assert_eq!(inventory.generation, paused.generation);
     assert_eq!(stats.execution_id, lease.execution_id);
-    assert_eq!(stats.generation, lease.generation);
+    assert_eq!(stats.generation, paused.generation);
     assert_eq!(service.processes_requests().len(), 1);
     assert_eq!(service.stats_requests().len(), 1);
 }
