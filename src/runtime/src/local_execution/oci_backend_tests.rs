@@ -1268,6 +1268,7 @@ struct FakeBundleProvider {
     cleanups: AtomicUsize,
     projection_ensures: AtomicUsize,
     projection_drains: AtomicUsize,
+    projection_owner_loss_stops: AtomicUsize,
     fail_projection: AtomicBool,
     invalid_console: AtomicBool,
     expected_snapshot_lower: Mutex<Option<std::path::PathBuf>>,
@@ -1358,6 +1359,16 @@ impl OciBundleProvider for FakeBundleProvider {
         _binding: &OciRuntimeBinding,
     ) -> ExecutionManagerResult<()> {
         self.projection_drains.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.projection_owner_loss_stops
+            .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -3863,6 +3874,11 @@ async fn reopened_backend_observes_natural_terminal_status_before_stopped_only_d
     assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
     assert_eq!(service.container_count(), 0);
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.projection_drains.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        provider.projection_owner_loss_stops.load(Ordering::SeqCst),
+        0
+    );
 }
 
 #[tokio::test]
@@ -3899,6 +3915,11 @@ async fn reopened_backend_cleans_stopped_generation_without_inventing_exit_statu
     assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
     assert_eq!(service.container_count(), 0);
     assert_eq!(provider.cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.projection_drains.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        provider.projection_owner_loss_stops.load(Ordering::SeqCst),
+        1
+    );
     assert!(record
         .managed_execution
         .as_ref()

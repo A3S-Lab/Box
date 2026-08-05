@@ -194,6 +194,14 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
     ) -> ExecutionManagerResult<()> {
         super::oci_log_projection::wait_drained(record, binding).await
     }
+
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::wait_stopped_after_owner_loss(record, binding).await
+    }
 }
 
 #[async_trait]
@@ -332,6 +340,14 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         binding: &super::OciRuntimeBinding,
     ) -> ExecutionManagerResult<()> {
         super::oci_log_projection::wait_drained(record, binding).await
+    }
+
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        super::oci_log_projection::wait_stopped_after_owner_loss(record, binding).await
     }
 }
 

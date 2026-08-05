@@ -510,6 +510,18 @@ pub trait OciBundleProvider: Send + Sync {
         Ok(())
     }
 
+    /// Wait until the exact projection worker has stopped after the runtime
+    /// owner was lost. This path must not claim that output was fully drained:
+    /// owner-death recovery deliberately preserves an unknown exit status and
+    /// may also have lost the tail of the init output stream.
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        _record: &BoxRecord,
+        _binding: &OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     /// Remove only Box-owned preparation artifacts after runtime cleanup.
     async fn cleanup(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
         Ok(())
@@ -1391,10 +1403,16 @@ impl OciLocalExecutionBackend {
         let execution_id = self.execution_id(record)?;
         let generation = self.metadata(record)?.generation;
         let status = self.adapter.wait_stopped(runtime, binding).await?;
-        self.provider.ensure_log_projection(record, binding).await?;
-        self.provider
-            .wait_log_projection_drained(record, binding)
-            .await?;
+        if status.is_some() {
+            self.provider.ensure_log_projection(record, binding).await?;
+            self.provider
+                .wait_log_projection_drained(record, binding)
+                .await?;
+        } else {
+            self.provider
+                .wait_log_projection_stopped_after_owner_loss(record, binding)
+                .await?;
+        }
         self.adapter
             .delete(&execution_id, generation, binding, DeleteMode::StoppedOnly)
             .await?;

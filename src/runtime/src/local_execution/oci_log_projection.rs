@@ -91,6 +91,66 @@ pub(super) async fn wait_drained(
     }
 }
 
+/// Wait for the exact projection worker to stop after OCI recovered a stopped
+/// generation without authenticated exit evidence. A dead runtime owner may
+/// make the final output tail unavailable, so this path intentionally leaves
+/// the readiness marker and worker diagnostics in place instead of publishing
+/// or synthesizing drain evidence. The next exact generation safely fences and
+/// replaces that dead marker in [`ensure_blocking`].
+pub(super) async fn wait_stopped_after_owner_loss(
+    record: &BoxRecord,
+    binding: &OciRuntimeBinding,
+) -> ExecutionManagerResult<()> {
+    let spec = worker_spec(record, binding)?;
+    let worker_log_path = projection_directory(record).join(WORKER_LOG_FILE);
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    loop {
+        if read_marker(&spec.drained_file)?
+            .as_ref()
+            .is_some_and(|marker| marker_matches_runtime(&spec, marker))
+        {
+            return Ok(());
+        }
+
+        match read_marker(&spec.ready_file)? {
+            Some(marker)
+                if marker_matches_runtime(&spec, &marker) && marker_is_running(&marker) => {}
+            Some(marker) if marker_matches_runtime(&spec, &marker) => {
+                tracing::warn!(
+                    box_id = %spec.box_id,
+                    runtime_container = %spec.runtime_container_id,
+                    runtime_generation = spec.runtime_generation,
+                    "Managed OCI log projection stopped without drain evidence after owner loss"
+                );
+                return Ok(());
+            }
+            Some(_) => {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: ExecutionId::new(record.id.clone())?,
+                    message: "another managed OCI log projection owns this Box directory"
+                        .to_string(),
+                });
+            }
+            None => {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "managed OCI log worker for {} generation {} has no readiness evidence after owner loss",
+                    spec.runtime_container_id, spec.runtime_generation
+                )));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "timed out waiting for managed OCI log worker for {} generation {} to stop after owner loss{}",
+                spec.runtime_container_id,
+                spec.runtime_generation,
+                worker_log_diagnostics(&worker_log_path)
+            )));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> ExecutionManagerResult<()> {
     let spec = worker_spec(record, binding)?;
     prepare_marker_paths(&spec)?;
