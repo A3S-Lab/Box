@@ -63,7 +63,11 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
     } else {
         None
     };
-    let streams = attach_stream_sources(&record.box_dir, &record.console_log);
+    let streams = attach_stream_sources(
+        &record.box_dir,
+        &record.console_log,
+        route == AttachRoute::ManagedLogs,
+    );
     if !streams.stdout.exists() {
         return Err(missing_console_log_message(&record.name, &streams.stdout).into());
     }
@@ -344,8 +348,9 @@ struct AttachStreamSources {
 fn attach_stream_sources(
     box_dir: &std::path::Path,
     console_log: &std::path::Path,
+    managed: bool,
 ) -> AttachStreamSources {
-    if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") && !managed {
         // WHPX exposes the supervised workload streams through the shared
         // rootfs while the VM is running. The conventional console files only
         // receive a fallback copy after exit, so tailing them makes a live
@@ -561,7 +566,16 @@ mod tests {
     fn attach_stream_sources_match_platform_runtime_output() {
         let box_dir = Path::new("box-dir");
         let console_log = box_dir.join("logs").join("console.log");
-        let streams = attach_stream_sources(box_dir, &console_log);
+        let managed_streams = attach_stream_sources(box_dir, &console_log, true);
+
+        assert_eq!(managed_streams.stdout, console_log);
+        assert_eq!(
+            managed_streams.stderr,
+            box_dir.join("logs").join("console.err.log")
+        );
+        assert!(!managed_streams.filter_runtime_noise);
+
+        let streams = attach_stream_sources(box_dir, &console_log, false);
 
         if cfg!(target_os = "windows") {
             assert_eq!(

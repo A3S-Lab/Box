@@ -354,7 +354,7 @@ retain process or filesystem sessions after its owner dies.
   fallback.
 - [x] Route live CLI `container-update` through the persisted OCI route with
   exact-generation, replay-safe resource intent and no socket fallback.
-- [ ] Route the remaining socket-oriented CLI projections (`attach` and init
+- [x] Route the remaining socket-oriented CLI projections (`attach` and init
   stdout/stderr log projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
@@ -383,8 +383,10 @@ one exec dispatch. Native Linux and utility-VM driver reattachment on real
 hosts remains part of the unchecked exit gate. The production Linux smoke now
 drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
 route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
-CLI `top`, `stats`, and `cp` projections now share that exact route. Attach,
-live update, and init-log projection remain deliberately unchecked.
+CLI `top`, `stats`, `cp`, live update, attach, and init-log projections now
+share that exact route. The init-log worker starts before runtime start,
+retains an exact endpoint and generation, reconnects after runtime-service
+owner replacement, and must publish final drain evidence before deletion.
 
 ### B3 - Storage And Networking Attachments
 

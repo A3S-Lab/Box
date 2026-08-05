@@ -57,7 +57,7 @@ unchanged. Windows x86_64 also has an explicit qualification-only
 service; it is not enabled by default and is not yet a production claim.
 
 > [!NOTE]
-> The current SDK-only Sandbox adapter now covers four exact-generation rails:
+> The current SDK-only Sandbox adapter now covers five exact-generation rails:
 >
 > - versioned rootfs, mount, network, process-I/O, secret, and extension
 >   attachments with a persisted manifest digest;
@@ -68,7 +68,9 @@ service; it is not enabled by default and is not yet a production claim.
 >   bounded listing, and recursive removal through descriptor-confined runtime
 >   sessions;
 > - live process inventory, normalized stats, bounded ordered events, and
->   replay-safe resource updates compiled into one complete OCI contract.
+>   replay-safe resource updates compiled into one complete OCI contract;
+> - detached init stdout/stderr projection into Box logging plus read-only and
+>   PTY CLI attach without a legacy runtime-socket fallback.
 >
 > Calls are capability-checked and bound to the exact runtime target. File and
 > filesystem mutations reuse one operation identity for an explicitly
@@ -104,10 +106,14 @@ service; it is not enabled by default and is not yet a production claim.
 > identities terminate, and use fresh Box SDK-bridge processes to rebind the
 > owner endpoint, reconcile the generation as stopped without inventing an exit
 > status, delete its exact runtime tombstone, and restart the next Box and OCI
-> generations.
+> generations. A generation-fenced Box worker is ready before OCI init starts,
+> consumes the runtime's ordered output cursor, writes the conventional split
+> console files, feeds the configured retention/redaction driver, reconnects
+> after runtime-service owner replacement, and publishes drain evidence before
+> the runtime generation is deleted.
 > WHPX production composition, transparent process/filesystem-session recovery
-> across real driver-owner death, remaining CLI projections, and the broader
-> cutover gates remain open; the default split above is still authoritative.
+> across real driver-owner death, and the broader cutover gates remain open;
+> the default split above is still authoritative.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -288,10 +294,14 @@ accident.
 
 Current Linux opt-in limits are intentional: only new Sandbox reservations are
 routed there; `all`/MicroVM migration is rejected on Linux; image-declared
-anonymous volumes must be replaced by explicit named or bind mounts; and
-remaining socket-based CLI projections (`attach` plus init stdout/stderr
-projection into Box logs) are not yet promoted on this path. CLI `top` and
-`stats` now use the persisted OCI route, including
+anonymous volumes must be replaced by explicit named or bind mounts. CLI
+`attach` now uses the persisted OCI route: read-only attach follows the
+generation-fenced Box console projection, while `attach -t` opens an exact
+managed PTY session; neither path falls back to a Box-owned runtime socket.
+Init stdout/stderr is projected by a detached Box worker that starts before OCI
+init, preserves stream ordering and separation, applies the configured logging
+policy, and drains before runtime deletion. CLI `top` and `stats` use the
+persisted OCI route, including
 exact-generation process dispatch and normalized CPU/memory/PID/block-I/O
 snapshots for running or paused workloads. CLI `cp` uses that same durable
 route for filesystem classification, bounded single-file transfer, directory
