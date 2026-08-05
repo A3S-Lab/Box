@@ -45,6 +45,7 @@ pub(super) async fn wait_drained(
     binding: &OciRuntimeBinding,
 ) -> ExecutionManagerResult<()> {
     let spec = worker_spec(record, binding)?;
+    let worker_log_path = projection_directory(record).join(WORKER_LOG_FILE);
     let deadline = Instant::now() + DRAIN_TIMEOUT;
     loop {
         if read_marker(&spec.drained_file)?
@@ -59,8 +60,10 @@ pub(super) async fn wait_drained(
                 if marker_matches_runtime(&spec, &marker) && marker_is_running(&marker) => {}
             Some(marker) if marker_matches_runtime(&spec, &marker) => {
                 return Err(ExecutionManagerError::Unavailable(format!(
-                    "managed OCI log worker for {} generation {} exited before publishing drain evidence",
-                    spec.runtime_container_id, spec.runtime_generation
+                    "managed OCI log worker for {} generation {} exited before publishing drain evidence{}",
+                    spec.runtime_container_id,
+                    spec.runtime_generation,
+                    worker_log_diagnostics(&worker_log_path)
                 )));
             }
             Some(_) => {
@@ -91,6 +94,7 @@ pub(super) async fn wait_drained(
 fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> ExecutionManagerResult<()> {
     let spec = worker_spec(record, binding)?;
     prepare_marker_paths(&spec)?;
+    let worker_log_path = projection_directory(record).join(WORKER_LOG_FILE);
 
     if let Some(ready) = read_marker(&spec.ready_file)? {
         let drained = read_marker(&spec.drained_file)?;
@@ -105,8 +109,10 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
                 return Ok(());
             }
             return Err(ExecutionManagerError::Unavailable(format!(
-                "managed OCI log worker for {} generation {} exited before drain; refusing to replay its Box log projection",
-                spec.runtime_container_id, spec.runtime_generation
+                "managed OCI log worker for {} generation {} exited before drain; refusing to replay its Box log projection{}",
+                spec.runtime_container_id,
+                spec.runtime_generation,
+                worker_log_diagnostics(&worker_log_path)
             )));
         }
         if drained
@@ -149,7 +155,6 @@ fn ensure_blocking(record: &BoxRecord, binding: &OciRuntimeBinding) -> Execution
             "failed to encode managed OCI log worker configuration: {error}"
         ))
     })?;
-    let worker_log_path = projection_directory(record).join(WORKER_LOG_FILE);
     let stdout = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -351,6 +356,12 @@ fn read_log_tail(path: &Path, limit: u64) -> Option<String> {
     file.take(limit).read_to_end(&mut bytes).ok()?;
     let tail = String::from_utf8_lossy(&bytes).trim().to_string();
     (!tail.is_empty()).then_some(tail)
+}
+
+fn worker_log_diagnostics(path: &Path) -> String {
+    read_log_tail(path, START_FAILURE_LOG_BYTES)
+        .map(|tail| format!(": {tail}"))
+        .unwrap_or_default()
 }
 
 fn projection_io(operation: &str, path: &Path, error: std::io::Error) -> ExecutionManagerError {
