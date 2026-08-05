@@ -241,7 +241,7 @@ async fn project_output(
                 process_observed = true;
                 chunks
             }
-            Err(error) if error.code == ErrorCode::Unavailable => {
+            Err(error) if should_retry_output_read(&error) => {
                 tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MILLIS)).await;
                 continue;
             }
@@ -303,6 +303,10 @@ async fn project_output(
         )?;
     }
     Ok(())
+}
+
+fn should_retry_output_read(error: &a3s_oci_sdk::Error) -> bool {
+    error.code == ErrorCode::Unavailable || (error.code == ErrorCode::Conflict && error.retryable)
 }
 
 fn accept_chunks(
@@ -423,6 +427,22 @@ fn boot_error(message: impl Into<String>) -> BoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retries_only_transient_output_ownership_conflicts() {
+        let active_start = a3s_oci_sdk::Error::new(
+            ErrorCode::Conflict,
+            "container is owned by the active start operation",
+        )
+        .retryable(true);
+        let stale_generation =
+            a3s_oci_sdk::Error::new(ErrorCode::Conflict, "container generation does not match");
+        let unavailable = a3s_oci_sdk::Error::new(ErrorCode::Unavailable, "runtime reconnecting");
+
+        assert!(should_retry_output_read(&active_start));
+        assert!(!should_retry_output_read(&stale_generation));
+        assert!(should_retry_output_read(&unavailable));
+    }
 
     #[test]
     fn accepts_contiguous_split_output_and_both_eofs() {
