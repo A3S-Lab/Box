@@ -1,7 +1,7 @@
 //! `a3s-box cp` command — Copy files or directories between host and a running box.
 //!
-//! Uses the exec channel's native file protocol for single files. Directories
-//! are archived with `tar` before transfer.
+//! Uses the selected runtime session's native file protocol for single files.
+//! Directories are archived with `tar` before transfer.
 //!
 //! Syntax:
 //!   a3s-box cp <box>:/path/in/box /host/path   (box → host)
@@ -14,10 +14,10 @@ use a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS;
 use a3s_box_core::exec::{
     ExecRequest, FileOp, FileRequest, FilesystemEntryKind, FilesystemOp, FilesystemRequest,
 };
-use a3s_box_runtime::ExecClient;
 
-use crate::resolve;
-use crate::state::StateFile;
+use self::session::{connect_copy_session, CopySession};
+
+mod session;
 
 /// Timeout for directory transfers (60 seconds).
 const DIR_TRANSFER_TIMEOUT_NS: u64 = 60_000_000_000;
@@ -79,12 +79,12 @@ async fn copy_from_box(
     box_path: &str,
     host_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = connect_exec(box_name).await?;
+    let session = connect_copy_session(box_name).await?;
 
-    if is_directory_in_box(&client, box_path).await? {
-        copy_dir_from_box(&client, box_name, box_path, host_path).await
+    if is_directory_in_box(&session, box_path).await? {
+        copy_dir_from_box(&session, box_name, box_path, host_path).await
     } else {
-        copy_file_from_box(&client, box_name, box_path, host_path).await
+        copy_file_from_box(&session, box_name, box_path, host_path).await
     }
 }
 
@@ -97,22 +97,22 @@ async fn copy_to_box(
     let meta =
         std::fs::metadata(host_path).map_err(|e| format!("Failed to stat {host_path}: {e}"))?;
 
-    let client = connect_exec(box_name).await?;
+    let session = connect_copy_session(box_name).await?;
 
     if meta.is_dir() {
-        copy_dir_to_box(&client, host_path, box_name, box_path).await
+        copy_dir_to_box(&session, host_path, box_name, box_path).await
     } else {
-        copy_file_to_box(&client, host_path, box_name, box_path).await
+        copy_file_to_box(&session, host_path, box_name, box_path).await
     }
 }
 
 /// Check if a path is a directory inside the box.
 async fn is_directory_in_box(
-    client: &ExecClient,
+    session: &CopySession,
     box_path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let response = client
-        .filesystem(&FilesystemRequest {
+    let response = session
+        .filesystem(FilesystemRequest {
             op: FilesystemOp::Stat,
             path: box_path.to_string(),
             destination: None,
@@ -143,7 +143,7 @@ async fn is_directory_in_box(
 
 #[cfg(unix)]
 async fn restore_file_mode_in_box(
-    client: &ExecClient,
+    session: &CopySession,
     box_path: &str,
     mode: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -164,7 +164,7 @@ async fn restore_file_mode_in_box(
         streaming: false,
     };
 
-    let output = client.exec_command(&request).await?;
+    let output = session.execute(request).await?;
     if output.exit_code != 0 {
         return Err(format!(
             "Failed to set permissions on {box_path} in box: {}",
@@ -181,14 +181,14 @@ async fn restore_file_mode_in_box(
 
 /// Copy a single file from a box to the host.
 async fn copy_file_from_box(
-    client: &ExecClient,
+    session: &CopySession,
     box_name: &str,
     box_path: &str,
     host_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use base64::Engine;
-    let response = client
-        .file_transfer(&FileRequest {
+    let response = session
+        .transfer_file(FileRequest {
             op: FileOp::Download,
             guest_path: box_path.to_string(),
             data: None,
@@ -229,7 +229,7 @@ async fn copy_file_from_box(
 
 /// Copy a single file from the host to a box.
 async fn copy_file_to_box(
-    client: &ExecClient,
+    session: &CopySession,
     host_path: &str,
     box_name: &str,
     box_path: &str,
@@ -239,8 +239,8 @@ async fn copy_file_to_box(
     let len = content.len();
 
     use base64::Engine;
-    let response = client
-        .file_transfer(&FileRequest {
+    let response = session
+        .transfer_file(FileRequest {
             op: FileOp::Upload,
             guest_path: box_path.to_string(),
             data: Some(base64::engine::general_purpose::STANDARD.encode(&content)),
@@ -265,7 +265,7 @@ async fn copy_file_to_box(
     }
 
     #[cfg(unix)]
-    restore_file_mode_in_box(client, box_path, host_file_mode(host_path)).await?;
+    restore_file_mode_in_box(session, box_path, host_file_mode(host_path)).await?;
 
     println!("{host_path} → {box_name}:{box_path} ({len} bytes)");
     Ok(())
@@ -286,7 +286,7 @@ fn host_file_mode(host_path: &str) -> u32 {
 
 /// Copy a directory from a box to the host using tar.
 async fn copy_dir_from_box(
-    client: &ExecClient,
+    session: &CopySession,
     box_name: &str,
     box_path: &str,
     host_path: &str,
@@ -315,7 +315,7 @@ async fn copy_dir_from_box(
         streaming: false,
     };
 
-    let output = client.exec_command(&request).await?;
+    let output = session.execute(request).await?;
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -345,7 +345,7 @@ async fn copy_dir_from_box(
 
 /// Copy a directory from the host to a box using tar.
 async fn copy_dir_to_box(
-    client: &ExecClient,
+    session: &CopySession,
     host_path: &str,
     box_name: &str,
     box_path: &str,
@@ -380,7 +380,7 @@ async fn copy_dir_to_box(
         streaming: false,
     };
 
-    let output = client.exec_command(&request).await?;
+    let output = session.execute(request).await?;
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -442,21 +442,6 @@ fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// Connect to a box's exec server.
-async fn connect_exec(box_name: &str) -> Result<ExecClient, Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, box_name)?;
-    let exec_socket_path = crate::socket_paths::require_runtime_socket(
-        record,
-        crate::socket_paths::RuntimeSocket::Exec,
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    ExecClient::connect(&exec_socket_path)
-        .await
-        .map_err(|e| e.into())
-}
-
 /// Minimal shell escaping for a file path.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -465,6 +450,324 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use a3s_box_core::pty::PtyRequest;
+    use a3s_box_core::{
+        BoxConfig, CreateExecutionRequest, ExecOutput, ExecutionGeneration, ExecutionId,
+        ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
+        ExecutionSessionManager, FileResponse, FilesystemResponse, OperationId,
+    };
+    use a3s_box_runtime::{ManagedExecutionMetadata, ManagedRuntimeRoute};
+
+    use super::session::{resolve_copy_route, CopyRoute};
+    use crate::state::BoxRecord;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SessionCall {
+        Execute {
+            execution_id: String,
+            generation: ExecutionGeneration,
+            command: Vec<String>,
+        },
+        TransferFile {
+            execution_id: String,
+            generation: ExecutionGeneration,
+            operation: FileOp,
+            path: String,
+        },
+        Filesystem {
+            execution_id: String,
+            generation: ExecutionGeneration,
+            operation: FilesystemOp,
+            path: String,
+        },
+    }
+
+    #[derive(Default)]
+    struct RecordingSessionManager {
+        calls: Mutex<Vec<SessionCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionSessionManager for RecordingSessionManager {
+        async fn execute(
+            &self,
+            execution_id: &ExecutionId,
+            generation: ExecutionGeneration,
+            request: ExecRequest,
+        ) -> ExecutionManagerResult<ExecOutput> {
+            self.calls.lock().unwrap().push(SessionCall::Execute {
+                execution_id: execution_id.as_str().to_string(),
+                generation,
+                command: request.cmd,
+            });
+            Ok(ExecOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_code: 0,
+                truncated: false,
+            })
+        }
+
+        async fn start_process(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _request: ExecRequest,
+        ) -> ExecutionManagerResult<ExecutionProcess> {
+            Err(ExecutionManagerError::Unavailable(
+                "streaming process is outside this test".to_string(),
+            ))
+        }
+
+        async fn start_pty(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _request: PtyRequest,
+        ) -> ExecutionManagerResult<ExecutionProcess> {
+            Err(ExecutionManagerError::Unavailable(
+                "PTY is outside this test".to_string(),
+            ))
+        }
+
+        async fn transfer_file(
+            &self,
+            execution_id: &ExecutionId,
+            generation: ExecutionGeneration,
+            request: FileRequest,
+        ) -> ExecutionManagerResult<FileResponse> {
+            use base64::Engine;
+
+            let response = match request.op {
+                FileOp::Upload => FileResponse {
+                    success: true,
+                    data: None,
+                    size: request
+                        .data
+                        .as_deref()
+                        .and_then(|data| {
+                            base64::engine::general_purpose::STANDARD.decode(data).ok()
+                        })
+                        .map_or(0, |data| data.len() as u64),
+                    error: None,
+                },
+                FileOp::Download => FileResponse {
+                    success: true,
+                    data: Some(base64::engine::general_purpose::STANDARD.encode(b"copy data")),
+                    size: 9,
+                    error: None,
+                },
+            };
+            self.calls.lock().unwrap().push(SessionCall::TransferFile {
+                execution_id: execution_id.as_str().to_string(),
+                generation,
+                operation: request.op,
+                path: request.guest_path,
+            });
+            Ok(response)
+        }
+
+        async fn filesystem(
+            &self,
+            execution_id: &ExecutionId,
+            generation: ExecutionGeneration,
+            request: FilesystemRequest,
+        ) -> ExecutionManagerResult<FilesystemResponse> {
+            self.calls.lock().unwrap().push(SessionCall::Filesystem {
+                execution_id: execution_id.as_str().to_string(),
+                generation,
+                operation: request.op,
+                path: request.path,
+            });
+            Ok(FilesystemResponse {
+                success: true,
+                entry: None,
+                entries: Vec::new(),
+                error: None,
+            })
+        }
+    }
+
+    fn test_exec_request(command: &[&str]) -> ExecRequest {
+        ExecRequest {
+            request_id: None,
+            cmd: command.iter().map(|part| (*part).to_string()).collect(),
+            timeout_ns: DIR_TRANSFER_TIMEOUT_NS,
+            env: Vec::new(),
+            working_dir: None,
+            rootfs: None,
+            stdin: None,
+            stdin_streaming: false,
+            user: None,
+            streaming: false,
+        }
+    }
+
+    fn oci_record(status: &str, generation: ExecutionGeneration) -> BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record =
+            crate::test_helpers::fixtures::make_record(id, "managed-copy", status, Some(1));
+        record.isolation = ExecutionIsolation::Sandbox;
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("copy-route-create").unwrap(),
+            generation,
+            CreateExecutionRequest {
+                external_sandbox_id: "managed-copy-external".to_string(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Sandbox,
+                    image: record.image.clone(),
+                    ..Default::default()
+                },
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.runtime_route = ManagedRuntimeRoute::OciSdk;
+        record.managed_execution = Some(metadata);
+        record
+    }
+
+    #[test]
+    fn oci_copy_route_uses_persisted_identity_without_requiring_a_socket() {
+        let generation = ExecutionGeneration::new(7).unwrap();
+        let mut record = oci_record("running", generation);
+        record.exec_socket_path = PathBuf::from("missing-copy-socket");
+
+        assert_eq!(
+            resolve_copy_route(&record).unwrap(),
+            CopyRoute::Managed {
+                execution_id: ExecutionId::new(record.id).unwrap(),
+                generation,
+            }
+        );
+    }
+
+    #[test]
+    fn stopped_oci_copy_route_does_not_fall_back_to_a_socket() {
+        let record = oci_record("stopped", ExecutionGeneration::new(3).unwrap());
+
+        let error = resolve_copy_route(&record).unwrap_err().to_string();
+
+        assert_eq!(error, "Box managed-copy is not running");
+        assert!(!error.contains("socket"));
+    }
+
+    #[tokio::test]
+    async fn managed_copy_session_fences_exec_file_and_filesystem_operations() {
+        let manager = Arc::new(RecordingSessionManager::default());
+        let execution_id = ExecutionId::new("managed-copy-id").unwrap();
+        let generation = ExecutionGeneration::new(11).unwrap();
+        let session = CopySession::Managed {
+            manager: manager.clone(),
+            execution_id: execution_id.clone(),
+            generation,
+        };
+
+        session
+            .execute(test_exec_request(&["sh", "-c", "tar -cf - ."]))
+            .await
+            .unwrap();
+        session
+            .transfer_file(FileRequest {
+                op: FileOp::Download,
+                guest_path: "/work/data.txt".to_string(),
+                data: None,
+                user: None,
+            })
+            .await
+            .unwrap();
+        session
+            .filesystem(FilesystemRequest {
+                op: FilesystemOp::Stat,
+                path: "/work".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *manager.calls.lock().unwrap(),
+            vec![
+                SessionCall::Execute {
+                    execution_id: execution_id.as_str().to_string(),
+                    generation,
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "tar -cf - .".to_string(),
+                    ],
+                },
+                SessionCall::TransferFile {
+                    execution_id: execution_id.as_str().to_string(),
+                    generation,
+                    operation: FileOp::Download,
+                    path: "/work/data.txt".to_string(),
+                },
+                SessionCall::Filesystem {
+                    execution_id: execution_id.as_str().to_string(),
+                    generation,
+                    operation: FilesystemOp::Stat,
+                    path: "/work".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_copy_restores_uploaded_file_mode_on_the_same_generation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), b"mode data").unwrap();
+        std::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        let manager = Arc::new(RecordingSessionManager::default());
+        let execution_id = ExecutionId::new("managed-copy-mode").unwrap();
+        let generation = ExecutionGeneration::new(5).unwrap();
+        let session = CopySession::Managed {
+            manager: manager.clone(),
+            execution_id: execution_id.clone(),
+            generation,
+        };
+
+        copy_file_to_box(
+            &session,
+            source.path().to_str().unwrap(),
+            "managed-copy",
+            "/work/mode.txt",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *manager.calls.lock().unwrap(),
+            vec![
+                SessionCall::TransferFile {
+                    execution_id: execution_id.as_str().to_string(),
+                    generation,
+                    operation: FileOp::Upload,
+                    path: "/work/mode.txt".to_string(),
+                },
+                SessionCall::Execute {
+                    execution_id: execution_id.as_str().to_string(),
+                    generation,
+                    command: vec![
+                        "chmod".to_string(),
+                        "750".to_string(),
+                        "/work/mode.txt".to_string(),
+                    ],
+                },
+            ]
+        );
+    }
 
     // --- Endpoint parsing tests ---
 

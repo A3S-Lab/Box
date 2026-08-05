@@ -348,8 +348,12 @@ retain process or filesystem sessions after its owner dies.
 - [x] Route CLI `top` and `stats` through the persisted OCI route, retaining
   exact-generation process dispatch plus normalized CPU, memory, PID, network,
   and block-I/O projection for running and paused workloads.
-- [ ] Route the remaining socket-oriented CLI projections (`attach`, `cp`,
-  live `container-update`, and init stdout/stderr log projection) through the
+- [x] Route CLI `cp` through the persisted OCI route, retaining
+  exact-generation filesystem classification, bounded single-file transfer,
+  directory archive execution, and Unix permission restoration without socket
+  fallback.
+- [ ] Route the remaining socket-oriented CLI projections (`attach`, live
+  `container-update`, and init stdout/stderr log projection) through the
   persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
@@ -378,7 +382,7 @@ one exec dispatch. Native Linux and utility-VM driver reattachment on real
 hosts remains part of the unchecked exit gate. The production Linux smoke now
 drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
 route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
-CLI `top` and `stats` projections now share that exact route. Attach, copy,
+CLI `top`, `stats`, and `cp` projections now share that exact route. Attach,
 live update, and init-log projection remain deliberately unchecked.
 
 ### B3 - Storage And Networking Attachments
