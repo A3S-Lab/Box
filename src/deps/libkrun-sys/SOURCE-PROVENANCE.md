@@ -24,9 +24,11 @@ flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`9f48d439184d16ce888a5f12920fe8e0fe4d2b6adccd14f9add3f48a61e0cd81`).
+`54735cc5dcc003b4b9907f5688cbafd61b2b896fb29b499a7fc62c86fe813749`).
 The deterministic archive was generated from local tooling commit
-`dc5519faeabd8bf38d984ed29c44e6da977f0b5c`; its
+`c8cd57ec84cfb1d0edf374d367418ca6700b731a`; that revision adds retryable
+macOS Unix-datagram TX backpressure handling without changing the packaged
+Windows runtime. Its
 `corresponding-source/2692169` directory preserves the exact wrapper source
 for the packaged firmware DLL. The archive also contains the Apache-2.0
 license and the EDK2 source notices.
