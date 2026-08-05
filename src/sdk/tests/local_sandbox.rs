@@ -11,6 +11,10 @@ use a3s_box_sdk::{
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
+const INIT_STDOUT_MARKER: &str = "a3s-sdk-init-stdout\n";
+const INIT_STDERR_MARKER: &str = "a3s-sdk-init-stderr\n";
+const INIT_COMMAND: &str = "printf 'a3s-sdk-init-stdout\\n'; printf 'a3s-sdk-init-stderr\\n' >&2; while :; do sleep 3600; done";
+
 #[tokio::test]
 #[ignore = "requires a real local A3S Box runtime and runnable OCI image"]
 async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
@@ -80,6 +84,8 @@ async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
         .timeout_seconds(300)
         .metadata("purpose", "local-sdk-smoke")
         .isolation(isolation)
+        .entrypoint(["/bin/sh", "-c"])
+        .command([INIT_COMMAND])
         .mount_named(&volume.name, "/cache")
         .workdir("/workspace");
     let builder = match &network {
@@ -200,8 +206,31 @@ async fn exercise(
         "Rust SDK move did not publish the destination",
     )?;
     sandbox.files.remove(directory).await?;
-    let logs = sandbox.logs(SandboxLogOptions::tail(20)).await?;
+    let log_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let logs = loop {
+        let logs = sandbox.logs(SandboxLogOptions::tail(20)).await?;
+        let has_stdout = logs
+            .iter()
+            .any(|entry| entry.stream == "stdout" && entry.log == INIT_STDOUT_MARKER);
+        let has_stderr = logs
+            .iter()
+            .any(|entry| entry.stream == "stderr" && entry.log == INIT_STDERR_MARKER);
+        if (has_stdout && has_stderr) || tokio::time::Instant::now() >= log_deadline {
+            break logs;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
     require(logs.len() <= 20, "Sandbox logs exceeded the requested tail")?;
+    require(
+        logs.iter()
+            .any(|entry| entry.stream == "stdout" && entry.log == INIT_STDOUT_MARKER),
+        "Sandbox logs omitted init stdout",
+    )?;
+    require(
+        logs.iter()
+            .any(|entry| entry.stream == "stderr" && entry.log == INIT_STDERR_MARKER),
+        "Sandbox logs omitted init stderr",
+    )?;
     if expected_isolation == ExecutionIsolation::Sandbox {
         let info = sandbox.info();
         let stats = sandbox.runtime_stats().await?;
