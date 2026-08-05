@@ -330,6 +330,10 @@ jobs:
             echo "::error title=Workspace library test failure::$diagnostic"
           fi
           exit "$status"
+      - name: Test deterministic CLI workflows
+        run: >-
+          cd src && cargo test --locked -p a3s-box-cli
+          --test command_coverage --test wait_integration
       - name: Compile local SDK real-runtime smoke
         run: cd src && cargo test --locked -p a3s-box-sdk --test local_sandbox --no-run
 

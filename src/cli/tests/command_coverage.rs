@@ -328,6 +328,7 @@ fn test_local_state_command_smoke() {
 fn test_build_from_scratch_copy_metadata_cli_smoke() {
     let cli = CliTest::new();
     let image = format!("coverage-scratch:{}", unique_tag("build"));
+    let cached_image = format!("coverage-scratch:{}", unique_tag("cached"));
     let build_dir = cli.home_path().join("scratch-build");
     std::fs::create_dir_all(&build_dir).expect("create scratch build context");
     std::fs::write(build_dir.join("message.txt"), "scratch-copy-ok\n")
@@ -393,7 +394,22 @@ CMD ["cat", "/opt/message.txt"]
         .expect("saved scratch image should contain copied file");
     assert_eq!(copied, "scratch-copy-ok\n");
 
-    cli.ok(&["rmi", "--force", &image]);
+    let cached_digest = cli.ok(&["build", "--tag", &cached_image, "--quiet", &build_dir_arg]);
+    assert_eq!(
+        cached_digest.trim(),
+        digest.trim(),
+        "a cache hit must finalize the same OCI manifest"
+    );
+    let cached_tar = cli.home_path().join("scratch-build-cached.tar");
+    let cached_tar_arg = cached_tar.to_string_lossy().to_string();
+    cli.ok(&["save", &cached_image, "--output", &cached_tar_arg]);
+    assert_eq!(
+        read_file_from_saved_oci_tar(&cached_tar, "/opt/message.txt").as_deref(),
+        Some("scratch-copy-ok\n"),
+        "a cached layer must be materialized into the active build before export"
+    );
+
+    cli.ok(&["rmi", "--force", &image, &cached_image]);
 }
 
 #[test]

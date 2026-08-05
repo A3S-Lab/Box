@@ -311,6 +311,8 @@ LABEL org.opencontainers.image.title="scratch-smoke"
             context.join("Dockerfile"),
             r#"FROM scratch
 COPY sh /bin/sh
+ARG ALPINE_MIRROR=dl-cdn.alpinelinux.org
+ARG RELEASE_MODE=default
 WORKDIR /app
 ENV HELLO=warm
 USER 1000:1001
@@ -373,6 +375,11 @@ CMD ["cat", "/app/copied.txt"]
                         assert_eq!(req.timeout_ns, Some(12_000_000_000));
                         assert_eq!(req.user.as_deref(), Some("1000:1001"));
                         assert!(req.env.iter().any(|entry| entry == "HELLO=warm"));
+                        assert!(req
+                            .env
+                            .iter()
+                            .any(|entry| entry == "ALPINE_MIRROR=mirrors.tencent.com"));
+                        assert!(req.env.iter().any(|entry| entry == "RELEASE_MODE=default"));
 
                         let rootfs = rootfs_host.as_ref().expect("lease records rootfs host");
                         match exec_count {
@@ -476,7 +483,10 @@ CMD ["cat", "/app/copied.txt"]
                     context_dir: context.clone(),
                     dockerfile_path: context.join("Dockerfile"),
                     tag: Some("run-pool:latest".to_string()),
-                    build_args: HashMap::new(),
+                    build_args: HashMap::from([(
+                        "ALPINE_MIRROR".to_string(),
+                        "mirrors.tencent.com".to_string(),
+                    )]),
                     quiet: true,
                     platforms: vec![],
                     target: None,

@@ -81,6 +81,51 @@ impl BackgroundCommand {
             code: output.status.code(),
         }
     }
+
+    fn signal_and_output(mut self, signal: libc::c_int, timeout: Duration) -> CommandResult {
+        let mut child = self.child.take().expect("background command child");
+        kill_host_pid(u64::from(child.id()), signal);
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let output = child.wait_with_output().unwrap_or_else(|error| {
+                        panic!(
+                            "failed to collect signalled `a3s-box {}` output: {error}",
+                            self.args
+                        )
+                    });
+                    return CommandResult {
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                        success: output.status.success(),
+                        code: output.status.code(),
+                    };
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().unwrap_or_else(|error| {
+                        panic!("failed to reap timed-out `a3s-box {}`: {error}", self.args)
+                    });
+                    panic!(
+                        "`a3s-box {}` did not exit after signal {signal}\nstdout:\n{}\nstderr:\n{}",
+                        self.args,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("failed to poll signalled `a3s-box {}`: {error}", self.args);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1100,6 +1145,50 @@ fn real_core_foreground_run_returns_exit_code_and_logs() {
     assert_contains(&inspect, "\"exit_code\": 7", "foreground inspect");
 
     smoke.ok(&["rm", &smoke.name]);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn real_core_foreground_auto_remove_handles_sigterm_and_archives_status() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+
+    seed_smoke_image(&smoke, &image);
+
+    let foreground = smoke.spawn_background(&[
+        "run",
+        "--rm",
+        "--name",
+        &smoke.name,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf 'core-smoke-interrupt-ready\\n'; exec sleep 3600",
+    ]);
+    smoke.wait_for_running();
+    smoke.wait_for_logs("core-smoke-interrupt-ready");
+
+    let result = foreground.signal_and_output(libc::SIGTERM, Duration::from_secs(30));
+    assert_eq!(result.code, Some(143), "foreground SIGTERM exit code");
+    assert_contains(&result.stdout, "Box", "foreground SIGTERM output");
+    assert_contains(
+        &result.stdout,
+        "removed",
+        "foreground SIGTERM cleanup output",
+    );
+
+    let after_interrupt = smoke.ok(&["ps", "-a"]);
+    assert!(
+        !after_interrupt.contains(&smoke.name),
+        "interrupted --rm box remained in state\n{after_interrupt}"
+    );
+    assert_eq!(
+        smoke.ok(&["wait", &smoke.name, "--timeout", "5"]).trim(),
+        "143",
+        "wait must recover the archived interrupted status"
+    );
 }
 
 #[test]
