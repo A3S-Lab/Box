@@ -721,8 +721,14 @@ jobs:
         with:
           workspaces: |
             src -> target
+            src/deps/libkrun-sys/vendor/libkrun -> target
             containerd-shim -> target
           key: ${{ matrix.target }}
+
+      - name: Test vendored libkrun TX backpressure
+        if: runner.os == 'macOS'
+        working-directory: src/deps/libkrun-sys/vendor/libkrun
+        run: cargo test --locked -p devices --features net backpressure -- --nocapture
 
       - name: Check compilation
         run: |
