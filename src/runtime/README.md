@@ -162,6 +162,9 @@ hits and stores from the existing `BuildCache`; there is no export cache,
 publisher, or cache lifecycle store alongside it. Export layers are copied
 into an immutable snapshot so receipt validation and cleanup cannot mutate the
 live cache authority through shared inodes.
+Native OCI config and history records use the canonical epoch because a build
+plan carries no creation clock, so identical inputs preserve the exact manifest
+descriptor across rebuilds and parent-cache hydration.
 
 The cache key length-binds the source digest, canonical plan digest, platform,
 and cache schema profile. The v2 supervised operation record persists the

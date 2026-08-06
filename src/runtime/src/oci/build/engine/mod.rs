@@ -42,6 +42,9 @@ use handlers::{
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
 
+// Build inputs carry no creation clock, so wall time must not contaminate OCI content identity.
+const REPRODUCIBLE_OCI_CREATED_AT: &str = "1970-01-01T00:00:00Z";
+
 pub(super) use control::{BuildExecutionControl, BuildExecutionObserver, BuildImageCommitPermit};
 
 pub(super) struct SupervisedBuildResult {
@@ -1687,7 +1690,6 @@ async fn assemble_image(
     all_diff_ids.extend(state.diff_ids.iter().cloned());
 
     // Build OCI config
-    let now = chrono::Utc::now().to_rfc3339();
     let arch = target_platform.oci_arch();
 
     let env_list: Vec<String> = state
@@ -1699,7 +1701,7 @@ async fn assemble_image(
     let mut config_obj = serde_json::json!({
         "architecture": arch,
         "os": "linux",
-        "created": now,
+        "created": REPRODUCIBLE_OCI_CREATED_AT,
         "config": {},
         "rootfs": {
             "type": "layers",
@@ -1709,7 +1711,7 @@ async fn assemble_image(
         },
         "history": state.history.iter().map(|h| {
             let mut entry = serde_json::json!({
-                "created": now,
+                "created": REPRODUCIBLE_OCI_CREATED_AT,
                 "created_by": h.created_by
             });
             if h.empty_layer {

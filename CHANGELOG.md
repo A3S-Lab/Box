@@ -180,6 +180,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Reproducible native OCI descriptors.** Native builds now write the canonical
+  epoch into OCI config and history creation fields because the build contract
+  carries no creation clock. Rebuilding identical content, including after
+  parent-cache hydration, therefore preserves the exact manifest descriptor.
 - **OCI-routed direct argv commands.** Captured exec, streaming exec, and PTY
   sessions now resolve a relative `argv[0]` through the effective container
   `PATH` against the prepared rootfs before SDK dispatch. Native Rust, Python,

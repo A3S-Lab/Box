@@ -15,6 +15,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn test_resolve_path_absolute() {
@@ -287,6 +288,27 @@ LABEL org.opencontainers.image.title="scratch-smoke"
             image.label("org.opencontainers.image.title"),
             Some("scratch-smoke")
         );
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let replay = build(
+            BuildConfig {
+                context_dir: context.clone(),
+                dockerfile_path: context.join("Dockerfile"),
+                tag: Some("scratch-smoke-replay:latest".to_string()),
+                build_args: HashMap::new(),
+                quiet: true,
+                platforms: vec![],
+                target: None,
+                no_cache: false,
+                network: BuildNetworkPolicy::Outbound,
+                metrics: None,
+                run_pool: None,
+            },
+            store,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.descriptor, result.descriptor);
     }
 
     #[cfg(all(feature = "pool", not(windows)))]
