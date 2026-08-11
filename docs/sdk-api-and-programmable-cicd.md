@@ -17,7 +17,7 @@ versioned machine bridge and never parse human CLI output. Language differences
 are limited to normal conventions such as Python sync/async variants and
 JavaScript promises.
 
-Bridge protocol v3 has one checked 48-operation inventory shared by Rust,
+Bridge protocol v3 has one checked 52-operation inventory shared by Rust,
 Python, TypeScript, and Go. A language client must validate the complete
 capability response before a normal operation, reject duplicate or missing
 entries, and fail closed on malformed response values. Lifecycle responses
@@ -136,6 +136,10 @@ The naming follows each language while preserving the same concepts:
 | Network selection | `SandboxNetwork` | `SandboxNetwork` | `SandboxNetwork` | `SandboxNetwork` |
 | Published port | `PortMapping` | `PortMapping` | `PortMapping` | `PortMapping` |
 | Script | `Script` | `Script` | `Script` | `ScriptBuilder` |
+| Process inventory | `processes` | `processes` | `processes` | `Processes` |
+| Runtime stats | `runtime_stats` | `runtime_stats` | `runtimeStats` | `RuntimeStats` |
+| Ordered events | `events` | `events` | `events` | `Events` |
+| Live resources | `update_resources` | `update_resources` | `updateResources` | `UpdateResources` |
 
 The existing `Sandbox` remains the convenient local execution facade. It is
 not overloaded with host-wide image, volume, and network management; those
@@ -182,10 +186,10 @@ If retained, the composition layer must:
 | Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have four-language parity. Direct content helpers remain pending. |
 | Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have four-language parity. Live hot-plug is intentionally unsupported. |
 | Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have four-language parity. Go preserves binary output as `[]byte`; the other SDKs expose their language-native byte/text conventions. Process handles, signals, wait, and streaming remain pending. |
-| Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
+| Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations and bounded single-file artifact export have Rust/Python/TypeScript/Go parity. Export accepts a selected limit up to the transport-safe 8 MiB single-frame ceiling, verifies declared size and rejects stat/read size changes, returns a lowercase SHA-256 digest, and can create an exact host destination without overwriting it. MicroVM guests enforce the selected limit before reading; the shared-kernel adapter retains the OCI Runtime transfer cap and rejects an oversized response. Directory export and large-file streaming remain pending. |
 | Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, TypeScript, and Go expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
 | Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, TypeScript, and Go have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Go serializes lifecycle transitions against in-flight command and file calls. Go and TypeScript validate Sandbox identity, positive generation, recognized state, and stable isolation on lifecycle results. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending across the full matrix. |
-| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, active resource stats, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have four-language parity. Event streams, health history, and audit queries remain pending. |
+| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, legacy route-aware stats, exact-generation process inventory, normalized runtime stats, bounded ordered-event polls and backpressured continuous streams, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have four-language parity. Streams pin one generation, accept running or paused targets, and expose language-native cancellation without adding a second event transport. Health history and audit queries remain pending. |
 | PTY | create, resize, input, output streaming, wait, and cancellation | Rust lower-level primitives only. |
 | Security | typed isolation, resource limits, read-only policy, capabilities, devices, secret injection, and attestation | Partial; unsupported policies must be rejected rather than represented as enforced. |
 
@@ -210,7 +214,7 @@ one-request/one-response bridge cannot represent live progress safely.
 ### Phase 2: Results, caches, and artifacts
 
 - Complete lifecycle, structured logs, stats, and snapshot inspection parity.
-- Add confined artifact export with hashes and limits.
+- Provide bounded single-file artifact export with hashes and limits.
 - Document named-volume cache patterns and warm-base snapshot patterns.
 - Add a checked API inventory so exported operations cannot drift silently.
 
@@ -218,8 +222,18 @@ Lifecycle, bounded structured logs, current stats, runtime diagnostics/disk
 usage, Sandbox list/get, and filesystem snapshot list/get now have typed
 Rust/Python/TypeScript/Go parity and are part of the checked bridge inventory.
 Restart retries use a durable operation ID, log tails are validated before
-runtime lookup, and stop is distinct from terminal removal. Confined artifact
-export and volume content helpers remain the unfinished Phase 2 work.
+runtime lookup, and stop is distinct from terminal removal. Bounded single-file
+artifact export is complete across all four SDKs; volume content helpers,
+directory export, and large-file streaming remain unfinished Phase 2 work.
+
+Exact-generation process inventory, normalized runtime stats, bounded ordered
+event polling, and replay-safe partial resource updates also have four-language
+parity. All four language clients validate event limits and resource values
+before runtime access, and validate returned execution identity and generation
+before exposing observation results. Continuous event consumers now compose
+those same bounded polls into backpressured Rust, Python, TypeScript, and Go
+streams; cancellation tears down an active poll and a restart ends the pinned
+stream instead of moving it to a new generation.
 
 ### Phase 3: Processes and interactive execution
 

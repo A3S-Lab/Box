@@ -62,7 +62,9 @@ mod version;
 pub mod volume;
 mod wait;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use clap::{Parser, Subcommand};
 
@@ -634,66 +636,73 @@ mod console_tail_tests {
 
 /// Dispatch a parsed CLI to the appropriate command handler.
 pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    match cli.command {
-        Command::Run(args) => run::execute(args).await,
-        Command::Create(args) => create::execute(args).await,
-        Command::Start(args) => start::execute(args).await,
-        Command::Stop(args) => stop::execute(args).await,
-        Command::Restart(args) => restart::execute(args).await,
-        Command::Rm(args) => rm::execute(args).await,
-        Command::Kill(args) => kill::execute(args).await,
-        Command::Pause(args) => pause::execute(args).await,
-        Command::Unpause(args) => unpause::execute(args).await,
-        Command::Ps(args) => ps::execute(args).await,
-        Command::Stats(args) => stats::execute(args).await,
-        Command::Logs(args) => logs::execute(args).await,
-        Command::Exec(args) => exec::execute(args).await,
-        Command::Top(args) => top::execute(args).await,
-        Command::Inspect(args) => inspect::execute(args).await,
-        Command::Attach(args) => attach::execute(args).await,
-        Command::Attest(args) => attest::execute(args).await,
-        Command::Audit(args) => audit::execute(args).await,
-        Command::Seal(args) => seal::execute(args).await,
-        Command::Unseal(args) => unseal::execute(args).await,
-        Command::InjectSecret(args) => inject_secret::execute(args).await,
-        Command::Wait(args) => wait::execute(args).await,
-        Command::Rename(args) => rename::execute(args).await,
-        Command::Port(args) => port::execute(args).await,
-        Command::PortForward(args) => port_forward::execute(args).await,
-        Command::Export(args) => export::execute(args).await,
-        Command::Commit(args) => commit::execute(args).await,
-        Command::Diff(args) => diff::execute(args).await,
-        Command::Events(args) => events::execute(args).await,
-        Command::ContainerUpdate(args) => container_update::execute(args).await,
-        Command::Compose(args) => compose::execute(args).await,
-        Command::Snapshot(args) => snapshot::execute(args).await,
-        Command::Build(args) => build::execute(args).await,
-        Command::Images(args) => images::execute(args).await,
-        Command::Pull(args) => pull::execute(args).await,
-        Command::Push(args) => push::execute(args).await,
-        Command::Login(args) => login::execute(args).await,
-        Command::Logout(args) => logout::execute(args).await,
-        Command::Rmi(args) => rmi::execute(args).await,
-        Command::ImageInspect(args) => image_inspect::execute(args).await,
-        Command::History(args) => history::execute(args).await,
-        Command::ImagePrune(args) => image_prune::execute(args).await,
-        Command::Tag(args) => image_tag::execute(args).await,
-        Command::Save(args) => save::execute(args).await,
-        Command::Load(args) => load::execute(args).await,
-        Command::Import(args) => import::execute(args).await,
-        Command::Cp(args) => cp::execute(args).await,
-        Command::Network(args) => network::execute(args).await,
-        Command::Volume(args) => volume::execute(args).await,
-        Command::Df(args) => df::execute(args).await,
-        Command::Prune(args) => prune::execute(args).await,
-        Command::SystemPrune(args) => system_prune::execute(args).await,
-        Command::Version(args) => version::execute(args).await,
-        Command::Info(args) => info::execute(args).await,
-        Command::Monitor(args) => monitor::execute(args).await,
-        Command::Pool(args) => pool::execute(args).await,
-        Command::Shell(args) => shell::execute(args).await,
-        Command::SdkBridge(args) => sdk_bridge::execute(args).await,
-    }
+    type CommandFuture = Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>>>>;
+
+    // Keep one selected handler on the heap. Without this indirection the async
+    // match stores enough state for the largest of every command, which can
+    // exhaust the default Windows process stack while entering `build` or
+    // another state-heavy handler.
+    let command: CommandFuture = match cli.command {
+        Command::Run(args) => Box::pin(run::execute(args)),
+        Command::Create(args) => Box::pin(create::execute(args)),
+        Command::Start(args) => Box::pin(start::execute(args)),
+        Command::Stop(args) => Box::pin(stop::execute(args)),
+        Command::Restart(args) => Box::pin(restart::execute(args)),
+        Command::Rm(args) => Box::pin(rm::execute(args)),
+        Command::Kill(args) => Box::pin(kill::execute(args)),
+        Command::Pause(args) => Box::pin(pause::execute(args)),
+        Command::Unpause(args) => Box::pin(unpause::execute(args)),
+        Command::Ps(args) => Box::pin(ps::execute(args)),
+        Command::Stats(args) => Box::pin(stats::execute(args)),
+        Command::Logs(args) => Box::pin(logs::execute(args)),
+        Command::Exec(args) => Box::pin(exec::execute(args)),
+        Command::Top(args) => Box::pin(top::execute(args)),
+        Command::Inspect(args) => Box::pin(inspect::execute(args)),
+        Command::Attach(args) => Box::pin(attach::execute(args)),
+        Command::Attest(args) => Box::pin(attest::execute(args)),
+        Command::Audit(args) => Box::pin(audit::execute(args)),
+        Command::Seal(args) => Box::pin(seal::execute(args)),
+        Command::Unseal(args) => Box::pin(unseal::execute(args)),
+        Command::InjectSecret(args) => Box::pin(inject_secret::execute(args)),
+        Command::Wait(args) => Box::pin(wait::execute(args)),
+        Command::Rename(args) => Box::pin(rename::execute(args)),
+        Command::Port(args) => Box::pin(port::execute(args)),
+        Command::PortForward(args) => Box::pin(port_forward::execute(args)),
+        Command::Export(args) => Box::pin(export::execute(args)),
+        Command::Commit(args) => Box::pin(commit::execute(args)),
+        Command::Diff(args) => Box::pin(diff::execute(args)),
+        Command::Events(args) => Box::pin(events::execute(args)),
+        Command::ContainerUpdate(args) => Box::pin(container_update::execute(args)),
+        Command::Compose(args) => Box::pin(compose::execute(args)),
+        Command::Snapshot(args) => Box::pin(snapshot::execute(args)),
+        Command::Build(args) => Box::pin(build::execute(args)),
+        Command::Images(args) => Box::pin(images::execute(args)),
+        Command::Pull(args) => Box::pin(pull::execute(args)),
+        Command::Push(args) => Box::pin(push::execute(args)),
+        Command::Login(args) => Box::pin(login::execute(args)),
+        Command::Logout(args) => Box::pin(logout::execute(args)),
+        Command::Rmi(args) => Box::pin(rmi::execute(args)),
+        Command::ImageInspect(args) => Box::pin(image_inspect::execute(args)),
+        Command::History(args) => Box::pin(history::execute(args)),
+        Command::ImagePrune(args) => Box::pin(image_prune::execute(args)),
+        Command::Tag(args) => Box::pin(image_tag::execute(args)),
+        Command::Save(args) => Box::pin(save::execute(args)),
+        Command::Load(args) => Box::pin(load::execute(args)),
+        Command::Import(args) => Box::pin(import::execute(args)),
+        Command::Cp(args) => Box::pin(cp::execute(args)),
+        Command::Network(args) => Box::pin(network::execute(args)),
+        Command::Volume(args) => Box::pin(volume::execute(args)),
+        Command::Df(args) => Box::pin(df::execute(args)),
+        Command::Prune(args) => Box::pin(prune::execute(args)),
+        Command::SystemPrune(args) => Box::pin(system_prune::execute(args)),
+        Command::Version(args) => Box::pin(version::execute(args)),
+        Command::Info(args) => Box::pin(info::execute(args)),
+        Command::Monitor(args) => Box::pin(monitor::execute(args)),
+        Command::Pool(args) => Box::pin(pool::execute(args)),
+        Command::Shell(args) => Box::pin(shell::execute(args)),
+        Command::SdkBridge(args) => Box::pin(sdk_bridge::execute(args)),
+    };
+    command.await
 }
 
 #[cfg(test)]

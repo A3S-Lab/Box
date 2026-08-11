@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import SandboxDefault, {
   A3SBoxClient,
@@ -7,7 +9,11 @@ import SandboxDefault, {
   A3SBoxNotInstalledError,
   A3SLocalRuntime,
   BRIDGE_PROTOCOL_VERSION,
+  DEFAULT_EVENT_STREAM_BATCH_ITEMS,
+  DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS,
   DEFAULT_IMAGE,
+  MAX_ARTIFACT_BYTES,
+  MAX_EXECUTION_EVENT_BATCH_ITEMS,
   RegistryCredentials,
   Sandbox,
   SignaturePolicy,
@@ -189,6 +195,56 @@ class FakeRuntime {
         }
       case 'sandbox_stats':
         return { stats: sandboxStatsResponse(request.sandbox_id) }
+      case 'sandbox_processes':
+        return {
+          execution_id: request.sandbox_id,
+          generation: request.generation,
+          processes: [
+            { process_id: 'init', pid: 1234, terminal: false },
+            { process_id: 'exec-1', pid: null, terminal: true },
+          ],
+        }
+      case 'sandbox_runtime_stats':
+        return {
+          execution_id: request.sandbox_id,
+          generation: request.generation,
+          timestamp_unix_ns: 1_000_000,
+          cpu: {
+            usage_ns: 300,
+            user_ns: 200,
+            system_ns: 100,
+            throttled_ns: 5,
+          },
+          memory: {
+            usage_bytes: 1024,
+            limit_bytes: 2048,
+            peak_bytes: 1536,
+          },
+          process_count: 2,
+          metrics: { 'io.read_bytes': 64 },
+        }
+      case 'sandbox_events':
+        return {
+          execution_id: request.sandbox_id,
+          generation: request.generation,
+          events: [
+            {
+              sequence: request.after_sequence + 1,
+              timestamp_unix_ns: 1_000_001,
+              process_id: 'exec-1',
+              kind: 'process-exited',
+              attributes: { exit_code: '0' },
+            },
+          ],
+          next_sequence: request.after_sequence + 1,
+        }
+      case 'sandbox_update_resources':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'running',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
+        }
       case 'sandbox_snapshot_create':
         return {
           snapshot_id: request.snapshot_id,
@@ -252,6 +308,61 @@ class FakeRuntime {
       default:
         throw new Error(`unexpected operation: ${request.operation}`)
     }
+  }
+}
+
+class ArtifactRuntime extends FakeRuntime {
+  constructor({
+    data = Buffer.from('hello'),
+    declaredSize = data.length,
+    statSize = 5,
+    entryType = 'file',
+  } = {}) {
+    super()
+    this.data = data
+    this.declaredSize = declaredSize
+    this.statSize = statSize
+    this.entryType = entryType
+  }
+
+  async request(request) {
+    if (request.operation === 'file_read') {
+      this.requests.push(request)
+      return {
+        path: request.path,
+        data_base64: this.data.toString('base64'),
+        size: this.declaredSize,
+      }
+    }
+    if (request.operation === 'filesystem_stat') {
+      this.requests.push(request)
+      return {
+        entry: {
+          name: 'artifact.bin',
+          type: this.entryType,
+          path: request.path,
+          size: this.statSize,
+          mode: 420,
+          permissions: '-rw-r--r--',
+          owner: 'root',
+          group: 'root',
+          modified_seconds: 1,
+          modified_nanos: 0,
+          symlink_target: null,
+        },
+      }
+    }
+    return super.request(request)
+  }
+}
+
+class EventStreamRuntime extends FakeRuntime {
+  async request(request, options) {
+    if (request.operation !== 'sandbox_events') {
+      return super.request(request, options)
+    }
+    this.requests.push(request)
+    return eventStreamResponse(request)
   }
 }
 
@@ -502,11 +613,23 @@ await coverageSandbox.pause()
 await coverageSandbox.resume()
 await coverageSandbox.logs({ tail: 10 })
 await coverageSandbox.stats()
+await coverageSandbox.processes()
+await coverageSandbox.runtimeStats()
+await coverageSandbox.events({
+  afterSequence: 4,
+  limit: 16,
+  waitTimeoutMs: 25,
+})
+await coverageSandbox.updateResources(
+  { cpuShares: 512 },
+  { operationId: 'coverage-resources' }
+)
 await coverageSandbox.createFilesystemSnapshot('snap-1')
 await coverageSandbox.commands.run(['true'])
 await coverageSandbox.files.write('/tmp/value', 'value')
 await coverageSandbox.files.read('/tmp/value')
 await coverageSandbox.files.stat('/tmp/value')
+await coverageSandbox.files.export('/tmp/value')
 await coverageSandbox.files.list('/tmp', { depth: 1 })
 await coverageSandbox.files.makeDir('/tmp/dir')
 await coverageSandbox.files.rename('/tmp/dir', '/tmp/moved')
@@ -688,6 +811,217 @@ assert.equal(read.path, '/workspace/notes.txt')
 assert.equal(stat.operation, 'filesystem_stat')
 assert.equal(kill.operation, 'sandbox_kill')
 
+assert.equal(MAX_ARTIFACT_BYTES, 8 * 1024 * 1024)
+const artifactRuntime = new ArtifactRuntime()
+const artifactSandbox = await Sandbox.create(undefined, {
+  runtime: artifactRuntime,
+})
+const artifactRoot = await mkdtemp(join(tmpdir(), 'a3s-box-artifact-'))
+try {
+  const destination = join(artifactRoot, 'note.txt')
+  const artifact = await artifactSandbox.files.export(
+    '/workspace/notes.txt',
+    { maxBytes: 5, destination, user: '1000' }
+  )
+  assert.equal(artifact.path, '/workspace/notes.txt')
+  assert.deepEqual(artifact.data, Buffer.from('hello'))
+  assert.equal(artifact.size, 5)
+  assert.equal(
+    artifact.sha256,
+    '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+  )
+  assert.equal(artifact.hostPath, destination)
+  assert.deepEqual(await readFile(destination), Buffer.from('hello'))
+
+  await writeFile(destination, 'keep')
+  await assert.rejects(
+    artifactSandbox.files.export('/workspace/notes.txt', { destination }),
+    (error) => error instanceof A3SBoxError && error.code === 'runtime_error'
+  )
+  assert.equal(await readFile(destination, 'utf8'), 'keep')
+
+  const artifactRequests = artifactRuntime.requests.filter((request) =>
+    ['filesystem_stat', 'file_read'].includes(request.operation)
+  )
+  assert.equal(artifactRequests[0].user, '1000')
+  assert.equal(artifactRequests[1].user, '1000')
+  assert.equal(artifactRequests[1].max_bytes, 5)
+} finally {
+  await rm(artifactRoot, { recursive: true, force: true })
+}
+
+function eventStreamResponse(request) {
+  const events = [2, 5, 9]
+    .filter((sequence) => sequence > request.after_sequence)
+    .slice(0, request.limit)
+    .map((sequence) => ({
+      sequence,
+      timestamp_unix_ns: 1_700_000_000_000_000 + sequence,
+      process_id: sequence === 5 ? 'init' : null,
+      kind:
+        sequence === 2
+          ? 'container-started'
+          : sequence === 5
+            ? 'process-started'
+            : 'resources-updated',
+      attributes: {},
+    }))
+  return {
+    execution_id: request.sandbox_id,
+    generation: request.generation,
+    events,
+    next_sequence:
+      events.length === 0
+        ? request.after_sequence
+        : events.at(-1).sequence,
+  }
+}
+
+const directoryRuntime = new ArtifactRuntime({
+  entryType: 'directory',
+  statSize: 0,
+})
+const directorySandbox = await Sandbox.create(undefined, {
+  runtime: directoryRuntime,
+})
+for (const maxBytes of [0, MAX_ARTIFACT_BYTES + 1]) {
+  await assert.rejects(
+    directorySandbox.files.export('/workspace/output', { maxBytes }),
+    (error) => error instanceof A3SBoxError && error.code === 'invalid_request'
+  )
+}
+
+const malformedProcessSandbox = await Sandbox.create(undefined, {
+  runtime: new MalformedSandboxRuntime('sandbox_processes', {
+    execution_id: 'sandbox-local-1',
+    generation: 1,
+    processes: [
+      { process_id: 'init', pid: 1, terminal: false },
+      { process_id: 'init', pid: 2, terminal: false },
+    ],
+  }),
+})
+await assert.rejects(
+  malformedProcessSandbox.processes(),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+const malformedStatsSandbox = await Sandbox.create(undefined, {
+  runtime: new MalformedSandboxRuntime('sandbox_runtime_stats', {
+    execution_id: 'sandbox-local-1',
+    generation: 1,
+    timestamp_unix_ns: 0,
+    cpu: { usage_ns: 1, user_ns: 1, system_ns: 0, throttled_ns: 0 },
+    memory: { usage_bytes: 0, limit_bytes: null, peak_bytes: null },
+    process_count: 1,
+    metrics: {},
+  }),
+})
+await assert.rejects(
+  malformedStatsSandbox.runtimeStats(),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+const malformedEventsSandbox = await Sandbox.create(undefined, {
+  runtime: new MalformedSandboxRuntime('sandbox_events', {
+    execution_id: 'sandbox-local-1',
+    generation: 1,
+    events: [
+      {
+        sequence: 7,
+        timestamp_unix_ns: 1,
+        process_id: null,
+        kind: 'runtime-warning',
+        attributes: {},
+      },
+    ],
+    next_sequence: 7,
+  }),
+})
+await assert.rejects(
+  malformedEventsSandbox.events({ afterSequence: 7 }),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+const malformedUpdateSandbox = await Sandbox.create(undefined, {
+  runtime: new MalformedSandboxRuntime('sandbox_update_resources', {
+    sandbox_id: 'sandbox-local-1',
+    generation: 2,
+    state: 'running',
+    isolation: 'microvm',
+  }),
+})
+await assert.rejects(
+  malformedUpdateSandbox.updateResources(
+    { cpuShares: 512 },
+    { operationId: 'malformed-update' }
+  ),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+for (const [path, options] of [
+  ['  ', {}],
+  ['/workspace/output', { destination: '  ' }],
+]) {
+  await assert.rejects(
+    directorySandbox.files.export(path, options),
+    (error) => error instanceof A3SBoxError && error.code === 'invalid_request'
+  )
+}
+assert.equal(
+  directoryRuntime.requests.some(
+    (request) => request.operation === 'filesystem_stat'
+  ),
+  false
+)
+await assert.rejects(
+  directorySandbox.files.export('/workspace/output'),
+  (error) => error instanceof A3SBoxError && error.code === 'invalid_request'
+)
+assert.equal(
+  directoryRuntime.requests.some((request) => request.operation === 'file_read'),
+  false
+)
+
+const oversizedRuntime = new ArtifactRuntime({ statSize: 6 })
+const oversizedSandbox = await Sandbox.create(undefined, {
+  runtime: oversizedRuntime,
+})
+await assert.rejects(
+  oversizedSandbox.files.export('/workspace/output', { maxBytes: 5 }),
+  (error) => error instanceof A3SBoxError && error.code === 'invalid_request'
+)
+assert.equal(
+  oversizedRuntime.requests.some((request) => request.operation === 'file_read'),
+  false
+)
+
+const malformedArtifactRuntime = new ArtifactRuntime({ declaredSize: 6 })
+const malformedArtifactSandbox = await Sandbox.create(undefined, {
+  runtime: malformedArtifactRuntime,
+})
+await assert.rejects(
+  malformedArtifactSandbox.files.export('/workspace/output'),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+const racingArtifactRuntime = new ArtifactRuntime({
+  data: Buffer.from('four'),
+  statSize: 5,
+})
+const racingArtifactSandbox = await Sandbox.create(undefined, {
+  runtime: racingArtifactRuntime,
+})
+await assert.rejects(
+  racingArtifactSandbox.files.export('/workspace/output'),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
 const lifecycleRuntime = new FakeRuntime()
 const lifecycleSandbox = await Sandbox.create(undefined, {
   runtime: lifecycleRuntime,
@@ -707,12 +1041,28 @@ assert.equal(lifecycleSandbox.generation, 2)
 assert.equal(lifecycleSandbox.state, 'running')
 const lifecycleLogs = await lifecycleSandbox.logs({ tail: 1 })
 const lifecycleStats = await lifecycleSandbox.stats()
+const lifecycleProcesses = await lifecycleSandbox.processes()
+const lifecycleRuntimeStats = await lifecycleSandbox.runtimeStats()
+const lifecycleEvents = await lifecycleSandbox.events({
+  afterSequence: 7,
+  limit: 8,
+  waitTimeoutMs: 50,
+})
+await lifecycleSandbox.updateResources(
+  { cpuShares: 512, cpusetCpus: '0-1' },
+  { operationId: 'typescript-resources-1' }
+)
 await lifecycleSandbox.stop()
 await lifecycleSandbox.remove()
 await lifecycleSandbox.kill()
 assert.equal(lifecycleSandbox.state, 'removed')
 assert.equal(lifecycleLogs[0].message, 'sdk-log\n')
 assert.equal(lifecycleStats.memoryPercent, 50)
+assert.equal(lifecycleProcesses.processes[0].processId, 'init')
+assert.equal(lifecycleRuntimeStats.cpu.usageNs, 300)
+assert.equal(lifecycleRuntimeStats.metrics['io.read_bytes'], 64)
+assert.equal(lifecycleEvents.events[0].kind, 'process-exited')
+assert.equal(lifecycleEvents.nextSequence, 8)
 assert.deepEqual(
   lifecycleRuntime.requests.map((request) => request.operation),
   [
@@ -721,6 +1071,10 @@ assert.deepEqual(
     'sandbox_restart',
     'sandbox_logs',
     'sandbox_stats',
+    'sandbox_processes',
+    'sandbox_runtime_stats',
+    'sandbox_events',
+    'sandbox_update_resources',
     'sandbox_stop',
     'sandbox_remove',
   ]
@@ -734,7 +1088,151 @@ assert.deepEqual(lifecycleRuntime.requests[2], {
 })
 assert.equal(lifecycleRuntime.requests[3].generation, 2)
 assert.equal(lifecycleRuntime.requests[3].tail, 1)
+assert.deepEqual(lifecycleRuntime.requests[7], {
+  operation: 'sandbox_events',
+  sandbox_id: 'sandbox-local-1',
+  generation: 2,
+  after_sequence: 7,
+  limit: 8,
+  wait_timeout_ms: 50,
+})
+assert.deepEqual(lifecycleRuntime.requests[8], {
+  operation: 'sandbox_update_resources',
+  sandbox_id: 'sandbox-local-1',
+  generation: 2,
+  operation_id: 'typescript-resources-1',
+  resources: { cpu_shares: 512, cpuset_cpus: '0-1' },
+})
 assert.equal(lifecycleRuntime.requests.at(-1).generation, 2)
+
+const validationRuntime = new FakeRuntime()
+const validationSandbox = await Sandbox.create(undefined, {
+  runtime: validationRuntime,
+})
+const validationRequestCount = validationRuntime.requests.length
+for (const options of [
+  { limit: 0 },
+  { limit: MAX_EXECUTION_EVENT_BATCH_ITEMS + 1 },
+  { afterSequence: -1 },
+  { waitTimeoutMs: -1 },
+]) {
+  await assert.rejects(validationSandbox.events(options))
+}
+for (const update of [
+  {},
+  { cpuShares: 1 },
+  { pidsLimit: 0 },
+  { memorySwap: -2 },
+  { cpusetCpus: '2-1' },
+]) {
+  await assert.rejects(validationSandbox.updateResources(update))
+}
+await assert.rejects(
+  validationSandbox.updateResources(
+    { cpuPeriod: 100_000 },
+    { operationId: ' ' }
+  ),
+  /operationId cannot be empty/
+)
+assert.equal(validationRuntime.requests.length, validationRequestCount)
+
+assert.equal(DEFAULT_EVENT_STREAM_BATCH_ITEMS, 256)
+assert.equal(DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS, 1_000)
+const eventStreamRuntime = new EventStreamRuntime()
+const eventStreamSandbox = await Sandbox.create(undefined, {
+  runtime: eventStreamRuntime,
+})
+const eventIterator = eventStreamSandbox
+  .streamEvents({ batchSize: 2, waitTimeoutMs: 1 })
+  [Symbol.asyncIterator]()
+const streamedEvents = [
+  (await eventIterator.next()).value,
+  (await eventIterator.next()).value,
+  (await eventIterator.next()).value,
+]
+assert.deepEqual(
+  streamedEvents.map((event) => event.sequence),
+  [2, 5, 9]
+)
+const eventPolls = eventStreamRuntime.requests.filter(
+  (request) => request.operation === 'sandbox_events'
+)
+assert.deepEqual(
+  eventPolls.map((request) => request.after_sequence),
+  [0, 5]
+)
+assert.ok(eventPolls.every((request) => request.generation === 1))
+await eventIterator.return()
+
+await eventStreamSandbox.pause()
+const pausedEvents = await eventStreamSandbox.events({
+  afterSequence: 9,
+  limit: 1,
+  waitTimeoutMs: 1,
+})
+assert.deepEqual(pausedEvents.events, [])
+await eventStreamSandbox.resume()
+
+const fencedIterator = eventStreamSandbox
+  .streamEvents({ batchSize: 1, waitTimeoutMs: 1 })
+  [Symbol.asyncIterator]()
+assert.equal((await fencedIterator.next()).value.sequence, 2)
+await eventStreamSandbox.restart({
+  operationId: 'typescript-event-stream-restart',
+})
+await assert.rejects(
+  fencedIterator.next(),
+  (error) => error instanceof A3SBoxError && error.code === 'conflict'
+)
+
+for (const options of [
+  { batchSize: 0 },
+  { batchSize: MAX_EXECUTION_EVENT_BATCH_ITEMS + 1 },
+  { afterSequence: -1 },
+  { waitTimeoutMs: 0 },
+]) {
+  assert.throws(() => eventStreamSandbox.streamEvents(options))
+}
+
+class BlockingEventRuntime extends FakeRuntime {
+  constructor() {
+    super()
+    this.started = new Promise((resolve) => {
+      this.markStarted = resolve
+    })
+  }
+
+  async request(request, options) {
+    if (request.operation !== 'sandbox_events') {
+      return super.request(request, options)
+    }
+    this.requests.push(request)
+    this.markStarted()
+    return new Promise((resolve, reject) => {
+      options?.signal?.addEventListener(
+        'abort',
+        () => reject(new A3SBoxError('test stream canceled', 'canceled')),
+        { once: true }
+      )
+    })
+  }
+}
+
+const blockingEventRuntime = new BlockingEventRuntime()
+const blockingEventSandbox = await Sandbox.create(undefined, {
+  runtime: blockingEventRuntime,
+})
+const abortController = new AbortController()
+const blockingIterator = blockingEventSandbox
+  .streamEvents({ signal: abortController.signal, waitTimeoutMs: 1 })
+  [Symbol.asyncIterator]()
+const blockedEvent = blockingIterator.next()
+await blockingEventRuntime.started
+abortController.abort()
+await assert.rejects(
+  blockedEvent,
+  (error) => error instanceof A3SBoxError && error.code === 'canceled'
+)
 
 const builderRuntime = new FakeRuntime()
 const client = new A3SBoxClient(builderRuntime)

@@ -4,10 +4,12 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use a3s_box_sdk::{
-    A3sBoxClient, A3sBoxPaths, ClientError, ExecutionIsolation, ExecutionSnapshotId,
-    ListBoxesOptions, OperationId, Sandbox, SandboxCreateOptions, SandboxLogOptions,
+    A3sBoxClient, A3sBoxPaths, ClientError, ExecutionEventKind, ExecutionEventsRequest,
+    ExecutionIsolation, ExecutionResourceUpdate, ExecutionSnapshotId, ListBoxesOptions,
+    OperationId, Sandbox, SandboxCreateOptions, SandboxEventStreamOptions, SandboxLogOptions,
     SandboxNetwork, SandboxRestartOptions, TagImage,
 };
+use futures::StreamExt;
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -191,6 +193,14 @@ async fn exercise(
         sandbox.files.stat(&source).await?.size == 5,
         "Rust SDK stat returned the wrong size",
     )?;
+    let artifact = sandbox.files.export(&source).await?;
+    require(
+        artifact.data == b"hello"
+            && artifact.size == 5
+            && artifact.sha256
+                == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "Rust SDK artifact export returned unexpected content or metadata",
+    )?;
     require(
         sandbox
             .files
@@ -233,6 +243,16 @@ async fn exercise(
     )?;
     if expected_isolation == ExecutionIsolation::Sandbox {
         let info = sandbox.info();
+        let inventory = sandbox.processes().await?;
+        require(
+            inventory.execution_id.as_str() == sandbox.id()
+                && inventory.generation.get() == info.generation,
+            "runtime process inventory targeted a different Sandbox generation",
+        )?;
+        require(
+            !inventory.processes.is_empty(),
+            "running Sandbox returned an empty runtime process inventory",
+        )?;
         let stats = sandbox.runtime_stats().await?;
         require(
             stats.execution_id.as_str() == sandbox.id(),
@@ -245,6 +265,59 @@ async fn exercise(
         require(
             stats.timestamp_unix_ns > 0 && stats.process_count > 0,
             "running Sandbox returned an invalid runtime stats snapshot",
+        )?;
+        let event_cursor = sandbox
+            .events(ExecutionEventsRequest {
+                after_sequence: 0,
+                limit: 256,
+                wait_timeout_ms: Some(0),
+            })
+            .await?
+            .next_sequence;
+        let mut event_stream = sandbox.stream_events(
+            SandboxEventStreamOptions::default()
+                .after_sequence(event_cursor)
+                .batch_items(256)
+                .wait_timeout_ms(1_000),
+        )?;
+        let update_operation = OperationId::new(format!("sdk-smoke-resources-{}", sandbox.id()))?;
+        let update = ExecutionResourceUpdate {
+            cpu_shares: Some(1_024),
+            ..ExecutionResourceUpdate::default()
+        };
+        sandbox
+            .update_resources(&update_operation, update.clone())
+            .await?;
+        sandbox.update_resources(&update_operation, update).await?;
+        let streamed_event = event_stream
+            .next()
+            .await
+            .transpose()?
+            .ok_or_else(|| std::io::Error::other("runtime event stream ended unexpectedly"))?;
+        require(
+            streamed_event.kind == ExecutionEventKind::ResourcesUpdated,
+            "runtime event stream returned the wrong event",
+        )?;
+        let events = sandbox
+            .events(ExecutionEventsRequest {
+                after_sequence: event_cursor,
+                limit: 256,
+                wait_timeout_ms: Some(0),
+            })
+            .await?;
+        require(
+            events.execution_id.as_str() == sandbox.id()
+                && events.generation.get() == info.generation,
+            "runtime events targeted a different Sandbox generation",
+        )?;
+        require(
+            events
+                .events
+                .iter()
+                .filter(|event| event.kind == ExecutionEventKind::ResourcesUpdated)
+                .count()
+                == 1,
+            "runtime resource-update replay did not publish exactly one event",
         )?;
     } else {
         require(

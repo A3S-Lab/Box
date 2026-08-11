@@ -968,6 +968,7 @@ mod tests {
                 guest_path: "~/data.bin".to_string(),
                 data: Some("AAEC".to_string()),
                 user: Some("user".to_string()),
+                max_bytes: None,
             })
             .await
             .unwrap();

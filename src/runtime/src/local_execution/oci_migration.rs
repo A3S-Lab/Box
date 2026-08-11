@@ -294,7 +294,7 @@ impl LocalExecutionManager {
 
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         {
-            return match WindowsWhpxOciMigrationConfig::from_environment(&home_dir)? {
+            match WindowsWhpxOciMigrationConfig::from_environment(&home_dir)? {
                 Some(config) => {
                     Self::with_windows_whpx_oci_qualification_and_pull_progress(
                         state_path,
@@ -305,7 +305,7 @@ impl LocalExecutionManager {
                     .await
                 }
                 None => legacy_backend(state_path, home_dir, pull_progress_fn),
-            };
+            }
         }
 
         #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]

@@ -21,6 +21,38 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Backpressured exact-generation event streams in every native SDK.** Rust
+  exposes a `Stream`, synchronous and asynchronous Python expose iterators,
+  TypeScript exposes an abortable `AsyncIterable`, and Go exposes a
+  context-aware stream with an idempotent `Close`. Each stream composes the
+  existing bounded long-poll authority, pins the generation visible at stream
+  creation, advances only validated cursors, and terminates instead of silently
+  following a restart. Runtime observation now also accepts the paused state
+  already supported by the core manager. Unit suites prove batch backpressure,
+  paused observation, generation drift, option validation, and cancellation;
+  the four real local-Sandbox SDK smokes consume the replay-safe
+  `resources-updated` event through both the stream and bounded replay paths.
+- **Cross-language exact-generation runtime observability and control.** The
+  protocol-v3 machine bridge and the synchronous/asynchronous Python,
+  TypeScript, and Go SDKs now expose the Rust Sandbox facade's live process
+  inventory, normalized CPU/memory statistics, bounded ordered-event polling,
+  and replay-safe partial resource updates. All clients validate event bounds,
+  update values, and operation identities before runtime access; observation
+  responses must match the exact Sandbox generation. The checked capability
+  inventory now contains 52 operations. The four real local-Sandbox SDK smokes,
+  including both Python client styles, also require a nonempty process inventory
+  and valid runtime statistics, then replay one resource update under the same
+  operation identity and require exactly one exact-generation
+  `resources-updated` event.
+- **Bounded artifact export across all native SDKs.** Rust, synchronous and
+  asynchronous Python, TypeScript, and Go can export one guest file with a
+  caller-selected limit up to the transport-safe 8 MiB single-frame ceiling,
+  backend-bounded reads, stat/read size-change and declared-size validation, and a
+  lowercase SHA-256 digest. MicroVM guests enforce the selected limit before
+  reading; the shared-kernel adapter retains the OCI Runtime transfer cap and
+  rejects a response beyond the selected limit. An optional exact host
+  destination uses exclusive creation and never overwrites an existing
+  artifact.
 - **Linux/KVM MicroVM qualification for the shared A3S Runtime provider.**
   `BoxRuntimeDriver` now runs its complete advertised Base, Recovery,
   Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs
@@ -180,6 +212,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Production-shaped macOS TX-backpressure qualification.** The physical
+  Apple Silicon/HVF gate now starts the exact digest-pinned PostgreSQL 17 image
+  from Box #204 and completes two sequential SCRAM-SHA-256 authentications and
+  queries through one published port. The dependency-free protocol client is
+  covered by HMAC/PBKDF2 vectors and a deterministic fake-server round trip;
+  the real gate also rejects `ENOBUFS` and guest `NETDEV WATCHDOG` evidence.
+- **Windows CLI main-stack exhaustion.** Async command dispatch now allocates
+  only the selected handler future instead of combining every handler on the
+  process main stack. Debug Windows builds can execute state-heavy commands
+  such as `build`, `create`, and `wait` without overflowing before the handler
+  starts, and the scratch build plus retained-status wait integrations now run
+  in the Windows CI lane.
 - **Reproducible native OCI descriptors.** Native builds now write the canonical
   epoch into OCI config and history creation fields because the build contract
   carries no creation clock. Rebuilding identical content, including after

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{RegistryCredentials, RegistryProtocol, SignaturePolicy};
+use crate::{ExecutionResourceUpdate, RegistryCredentials, RegistryProtocol, SignaturePolicy};
 
 use super::{default_depth, default_network_subnet, default_true, BridgeSandboxCreateRequest};
 
@@ -46,6 +46,10 @@ pub const BRIDGE_OPERATIONS: &[&str] = &[
     "sandbox_resume",
     "sandbox_logs",
     "sandbox_stats",
+    "sandbox_processes",
+    "sandbox_runtime_stats",
+    "sandbox_events",
+    "sandbox_update_resources",
     "sandbox_snapshot_create",
     "filesystem_snapshot_list",
     "filesystem_snapshot_get",
@@ -203,6 +207,31 @@ pub enum BridgeRequest {
         sandbox_id: String,
         generation: u64,
     },
+    SandboxProcesses {
+        sandbox_id: String,
+        generation: u64,
+    },
+    SandboxRuntimeStats {
+        sandbox_id: String,
+        generation: u64,
+    },
+    SandboxEvents {
+        sandbox_id: String,
+        generation: u64,
+        #[serde(default)]
+        after_sequence: u64,
+        #[serde(default = "default_event_limit")]
+        limit: u32,
+        #[serde(default)]
+        wait_timeout_ms: Option<u64>,
+    },
+    SandboxUpdateResources {
+        sandbox_id: String,
+        generation: u64,
+        operation_id: String,
+        #[serde(default)]
+        resources: ExecutionResourceUpdate,
+    },
     SandboxSnapshotCreate {
         sandbox_id: String,
         generation: u64,
@@ -247,6 +276,8 @@ pub enum BridgeRequest {
         path: String,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        max_bytes: Option<u64>,
     },
     FilesystemStat {
         sandbox_id: String,
@@ -326,6 +357,10 @@ impl BridgeRequest {
             Self::SandboxResume { .. } => "sandbox_resume",
             Self::SandboxLogs { .. } => "sandbox_logs",
             Self::SandboxStats { .. } => "sandbox_stats",
+            Self::SandboxProcesses { .. } => "sandbox_processes",
+            Self::SandboxRuntimeStats { .. } => "sandbox_runtime_stats",
+            Self::SandboxEvents { .. } => "sandbox_events",
+            Self::SandboxUpdateResources { .. } => "sandbox_update_resources",
             Self::SandboxSnapshotCreate { .. } => "sandbox_snapshot_create",
             Self::FilesystemSnapshotList => "filesystem_snapshot_list",
             Self::FilesystemSnapshotGet { .. } => "filesystem_snapshot_get",
@@ -345,6 +380,10 @@ impl BridgeRequest {
 
 const fn default_log_tail() -> usize {
     100
+}
+
+const fn default_event_limit() -> u32 {
+    256
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]

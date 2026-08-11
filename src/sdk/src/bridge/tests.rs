@@ -1,4 +1,5 @@
 use super::*;
+use crate::ExecutionResourceUpdate;
 
 #[test]
 fn create_request_defaults_to_a_local_microvm() {
@@ -171,6 +172,35 @@ fn zero_generation_is_rejected_before_runtime_access() {
 }
 
 #[test]
+fn bounded_file_read_shape_preserves_the_guest_limit() {
+    let request: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"file_read",
+            "sandbox_id":"box-1",
+            "generation":7,
+            "path":"/workspace/report.json",
+            "user":"1000",
+            "max_bytes":4096
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::FileRead {
+        generation,
+        path,
+        user,
+        max_bytes,
+        ..
+    } = request
+    else {
+        panic!("expected file_read request");
+    };
+    assert_eq!(generation, 7);
+    assert_eq!(path, "/workspace/report.json");
+    assert_eq!(user.as_deref(), Some("1000"));
+    assert_eq!(max_bytes, Some(4096));
+}
+
+#[test]
 fn builder_bridge_shapes_deserialize_as_typed_requests() {
     let request: BridgeRequest = serde_json::from_str(
         r#"{
@@ -302,6 +332,22 @@ fn lifecycle_observability_and_inspection_shapes_are_typed() {
             "sandbox_stats",
         ),
         (
+            r#"{"operation":"sandbox_processes","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_processes",
+        ),
+        (
+            r#"{"operation":"sandbox_runtime_stats","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_runtime_stats",
+        ),
+        (
+            r#"{"operation":"sandbox_events","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_events",
+        ),
+        (
+            r#"{"operation":"sandbox_update_resources","sandbox_id":"box-1","generation":2,"operation_id":"resources-1","resources":{"cpu_shares":512}}"#,
+            "sandbox_update_resources",
+        ),
+        (
             r#"{"operation":"filesystem_snapshot_list"}"#,
             "filesystem_snapshot_list",
         ),
@@ -317,6 +363,19 @@ fn lifecycle_observability_and_inspection_shapes_are_typed() {
         match request {
             BridgeRequest::SandboxList { all } => assert!(all),
             BridgeRequest::SandboxLogs { tail, .. } => assert_eq!(tail, 100),
+            BridgeRequest::SandboxEvents {
+                after_sequence,
+                limit,
+                wait_timeout_ms,
+                ..
+            } => {
+                assert_eq!(after_sequence, 0);
+                assert_eq!(limit, 256);
+                assert_eq!(wait_timeout_ms, None);
+            }
+            BridgeRequest::SandboxUpdateResources { resources, .. } => {
+                assert_eq!(resources.cpu_shares, Some(512));
+            }
             BridgeRequest::SandboxRestart {
                 stop_timeout_seconds,
                 ..
@@ -356,6 +415,49 @@ async fn lifecycle_validation_precedes_runtime_lookup_or_mutation() {
         .await;
         assert!(!logs.ok);
         assert_eq!(logs.error.unwrap().code, "invalid_request");
+    }
+
+    for limit in [0, 4_097] {
+        let events = handle_request(
+            &client,
+            BridgeRequest::SandboxEvents {
+                sandbox_id: "missing".to_string(),
+                generation: 1,
+                after_sequence: 0,
+                limit,
+                wait_timeout_ms: None,
+            },
+        )
+        .await;
+        assert!(!events.ok);
+        assert_eq!(events.error.unwrap().code, "invalid_request");
+    }
+
+    for (operation_id, resources) in [
+        (
+            " ".to_string(),
+            ExecutionResourceUpdate {
+                cpu_shares: Some(512),
+                ..ExecutionResourceUpdate::default()
+            },
+        ),
+        (
+            "resources-1".to_string(),
+            ExecutionResourceUpdate::default(),
+        ),
+    ] {
+        let update = handle_request(
+            &client,
+            BridgeRequest::SandboxUpdateResources {
+                sandbox_id: "missing".to_string(),
+                generation: 1,
+                operation_id,
+                resources,
+            },
+        )
+        .await;
+        assert!(!update.ok);
+        assert_eq!(update.error.unwrap().code, "invalid_request");
     }
     assert!(!client.paths().boxes_file.exists());
 }

@@ -139,6 +139,90 @@ type SandboxStats struct {
 	BlockWriteBytes  uint64  `json:"block_write_bytes"`
 }
 
+type ExecutionProcessInfo struct {
+	ProcessID string  `json:"process_id"`
+	PID       *uint32 `json:"pid"`
+	Terminal  bool    `json:"terminal"`
+}
+
+type ExecutionProcessInventory struct {
+	ExecutionID string                 `json:"execution_id"`
+	Generation  uint64                 `json:"generation"`
+	Processes   []ExecutionProcessInfo `json:"processes"`
+}
+
+type ExecutionCPUStats struct {
+	UsageNS     uint64 `json:"usage_ns"`
+	UserNS      uint64 `json:"user_ns"`
+	SystemNS    uint64 `json:"system_ns"`
+	ThrottledNS uint64 `json:"throttled_ns"`
+}
+
+type ExecutionMemoryStats struct {
+	UsageBytes uint64  `json:"usage_bytes"`
+	LimitBytes *uint64 `json:"limit_bytes"`
+	PeakBytes  *uint64 `json:"peak_bytes"`
+}
+
+type ExecutionStats struct {
+	ExecutionID     string               `json:"execution_id"`
+	Generation      uint64               `json:"generation"`
+	TimestampUnixNS uint64               `json:"timestamp_unix_ns"`
+	CPU             ExecutionCPUStats    `json:"cpu"`
+	Memory          ExecutionMemoryStats `json:"memory"`
+	ProcessCount    uint64               `json:"process_count"`
+	Metrics         map[string]uint64    `json:"metrics"`
+}
+
+type ExecutionEventKind string
+
+const (
+	EventContainerCreating ExecutionEventKind = "container-creating"
+	EventContainerCreated  ExecutionEventKind = "container-created"
+	EventContainerStarted  ExecutionEventKind = "container-started"
+	EventContainerStopped  ExecutionEventKind = "container-stopped"
+	EventContainerDeleted  ExecutionEventKind = "container-deleted"
+	EventContainerPaused   ExecutionEventKind = "container-paused"
+	EventContainerResumed  ExecutionEventKind = "container-resumed"
+	EventResourcesUpdated  ExecutionEventKind = "resources-updated"
+	EventProcessCreated    ExecutionEventKind = "process-created"
+	EventProcessStarted    ExecutionEventKind = "process-started"
+	EventProcessExited     ExecutionEventKind = "process-exited"
+	EventOutputDropped     ExecutionEventKind = "output-dropped"
+	EventRuntimeWarning    ExecutionEventKind = "runtime-warning"
+)
+
+type ExecutionRuntimeEvent struct {
+	Sequence        uint64             `json:"sequence"`
+	TimestampUnixNS uint64             `json:"timestamp_unix_ns"`
+	ProcessID       *string            `json:"process_id"`
+	Kind            ExecutionEventKind `json:"kind"`
+	Attributes      map[string]string  `json:"attributes"`
+}
+
+type ExecutionEventBatch struct {
+	ExecutionID  string                  `json:"execution_id"`
+	Generation   uint64                  `json:"generation"`
+	Events       []ExecutionRuntimeEvent `json:"events"`
+	NextSequence uint64                  `json:"next_sequence"`
+}
+
+type ExecutionEventsRequest struct {
+	AfterSequence uint64
+	Limit         uint32
+	WaitTimeoutMS *uint64
+}
+
+type ExecutionResourceUpdate struct {
+	MemoryReservation *uint64 `json:"memory_reservation,omitempty"`
+	MemorySwap        *int64  `json:"memory_swap,omitempty"`
+	PIDsLimit         *uint64 `json:"pids_limit,omitempty"`
+	CPUShares         *uint64 `json:"cpu_shares,omitempty"`
+	CPUQuota          *int64  `json:"cpu_quota,omitempty"`
+	CPUPeriod         *uint64 `json:"cpu_period,omitempty"`
+	CPUSetCPUs        *string `json:"cpuset_cpus,omitempty"`
+}
+
 type RuntimeVirtualization struct {
 	Available bool    `json:"available"`
 	Backend   *string `json:"backend"`
@@ -198,6 +282,15 @@ type SandboxInfo struct {
 type WriteInfo struct {
 	Path string `json:"path"`
 	Size uint64 `json:"size"`
+}
+
+// Artifact is one verified, bounded guest file and its SHA-256 digest.
+type Artifact struct {
+	Path     string
+	Data     []byte
+	Size     uint64
+	SHA256   string
+	HostPath string
 }
 
 type EntryInfo struct {

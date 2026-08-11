@@ -1,10 +1,14 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { open, rm, type FileHandle } from 'node:fs/promises'
 
 import { A3SBoxError } from './errors.js'
 import {
   asRecord,
   decodeBase64,
   entryInfo,
+  executionEventBatch,
+  executionProcessInventory,
+  executionStats,
   filesystemSnapshotInfo,
   requiredBoolean,
   requiredGeneration,
@@ -25,6 +29,10 @@ import {
 } from './runtime.js'
 
 export const DEFAULT_IMAGE = 'alpine:3.20'
+export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+export const MAX_EXECUTION_EVENT_BATCH_ITEMS = 4_096
+export const DEFAULT_EVENT_STREAM_BATCH_ITEMS = 256
+export const DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS = 1_000
 
 export type Isolation = 'microvm' | 'sandbox'
 
@@ -114,6 +122,20 @@ export interface WriteInfo {
   size: number
 }
 
+export interface Artifact {
+  path: string
+  data: Uint8Array
+  size: number
+  sha256: string
+  hostPath?: string
+}
+
+export interface ArtifactExportOptions {
+  maxBytes?: number
+  destination?: string
+  user?: string
+}
+
 export interface FilesystemSnapshotInfo {
   snapshotId: string
   sizeBytes: number
@@ -138,6 +160,98 @@ export interface EntryInfo {
 export interface FilesystemReadOptions {
   format?: 'text' | 'bytes'
   user?: string
+}
+
+export interface ExecutionProcessInfo {
+  processId: string
+  pid?: number
+  terminal: boolean
+}
+
+export interface ExecutionProcessInventory {
+  executionId: string
+  generation: number
+  processes: ExecutionProcessInfo[]
+}
+
+export interface ExecutionCpuStats {
+  usageNs: number
+  userNs: number
+  systemNs: number
+  throttledNs: number
+}
+
+export interface ExecutionMemoryStats {
+  usageBytes: number
+  limitBytes?: number
+  peakBytes?: number
+}
+
+export interface ExecutionStats {
+  executionId: string
+  generation: number
+  timestampUnixNs: number
+  cpu: ExecutionCpuStats
+  memory: ExecutionMemoryStats
+  processCount: number
+  metrics: Readonly<Record<string, number>>
+}
+
+export type ExecutionEventKind =
+  | 'container-creating'
+  | 'container-created'
+  | 'container-started'
+  | 'container-stopped'
+  | 'container-deleted'
+  | 'container-paused'
+  | 'container-resumed'
+  | 'resources-updated'
+  | 'process-created'
+  | 'process-started'
+  | 'process-exited'
+  | 'output-dropped'
+  | 'runtime-warning'
+
+export interface ExecutionRuntimeEvent {
+  sequence: number
+  timestampUnixNs: number
+  processId?: string
+  kind: ExecutionEventKind
+  attributes: Readonly<Record<string, string>>
+}
+
+export interface ExecutionEventBatch {
+  executionId: string
+  generation: number
+  events: ExecutionRuntimeEvent[]
+  nextSequence: number
+}
+
+export interface ExecutionEventsOptions {
+  afterSequence?: number
+  limit?: number
+  waitTimeoutMs?: number
+}
+
+export interface ExecutionEventStreamOptions {
+  afterSequence?: number
+  batchSize?: number
+  waitTimeoutMs?: number
+  signal?: AbortSignal
+}
+
+export interface ExecutionResourceUpdate {
+  memoryReservation?: number
+  memorySwap?: number
+  pidsLimit?: number
+  cpuShares?: number
+  cpuQuota?: number
+  cpuPeriod?: number
+  cpusetCpus?: string
+}
+
+export interface UpdateResourcesOptions {
+  operationId?: string
 }
 
 export class Sandbox {
@@ -375,6 +489,137 @@ export class Sandbox {
       : sandboxStats(asRecord(result.stats))
   }
 
+  async processes(): Promise<ExecutionProcessInventory> {
+    this.requireObservable()
+    const inventory = executionProcessInventory(
+      await this.runtime.request(
+        this.lifecycleRequest('sandbox_processes')
+      )
+    )
+    this.validateExecutionIdentity(
+      inventory.executionId,
+      inventory.generation
+    )
+    validateProcessInventory(inventory)
+    return inventory
+  }
+
+  async runtimeStats(): Promise<ExecutionStats> {
+    this.requireObservable()
+    const stats = executionStats(
+      await this.runtime.request(
+        this.lifecycleRequest('sandbox_runtime_stats')
+      )
+    )
+    this.validateExecutionIdentity(stats.executionId, stats.generation)
+    validateExecutionStats(stats)
+    return stats
+  }
+
+  async events(
+    options: ExecutionEventsOptions = {}
+  ): Promise<ExecutionEventBatch> {
+    this.requireObservable()
+    const afterSequence = options.afterSequence ?? 0
+    const limit = options.limit ?? 256
+    validateInteger('afterSequence', afterSequence, 0)
+    validateInteger(
+      'limit',
+      limit,
+      1,
+      MAX_EXECUTION_EVENT_BATCH_ITEMS
+    )
+    if (options.waitTimeoutMs !== undefined) {
+      validateInteger('waitTimeoutMs', options.waitTimeoutMs, 0)
+    }
+    const batch = executionEventBatch(
+      await this.runtime.request({
+        ...this.lifecycleRequest('sandbox_events'),
+        after_sequence: afterSequence,
+        limit,
+        ...(options.waitTimeoutMs === undefined
+          ? {}
+          : { wait_timeout_ms: options.waitTimeoutMs }),
+      })
+    )
+    this.validateExecutionIdentity(batch.executionId, batch.generation)
+    validateExecutionEventBatch(batch, afterSequence)
+    return batch
+  }
+
+  streamEvents(
+    options: ExecutionEventStreamOptions = {}
+  ): AsyncIterable<ExecutionRuntimeEvent> {
+    this.requireObservable()
+    const afterSequence = options.afterSequence ?? 0
+    const batchSize = options.batchSize ?? DEFAULT_EVENT_STREAM_BATCH_ITEMS
+    const waitTimeoutMs =
+      options.waitTimeoutMs ?? DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS
+    validateInteger('afterSequence', afterSequence, 0)
+    validateInteger(
+      'batchSize',
+      batchSize,
+      1,
+      MAX_EXECUTION_EVENT_BATCH_ITEMS
+    )
+    validateInteger('waitTimeoutMs', waitTimeoutMs, 1)
+
+    const sandbox = this
+    const generation = this.generation
+    const signal = options.signal
+    return {
+      async *[Symbol.asyncIterator](): AsyncGenerator<ExecutionRuntimeEvent> {
+        let cursor = afterSequence
+        while (true) {
+          if (signal?.aborted) throw canceledEventStreamError()
+          sandbox.requireStreamGeneration(generation)
+          const batch = executionEventBatch(
+            await sandbox.runtime.request(
+              {
+                operation: 'sandbox_events',
+                sandbox_id: sandbox.sandboxId,
+                generation,
+                after_sequence: cursor,
+                limit: batchSize,
+                wait_timeout_ms: waitTimeoutMs,
+              },
+              { signal }
+            )
+          )
+          sandbox.validateExecutionIdentity(
+            batch.executionId,
+            batch.generation,
+            generation
+          )
+          validateExecutionEventBatch(batch, cursor)
+          cursor = batch.nextSequence
+          if (signal?.aborted) throw canceledEventStreamError()
+          for (const event of batch.events) yield event
+        }
+      },
+    }
+  }
+
+  async updateResources(
+    update: ExecutionResourceUpdate,
+    options: UpdateResourcesOptions = {}
+  ): Promise<void> {
+    this.requireRunning()
+    if (
+      options.operationId !== undefined &&
+      options.operationId.trim().length === 0
+    ) {
+      throw new Error('operationId cannot be empty')
+    }
+    const result = await this.runtime.request({
+      ...this.lifecycleRequest('sandbox_update_resources'),
+      operation_id:
+        options.operationId ?? `sdk-resource-update-${randomUUID()}`,
+      resources: executionResourceUpdateValue(update),
+    })
+    this.updateLifecycle(result, 'running', this.generation)
+  }
+
   async createFilesystemSnapshot(
     snapshotId: string
   ): Promise<FilesystemSnapshotInfo> {
@@ -448,15 +693,224 @@ export class Sandbox {
     }
   }
 
-  private updateLifecycle(result: BridgeResult): void {
+  private updateLifecycle(
+    result: BridgeResult,
+    expectedState?: string,
+    expectedGeneration?: number
+  ): void {
     const info = sandboxLifecycleInfo(
       result,
       this.sandboxId,
       this.isolation
     )
+    if (expectedState !== undefined && info.state !== expectedState) {
+      throw new A3SBoxError(
+        `Bridge returned sandbox state ${info.state}; expected ${expectedState}`,
+        'bridge_protocol_error'
+      )
+    }
+    if (
+      expectedGeneration !== undefined &&
+      info.generation !== expectedGeneration
+    ) {
+      throw new A3SBoxError(
+        'Bridge returned a different execution generation',
+        'bridge_protocol_error'
+      )
+    }
     this.generation = info.generation
     this.state = info.state
   }
+
+  private requireRunning(): void {
+    if (this.state !== 'running') {
+      throw new Error(`sandbox ${this.sandboxId} is not running`)
+    }
+  }
+
+  private requireObservable(): void {
+    if (this.state !== 'running' && this.state !== 'paused') {
+      throw new Error(
+        `sandbox ${this.sandboxId} is neither running nor paused`
+      )
+    }
+  }
+
+  private requireStreamGeneration(expectedGeneration: number): void {
+    if (
+      this.generation !== expectedGeneration ||
+      (this.state !== 'running' && this.state !== 'paused')
+    ) {
+      throw new A3SBoxError(
+        `Sandbox ${this.sandboxId} changed while streaming events`,
+        'conflict'
+      )
+    }
+  }
+
+  private validateExecutionIdentity(
+    executionId: string,
+    generation: number,
+    expectedGeneration = this.generation
+  ): void {
+    if (
+      executionId !== this.sandboxId ||
+      generation !== expectedGeneration
+    ) {
+      throw new A3SBoxError(
+        'Bridge returned a different execution generation',
+        'bridge_protocol_error'
+      )
+    }
+  }
+}
+
+function canceledEventStreamError(): A3SBoxError {
+  return new A3SBoxError('Sandbox event stream was canceled', 'canceled')
+}
+
+function validateProcessInventory(
+  inventory: ExecutionProcessInventory
+): void {
+  const identifiers = new Set<string>()
+  for (const process of inventory.processes) {
+    if (
+      process.processId.trim().length === 0 ||
+      (process.pid !== undefined &&
+        (!Number.isSafeInteger(process.pid) || process.pid <= 0)) ||
+      identifiers.has(process.processId)
+    ) {
+      throw new A3SBoxError(
+        'Bridge returned an invalid runtime process inventory',
+        'bridge_protocol_error'
+      )
+    }
+    identifiers.add(process.processId)
+  }
+}
+
+function validateExecutionStats(stats: ExecutionStats): void {
+  if (
+    stats.timestampUnixNs <= 0 ||
+    stats.cpu.userNs + stats.cpu.systemNs > stats.cpu.usageNs ||
+    (stats.memory.peakBytes !== undefined &&
+      stats.memory.peakBytes < stats.memory.usageBytes) ||
+    Object.keys(stats.metrics).some(
+      (name) =>
+        name.length === 0 ||
+        name.length > 256 ||
+        /[\u0000-\u0020\u007f]/.test(name)
+    )
+  ) {
+    throw new A3SBoxError(
+      'Bridge returned invalid runtime statistics',
+      'bridge_protocol_error'
+    )
+  }
+}
+
+function validateExecutionEventBatch(
+  batch: ExecutionEventBatch,
+  afterSequence: number
+): void {
+  let previous = afterSequence
+  for (const event of batch.events) {
+    if (event.sequence <= previous || event.timestampUnixNs <= 0) {
+      throw new A3SBoxError(
+        'Bridge returned an invalid runtime event order',
+        'bridge_protocol_error'
+      )
+    }
+    previous = event.sequence
+  }
+  if (batch.nextSequence < previous) {
+    throw new A3SBoxError(
+      'Bridge returned a regressed runtime event cursor',
+      'bridge_protocol_error'
+    )
+  }
+}
+
+function executionResourceUpdateValue(
+  update: ExecutionResourceUpdate
+): Readonly<Record<string, number | string>> {
+  if (typeof update !== 'object' || update === null) {
+    throw new Error('update must be an ExecutionResourceUpdate')
+  }
+  const result: Record<string, number | string> = {}
+  const numericFields: readonly [
+    keyof ExecutionResourceUpdate,
+    string,
+    number,
+    number?
+  ][] = [
+    ['memoryReservation', 'memory_reservation', 0],
+    ['memorySwap', 'memory_swap', -1],
+    ['pidsLimit', 'pids_limit', 1],
+    ['cpuShares', 'cpu_shares', 2, 262_144],
+    ['cpuQuota', 'cpu_quota', 1],
+    ['cpuPeriod', 'cpu_period', 1],
+  ]
+  for (const [property, field, minimum, maximum] of numericFields) {
+    const value = update[property]
+    if (value === undefined) continue
+    if (typeof value !== 'number') {
+      throw new Error(`${property} must be an integer`)
+    }
+    validateInteger(property, value, minimum, maximum)
+    result[field] = value
+  }
+  if (update.cpusetCpus !== undefined) {
+    if (!validCpuset(update.cpusetCpus)) {
+      throw new Error(
+        'cpusetCpus must be a comma-separated list of indices or ascending ranges'
+      )
+    }
+    result.cpuset_cpus = update.cpusetCpus
+  }
+  if (Object.keys(result).length === 0) {
+    throw new Error(
+      'resource update must change at least one supported field'
+    )
+  }
+  return result
+}
+
+function validateInteger(
+  name: string,
+  value: number,
+  minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER
+): void {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw new Error(
+      `${name} must be an integer between ${minimum} and ${maximum}`
+    )
+  }
+}
+
+function validCpuset(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim().length === 0) return false
+  return value.split(',').every((rawItem) => {
+    const item = rawItem.trim()
+    if (/^[0-9]+$/.test(item)) return validCPUIndex(item)
+    const range = /^([0-9]+)-([0-9]+)$/.exec(item)
+    return (
+      range !== null &&
+      validCPUIndex(range[1]) &&
+      validCPUIndex(range[2]) &&
+      Number(range[1]) <= Number(range[2])
+    )
+  })
+}
+
+function validCPUIndex(value: string): boolean {
+  const index = Number(value)
+  return Number.isSafeInteger(index) && index <= 0xffff_ffff
 }
 
 export class Commands {
@@ -606,11 +1060,64 @@ export class Filesystem {
     path: string,
     options: FilesystemReadOptions = {}
   ): Promise<string | Uint8Array> {
-    const result = await this.sandbox.bridgeRequest(
-      this.request('file_read', path, options.user)
-    )
-    const data = decodeBase64(result, 'data_base64')
+    const data = await this.readBytes(path, options.user)
     return options.format === 'bytes' ? data : data.toString('utf8')
+  }
+
+  async export(
+    path: string,
+    options: ArtifactExportOptions = {}
+  ): Promise<Artifact> {
+    if (typeof path !== 'string' || path.trim().length === 0) {
+      throw new A3SBoxError(
+        'artifact source path cannot be empty',
+        'invalid_request'
+      )
+    }
+    const maxBytes = artifactLimit(options.maxBytes ?? MAX_ARTIFACT_BYTES)
+    const destination = artifactDestination(options.destination)
+    const entry = await this.stat(path, { user: options.user })
+    if (entry.type !== 'file') {
+      throw new A3SBoxError(
+        `artifact source ${JSON.stringify(path)} must be a file`,
+        'invalid_request'
+      )
+    }
+    if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
+      throw new A3SBoxError(
+        'Bridge returned an invalid artifact size',
+        'bridge_protocol_error'
+      )
+    }
+    if (entry.size > maxBytes) {
+      throw new A3SBoxError(
+        `artifact source is ${entry.size} bytes; maxBytes is ${maxBytes}`,
+        'invalid_request'
+      )
+    }
+    const data = await this.readBytes(path, options.user, maxBytes)
+    if (data.length > maxBytes) {
+      throw new A3SBoxError(
+        `artifact source grew beyond maxBytes (${maxBytes}) while reading`,
+        'bridge_protocol_error'
+      )
+    }
+    if (data.length !== entry.size) {
+      throw new A3SBoxError(
+        'artifact source changed size while it was being exported',
+        'bridge_protocol_error'
+      )
+    }
+    if (destination !== undefined) {
+      await writeNewHostFile(destination, data)
+    }
+    return {
+      path,
+      data,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+      ...(destination === undefined ? {} : { hostPath: destination }),
+    }
   }
 
   async stat(path: string, options: { user?: string } = {}): Promise<EntryInfo> {
@@ -677,6 +1184,37 @@ export class Filesystem {
     )
   }
 
+  private async readBytes(
+    path: string,
+    user: string | undefined,
+    maxBytes?: number
+  ): Promise<Buffer> {
+    const request = this.request('file_read', path, user)
+    const result = await this.sandbox.bridgeRequest(
+      maxBytes === undefined ? request : { ...request, max_bytes: maxBytes }
+    )
+    const responsePath = requiredString(result, 'path')
+    if (responsePath !== path) {
+      throw new A3SBoxError(
+        'Bridge returned file data for a different path',
+        'bridge_protocol_error'
+      )
+    }
+    const data = decodeBase64(result, 'data_base64')
+    const declaredSize = requiredNumber(result, 'size')
+    if (
+      !Number.isSafeInteger(declaredSize) ||
+      declaredSize < 0 ||
+      declaredSize !== data.length
+    ) {
+      throw new A3SBoxError(
+        'Bridge returned inconsistent file size metadata',
+        'bridge_protocol_error'
+      )
+    }
+    return data
+  }
+
   private request(
     operation: string,
     path: string,
@@ -690,6 +1228,76 @@ export class Filesystem {
       ...(user === undefined ? {} : { user }),
     }
   }
+}
+
+function artifactLimit(maxBytes: number): number {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes <= 0 ||
+    maxBytes > MAX_ARTIFACT_BYTES
+  ) {
+    throw new A3SBoxError(
+      `maxBytes must be between 1 and ${MAX_ARTIFACT_BYTES}`,
+      'invalid_request'
+    )
+  }
+  return maxBytes
+}
+
+function artifactDestination(destination: string | undefined): string | undefined {
+  if (destination === undefined) return undefined
+  if (typeof destination !== 'string' || destination.trim().length === 0) {
+    throw new A3SBoxError(
+      'destination must be a non-empty host filesystem path',
+      'invalid_request'
+    )
+  }
+  return destination
+}
+
+async function writeNewHostFile(
+  destination: string,
+  data: Uint8Array
+): Promise<void> {
+  let file: FileHandle
+  try {
+    file = await open(destination, 'wx', 0o600)
+  } catch (error) {
+    throw new A3SBoxError(
+      `Could not create artifact destination ${JSON.stringify(destination)}: ${errorMessage(error)}`,
+      'runtime_error'
+    )
+  }
+
+  try {
+    await file.writeFile(data)
+    await file.sync()
+    await file.close()
+  } catch (error) {
+    try {
+      await file.close()
+    } catch {
+      // The original write or close failure remains authoritative.
+    }
+    let cleanupFailure: unknown
+    try {
+      await rm(destination)
+    } catch (cleanupError) {
+      cleanupFailure = cleanupError
+    }
+    const cleanup =
+      cleanupFailure === undefined
+        ? ''
+        : `; partial-file cleanup failed: ${errorMessage(cleanupFailure)}`
+    throw new A3SBoxError(
+      `Could not write artifact destination ${JSON.stringify(destination)}: ${errorMessage(error)}${cleanup}`,
+      'runtime_error'
+    )
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function bridgeVolumeMount(

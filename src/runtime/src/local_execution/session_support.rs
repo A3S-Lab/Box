@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, SecurityConfig,
-};
+use a3s_box_core::{ExecutionGeneration, ExecutionId};
+#[cfg(unix)]
+use a3s_box_core::{ExecutionManagerError, ExecutionManagerResult, SecurityConfig};
 
 use crate::BoxRecord;
 
@@ -52,6 +52,7 @@ pub(super) fn inherit_container_environment(
 /// `A3S_SEC_*` controls as the main process. Request and container environment
 /// entries cannot override these runtime-owned values, and the guest filters
 /// them before the workload observes its environment.
+#[cfg(unix)]
 pub(super) fn inherit_execution_security_environment(
     record: &BoxRecord,
     request: &mut Vec<String>,

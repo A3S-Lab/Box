@@ -24,10 +24,12 @@ pub use client::{
     SnapshotSummary, StopBox, StopBoxSummary, StopOutcome, TagImage, VolumeBuilder, VolumeSummary,
 };
 pub use sandbox::{
-    CommandResult, CommandRunOptions, Commands, Filesystem, FilesystemOptions, Sandbox,
-    SandboxBuilder, SandboxCommand, SandboxCreateOptions, SandboxInfo, SandboxLogOptions,
-    SandboxNetwork, SandboxRestartOptions, ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource,
-    WriteInfo, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    Artifact, ArtifactExportOptions, CommandResult, CommandRunOptions, Commands, Filesystem,
+    FilesystemOptions, Sandbox, SandboxBuilder, SandboxCommand, SandboxCreateOptions,
+    SandboxEventStream, SandboxEventStreamOptions, SandboxInfo, SandboxLogOptions, SandboxNetwork,
+    SandboxRestartOptions, ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource, WriteInfo,
+    DEFAULT_EVENT_STREAM_BATCH_ITEMS, DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS, DEFAULT_SANDBOX_IMAGE,
+    DEFAULT_SANDBOX_TIMEOUT_SECONDS, MAX_ARTIFACT_BYTES,
 };
 
 pub use a3s_box_core::{

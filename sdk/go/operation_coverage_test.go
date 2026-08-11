@@ -67,12 +67,22 @@ func TestPublicAPIExercisesEveryBridgeOperation(t *testing.T) {
 	mustNoError(t, sandbox.Resume(ctx))
 	check(sandbox.Logs(ctx, 10))
 	check(sandbox.Stats(ctx))
+	check(sandbox.Processes(ctx))
+	check(sandbox.RuntimeStats(ctx))
+	check(sandbox.Events(ctx, ExecutionEventsRequest{Limit: 16}))
+	cpuShares := uint64(512)
+	mustNoError(t, sandbox.UpdateResources(
+		ctx,
+		ExecutionResourceUpdate{CPUShares: &cpuShares},
+		UpdateResourcesOperationID("coverage-resources"),
+	))
 	check(sandbox.CreateFilesystemSnapshot(ctx, "snap-1"))
 	check(sandbox.Run(ctx, Argv("true")))
 	files := sandbox.Files()
 	check(files.WriteString(ctx, "/tmp/value", "value"))
 	check(files.Read(ctx, "/tmp/value"))
 	check(files.Stat(ctx, "/tmp/value"))
+	check(files.Export(ctx, "/tmp/value"))
 	check(files.List(ctx, "/tmp", 1))
 	mustNoError(t, files.MakeDir(ctx, "/tmp/dir"))
 	mustNoError(t, files.Move(ctx, "/tmp/dir", "/tmp/moved"))
@@ -173,6 +183,30 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 		return map[string]any{"logs": []SandboxLogEntry{}}, nil
 	case "sandbox_stats":
 		return map[string]any{"stats": SandboxStats{ID: "box-1"}}, nil
+	case "sandbox_processes":
+		return ExecutionProcessInventory{
+			ExecutionID: "box-1",
+			Generation:  2,
+			Processes:   []ExecutionProcessInfo{{ProcessID: "init"}},
+		}, nil
+	case "sandbox_runtime_stats":
+		return ExecutionStats{
+			ExecutionID:     "box-1",
+			Generation:      2,
+			TimestampUnixNS: 1,
+			CPU:             ExecutionCPUStats{},
+			Memory:          ExecutionMemoryStats{},
+			Metrics:         map[string]uint64{},
+		}, nil
+	case "sandbox_events":
+		return ExecutionEventBatch{
+			ExecutionID:  "box-1",
+			Generation:   2,
+			Events:       []ExecutionRuntimeEvent{},
+			NextSequence: 0,
+		}, nil
+	case "sandbox_update_resources":
+		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateRunning, Isolation: IsolationMicroVM}, nil
 	case "sandbox_snapshot_create":
 		return FilesystemSnapshotInfo{SnapshotID: "snap-1", Generation: 2}, nil
 	case "sandbox_kill":
@@ -184,9 +218,9 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "file_write":
 		return WriteInfo{Path: "/tmp/value", Size: 5}, nil
 	case "file_read":
-		return map[string]any{"data_base64": base64.StdEncoding.EncodeToString([]byte("value")), "size": 5}, nil
+		return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString([]byte("value")), "size": 5}, nil
 	case "filesystem_stat":
-		return map[string]any{"entry": EntryInfo{Path: "/tmp/value", Type: "file"}}, nil
+		return map[string]any{"entry": EntryInfo{Path: "/tmp/value", Type: "file", Size: 5}}, nil
 	case "filesystem_list":
 		return map[string]any{"entries": []EntryInfo{}}, nil
 	case "filesystem_make_dir", "filesystem_move", "filesystem_remove":

@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use a3s_box_core::{
-    error::BoxError, ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot,
-    ExecutionSnapshotId, ExecutionState, FilesystemEntry, FilesystemEntryKind, OperationId,
-    Platform, PortMapping,
+    error::BoxError, ExecutionEventsRequest, ExecutionGeneration, ExecutionId, ExecutionIsolation,
+    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, FilesystemEntry, FilesystemEntryKind,
+    OperationId, Platform, PortMapping,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -548,6 +548,53 @@ async fn execute_request(
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             serialize_field("stats", sandbox.stats().await?)
         }
+        BridgeRequest::SandboxProcesses {
+            sandbox_id,
+            generation,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            serialize_value(sandbox.processes().await?)
+        }
+        BridgeRequest::SandboxRuntimeStats {
+            sandbox_id,
+            generation,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            serialize_value(sandbox.runtime_stats().await?)
+        }
+        BridgeRequest::SandboxEvents {
+            sandbox_id,
+            generation,
+            after_sequence,
+            limit,
+            wait_timeout_ms,
+        } => {
+            let request = ExecutionEventsRequest {
+                after_sequence,
+                limit,
+                wait_timeout_ms,
+            };
+            request
+                .validate()
+                .map_err(|error| invalid(error.to_string()))?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            serialize_value(sandbox.events(request).await?)
+        }
+        BridgeRequest::SandboxUpdateResources {
+            sandbox_id,
+            generation,
+            operation_id,
+            resources,
+        } => {
+            let operation_id =
+                OperationId::new(operation_id).map_err(|error| invalid(error.to_string()))?;
+            resources
+                .validate()
+                .map_err(|error| invalid(error.to_string()))?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            sandbox.update_resources(&operation_id, resources).await?;
+            Ok(sandbox_info_value(&sandbox))
+        }
         BridgeRequest::SandboxSnapshotCreate {
             sandbox_id,
             generation,
@@ -648,12 +695,19 @@ async fn execute_request(
             generation,
             path,
             user,
+            max_bytes,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            let data = sandbox
-                .files
-                .read_with_options(&path, FilesystemOptions { user })
-                .await?;
+            let options = FilesystemOptions { user };
+            let data = match max_bytes {
+                Some(max_bytes) => {
+                    sandbox
+                        .files
+                        .read_bounded_with_options(&path, max_bytes, options)
+                        .await?
+                }
+                None => sandbox.files.read_with_options(&path, options).await?,
+            };
             Ok(json!({
                 "path": path,
                 "data_base64": STANDARD.encode(&data),

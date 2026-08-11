@@ -19,6 +19,11 @@
 //! - `A3S_BOX_SMOKE_TIMEOUT_SECS`: command and polling timeout (default: 300)
 //! - `A3S_BOX_VIRTIOFS_TAR_TIMEOUT_SECS`: Windows timeout for the high-intensity
 //!   virtio-fs tar test (default: 900; never shorter than the general timeout)
+//! - `A3S_BOX_HVF_POSTGRES_IMAGE`: digest-pinned PostgreSQL image for the macOS
+//!   published-port/SCRAM regression
+
+#[path = "core_smoke/postgres_wire.rs"]
+mod postgres_wire;
 
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -27,6 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:latest";
+const DEFAULT_POSTGRES_IMAGE: &str = "docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 struct CommandResult {
@@ -538,7 +544,6 @@ impl CoreSmoke {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn assert_shim_log_excludes(&self, name: &str, forbidden: &[&str]) {
         let record = self.inspect_json(name);
         let console_log = PathBuf::from(json_string_field(&record, "console_log"));
@@ -816,6 +821,11 @@ fn smoke_timeout() -> Duration {
 
 fn smoke_image() -> String {
     std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string())
+}
+
+fn postgres_image() -> String {
+    std::env::var("A3S_BOX_HVF_POSTGRES_IMAGE")
+        .unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.to_string())
 }
 
 fn smoke_image_tar() -> Option<String> {
@@ -1418,6 +1428,89 @@ exec nc -ll -p 6379 -e /tmp/a3s-pong"#,
     ]);
     assert_contains(&exec, "EXEC_AFTER_PONG", "exec after TSI PONG");
 
+    smoke.assert_shim_log_excludes(
+        &smoke.name,
+        &["Backend(Internal(ENOBUFS))", "NETDEV WATCHDOG"],
+    );
+
+    smoke.ok(&["rm", "-f", &smoke.name]);
+}
+
+#[test]
+#[ignore]
+fn real_core_postgres_scram_survives_sequential_published_connections() {
+    if !cfg!(target_os = "macos") {
+        eprintln!("physical Apple Silicon/HVF PostgreSQL regression requires macOS");
+        return;
+    }
+
+    let smoke = CoreSmoke::new();
+    let image = postgres_image();
+    let host_port = unused_tcp_port();
+    let publish = format!("{host_port}:5432");
+    let _cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: smoke.name.clone(),
+    };
+
+    // This is the exact immutable image identity from #204. Its default host
+    // authentication is SCRAM-SHA-256, so the test drives substantially more
+    // bidirectional traffic than a readiness probe or plaintext PING/PONG.
+    smoke.ok(&["pull", &image]);
+    smoke.ok(&[
+        "run",
+        "-d",
+        "--name",
+        &smoke.name,
+        "-p",
+        &publish,
+        "--env",
+        "POSTGRES_DB=a3s_cloud",
+        "--env",
+        "POSTGRES_USER=a3s_cloud",
+        "--env",
+        "POSTGRES_PASSWORD=a3s_cloud",
+        &image,
+    ]);
+    smoke.wait_for_running();
+    smoke.wait_for_logs("database system is ready to accept connections");
+
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+    for connection in 1..=2 {
+        let deadline = Instant::now() + smoke.timeout;
+        let mut attempt = 0_u64;
+        let row = loop {
+            attempt += 1;
+            let nonce = format!("a3sboxhvf{}{}{}", std::process::id(), connection, attempt);
+            match postgres_wire::query_text(address, "a3s_cloud", "a3s_cloud", "a3s_cloud", &nonce)
+            {
+                Ok(row) => break row,
+                Err(error) if Instant::now() < deadline => {
+                    eprintln!(
+                        "PostgreSQL connection {connection} attempt {attempt} is not ready: {error}"
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(error) => panic!(
+                    "PostgreSQL connection {connection} failed after {attempt} attempts: {error}"
+                ),
+            }
+        };
+        assert_eq!(
+            row, "a3s-box-hvf-a3s_cloud",
+            "PostgreSQL query result for connection {connection}"
+        );
+    }
+
+    let exec = smoke.ok(&[
+        "exec",
+        &smoke.name,
+        "--",
+        "/bin/sh",
+        "-c",
+        "pg_isready -U a3s_cloud -d a3s_cloud",
+    ]);
+    assert_contains(&exec, "accepting connections", "pg_isready after SCRAM");
     smoke.assert_shim_log_excludes(
         &smoke.name,
         &["Backend(Internal(ENOBUFS))", "NETDEV WATCHDOG"],

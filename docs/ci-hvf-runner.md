@@ -6,6 +6,10 @@ Apple Silicon host. It boots real Box MicroVMs and:
 - performs two sequential bidirectional connections through one published
   port, executes a command afterwards, and rejects shim logs containing the
   fatal `ENOBUFS` path or a guest `NETDEV WATCHDOG` timeout;
+- starts the exact digest-pinned PostgreSQL 17 image reported in Box #204,
+  completes SCRAM-SHA-256 authentication plus a query over two sequential
+  published-port connections, runs `pg_isready` afterwards, and applies the
+  same fatal-log assertions;
 - sends `SIGTERM` to an attached `run --rm`, proves cleanup, and recovers exit
   status 143 from the removal archive by both name and ID; and
 - runs the reduced pnpm fixture through a digest-pinned Node image, Corepack,
@@ -48,7 +52,8 @@ Create these repository Actions variables:
 
 Every enabled run uploads an evidence artifact containing the exact Box and
 vendored libkrun revisions, host architecture, HVF availability, published-port
-and interruption test logs, and the bounded pnpm qualification logs. A
+PING/PONG, PostgreSQL/SCRAM, and interruption test logs, plus the bounded pnpm
+qualification logs. A
 successful source-only unit test or hosted macOS build is not a substitute for
 this artifact. The reduced pnpm fixture is a platform regression gate; issues
 that explicitly require a larger production checkout still need that separate
@@ -71,6 +76,11 @@ A3S_BOX_ALLOW_REGISTRY_PULL=1 \
   A3S_BOX_SMOKE_TIMEOUT_SECS=600 \
   cargo test --locked --release -p a3s-box-cli --test core_smoke \
     real_core_tsi_published_tcp_nonblocking_accept_and_exec \
+    -- --ignored --nocapture --test-threads=1
+A3S_BOX_HVF_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193' \
+  A3S_BOX_SMOKE_TIMEOUT_SECS=600 \
+  cargo test --locked --release -p a3s-box-cli --test core_smoke \
+    real_core_postgres_scram_survives_sequential_published_connections \
     -- --ignored --nocapture --test-threads=1
 cargo test --locked --release -p a3s-box-cli --test core_smoke \
   real_core_foreground_auto_remove_handles_sigterm_and_archives_status \

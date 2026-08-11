@@ -39,6 +39,10 @@ export const SUPPORTED_BRIDGE_OPERATIONS = [
   'sandbox_resume',
   'sandbox_logs',
   'sandbox_stats',
+  'sandbox_processes',
+  'sandbox_runtime_stats',
+  'sandbox_events',
+  'sandbox_update_resources',
   'sandbox_snapshot_create',
   'filesystem_snapshot_list',
   'filesystem_snapshot_get',
@@ -57,8 +61,15 @@ export const SUPPORTED_BRIDGE_OPERATIONS = [
 export type BridgeRequest = Readonly<Record<string, unknown>>
 export type BridgeResult = Record<string, unknown>
 
+export interface RuntimeRequestOptions {
+  signal?: AbortSignal
+}
+
 export interface LocalRuntime {
-  request(request: BridgeRequest): Promise<BridgeResult>
+  request(
+    request: BridgeRequest,
+    options?: RuntimeRequestOptions
+  ): Promise<BridgeResult>
 }
 
 class CompatibleLocalRuntime implements LocalRuntime {
@@ -66,12 +77,15 @@ class CompatibleLocalRuntime implements LocalRuntime {
 
   constructor(private readonly runtime: LocalRuntime) {}
 
-  async request(request: BridgeRequest): Promise<BridgeResult> {
+  async request(
+    request: BridgeRequest,
+    options: RuntimeRequestOptions = {}
+  ): Promise<BridgeResult> {
     if (request.operation === 'sdk_capabilities') {
       return { ...(await this.verify()) }
     }
     await this.verify()
-    return this.runtime.request(request)
+    return this.runtime.request(request, options)
   }
 
   private verify(): Promise<BridgeResult> {
@@ -150,11 +164,15 @@ export class A3SLocalRuntime implements LocalRuntime {
     }
   }
 
-  async request(request: BridgeRequest): Promise<BridgeResult> {
+  async request(
+    request: BridgeRequest,
+    options: RuntimeRequestOptions = {}
+  ): Promise<BridgeResult> {
     const response = await invokeBridge(
       this.binaryPath,
       request,
-      this.bridgeTimeoutMs
+      this.bridgeTimeoutMs,
+      options.signal
     )
     return decodeResponse(response.stdout, response.stderr, response.exitCode)
   }
@@ -169,8 +187,12 @@ interface ProcessResponse {
 function invokeBridge(
   binary: string,
   request: BridgeRequest,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<ProcessResponse> {
+  if (signal?.aborted) {
+    return Promise.reject(canceledBridgeError())
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['sdk-bridge'], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -179,9 +201,23 @@ function invokeBridge(
     const stderr: Buffer[] = []
     let settled = false
 
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      child.kill()
+      reject(canceledBridgeError())
+    }
+
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      cleanup()
       child.kill()
       reject(
         new A3SBoxError(
@@ -190,13 +226,15 @@ function invokeBridge(
         )
       )
     }, timeoutMs)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
 
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk))
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
     child.on('error', (error: NodeJS.ErrnoException) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      cleanup()
       if (error.code === 'ENOENT') {
         reject(new A3SBoxNotInstalledError(binary))
       } else {
@@ -206,7 +244,7 @@ function invokeBridge(
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      cleanup()
       resolve({
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
@@ -216,6 +254,10 @@ function invokeBridge(
 
     child.stdin.end(JSON.stringify(request))
   })
+}
+
+function canceledBridgeError(): A3SBoxError {
+  return new A3SBoxError('Local A3S Box bridge request was canceled', 'canceled')
 }
 
 function decodeResponse(

@@ -45,7 +45,7 @@ pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};
 pub use exec::{ExecOutput, ExecRequest};
 pub use exec::{
     FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind, FilesystemOp,
-    FilesystemRequest, FilesystemResponse, GuestSessionRequest,
+    FilesystemRequest, FilesystemResponse, GuestSessionRequest, MAX_BOUNDED_FILE_BYTES,
 };
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
 pub use execution::{

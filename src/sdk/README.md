@@ -30,6 +30,34 @@ sandbox.kill().await?;
 # Ok(()) }
 ```
 
+Export a build or test artifact without an unbounded guest read:
+
+```rust
+use a3s_box_sdk::{ArtifactExportOptions, Sandbox};
+
+# async fn export_artifact(sandbox: &Sandbox) -> Result<(), a3s_box_sdk::ClientError> {
+let artifact = sandbox
+    .files
+    .export_with_options(
+        "/workspace/report.json",
+        ArtifactExportOptions::default()
+            .max_bytes(8 * 1024 * 1024)
+            .destination("artifacts/report.json"),
+    )
+    .await?;
+println!("{} {}", artifact.size, artifact.sha256);
+# Ok(()) }
+```
+
+Artifact export accepts one file and has a transport-safe 8 MiB single-frame
+ceiling. It checks the file type and size before reading, sends the selected
+limit to the execution backend, rejects declared-size mismatches or stat/read
+size changes, and
+returns the bytes with a lowercase SHA-256 digest. MicroVM guests enforce that
+limit before reading; the shared-kernel adapter retains the OCI Runtime transfer
+cap and rejects an oversized response. A destination is created exclusively at
+the exact caller-selected host path; an existing file is never overwritten.
+
 MicroVM isolation is the default. Shared-kernel Sandbox isolation is an
 explicit opt-in and requires a certified Linux host:
 
@@ -75,13 +103,47 @@ management APIs.
 
 ```rust
 use a3s_box_sdk::{
-    OperationId, SandboxLogOptions, SandboxRestartOptions,
+    ExecutionEventsRequest, ExecutionResourceUpdate, OperationId,
+    SandboxEventStreamOptions, SandboxLogOptions, SandboxRestartOptions,
 };
+use futures::StreamExt;
 
 # async fn lifecycle(sandbox: &a3s_box_sdk::Sandbox) -> Result<(), a3s_box_sdk::ClientError> {
 let logs = sandbox.logs(SandboxLogOptions::tail(100)).await?;
 let stats = sandbox.stats().await?;
 println!("{} log entries; active stats: {}", logs.len(), stats.is_some());
+
+let processes = sandbox.processes().await?;
+let runtime_stats = sandbox.runtime_stats().await?;
+let events = sandbox
+    .events(ExecutionEventsRequest {
+        after_sequence: 0,
+        limit: 256,
+        wait_timeout_ms: Some(1_000),
+    })
+    .await?;
+let mut event_stream = sandbox.stream_events(
+    SandboxEventStreamOptions::default()
+        .after_sequence(events.next_sequence),
+)?;
+println!(
+    "{} processes; {} runtime events; {} bytes in use",
+    processes.processes.len(),
+    events.events.len(),
+    runtime_stats.memory.usage_bytes,
+);
+sandbox
+    .update_resources(
+        &OperationId::new("ci-resources-1")?,
+        ExecutionResourceUpdate {
+            cpu_shares: Some(512),
+            ..ExecutionResourceUpdate::default()
+        },
+    )
+    .await?;
+if let Some(event) = event_stream.next().await.transpose()? {
+    println!("streamed event: {:?}", event.kind);
+}
 
 sandbox.stop().await?;
 sandbox
@@ -99,7 +161,13 @@ sandbox.remove().await?;
 Callers should persist an operation ID until a restart outcome is known; a
 retry with that identity resolves the same durable restart instead of
 allocating a second lifecycle transition. Log tails must contain 1 through
-10,000 entries.
+10,000 entries. Process inventory, normalized runtime stats, bounded event
+polls, and event streams are available while the Sandbox is running or paused;
+resource updates require it to be running. Every observation is fenced to the
+handle's exact generation, and a stream ends on generation drift instead of
+following a restart. Dropping the Rust stream cancels its active long poll.
+Resource-update operation IDs should likewise be retained until the outcome is
+known.
 
 ## Builder-Style Programmable CI/CD
 

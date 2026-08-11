@@ -389,15 +389,24 @@ setting.
 
 Python, TypeScript, and Go exchange structured protocol-v3 messages with
 `a3s-box sdk-bridge`; they never parse human CLI output. The exact
-48-operation handshake fails closed on missing, duplicate, malformed, or
+52-operation handshake fails closed on missing, duplicate, malformed, or
 incompatible capabilities. See the
 [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md).
 
-The Rust execution contract also exposes `transfer_file`, `filesystem`,
-`processes`, `runtime_stats`, `events`, and `update_resources` on the local
-Sandbox facade. Each call carries the current Box generation; a backend that
-does not advertise the matching runtime operation returns a typed availability
-error before dispatch.
+All four SDKs also expose the same bounded single-file artifact export: a
+caller-selected limit up to the transport-safe 8 MiB single-frame ceiling,
+backend-bounded reads, stat/read size validation, a lowercase SHA-256
+digest, and optional exclusive host-file creation that never overwrites an
+existing path. MicroVM guests enforce the selected limit before reading;
+shared-kernel execution retains the OCI Runtime transfer cap and rejects a
+response beyond the selected limit.
+
+All four SDKs expose exact-generation process inventory, normalized runtime
+stats, bounded ordered-event polling, and replay-safe live resource updates.
+The language-native names are `processes`, `runtime_stats`/`runtimeStats`/
+`RuntimeStats`, `events`/`Events`, and `update_resources`/`updateResources`/
+`UpdateResources`. A backend that does not advertise the matching runtime
+operation returns a typed availability error before dispatch.
 
 ## Platform status
 

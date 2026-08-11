@@ -15,6 +15,7 @@ use a3s_box_core::{
     FilesystemEntry as BoxFilesystemEntry, FilesystemEntryKind as BoxFilesystemEntryKind,
     FilesystemOp as BoxFilesystemOp, FilesystemRequest as BoxFilesystemRequest,
     FilesystemResponse as BoxFilesystemResponse, KillOutcome, OperationId as BoxOperationId,
+    MAX_BOUNDED_FILE_BYTES,
 };
 use a3s_oci_sdk::oci_spec::runtime::ContainerState;
 use a3s_oci_sdk::{
@@ -1071,6 +1072,20 @@ impl OciLifecycleAdapter {
         binding.validate_for(execution_id)?;
         self.require_operation(RuntimeOperation::File, "file")
             .await?;
+        let maximum_download_size = match (request.op, request.max_bytes) {
+            (BoxFileOp::Upload, Some(_)) => {
+                return Err(ExecutionManagerError::InvalidRequest(
+                    "max_bytes is only valid for file downloads".to_string(),
+                ))
+            }
+            (BoxFileOp::Download, Some(limit)) if limit == 0 || limit > MAX_BOUNDED_FILE_BYTES => {
+                return Err(ExecutionManagerError::InvalidRequest(format!(
+                    "download max_bytes must be between 1 and {MAX_BOUNDED_FILE_BYTES}"
+                )))
+            }
+            (BoxFileOp::Download, limit) => limit,
+            (BoxFileOp::Upload, None) => None,
+        };
         let expected_upload_size = match request.op {
             BoxFileOp::Upload => {
                 let encoded = request.data.as_deref().ok_or_else(|| {
@@ -1125,7 +1140,13 @@ impl OciLifecycleAdapter {
             result => result,
         }
         .map_err(|error| sdk_error("file", error))?;
-        validate_file_response(binding, &response, operation, expected_upload_size)?;
+        validate_file_response(
+            binding,
+            &response,
+            operation,
+            expected_upload_size,
+            maximum_download_size,
+        )?;
         Ok(BoxFileResponse {
             success: true,
             data: response.data,
@@ -2214,6 +2235,7 @@ fn validate_file_response(
     response: &OciFileResponse,
     operation: OciFileOp,
     expected_upload_size: Option<u64>,
+    maximum_download_size: Option<u64>,
 ) -> ExecutionManagerResult<()> {
     if response.target != binding.target || response.size > MAX_FILE_TRANSFER_BYTES as u64 {
         return Err(ExecutionManagerError::Internal(
@@ -2229,6 +2251,11 @@ fn validate_file_response(
             ))
         }
         OciFileOp::Download => {
+            if maximum_download_size.is_some_and(|limit| response.size > limit) {
+                return Err(ExecutionManagerError::Internal(
+                    "A3S OCI file response exceeds the requested download limit".to_string(),
+                ));
+            }
             let data = response.data.as_deref().ok_or_else(|| {
                 ExecutionManagerError::Internal(
                     "A3S OCI omitted the downloaded file payload".to_string(),

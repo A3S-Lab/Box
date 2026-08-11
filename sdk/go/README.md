@@ -28,7 +28,7 @@ go get github.com/A3S-Lab/Box/sdk/go/v3
 ```
 
 Use the SDK and runtime from the same A3S Box release. `NewClient` performs a
-protocol v3 and exact 48-operation capability handshake before it permits any
+protocol v3 and exact 52-operation capability handshake before it permits any
 mutation. Missing or duplicate operations fail closed.
 
 ## Quick start
@@ -66,6 +66,27 @@ func main() {
 
 Use `box.Argv(...)` for direct execution. Use `box.Shell(...)` only when shell
 syntax is intentional.
+
+Export one bounded build or test artifact, optionally writing it to an exact
+host destination:
+
+```go
+artifact, err := sandbox.Files().Export(
+	ctx,
+	"/workspace/report.json",
+	box.ArtifactMaxBytes(8*1024*1024),
+	box.ArtifactTo("artifacts/report.json"),
+)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(artifact.Size, artifact.SHA256)
+```
+
+Artifact export has a hard 8 MiB ceiling. It checks the file type and size
+before reading, rejects declared-size mismatches or stat/read size changes, and returns the bytes
+with a lowercase SHA-256 digest. A destination is created exclusively; an
+existing host file is never overwritten.
 
 ## Initial process configuration
 
@@ -166,14 +187,62 @@ automatic cleanup are all typed builder values.
 | Networks | `Network(...).Create`, `GetNetwork`, `ListNetworks`, `RemoveNetwork`, `PruneNetworks` |
 | Sandbox | `Create`, `Connect`, `Sandbox(...).Command(...).Entrypoint(...).Start`, `Inspect`, `Stop`, `Restart`, `Pause`, `Resume`, `Kill`, `Remove`, `Close` |
 | Execution | `Run`, `Commands().Run`, `Script`, `ScriptBytes` |
-| Files | `Write`, `WriteString`, `Read`, `ReadString`, `Stat`, `Exists`, `List`, `MakeDir`, `Move`, `Remove` |
+| Files | `Write`, `WriteString`, `Read`, `ReadString`, `Export`, `Stat`, `Exists`, `List`, `MakeDir`, `Move`, `Remove` |
 | Snapshots | `CreateFilesystemSnapshot`, `ListFilesystemSnapshots`, `GetFilesystemSnapshot`, `FilesystemSnapshotSize`, `DeleteFilesystemSnapshot` |
-| Observability | `ListSandboxes`, `GetSandbox`, `Logs`, `Stats`, `IsRunning` |
+| Observability and control | `ListSandboxes`, `GetSandbox`, `Logs`, `Stats`, `IsRunning`, `Processes`, `RuntimeStats`, `Events`, `StreamEvents`, `UpdateResources` |
 
 All runtime I/O accepts `context.Context`. Command and file calls on one
 `Sandbox` may run concurrently. Lifecycle transitions are serialized against
 in-flight calls and update the generation fence atomically. `Close` is bounded,
 idempotent after successful cleanup, and retryable after a cleanup failure.
+
+Runtime-native process inventory, normalized stats, ordered event polls and
+streams are exact-generation operations available for a running or paused
+Sandbox. Live resource updates require a running Sandbox:
+
+```go
+processes, err := sandbox.Processes(ctx)
+if err != nil {
+	return err
+}
+stats, err := sandbox.RuntimeStats(ctx)
+if err != nil {
+	return err
+}
+events, err := sandbox.Events(ctx, box.ExecutionEventsRequest{
+	Limit: 256,
+})
+if err != nil {
+	return err
+}
+stream, err := sandbox.StreamEvents(box.ExecutionEventStreamOptions{
+	AfterSequence: events.NextSequence,
+})
+if err != nil {
+	return err
+}
+defer stream.Close()
+shares := uint64(512)
+err = sandbox.UpdateResources(
+	ctx,
+	box.ExecutionResourceUpdate{CPUShares: &shares},
+	box.UpdateResourcesOperationID("ci-resources-1"),
+)
+if err != nil {
+	return err
+}
+event, err := stream.Next(ctx)
+if err != nil {
+	return err
+}
+fmt.Println(len(processes.Processes), stats.Memory.UsageBytes, event.Kind)
+```
+
+An event limit of zero selects the default 256 items; the maximum is 4,096.
+`ExecutionEventStream` pins its creation generation, applies one-event caller
+backpressure, exposes a safe resume cursor, and terminates on drift. Cancel the
+`Next` context or call `Close` to interrupt an active bridge poll. Retain an
+explicit resource-update operation ID until its outcome is known.
 
 Command output and file primitives use `[]byte`. The `StdoutString`,
 `StderrString`, `WriteString`, and `ReadString` helpers are conveniences for

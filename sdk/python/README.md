@@ -25,6 +25,27 @@ with Sandbox.create("python:3.12-alpine") as sandbox:
     print(sandbox.files.read("/workspace/note.txt"))
 ```
 
+Export one bounded build or test artifact, optionally writing it to an exact
+host destination:
+
+```python
+from a3s_box import Sandbox
+
+with Sandbox.create("alpine:3.20") as sandbox:
+    artifact = sandbox.files.export(
+        "/workspace/report.json",
+        max_bytes=8 * 1024 * 1024,
+        destination="artifacts/report.json",
+    )
+    print(artifact.size, artifact.sha256)
+```
+
+The synchronous and asynchronous `files.export()` methods have a hard 8 MiB
+ceiling. They check the file type and size before reading, reject declared-size
+mismatches or stat/read size changes, and return the bytes with a lowercase SHA-256 digest. A
+destination is created exclusively; an existing host file is never
+overwritten.
+
 `Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. The first
 argument is an OCI image reference in local mode. Select the shared-kernel
 Sandbox backend explicitly on a certified Linux host:
@@ -76,7 +97,7 @@ performs stop plus removal. Reuse the same `operation_id` when retrying a
 restart whose outcome is not yet known.
 
 ```python
-from a3s_box import A3SBoxClient, Sandbox
+from a3s_box import A3SBoxClient, ExecutionResourceUpdate, Sandbox
 
 client = A3SBoxClient()
 sandbox = Sandbox.create("alpine:3.20")
@@ -85,6 +106,23 @@ try:
     logs = sandbox.logs(tail=100)
     stats = sandbox.stats()
     print(len(logs), stats.memory_percent if stats else None)
+
+    processes = sandbox.processes()
+    runtime_stats = sandbox.runtime_stats()
+    events = sandbox.events(
+        after_sequence=0,
+        limit=256,
+        wait_timeout_ms=1_000,
+    )
+    event_stream = sandbox.stream_events(after_sequence=events.next_sequence)
+    print(len(processes.processes), runtime_stats.memory.usage_bytes)
+    print(events.next_sequence)
+    sandbox.update_resources(
+        ExecutionResourceUpdate(cpu_shares=512),
+        operation_id="ci-resources-1",
+    )
+    print(next(event_stream).kind)
+    event_stream.close()
 
     sandbox.stop()
     sandbox.restart(operation_id="ci-restart-1", stop_timeout=10)
@@ -99,6 +137,16 @@ accept tails from 1 through 10,000 entries. The runtime client also exposes
 `runtime_disk_usage()`, `list_filesystem_snapshots()`, and
 `get_filesystem_snapshot()`. `A3SAsyncBoxClient` and `AsyncSandbox` provide
 the same operations with `async` methods.
+
+`processes()`, `runtime_stats()`, `events()`, and `stream_events()` accept a
+running or paused Sandbox and preserve its exact generation;
+`update_resources()` requires a running Sandbox. Event polls and stream batches
+default to 256 items and accept at most 4,096. A synchronous stream can use a
+`threading.Event` for bounded cross-thread cancellation. `AsyncSandbox` returns
+an async iterator whose task cancellation kills the active local bridge
+process. Streams terminate on generation drift instead of following a restart.
+Reuse an explicit resource-update `operation_id` when retrying an outcome that
+is not yet known.
 
 ## Builder-style programmable CI/CD
 
@@ -195,6 +243,6 @@ client.prune_volumes()
 client.prune_networks()
 ```
 
-`client.capabilities()` returns bridge protocol version 3 and the exact 48
+`client.capabilities()` returns bridge protocol version 3 and the exact 52
 supported operation names. Registry passwords are passed only to the local
 runtime process.

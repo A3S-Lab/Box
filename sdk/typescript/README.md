@@ -33,6 +33,27 @@ try {
 }
 ```
 
+Export one bounded build or test artifact, optionally writing it to an exact
+host destination:
+
+```typescript
+const artifactSandbox = await Sandbox.create('alpine:3.20')
+try {
+  const artifact = await artifactSandbox.files.export('/workspace/report.json', {
+    maxBytes: 8 * 1024 * 1024,
+    destination: 'artifacts/report.json',
+  })
+  console.log(artifact.size, artifact.sha256)
+} finally {
+  await artifactSandbox.kill()
+}
+```
+
+Artifact export has a hard 8 MiB ceiling. It checks the file type and size
+before reading, rejects declared-size mismatches or stat/read size changes, and returns the bytes
+with a lowercase SHA-256 digest. A destination is created exclusively; an
+existing host file is never overwritten.
+
 `Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. The first
 argument is an OCI image reference in local mode. Select the shared-kernel
 Sandbox backend explicitly on a certified Linux host:
@@ -75,6 +96,25 @@ try {
   const stats = await sandbox.stats()
   console.log(logs.length, stats?.memoryPercent)
 
+  const processes = await sandbox.processes()
+  const runtimeStats = await sandbox.runtimeStats()
+  const events = await sandbox.events({
+    afterSequence: 0,
+    limit: 256,
+    waitTimeoutMs: 1_000,
+  })
+  const eventStream = sandbox
+    .streamEvents({ afterSequence: events.nextSequence })
+    [Symbol.asyncIterator]()
+  console.log(processes.processes.length, runtimeStats.memory.usageBytes)
+  console.log(events.nextSequence)
+  await sandbox.updateResources(
+    { cpuShares: 512 },
+    { operationId: 'ci-resources-1' }
+  )
+  console.log((await eventStream.next()).value?.kind)
+  await eventStream.return()
+
   await sandbox.stop()
   await sandbox.restart({
     operationId: 'ci-restart-1',
@@ -91,6 +131,15 @@ accept tails from 1 through 10,000 entries. The runtime client also exposes
 `listSandboxes()`, `getSandbox()`, `runtimeDiagnostics()`,
 `runtimeDiskUsage()`, `listFilesystemSnapshots()`, and
 `getFilesystemSnapshot()`.
+
+`processes()`, `runtimeStats()`, `events()`, and `streamEvents()` accept a
+running or paused Sandbox and preserve its exact generation;
+`updateResources()` requires a running Sandbox. Event polls and stream batches
+default to 256 items and accept at most 4,096. `streamEvents()` is an
+`AsyncIterable`; pass an `AbortSignal` to cancel an active local bridge process.
+Streams terminate on generation drift instead of following a restart. Reuse an
+explicit resource-update `operationId` when retrying an outcome that is not yet
+known.
 
 ## Builder-style programmable CI/CD
 
@@ -193,6 +242,6 @@ await client.pruneVolumes()
 await client.pruneNetworks()
 ```
 
-`client.capabilities()` returns bridge protocol version 3 and the exact 48
+`client.capabilities()` returns bridge protocol version 3 and the exact 52
 supported operation names. Registry passwords are passed only to the local
 runtime process.

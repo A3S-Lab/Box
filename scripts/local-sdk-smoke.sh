@@ -110,6 +110,7 @@ A3S_BOX_BINARY="$A3S_BOX_BINARY" \
     A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
     PYTHONPATH="$REPO_ROOT/sdk/python/src" \
     "$PYTHON" - <<'PY'
+import asyncio
 import json
 import os
 import shutil
@@ -118,7 +119,7 @@ import stat
 import time
 from pathlib import Path
 
-from a3s_box import A3SBoxClient, Sandbox
+from a3s_box import A3SBoxClient, AsyncSandbox, ExecutionResourceUpdate, Sandbox
 
 
 def read_private_json(path: Path) -> dict:
@@ -328,6 +329,45 @@ def exercise_owner_death_recovery(sandbox: Sandbox) -> None:
         f"runtime-generation={old_runtime_generation}->{new_runtime_generation}"
     )
 
+
+async def exercise_async_runtime_controls(sandbox_id: str) -> None:
+    sandbox = await AsyncSandbox.connect(sandbox_id)
+    inventory = await sandbox.processes()
+    assert inventory.execution_id == sandbox.id
+    assert inventory.generation == sandbox.generation
+    assert inventory.processes
+    runtime_stats = await sandbox.runtime_stats()
+    assert runtime_stats.execution_id == sandbox.id
+    assert runtime_stats.generation == sandbox.generation
+    assert runtime_stats.timestamp_unix_ns > 0
+    assert runtime_stats.process_count > 0
+    event_cursor = (
+        await sandbox.events(limit=256, wait_timeout_ms=0)
+    ).next_sequence
+    event_stream = sandbox.stream_events(
+        after_sequence=event_cursor,
+        batch_size=256,
+        wait_timeout_ms=1000,
+    )
+    update = ExecutionResourceUpdate(cpu_shares=768)
+    update_operation = f"python-async-smoke-resources-{sandbox.id}"
+    await sandbox.update_resources(update, operation_id=update_operation)
+    await sandbox.update_resources(update, operation_id=update_operation)
+    streamed_event = await anext(event_stream)
+    assert streamed_event.kind == "resources-updated"
+    await event_stream.aclose()
+    events = await sandbox.events(
+        after_sequence=event_cursor,
+        limit=256,
+        wait_timeout_ms=0,
+    )
+    assert events.execution_id == sandbox.id
+    assert events.generation == sandbox.generation
+    assert sum(
+        event.kind == "resources-updated"
+        for event in events.events
+    ) == 1
+
 client = A3SBoxClient()
 isolation = os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"]
 diagnostics = client.runtime_diagnostics()
@@ -395,10 +435,54 @@ try:
         assert sandbox.files.read("/cache/marker.txt") == "cache-ok"
         sandbox.files.write("/tmp/a3s-python-sdk-smoke.txt", "hello")
         assert sandbox.files.read("/tmp/a3s-python-sdk-smoke.txt") == "hello"
+        artifact = sandbox.files.export(
+            "/tmp/a3s-python-sdk-smoke.txt",
+            max_bytes=5,
+        )
+        assert artifact.data == b"hello"
+        assert artifact.size == 5
+        assert artifact.sha256 == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         sandbox.files.remove("/tmp/a3s-python-sdk-smoke.txt")
         assert len(sandbox.logs(tail=20)) <= 20
         assert sandbox.stats() is not None
         if isolation == "sandbox":
+            inventory = sandbox.processes()
+            assert inventory.execution_id == sandbox.id
+            assert inventory.generation == sandbox.generation
+            assert inventory.processes
+            runtime_stats = sandbox.runtime_stats()
+            assert runtime_stats.execution_id == sandbox.id
+            assert runtime_stats.generation == sandbox.generation
+            assert runtime_stats.timestamp_unix_ns > 0
+            assert runtime_stats.process_count > 0
+            event_cursor = sandbox.events(
+                limit=256,
+                wait_timeout_ms=0,
+            ).next_sequence
+            event_stream = sandbox.stream_events(
+                after_sequence=event_cursor,
+                batch_size=256,
+                wait_timeout_ms=1000,
+            )
+            update = ExecutionResourceUpdate(cpu_shares=1024)
+            update_operation = f"python-smoke-resources-{sandbox.id}"
+            sandbox.update_resources(update, operation_id=update_operation)
+            sandbox.update_resources(update, operation_id=update_operation)
+            streamed_event = next(event_stream)
+            assert streamed_event.kind == "resources-updated"
+            event_stream.close()
+            events = sandbox.events(
+                after_sequence=event_cursor,
+                limit=256,
+                wait_timeout_ms=0,
+            )
+            assert events.execution_id == sandbox.id
+            assert events.generation == sandbox.generation
+            assert sum(
+                event.kind == "resources-updated"
+                for event in events.events
+            ) == 1
+            asyncio.run(exercise_async_runtime_controls(sandbox.id))
             # `/tmp` is an ephemeral tmpfs and is intentionally excluded from
             # rootfs snapshots.
             marker = "/a3s-python-sdk-snapshot.txt"
@@ -557,6 +641,17 @@ try {
     if (await sandbox.files.read('/tmp/a3s-typescript-sdk-smoke.txt') !== 'hello') {
       throw new Error('TypeScript SDK file read returned unexpected data')
     }
+    const artifact = await sandbox.files.export(
+      '/tmp/a3s-typescript-sdk-smoke.txt',
+      { maxBytes: 5 }
+    )
+    if (
+      Buffer.from(artifact.data).toString('utf8') !== 'hello' ||
+      artifact.size !== 5 ||
+      artifact.sha256 !== '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+    ) {
+      throw new Error('TypeScript SDK artifact export returned unexpected content or metadata')
+    }
     await sandbox.files.remove('/tmp/a3s-typescript-sdk-smoke.txt')
     if ((await sandbox.logs({ tail: 20 })).length > 20) {
       throw new Error('Sandbox logs exceeded the requested tail')
@@ -565,6 +660,55 @@ try {
       throw new Error('running Sandbox did not expose a stats snapshot')
     }
     if (isolation === 'sandbox') {
+      const inventory = await sandbox.processes()
+      if (
+        inventory.executionId !== sandbox.id ||
+        inventory.generation !== sandbox.generation ||
+        inventory.processes.length === 0
+      ) {
+        throw new Error('runtime process inventory returned an invalid Sandbox generation')
+      }
+      const runtimeStats = await sandbox.runtimeStats()
+      if (
+        runtimeStats.executionId !== sandbox.id ||
+        runtimeStats.generation !== sandbox.generation ||
+        runtimeStats.timestampUnixNs <= 0 ||
+        runtimeStats.processCount <= 0
+      ) {
+        throw new Error('runtime stats returned an invalid Sandbox snapshot')
+      }
+      const eventCursor = (await sandbox.events({ limit: 256, waitTimeoutMs: 0 }))
+        .nextSequence
+      const eventStream = sandbox
+        .streamEvents({
+          afterSequence: eventCursor,
+          batchSize: 256,
+          waitTimeoutMs: 1000,
+        })
+        [Symbol.asyncIterator]()
+      const update = { cpuShares: 1024 }
+      const updateOptions = {
+        operationId: `typescript-smoke-resources-${sandbox.id}`,
+      }
+      await sandbox.updateResources(update, updateOptions)
+      await sandbox.updateResources(update, updateOptions)
+      const streamedEvent = (await eventStream.next()).value
+      if (streamedEvent?.kind !== 'resources-updated') {
+        throw new Error('runtime event stream returned the wrong event')
+      }
+      await eventStream.return()
+      const events = await sandbox.events({
+        afterSequence: eventCursor,
+        limit: 256,
+        waitTimeoutMs: 0,
+      })
+      if (
+        events.executionId !== sandbox.id ||
+        events.generation !== sandbox.generation ||
+        events.events.filter((event) => event.kind === 'resources-updated').length !== 1
+      ) {
+        throw new Error('runtime resource-update replay did not publish exactly one event')
+      }
       // `/tmp` is an ephemeral tmpfs and is intentionally excluded from
       // rootfs snapshots.
       const marker = '/a3s-typescript-sdk-snapshot.txt'

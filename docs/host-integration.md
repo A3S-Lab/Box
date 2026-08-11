@@ -97,11 +97,16 @@ sudo usermod -aG kvm "$USER"
 
 ## Native local SDK matrix
 
-The native Rust, Python, TypeScript, and Go SDK smoke exercises the same local
-`Sandbox`, commands, files, pause/resume, kill, and cleanup behavior against a
-real backend. Before starting the box it also verifies the bridge capability
-inventory, built-image get/inspect/history/tag/remove calls, and unused
-volume/network pruning; cache eviction is exercised after cleanup.
+The native Rust, synchronous/asynchronous Python, TypeScript, and Go SDK smoke
+exercises the same local `Sandbox`, commands, files, process inventory,
+normalized runtime statistics, bounded event replay, backpressured continuous
+event streams, replay-safe resource updates, pause/resume, kill, and cleanup
+behavior against a real backend. Each stream is opened before an idempotently
+replayed resource update and must yield the same sole `resources-updated` event
+later proven by the bounded replay. Before
+starting the box it also verifies the bridge capability inventory, built-image
+get/inspect/history/tag/remove calls, and unused volume/network pruning; cache
+eviction is exercised after cleanup.
 
 Build the host binary, shim, and matching Linux guest init first. Then use a
 dedicated state directory:
@@ -294,6 +299,7 @@ repository regression coverage:
 | [#165](https://github.com/A3S-Lab/Box/issues/165) | Non-interactive normal and pooled runs suppress the Corepack download prompt unless explicitly overridden, while cold runtime startup emits phase-specific progress. |
 | [#166](https://github.com/A3S-Lab/Box/issues/166) | Dockerfile `WORKDIR` and declared/default/overridden `ARG` values reach `RUN`; a cached `scratch` rebuild must still export its copied layer; registry push exposes `--plain-http`, `--insecure`, and `--tls-verify=false`. |
 | [#167](https://github.com/A3S-Lab/Box/issues/167) | Foreground `run --rm` handles `SIGINT`/`SIGTERM`, removes the workload, preserves the signal-derived exit status, and lets a later bounded `wait` recover that archived status. |
+| [#204](https://github.com/A3S-Lab/Box/issues/204) | The physical Apple Silicon/HVF gate drives two authenticated PostgreSQL SCRAM-SHA-256 sessions through one published port, queries both sessions, verifies the guest remains responsive, and rejects `ENOBUFS` or `NETDEV WATCHDOG` shim logs. |
 
 The deterministic CLI lane runs the build/export and wait regressions on every
 push. Real Unix signal cleanup remains part of the host-backed core smoke.
@@ -301,8 +307,9 @@ These tests do not replace the issue-specific production-host reruns requested
 in [#164](https://github.com/A3S-Lab/Box/issues/164),
 [#165](https://github.com/A3S-Lab/Box/issues/165),
 [#166](https://github.com/A3S-Lab/Box/issues/166), and
-[#167](https://github.com/A3S-Lab/Box/issues/167); record those runs before
-closing the reports.
+[#167](https://github.com/A3S-Lab/Box/issues/167), and the physical-HVF
+PostgreSQL run required by [#204](https://github.com/A3S-Lab/Box/issues/204);
+record those runs before closing the reports.
 
 For repeated short checks, run a warm-pool daemon with the same image, resource
 shape, and workspace mount, then either pass `--pool` explicitly or export

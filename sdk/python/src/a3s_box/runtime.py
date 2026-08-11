@@ -51,6 +51,10 @@ SUPPORTED_BRIDGE_OPERATIONS = (
     "sandbox_resume",
     "sandbox_logs",
     "sandbox_stats",
+    "sandbox_processes",
+    "sandbox_runtime_stats",
+    "sandbox_events",
+    "sandbox_update_resources",
     "sandbox_snapshot_create",
     "filesystem_snapshot_list",
     "filesystem_snapshot_get",
@@ -241,8 +245,20 @@ class A3SAsyncLocalRuntime:
                 process.communicate(payload),
                 timeout=self.bridge_timeout,
             )
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await asyncio.shield(process.wait())
+            raise
         except asyncio.TimeoutError as error:
-            process.kill()
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
             await process.wait()
             raise A3SBoxError(
                 f"Local A3S Box bridge timed out after {self.bridge_timeout:g} seconds",

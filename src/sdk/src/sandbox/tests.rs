@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::log::LogEntry;
 use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest,
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionProcess, ExecutionReservation,
+    ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest, ExecutionGeneration,
+    ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionProcess, ExecutionReservation, ExecutionRuntimeEvent,
     ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
     ExecutionStatus, FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind,
     FilesystemOp, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId,
@@ -16,10 +17,12 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::Utc;
+use futures::StreamExt;
 
 use super::{
-    CommandRunOptions, Sandbox, SandboxCreateOptions, SandboxLogOptions, SandboxNetwork,
-    SandboxRestartOptions,
+    ArtifactExportOptions, CommandRunOptions, FilesystemOptions, Sandbox, SandboxCreateOptions,
+    SandboxEventStreamOptions, SandboxLogOptions, SandboxNetwork, SandboxRestartOptions,
+    MAX_ARTIFACT_BYTES,
 };
 use crate::{A3sBoxClient, A3sBoxPaths, ClientError};
 
@@ -33,12 +36,16 @@ struct RecordingRuntime {
     exec_requests: Mutex<Vec<ExecRequest>>,
     file_requests: Mutex<Vec<FileRequest>>,
     filesystem_requests: Mutex<Vec<FilesystemRequest>>,
+    download_response: Mutex<FileResponse>,
+    stat_entry: Mutex<FilesystemEntry>,
     snapshot_requests: Mutex<Vec<ExecutionSnapshotId>>,
     log_requests: Mutex<Vec<ExecutionGeneration>>,
     restart_requests: Mutex<Vec<(ExecutionGeneration, OperationId, RestartExecutionOptions)>>,
     kill_requests: Mutex<Vec<ExecutionGeneration>>,
     remove_requests: Mutex<Vec<ExecutionGeneration>>,
     logs: Mutex<Vec<LogEntry>>,
+    event_requests: Mutex<VecDeque<(ExecutionGeneration, ExecutionEventsRequest)>>,
+    runtime_events: Mutex<Vec<ExecutionRuntimeEvent>>,
 }
 
 impl RecordingRuntime {
@@ -52,6 +59,26 @@ impl RecordingRuntime {
             exec_requests: Mutex::new(Vec::new()),
             file_requests: Mutex::new(Vec::new()),
             filesystem_requests: Mutex::new(Vec::new()),
+            download_response: Mutex::new(FileResponse {
+                success: true,
+                data: Some(STANDARD.encode(b"hello")),
+                size: 5,
+                error: None,
+            }),
+            stat_entry: Mutex::new(FilesystemEntry {
+                name: "note.txt".to_string(),
+                kind: FilesystemEntryKind::File,
+                path: "/workspace/note.txt".to_string(),
+                size: 5,
+                mode: 0o644,
+                permissions: "-rw-r--r--".to_string(),
+                owner: "root".to_string(),
+                group: "root".to_string(),
+                modified_seconds: 1,
+                modified_nanos: 0,
+                symlink_target: None,
+                metadata: BTreeMap::new(),
+            }),
             snapshot_requests: Mutex::new(Vec::new()),
             log_requests: Mutex::new(Vec::new()),
             restart_requests: Mutex::new(Vec::new()),
@@ -67,6 +94,30 @@ impl RecordingRuntime {
                     log: "second\n".to_string(),
                     stream: "stderr".to_string(),
                     time: "2026-07-23T00:00:01Z".to_string(),
+                },
+            ]),
+            event_requests: Mutex::new(VecDeque::new()),
+            runtime_events: Mutex::new(vec![
+                ExecutionRuntimeEvent {
+                    sequence: 2,
+                    timestamp_unix_ns: 1_700_000_000_000_000_002,
+                    process_id: None,
+                    kind: ExecutionEventKind::ContainerStarted,
+                    attributes: BTreeMap::new(),
+                },
+                ExecutionRuntimeEvent {
+                    sequence: 5,
+                    timestamp_unix_ns: 1_700_000_000_000_000_005,
+                    process_id: Some("init".to_string()),
+                    kind: ExecutionEventKind::ProcessStarted,
+                    attributes: BTreeMap::new(),
+                },
+                ExecutionRuntimeEvent {
+                    sequence: 9,
+                    timestamp_unix_ns: 1_700_000_000_000_000_009,
+                    process_id: None,
+                    kind: ExecutionEventKind::ResourcesUpdated,
+                    attributes: BTreeMap::new(),
                 },
             ]),
         }
@@ -165,6 +216,38 @@ impl ExecutionManager for RecordingRuntime {
         self.require_current_generation(execution_id, generation)?;
         self.log_requests.lock().unwrap().push(generation);
         Ok(self.logs.lock().unwrap().clone())
+    }
+
+    async fn events(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: ExecutionEventsRequest,
+    ) -> ExecutionManagerResult<ExecutionEventBatch> {
+        self.require_current_generation(execution_id, generation)?;
+        request.validate()?;
+        self.event_requests
+            .lock()
+            .unwrap()
+            .push_back((generation, request.clone()));
+        let events = self
+            .runtime_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.sequence > request.after_sequence)
+            .take(request.limit as usize)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_sequence = events
+            .last()
+            .map_or(request.after_sequence, |event| event.sequence);
+        Ok(ExecutionEventBatch {
+            execution_id: execution_id.clone(),
+            generation,
+            events,
+            next_sequence,
+        })
     }
 
     async fn create_filesystem_snapshot(
@@ -358,12 +441,7 @@ impl ExecutionSessionManager for RecordingRuntime {
                     .map_or(0, |data| data.len() as u64),
                 error: None,
             },
-            FileOp::Download => FileResponse {
-                success: true,
-                data: Some(STANDARD.encode(b"hello")),
-                size: 5,
-                error: None,
-            },
+            FileOp::Download => self.download_response.lock().unwrap().clone(),
         };
         self.file_requests.lock().unwrap().push(request);
         Ok(response)
@@ -375,19 +453,10 @@ impl ExecutionSessionManager for RecordingRuntime {
         _generation: ExecutionGeneration,
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
-        let entry = (request.op == FilesystemOp::Stat).then(|| FilesystemEntry {
-            name: "note.txt".to_string(),
-            kind: FilesystemEntryKind::File,
-            path: request.path.clone(),
-            size: 5,
-            mode: 0o644,
-            permissions: "-rw-r--r--".to_string(),
-            owner: "root".to_string(),
-            group: "root".to_string(),
-            modified_seconds: 1,
-            modified_nanos: 0,
-            symlink_target: None,
-            metadata: BTreeMap::new(),
+        let entry = (request.op == FilesystemOp::Stat).then(|| {
+            let mut entry = self.stat_entry.lock().unwrap().clone();
+            entry.path.clone_from(&request.path);
+            entry
         });
         self.filesystem_requests.lock().unwrap().push(request);
         Ok(FilesystemResponse {
@@ -476,6 +545,151 @@ async fn local_sandbox_surface_supports_both_isolation_levels() {
         let exec = runtime.exec_requests.lock().unwrap();
         assert_eq!(exec[0].cmd, ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"]);
     }
+}
+
+#[tokio::test]
+async fn artifact_export_is_bounded_hashed_and_never_overwrites() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+    let destination = temp.path().join("artifact.bin");
+
+    let artifact = sandbox
+        .files
+        .export_with_options(
+            "/workspace/note.txt",
+            ArtifactExportOptions::default()
+                .max_bytes(5)
+                .destination(&destination)
+                .user("1000"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(artifact.path, "/workspace/note.txt");
+    assert_eq!(artifact.data, b"hello");
+    assert_eq!(artifact.size, 5);
+    assert_eq!(
+        artifact.sha256,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert_eq!(artifact.host_path.as_deref(), Some(destination.as_path()));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"hello");
+
+    std::fs::write(&destination, b"keep").unwrap();
+    let error = sandbox
+        .files
+        .export_with_options(
+            "/workspace/note.txt",
+            ArtifactExportOptions::default().destination(&destination),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ClientError::State(_)));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"keep");
+
+    let filesystem_requests = runtime.filesystem_requests.lock().unwrap();
+    let file_requests = runtime.file_requests.lock().unwrap();
+    assert_eq!(filesystem_requests[0].user.as_deref(), Some("1000"));
+    assert_eq!(file_requests[0].user.as_deref(), Some("1000"));
+    assert_eq!(file_requests[0].max_bytes, Some(5));
+}
+
+#[tokio::test]
+async fn artifact_export_rejects_invalid_sources_and_racing_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    for max_bytes in [0, MAX_ARTIFACT_BYTES + 1] {
+        let error = sandbox
+            .files
+            .export_with_options(
+                "/workspace/output",
+                ArtifactExportOptions::default().max_bytes(max_bytes),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Validation(_)));
+    }
+    for (path, options) in [
+        ("  ", ArtifactExportOptions::default()),
+        (
+            "/workspace/output",
+            ArtifactExportOptions::default().destination("  "),
+        ),
+    ] {
+        let error = sandbox
+            .files
+            .export_with_options(path, options)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Validation(_)));
+    }
+    assert!(runtime.filesystem_requests.lock().unwrap().is_empty());
+    assert!(runtime.file_requests.lock().unwrap().is_empty());
+
+    runtime.stat_entry.lock().unwrap().kind = FilesystemEntryKind::Directory;
+    let error = sandbox.files.export("/workspace/output").await.unwrap_err();
+    assert!(matches!(error, ClientError::Validation(_)));
+    assert!(runtime.file_requests.lock().unwrap().is_empty());
+
+    {
+        let mut entry = runtime.stat_entry.lock().unwrap();
+        entry.kind = FilesystemEntryKind::File;
+        entry.size = 6;
+    }
+    let error = sandbox
+        .files
+        .export_with_options(
+            "/workspace/output",
+            ArtifactExportOptions::default().max_bytes(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Validation(_)));
+    assert!(runtime.file_requests.lock().unwrap().is_empty());
+
+    runtime.stat_entry.lock().unwrap().size = 5;
+    *runtime.download_response.lock().unwrap() = FileResponse {
+        success: true,
+        data: Some(STANDARD.encode(b"sixsix")),
+        size: 6,
+        error: None,
+    };
+    let error = sandbox
+        .files
+        .read_bounded_with_options("/workspace/output", 5, FilesystemOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Guest(_)));
+
+    *runtime.download_response.lock().unwrap() = FileResponse {
+        success: true,
+        data: Some(STANDARD.encode(b"hello")),
+        size: 6,
+        error: None,
+    };
+    let error = sandbox.files.export("/workspace/output").await.unwrap_err();
+    assert!(matches!(error, ClientError::Guest(_)));
+
+    *runtime.download_response.lock().unwrap() = FileResponse {
+        success: true,
+        data: Some(STANDARD.encode(b"four")),
+        size: 4,
+        error: None,
+    };
+    let error = sandbox.files.export("/workspace/output").await.unwrap_err();
+    assert!(matches!(error, ClientError::Guest(_)));
 }
 
 #[tokio::test]
@@ -687,6 +901,95 @@ async fn sandbox_logs_reject_invalid_bounds_and_stale_generations() {
     assert!(runtime.log_requests.lock().unwrap().is_empty());
 
     sandbox.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn sandbox_event_stream_is_backpressured_and_generation_fenced() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    let mut stream = sandbox
+        .stream_events(
+            SandboxEventStreamOptions::default()
+                .batch_items(2)
+                .wait_timeout_ms(1),
+        )
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().sequence, 2);
+    assert_eq!(stream.next().await.unwrap().unwrap().sequence, 5);
+    assert_eq!(stream.next().await.unwrap().unwrap().sequence, 9);
+
+    {
+        let requests = runtime.event_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1.after_sequence, 0);
+        assert_eq!(requests[1].1.after_sequence, 5);
+        assert_eq!(requests[0].1.wait_timeout_ms, Some(1));
+    }
+
+    sandbox.pause(true).await.unwrap();
+    let paused = sandbox
+        .events(ExecutionEventsRequest {
+            after_sequence: 9,
+            limit: 1,
+            wait_timeout_ms: Some(1),
+        })
+        .await
+        .unwrap();
+    assert!(paused.events.is_empty());
+    sandbox.resume().await.unwrap();
+
+    let mut fenced = sandbox
+        .stream_events(
+            SandboxEventStreamOptions::default()
+                .batch_items(1)
+                .wait_timeout_ms(1),
+        )
+        .unwrap();
+    assert_eq!(fenced.next().await.unwrap().unwrap().sequence, 2);
+    sandbox
+        .restart(
+            SandboxRestartOptions::default()
+                .operation_id(OperationId::new("event-stream-restart").unwrap()),
+        )
+        .await
+        .unwrap();
+    let error = fenced.next().await.unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        ClientError::Execution(ExecutionManagerError::Conflict { .. })
+    ));
+    assert!(fenced.next().await.is_none());
+}
+
+#[tokio::test]
+async fn sandbox_event_stream_rejects_unbounded_polling_options() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    for options in [
+        SandboxEventStreamOptions::default().batch_items(0),
+        SandboxEventStreamOptions::default().wait_timeout_ms(0),
+    ] {
+        let error = match sandbox.stream_events(options) {
+            Ok(_) => panic!("invalid event stream options must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ClientError::Validation(_)));
+    }
+    assert!(runtime.event_requests.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -2202,6 +2202,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 guest_path: "~/payload.txt".to_string(),
                 data: Some(upload_data.clone()),
                 user: Some("1000:1001".to_string()),
+                max_bytes: None,
             },
         )
         .await
@@ -2220,6 +2221,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 guest_path: "/work/result.txt".to_string(),
                 data: None,
                 user: None,
+                max_bytes: None,
             },
         )
         .await
@@ -2232,6 +2234,26 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
             .expect("valid download base64"),
         b"fake file\n"
     );
+
+    let bounded_error = manager
+        .transfer_file(
+            &lease.execution_id,
+            lease.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Download,
+                guest_path: "/work/result.txt".to_string(),
+                data: None,
+                user: None,
+                max_bytes: Some(9),
+            },
+        )
+        .await
+        .expect_err("download response larger than max_bytes must fail closed");
+    assert!(matches!(
+        bounded_error,
+        ExecutionManagerError::Internal(message)
+            if message.contains("requested download limit")
+    ));
 
     service
         .fail_filesystem_after_effect
@@ -2331,7 +2353,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
     assert!(removed.entries.is_empty());
 
     let file_calls = service.file_requests();
-    assert_eq!(file_calls.len(), 3);
+    assert_eq!(file_calls.len(), 4);
     assert_eq!(file_calls[0], file_calls[1]);
     assert_eq!(file_calls[0].op, OciFileOp::Upload);
     assert_eq!(file_calls[0].path, "~/payload.txt");
@@ -2340,6 +2362,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
     assert_eq!(file_calls[2].op, OciFileOp::Download);
     assert!(file_calls[2].context.is_none());
     assert!(file_calls[2].data.is_none());
+    assert_eq!(file_calls[3], file_calls[2]);
     assert_eq!(service.file_effects(), vec![file_calls[0].clone()]);
     assert!(file_calls
         .iter()
@@ -2363,6 +2386,56 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
     assert!(filesystem_calls
         .iter()
         .all(|call| call.target == file_calls[0].target));
+}
+
+#[tokio::test]
+async fn file_sessions_reject_invalid_download_limits_before_dispatch() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("file-limits", ExecutionIsolation::Sandbox),
+            &box_operation("file-limits-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    for request in [
+        BoxFileRequest {
+            op: BoxFileOp::Upload,
+            guest_path: "/tmp/result".to_string(),
+            data: Some(STANDARD.encode(b"value")),
+            user: None,
+            max_bytes: Some(5),
+        },
+        BoxFileRequest {
+            op: BoxFileOp::Download,
+            guest_path: "/tmp/result".to_string(),
+            data: None,
+            user: None,
+            max_bytes: Some(0),
+        },
+        BoxFileRequest {
+            op: BoxFileOp::Download,
+            guest_path: "/tmp/result".to_string(),
+            data: None,
+            user: None,
+            max_bytes: Some(a3s_box_core::MAX_BOUNDED_FILE_BYTES + 1),
+        },
+    ] {
+        let error = manager
+            .transfer_file(&lease.execution_id, lease.generation, request)
+            .await
+            .expect_err("invalid file limit must fail");
+        assert!(matches!(error, ExecutionManagerError::InvalidRequest(_)));
+    }
+    assert!(service.file_requests().is_empty());
 }
 
 #[tokio::test]
@@ -2391,6 +2464,7 @@ async fn file_and_filesystem_capabilities_and_box_generation_fail_before_dispatc
         guest_path: "/tmp/result".to_string(),
         data: None,
         user: None,
+        max_bytes: None,
     };
     let stale_error = file_manager
         .transfer_file(&file_lease.execution_id, stale, file_request.clone())
@@ -2496,6 +2570,7 @@ async fn file_and_filesystem_sessions_reject_runtime_target_drift() {
                 guest_path: "/tmp/result".to_string(),
                 data: None,
                 user: None,
+                max_bytes: None,
             },
         )
         .await

@@ -19,7 +19,8 @@ use a3s_box_core::exec::GuestSessionRequest;
 use a3s_box_core::exec::{
     ExecChunk, ExecExit, ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse,
     FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse,
-    StreamType, DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
+    StreamType, DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_BOUNDED_FILE_BYTES,
+    MAX_ONE_SHOT_OUTPUT_BYTES,
 };
 use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
 use base64::engine::general_purpose::STANDARD;
@@ -963,6 +964,9 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
         let path = resolve_file_path(&request.guest_path, &home)?;
         match request.op {
             FileOp::Upload => {
+                if request.max_bytes.is_some() {
+                    return Err("max_bytes is only valid for file downloads".to_string());
+                }
                 let encoded = request
                     .data
                     .as_deref()
@@ -996,6 +1000,14 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
                 })
             }
             FileOp::Download => {
+                if request
+                    .max_bytes
+                    .is_some_and(|limit| limit == 0 || limit > MAX_BOUNDED_FILE_BYTES)
+                {
+                    return Err(format!(
+                        "download max_bytes must be between 1 and {MAX_BOUNDED_FILE_BYTES}"
+                    ));
+                }
                 let metadata = std::fs::metadata(&path).map_err(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         format!("file not found: {}", path.display())
@@ -1006,8 +1018,35 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
                 if metadata.is_dir() {
                     return Err(format!("path is a directory: {}", path.display()));
                 }
-                let data = std::fs::read(&path)
-                    .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+                if let Some(limit) = request.max_bytes {
+                    if metadata.len() > limit {
+                        return Err(format!(
+                            "download target is {} bytes; max_bytes is {limit}",
+                            metadata.len()
+                        ));
+                    }
+                }
+                let data = match request.max_bytes {
+                    Some(limit) => {
+                        let file = std::fs::File::open(&path).map_err(|error| {
+                            format!("failed to open {}: {error}", path.display())
+                        })?;
+                        let mut data = Vec::with_capacity(metadata.len() as usize);
+                        file.take(limit + 1)
+                            .read_to_end(&mut data)
+                            .map_err(|error| {
+                                format!("failed to read {}: {error}", path.display())
+                            })?;
+                        if data.len() as u64 > limit {
+                            return Err(format!(
+                                "download target grew beyond max_bytes ({limit}) while reading"
+                            ));
+                        }
+                        data
+                    }
+                    None => std::fs::read(&path)
+                        .map_err(|error| format!("failed to read {}: {error}", path.display()))?,
+                };
                 Ok(FileResponse {
                     success: true,
                     data: Some(STANDARD.encode(&data)),
@@ -3652,6 +3691,7 @@ mod tests {
             guest_path: path.to_string_lossy().into_owned(),
             data: Some(STANDARD.encode(&data)),
             user: None,
+            max_bytes: None,
         });
         assert!(uploaded.success, "{:?}", uploaded.error);
         assert_eq!(uploaded.size, data.len() as u64);
@@ -3662,10 +3702,54 @@ mod tests {
             guest_path: path.to_string_lossy().into_owned(),
             data: None,
             user: None,
+            max_bytes: Some(data.len() as u64),
         });
         assert!(downloaded.success, "{:?}", downloaded.error);
         assert_eq!(downloaded.size, data.len() as u64);
         assert_eq!(STANDARD.decode(downloaded.data.unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn file_session_enforces_bounded_downloads_before_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.bin");
+        std::fs::write(&path, b"sixsix").unwrap();
+
+        let invalid_upload = handle_file_request(FileRequest {
+            op: FileOp::Upload,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: Some(STANDARD.encode(b"replacement")),
+            user: None,
+            max_bytes: Some(5),
+        });
+        assert!(!invalid_upload.success);
+        assert!(invalid_upload
+            .error
+            .unwrap()
+            .contains("only valid for file downloads"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"sixsix");
+
+        let oversized = handle_file_request(FileRequest {
+            op: FileOp::Download,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: None,
+            user: None,
+            max_bytes: Some(5),
+        });
+        assert!(!oversized.success);
+        assert!(oversized.error.unwrap().contains("max_bytes is 5"));
+
+        for limit in [0, MAX_BOUNDED_FILE_BYTES + 1] {
+            let invalid = handle_file_request(FileRequest {
+                op: FileOp::Download,
+                guest_path: path.to_string_lossy().into_owned(),
+                data: None,
+                user: None,
+                max_bytes: Some(limit),
+            });
+            assert!(!invalid.success);
+            assert!(invalid.error.unwrap().contains("must be between"));
+        }
     }
 
     #[test]
@@ -3675,6 +3759,7 @@ mod tests {
             guest_path: "/tmp/never-written".to_string(),
             data: Some("not-base64!".to_string()),
             user: None,
+            max_bytes: None,
         });
         assert!(!invalid.success);
         assert!(invalid.error.unwrap().contains("valid base64"));
@@ -3684,6 +3769,7 @@ mod tests {
             guest_path: "/path/that/does/not/exist".to_string(),
             data: None,
             user: None,
+            max_bytes: Some(1024),
         });
         assert!(!missing.success);
         assert!(missing.error.unwrap().contains("file not found"));
@@ -3693,6 +3779,7 @@ mod tests {
             guest_path: "/tmp/data".to_string(),
             data: None,
             user: None,
+            max_bytes: Some(1024),
         }))
         .unwrap();
         assert!(declares_guest_session_request(&envelope));

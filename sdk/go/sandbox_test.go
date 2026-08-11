@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,6 +98,134 @@ func TestSandboxLifecycleTracksGenerationAndState(t *testing.T) {
 	}
 	if got := len(runtime.Requests()); got != beforeClose {
 		t.Fatalf("idempotent close issued another request")
+	}
+}
+
+func TestSandboxRuntimeControlUsesExactGeneration(t *testing.T) {
+	pid := uint32(42)
+	waitTimeoutMS := uint64(50)
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		switch request["operation"] {
+		case "sandbox_processes":
+			assertGeneration(t, request, 3)
+			return ExecutionProcessInventory{
+				ExecutionID: "box-1",
+				Generation:  3,
+				Processes: []ExecutionProcessInfo{
+					{ProcessID: "init", PID: &pid},
+					{ProcessID: "exec-1", Terminal: true},
+				},
+			}, nil
+		case "sandbox_runtime_stats":
+			assertGeneration(t, request, 3)
+			peak := uint64(1536)
+			limit := uint64(2048)
+			return ExecutionStats{
+				ExecutionID:     "box-1",
+				Generation:      3,
+				TimestampUnixNS: 1_000_000,
+				CPU: ExecutionCPUStats{
+					UsageNS:     300,
+					UserNS:      200,
+					SystemNS:    100,
+					ThrottledNS: 5,
+				},
+				Memory: ExecutionMemoryStats{
+					UsageBytes: 1024,
+					LimitBytes: &limit,
+					PeakBytes:  &peak,
+				},
+				ProcessCount: 2,
+				Metrics:      map[string]uint64{"io.read_bytes": 64},
+			}, nil
+		case "sandbox_events":
+			assertGeneration(t, request, 3)
+			if request["after_sequence"] != float64(7) || request["limit"] != float64(DefaultExecutionEventBatchLimit) || request["wait_timeout_ms"] != float64(50) {
+				t.Fatalf("unexpected event request: %#v", request)
+			}
+			processID := "exec-1"
+			return ExecutionEventBatch{
+				ExecutionID: "box-1",
+				Generation:  3,
+				Events: []ExecutionRuntimeEvent{{
+					Sequence:        8,
+					TimestampUnixNS: 1_000_001,
+					ProcessID:       &processID,
+					Kind:            EventProcessExited,
+					Attributes:      map[string]string{"exit_code": "0"},
+				}},
+				NextSequence: 8,
+			}, nil
+		case "sandbox_update_resources":
+			assertGeneration(t, request, 3)
+			if request["operation_id"] != "go-resources-1" {
+				t.Fatalf("unexpected operation ID: %#v", request)
+			}
+			resources, ok := request["resources"].(map[string]any)
+			if !ok || resources["cpu_shares"] != float64(512) || resources["cpuset_cpus"] != "0-1" {
+				t.Fatalf("unexpected resource update: %#v", request)
+			}
+			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateRunning, Isolation: IsolationSandbox}, nil
+		default:
+			t.Fatalf("unexpected operation: %v", request["operation"])
+			return nil, nil
+		}
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID: "box-1", Generation: 3, State: StateRunning, Isolation: IsolationSandbox,
+	})
+	ctx := context.Background()
+
+	processes, err := sandbox.Processes(ctx)
+	if err != nil || len(processes.Processes) != 2 || processes.Processes[0].PID == nil || *processes.Processes[0].PID != 42 {
+		t.Fatalf("processes=%+v err=%v", processes, err)
+	}
+	stats, err := sandbox.RuntimeStats(ctx)
+	if err != nil || stats.CPU.UsageNS != 300 || stats.Metrics["io.read_bytes"] != 64 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	events, err := sandbox.Events(ctx, ExecutionEventsRequest{AfterSequence: 7, WaitTimeoutMS: &waitTimeoutMS})
+	if err != nil || len(events.Events) != 1 || events.Events[0].Kind != EventProcessExited || events.NextSequence != 8 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	cpuShares := uint64(512)
+	cpuset := "0-1"
+	if err := sandbox.UpdateResources(
+		ctx,
+		ExecutionResourceUpdate{CPUShares: &cpuShares, CPUSetCPUs: &cpuset},
+		UpdateResourcesOperationID("go-resources-1"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	before := len(runtime.Requests())
+	invalidShares := uint64(1)
+	invalidPIDs := uint64(0)
+	invalidSwap := int64(-2)
+	invalidCPUSet := "2-1"
+	for _, update := range []ExecutionResourceUpdate{
+		{},
+		{CPUShares: &invalidShares},
+		{PIDsLimit: &invalidPIDs},
+		{MemorySwap: &invalidSwap},
+		{CPUSetCPUs: &invalidCPUSet},
+	} {
+		if err := sandbox.UpdateResources(ctx, update); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("update=%+v error=%v", update, err)
+		}
+	}
+	if _, err := sandbox.Events(ctx, ExecutionEventsRequest{Limit: MaxExecutionEventBatchItems + 1}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("invalid event limit error=%v", err)
+	}
+	if err := sandbox.UpdateResources(
+		ctx,
+		ExecutionResourceUpdate{CPUShares: &cpuShares},
+		UpdateResourcesOperationID(" "),
+	); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("blank operation ID error=%v", err)
+	}
+	if got := len(runtime.Requests()); got != before {
+		t.Fatalf("invalid control request reached bridge: before=%d after=%d", before, got)
 	}
 }
 
@@ -264,7 +396,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 			}
 			return WriteInfo{Path: stringValue(request["path"]), Size: uint64(len(data))}, nil
 		case "file_read":
-			return map[string]any{"data_base64": base64.StdEncoding.EncodeToString(binaryOutput), "size": 3}, nil
+			return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString(binaryOutput), "size": 3}, nil
 		case "filesystem_stat":
 			if request["path"] == "/missing" {
 				return nil, sdkError("filesystem_stat", CodeNotFound, "missing", nil)
@@ -351,6 +483,130 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 	}
 }
 
+func TestArtifactExportIsBoundedHashedAndDoesNotOverwrite(t *testing.T) {
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		switch request["operation"] {
+		case "filesystem_stat":
+			return map[string]any{"entry": EntryInfo{Name: "artifact.bin", Type: "file", Path: stringValue(request["path"]), Size: 5}}, nil
+		case "file_read":
+			return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString([]byte("hello")), "size": 5}, nil
+		default:
+			return nil, errors.New("unexpected operation")
+		}
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 9, State: StateRunning, Isolation: IsolationMicroVM})
+	destination := filepath.Join(t.TempDir(), "artifact.bin")
+
+	artifact, err := sandbox.Files().Export(
+		context.Background(),
+		"/workspace/artifact.bin",
+		ArtifactMaxBytes(5),
+		ArtifactTo(destination),
+		ArtifactAs("1000"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Path != "/workspace/artifact.bin" || string(artifact.Data) != "hello" || artifact.Size != 5 {
+		t.Fatalf("unexpected artifact: %+v", artifact)
+	}
+	if artifact.SHA256 != "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		t.Fatalf("unexpected artifact digest: %s", artifact.SHA256)
+	}
+	if artifact.HostPath != destination {
+		t.Fatalf("host path=%q", artifact.HostPath)
+	}
+	written, err := os.ReadFile(destination)
+	if err != nil || string(written) != "hello" {
+		t.Fatalf("destination=%q err=%v", written, err)
+	}
+	if err := os.WriteFile(destination, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sandbox.Files().Export(context.Background(), "/workspace/artifact.bin", ArtifactTo(destination)); !errors.Is(err, ErrRuntime) {
+		t.Fatalf("expected exclusive-create runtime error, got %v", err)
+	}
+	written, err = os.ReadFile(destination)
+	if err != nil || string(written) != "keep" {
+		t.Fatalf("existing destination changed: %q, %v", written, err)
+	}
+
+	requests := runtime.Requests()
+	if requests[0]["user"] != "1000" || requests[1]["user"] != "1000" {
+		t.Fatalf("artifact user was not forwarded: %#v", requests[:2])
+	}
+	if requests[1]["max_bytes"] != float64(5) {
+		t.Fatalf("artifact max bytes was not forwarded: %#v", requests[1])
+	}
+}
+
+func TestArtifactExportRejectsInvalidSourcesAndRacingResponses(t *testing.T) {
+	t.Run("invalid limits do not reach runtime", func(t *testing.T) {
+		runtime := &fakeRuntime{}
+		sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
+		for _, limit := range []uint64{0, MaxArtifactBytes + 1} {
+			if _, err := sandbox.Files().Export(context.Background(), "/output", ArtifactMaxBytes(limit)); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("limit=%d error=%v", limit, err)
+			}
+		}
+		for _, request := range []struct {
+			path    string
+			options []ArtifactExportOption
+		}{
+			{path: "  "},
+			{path: "/output", options: []ArtifactExportOption{ArtifactTo("  ")}},
+		} {
+			if _, err := sandbox.Files().Export(context.Background(), request.path, request.options...); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("path=%q error=%v", request.path, err)
+			}
+		}
+		if len(runtime.Requests()) != 0 {
+			t.Fatal("invalid artifact limit reached runtime")
+		}
+	})
+
+	tests := []struct {
+		name       string
+		entry      EntryInfo
+		data       []byte
+		declared   uint64
+		maxBytes   uint64
+		expected   error
+		expectRead bool
+	}{
+		{name: "directory", entry: EntryInfo{Type: "directory"}, maxBytes: MaxArtifactBytes, expected: ErrInvalidRequest},
+		{name: "oversized", entry: EntryInfo{Type: "file", Size: 6}, maxBytes: 5, expected: ErrInvalidRequest},
+		{name: "malformed size", entry: EntryInfo{Type: "file", Size: 5}, data: []byte("hello"), declared: 6, maxBytes: MaxArtifactBytes, expected: ErrProtocol, expectRead: true},
+		{name: "stat read race", entry: EntryInfo{Type: "file", Size: 5}, data: []byte("four"), declared: 4, maxBytes: MaxArtifactBytes, expected: ErrProtocol, expectRead: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+				switch request["operation"] {
+				case "filesystem_stat":
+					return map[string]any{"entry": test.entry}, nil
+				case "file_read":
+					return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString(test.data), "size": test.declared}, nil
+				default:
+					return nil, errors.New("unexpected operation")
+				}
+			}}
+			sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
+			_, err := sandbox.Files().Export(context.Background(), "/output", ArtifactMaxBytes(test.maxBytes))
+			if !errors.Is(err, test.expected) {
+				t.Fatalf("expected %v, got %v", test.expected, err)
+			}
+			read := false
+			for _, request := range runtime.Requests() {
+				read = read || request["operation"] == "file_read"
+			}
+			if read != test.expectRead {
+				t.Fatalf("file_read=%v, expected %v", read, test.expectRead)
+			}
+		})
+	}
+}
+
 func TestCommandValidationDoesNotReachRuntime(t *testing.T) {
 	runtime := &fakeRuntime{}
 	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
@@ -365,6 +621,165 @@ func TestCommandValidationDoesNotReachRuntime(t *testing.T) {
 	}
 	if len(runtime.Requests()) != 0 {
 		t.Fatal("invalid terminal operations reached runtime")
+	}
+}
+
+func TestEventStreamIsBackpressuredPausedAndGenerationFenced(t *testing.T) {
+	var generation atomic.Uint64
+	generation.Store(1)
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		switch request["operation"] {
+		case "sandbox_events":
+			requestGeneration := uint64(request["generation"].(float64))
+			if requestGeneration != generation.Load() {
+				return nil, sdkError("sandbox_events", CodeConflict, "stale generation", nil)
+			}
+			after := uint64(request["after_sequence"].(float64))
+			limit := int(request["limit"].(float64))
+			sequences := []uint64{2, 5, 9}
+			events := make([]ExecutionRuntimeEvent, 0, limit)
+			for _, sequence := range sequences {
+				if sequence <= after || len(events) == limit {
+					continue
+				}
+				events = append(events, ExecutionRuntimeEvent{
+					Sequence:        sequence,
+					TimestampUnixNS: 1_700_000_000_000_000_000 + sequence,
+					Kind:            EventResourcesUpdated,
+					Attributes:      map[string]string{},
+				})
+			}
+			next := after
+			if len(events) != 0 {
+				next = events[len(events)-1].Sequence
+			}
+			return ExecutionEventBatch{
+				ExecutionID:  "box-1",
+				Generation:   requestGeneration,
+				Events:       events,
+				NextSequence: next,
+			}, nil
+		case "sandbox_pause":
+			return SandboxInfo{SandboxID: "box-1", Generation: generation.Load(), State: StatePaused, Isolation: IsolationSandbox}, nil
+		case "sandbox_resume":
+			return SandboxInfo{SandboxID: "box-1", Generation: generation.Load(), State: StateRunning, Isolation: IsolationSandbox}, nil
+		case "sandbox_restart":
+			next := generation.Add(1)
+			return SandboxInfo{SandboxID: "box-1", Generation: next, State: StateRunning, Isolation: IsolationSandbox}, nil
+		default:
+			return nil, errors.New("unexpected operation")
+		}
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox})
+
+	stream, err := sandbox.StreamEvents(ExecutionEventStreamOptions{
+		BatchLimit:  2,
+		WaitTimeout: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, expected := range []uint64{2, 5, 9} {
+		event, nextErr := stream.Next(context.Background())
+		if nextErr != nil || event.Sequence != expected {
+			t.Fatalf("event %d: %+v, %v", index, event, nextErr)
+		}
+		if stream.Cursor() != expected {
+			t.Fatalf("cursor=%d, expected %d", stream.Cursor(), expected)
+		}
+	}
+	polls := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "sandbox_events" {
+			polls = append(polls, request)
+		}
+	}
+	if len(polls) != 2 || polls[0]["after_sequence"] != float64(0) || polls[1]["after_sequence"] != float64(5) {
+		t.Fatalf("unexpected event polls: %#v", polls)
+	}
+
+	if err := sandbox.Pause(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	wait := uint64(1)
+	paused, err := sandbox.Events(context.Background(), ExecutionEventsRequest{AfterSequence: 9, Limit: 1, WaitTimeoutMS: &wait})
+	if err != nil || len(paused.Events) != 0 {
+		t.Fatalf("paused events=%+v err=%v", paused, err)
+	}
+	if err := sandbox.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fenced, err := sandbox.StreamEvents(ExecutionEventStreamOptions{BatchLimit: 1, WaitTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, nextErr := fenced.Next(context.Background()); nextErr != nil || event.Sequence != 2 {
+		t.Fatalf("first fenced event=%+v err=%v", event, nextErr)
+	}
+	if err := sandbox.Restart(context.Background(), RestartOperationID("go-event-stream-restart")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fenced.Next(context.Background()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected generation conflict, got %v", err)
+	}
+	if _, err := fenced.Next(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected terminal EOF, got %v", err)
+	}
+}
+
+func TestEventStreamCloseCancelsActivePoll(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	runtime := &fakeRuntime{handler: func(ctx context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "sandbox_events" {
+			return nil, errors.New("unexpected operation")
+		}
+		once.Do(func() { close(started) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox})
+	stream, err := sandbox.StreamEvents(ExecutionEventStreamOptions{WaitTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, nextErr := stream.Next(context.Background())
+		done <- nextErr
+	}()
+	<-started
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("expected EOF after close, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event stream close did not cancel its active poll")
+	}
+	if _, err := stream.Next(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected closed stream EOF, got %v", err)
+	}
+}
+
+func TestEventStreamOptionsValidateBeforeRuntimeAccess(t *testing.T) {
+	runtime := &fakeRuntime{}
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox})
+	for _, options := range []ExecutionEventStreamOptions{
+		{BatchLimit: MaxExecutionEventBatchItems + 1},
+		{WaitTimeout: -time.Millisecond},
+		{WaitTimeout: time.Microsecond},
+	} {
+		if _, err := sandbox.StreamEvents(options); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("expected invalid options error, got %v", err)
+		}
+	}
+	if len(runtime.Requests()) != 0 {
+		t.Fatal("invalid event stream options reached runtime")
 	}
 }
 

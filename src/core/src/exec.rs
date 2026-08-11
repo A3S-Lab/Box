@@ -201,7 +201,19 @@ pub struct FileRequest {
     /// User that owns newly created files and parent directories.
     #[serde(default)]
     pub user: Option<String>,
+    /// Optional decoded-byte ceiling for a bounded download.
+    ///
+    /// Ordinary file reads omit this field. Callers that set it must stay at
+    /// or below [`MAX_BOUNDED_FILE_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
+
+/// Largest decoded file that can be returned in one framed JSON response.
+///
+/// Download bytes are base64 encoded. Reserving half of the transport frame
+/// leaves deterministic room for that expansion and the response envelope.
+pub const MAX_BOUNDED_FILE_BYTES: u64 = a3s_transport::MAX_PAYLOAD_SIZE as u64 / 2;
 
 /// File transfer operation type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +332,8 @@ pub enum GuestSessionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
 
     #[test]
     fn test_exec_request_serialization_roundtrip() {
@@ -441,6 +455,18 @@ mod tests {
             truncated: true,
         };
         let encoded = serde_json::to_vec(&output).unwrap();
+        assert!(encoded.len() <= a3s_transport::MAX_PAYLOAD_SIZE as usize);
+    }
+
+    #[test]
+    fn maximum_bounded_file_response_fits_one_transport_frame() {
+        let response = FileResponse {
+            success: true,
+            data: Some(STANDARD.encode(vec![0; MAX_BOUNDED_FILE_BYTES as usize])),
+            size: MAX_BOUNDED_FILE_BYTES,
+            error: None,
+        };
+        let encoded = serde_json::to_vec(&response).unwrap();
         assert!(encoded.len() <= a3s_transport::MAX_PAYLOAD_SIZE as usize);
     }
 
@@ -641,12 +667,20 @@ mod tests {
             guest_path: "/tmp/test.txt".to_string(),
             data: Some("aGVsbG8=".to_string()),
             user: Some("1000:1000".to_string()),
+            max_bytes: None,
         };
         let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("max_bytes"));
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.op, FileOp::Upload);
         assert_eq!(parsed.guest_path, "/tmp/test.txt");
         assert_eq!(parsed.data.as_deref(), Some("aGVsbG8="));
+
+        let legacy: FileRequest = serde_json::from_str(
+            r#"{"op":"Download","guest_path":"/tmp/legacy","data":null,"user":null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.max_bytes, None);
     }
 
     #[test]
@@ -656,11 +690,13 @@ mod tests {
             guest_path: "/etc/hostname".to_string(),
             data: None,
             user: None,
+            max_bytes: Some(4096),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.op, FileOp::Download);
         assert!(parsed.data.is_none());
+        assert_eq!(parsed.max_bytes, Some(4096));
     }
 
     #[test]
@@ -699,6 +735,7 @@ mod tests {
             guest_path: "/tmp/data.bin".to_string(),
             data: None,
             user: None,
+            max_bytes: None,
         });
 
         let value = serde_json::to_value(&request).unwrap();

@@ -20,6 +20,14 @@ import type {
 } from './client.js'
 import type {
   EntryInfo,
+  ExecutionCpuStats,
+  ExecutionEventBatch,
+  ExecutionEventKind,
+  ExecutionMemoryStats,
+  ExecutionProcessInfo,
+  ExecutionProcessInventory,
+  ExecutionRuntimeEvent,
+  ExecutionStats,
   FilesystemSnapshotInfo,
 } from './sandbox.js'
 
@@ -195,6 +203,103 @@ export function sandboxStats(result: BridgeResult): SandboxStats {
   }
 }
 
+export function executionProcessInventory(
+  result: BridgeResult
+): ExecutionProcessInventory {
+  return {
+    executionId: requiredString(result, 'execution_id'),
+    generation: requiredGeneration(result, 'generation'),
+    processes: recordArray(result, 'processes').map(executionProcessInfo),
+  }
+}
+
+function executionProcessInfo(result: BridgeResult): ExecutionProcessInfo {
+  return {
+    processId: requiredString(result, 'process_id'),
+    pid: optionalUnsignedInteger(result, 'pid'),
+    terminal: requiredBoolean(result, 'terminal'),
+  }
+}
+
+export function executionStats(result: BridgeResult): ExecutionStats {
+  const cpu = requiredRecord(result, 'cpu')
+  const memory = requiredRecord(result, 'memory')
+  return {
+    executionId: requiredString(result, 'execution_id'),
+    generation: requiredGeneration(result, 'generation'),
+    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    cpu: executionCpuStats(cpu),
+    memory: executionMemoryStats(memory),
+    processCount: requiredUnsignedInteger(result, 'process_count'),
+    metrics: unsignedIntegerRecord(result.metrics),
+  }
+}
+
+function executionCpuStats(result: BridgeResult): ExecutionCpuStats {
+  return {
+    usageNs: requiredUnsignedInteger(result, 'usage_ns'),
+    userNs: requiredUnsignedInteger(result, 'user_ns'),
+    systemNs: requiredUnsignedInteger(result, 'system_ns'),
+    throttledNs: requiredUnsignedInteger(result, 'throttled_ns'),
+  }
+}
+
+function executionMemoryStats(result: BridgeResult): ExecutionMemoryStats {
+  return {
+    usageBytes: requiredUnsignedInteger(result, 'usage_bytes'),
+    limitBytes: optionalUnsignedInteger(result, 'limit_bytes'),
+    peakBytes: optionalUnsignedInteger(result, 'peak_bytes'),
+  }
+}
+
+export function executionEventBatch(
+  result: BridgeResult
+): ExecutionEventBatch {
+  return {
+    executionId: requiredString(result, 'execution_id'),
+    generation: requiredGeneration(result, 'generation'),
+    events: recordArray(result, 'events').map(executionRuntimeEvent),
+    nextSequence: requiredUnsignedInteger(result, 'next_sequence'),
+  }
+}
+
+function executionRuntimeEvent(result: BridgeResult): ExecutionRuntimeEvent {
+  return {
+    sequence: requiredUnsignedInteger(result, 'sequence'),
+    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    processId: optionalString(result, 'process_id'),
+    kind: executionEventKind(result, 'kind'),
+    attributes: stringRecord(result.attributes),
+  }
+}
+
+function executionEventKind(
+  result: BridgeResult,
+  key: string
+): ExecutionEventKind {
+  const value = requiredString(result, key)
+  if (!EXECUTION_EVENT_KINDS.has(value as ExecutionEventKind)) {
+    bridgeTypeError(key)
+  }
+  return value as ExecutionEventKind
+}
+
+const EXECUTION_EVENT_KINDS = new Set<ExecutionEventKind>([
+  'container-creating',
+  'container-created',
+  'container-started',
+  'container-stopped',
+  'container-deleted',
+  'container-paused',
+  'container-resumed',
+  'resources-updated',
+  'process-created',
+  'process-started',
+  'process-exited',
+  'output-dropped',
+  'runtime-warning',
+])
+
 export function runtimeDiagnostics(result: BridgeResult): RuntimeDiagnostics {
   const virtualization = asRecord(result.virtualization)
   return {
@@ -301,6 +406,24 @@ export function requiredNumber(
   return value
 }
 
+export function requiredUnsignedInteger(
+  result: BridgeResult,
+  key: string
+): number {
+  const value = requiredNumber(result, key)
+  if (!Number.isSafeInteger(value) || value < 0) bridgeTypeError(key)
+  return value
+}
+
+export function optionalUnsignedInteger(
+  result: BridgeResult,
+  key: string
+): number | undefined {
+  const value = result[key]
+  if (value === null || value === undefined) return undefined
+  return requiredUnsignedInteger(result, key)
+}
+
 export function requiredGeneration(
   result: BridgeResult,
   key: string
@@ -394,6 +517,23 @@ export function stringRecord(
     bridgeTypeError('record')
   }
   return record as Record<string, string>
+}
+
+export function unsignedIntegerRecord(
+  value: unknown
+): Readonly<Record<string, number>> {
+  const record = asRecord(value)
+  if (
+    !Object.values(record).every(
+      (item) =>
+        typeof item === 'number' &&
+        Number.isSafeInteger(item) &&
+        item >= 0
+    )
+  ) {
+    bridgeTypeError('record')
+  }
+  return record as Record<string, number>
 }
 
 export function requiredRecord(

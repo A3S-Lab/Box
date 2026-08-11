@@ -416,6 +416,12 @@ mod tests {
 
     #[test]
     fn test_shim_handler_try_wait_exit_captures_child_exit_code() {
+        #[cfg(windows)]
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "exit 7"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
         let child = std::process::Command::new("sh")
             .arg("-c")
             .arg("exit 7")

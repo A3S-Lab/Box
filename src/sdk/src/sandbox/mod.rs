@@ -5,6 +5,7 @@
 
 mod builder;
 mod commands;
+mod events;
 mod filesystem;
 mod lifecycle;
 mod options;
@@ -20,7 +21,13 @@ use a3s_box_core::{
 
 pub use builder::SandboxBuilder;
 pub use commands::{CommandResult, CommandRunOptions, Commands, SandboxCommand};
-pub use filesystem::{Filesystem, FilesystemOptions, WriteInfo};
+pub use events::{
+    SandboxEventStream, SandboxEventStreamOptions, DEFAULT_EVENT_STREAM_BATCH_ITEMS,
+    DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS,
+};
+pub use filesystem::{
+    Artifact, ArtifactExportOptions, Filesystem, FilesystemOptions, WriteInfo, MAX_ARTIFACT_BYTES,
+};
 pub use lifecycle::{SandboxLogOptions, SandboxRestartOptions};
 pub use options::{
     SandboxCreateOptions, SandboxNetwork, TmpfsMount, VolumeMount, VolumeSource,
@@ -76,6 +83,22 @@ impl SandboxInner {
         if state.closed || state.state != ExecutionState::Running {
             return Err(ClientError::Validation(format!(
                 "sandbox {} is not running",
+                self.execution_id
+            )));
+        }
+        Ok((self.execution_id.clone(), state.generation))
+    }
+
+    pub(crate) fn observable_execution(&self) -> Result<(ExecutionId, ExecutionGeneration)> {
+        let state = self.state();
+        if state.closed
+            || !matches!(
+                state.state,
+                ExecutionState::Running | ExecutionState::Paused
+            )
+        {
+            return Err(ClientError::Validation(format!(
+                "sandbox {} is neither running nor paused",
                 self.execution_id
             )));
         }
@@ -296,7 +319,7 @@ impl Sandbox {
 
     /// Return the runtime-visible init and live exec processes.
     pub async fn processes(&self) -> Result<ExecutionProcessInventory> {
-        let (_, generation) = self.inner.active_execution()?;
+        let (_, generation) = self.inner.observable_execution()?;
         self.inner
             .client
             .list_execution_processes(&self.inner.execution_id, generation)
@@ -305,7 +328,7 @@ impl Sandbox {
 
     /// Return one normalized resource snapshot for the current generation.
     pub async fn runtime_stats(&self) -> Result<ExecutionStats> {
-        let (_, generation) = self.inner.active_execution()?;
+        let (_, generation) = self.inner.observable_execution()?;
         self.inner
             .client
             .execution_stats(&self.inner.execution_id, generation)
@@ -314,7 +337,7 @@ impl Sandbox {
 
     /// Poll ordered events without crossing the current runtime generation.
     pub async fn events(&self, request: ExecutionEventsRequest) -> Result<ExecutionEventBatch> {
-        let (_, generation) = self.inner.active_execution()?;
+        let (_, generation) = self.inner.observable_execution()?;
         self.inner
             .client
             .execution_events(&self.inner.execution_id, generation, request)

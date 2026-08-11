@@ -5,9 +5,11 @@ import base64
 import inspect
 import json
 import os
+import threading
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
@@ -17,7 +19,10 @@ from a3s_box import (
     A3SAsyncBoxClient,
     A3SBoxClient,
     A3SBoxNotInstalledError,
+    A3SAsyncLocalRuntime,
     AsyncSandbox,
+    ExecutionResourceUpdate,
+    MAX_ARTIFACT_BYTES,
     RegistryCredentials,
     Sandbox,
     SignaturePolicy,
@@ -50,6 +55,75 @@ class AsyncFakeRuntime:
             self.requests.append(payload)
         await asyncio.sleep(0)
         return response_for(payload)
+
+
+class ArtifactRuntime(FakeRuntime):
+    def __init__(
+        self,
+        *,
+        data: bytes = b"hello",
+        declared_size: int | None = None,
+        stat_size: int = 5,
+        entry_type: str = "file",
+    ) -> None:
+        super().__init__()
+        self.data = data
+        self.declared_size = len(data) if declared_size is None else declared_size
+        self.stat_size = stat_size
+        self.entry_type = entry_type
+
+    def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        payload = dict(request)
+        if payload["operation"] != "sdk_capabilities":
+            self.requests.append(payload)
+        if payload["operation"] == "file_read":
+            return {
+                "path": payload["path"],
+                "data_base64": base64.b64encode(self.data).decode(),
+                "size": self.declared_size,
+            }
+        if payload["operation"] == "filesystem_stat":
+            result = response_for(payload)
+            result["entry"]["size"] = self.stat_size
+            result["entry"]["type"] = self.entry_type
+            return result
+        return response_for(payload)
+
+
+class AsyncArtifactRuntime(ArtifactRuntime):
+    async def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return super().request(request)
+
+
+def event_stream_response(request: Mapping[str, object]) -> dict[str, Any]:
+    after_sequence = int(request["after_sequence"])
+    limit = int(request["limit"])
+    events = [
+        {
+            "sequence": sequence,
+            "timestamp_unix_ns": 1_700_000_000_000_000_000 + sequence,
+            "process_id": "init" if sequence == 5 else None,
+            "kind": (
+                "container-started"
+                if sequence == 2
+                else "process-started"
+                if sequence == 5
+                else "resources-updated"
+            ),
+            "attributes": {},
+        }
+        for sequence in (2, 5, 9)
+        if sequence > after_sequence
+    ][:limit]
+    return {
+        "execution_id": request["sandbox_id"],
+        "generation": request["generation"],
+        "events": events,
+        "next_sequence": (
+            int(events[-1]["sequence"]) if events else after_sequence
+        ),
+    }
 
 
 class CapabilityRuntime:
@@ -234,6 +308,56 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         }
     if operation == "sandbox_stats":
         return {"stats": sandbox_stats_response(str(request["sandbox_id"]))}
+    if operation == "sandbox_processes":
+        return {
+            "execution_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "processes": [
+                {"process_id": "init", "pid": 1234, "terminal": False},
+                {"process_id": "exec-1", "pid": None, "terminal": True},
+            ],
+        }
+    if operation == "sandbox_runtime_stats":
+        return {
+            "execution_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "timestamp_unix_ns": 1_000_000,
+            "cpu": {
+                "usage_ns": 300,
+                "user_ns": 200,
+                "system_ns": 100,
+                "throttled_ns": 5,
+            },
+            "memory": {
+                "usage_bytes": 1024,
+                "limit_bytes": 2048,
+                "peak_bytes": 1536,
+            },
+            "process_count": 2,
+            "metrics": {"io.read_bytes": 64},
+        }
+    if operation == "sandbox_events":
+        return {
+            "execution_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "events": [
+                {
+                    "sequence": int(request["after_sequence"]) + 1,
+                    "timestamp_unix_ns": 1_000_001,
+                    "process_id": "exec-1",
+                    "kind": "process-exited",
+                    "attributes": {"exit_code": "0"},
+                }
+            ],
+            "next_sequence": int(request["after_sequence"]) + 1,
+        }
+    if operation == "sandbox_update_resources":
+        return {
+            "sandbox_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "state": "running",
+            "isolation": "microvm",
+        }
     if operation == "sandbox_snapshot_create":
         return {
             "snapshot_id": request["snapshot_id"],
@@ -539,11 +663,19 @@ class SdkTests(unittest.TestCase):
         sandbox.resume()
         sandbox.logs(tail=10)
         sandbox.stats()
+        sandbox.processes()
+        sandbox.runtime_stats()
+        sandbox.events(after_sequence=4, limit=16, wait_timeout_ms=25)
+        sandbox.update_resources(
+            ExecutionResourceUpdate(cpu_shares=512),
+            operation_id="coverage-resources",
+        )
         sandbox.create_filesystem_snapshot("snap-1")
         sandbox.commands.run(["true"])
         sandbox.files.write("/tmp/value", "value")
         sandbox.files.read("/tmp/value")
         sandbox.files.stat("/tmp/value")
+        sandbox.files.export("/tmp/value")
         sandbox.files.list("/tmp", depth=1)
         sandbox.files.make_dir("/tmp/dir")
         sandbox.files.rename("/tmp/dir", "/tmp/moved")
@@ -597,7 +729,9 @@ class SdkTests(unittest.TestCase):
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)
         self.assertEqual(a3s_box.DEFAULT_IMAGE, "alpine:3.20")
+        self.assertEqual(a3s_box.MAX_ARTIFACT_BYTES, 8 * 1024 * 1024)
         for exported_type in (
+            "Artifact",
             "FilesystemSnapshotSummary",
             "RuntimeDiagnostics",
             "RuntimeDiskUsage",
@@ -663,6 +797,187 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(stat["operation"], "filesystem_stat")
         self.assertEqual(kill["operation"], "sandbox_kill")
 
+    def test_artifact_export_hashes_and_exclusively_writes_host_file(self) -> None:
+        runtime = FakeRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+
+        with TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "note.txt"
+            artifact = sandbox.files.export(
+                "/workspace/notes.txt",
+                max_bytes=5,
+                destination=destination,
+                user="1000",
+            )
+
+            self.assertEqual(artifact.path, "/workspace/notes.txt")
+            self.assertEqual(artifact.data, b"hello")
+            self.assertEqual(artifact.size, 5)
+            self.assertEqual(
+                artifact.sha256,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e"
+                "1b161e5c1fa7425e73043362938b9824",
+            )
+            self.assertEqual(artifact.host_path, str(destination))
+            self.assertEqual(destination.read_bytes(), b"hello")
+
+            destination.write_bytes(b"keep")
+            with self.assertRaises(A3SBoxError) as raised:
+                sandbox.files.export(
+                    "/workspace/notes.txt",
+                    destination=destination,
+                )
+            self.assertEqual(raised.exception.code, "runtime_error")
+            self.assertEqual(destination.read_bytes(), b"keep")
+
+        artifact_requests = [
+            request
+            for request in runtime.requests
+            if request["operation"] in {"filesystem_stat", "file_read"}
+        ]
+        self.assertEqual(artifact_requests[0]["user"], "1000")
+        self.assertEqual(artifact_requests[1]["user"], "1000")
+        self.assertEqual(artifact_requests[1]["max_bytes"], 5)
+
+    def test_artifact_export_rejects_invalid_limits_and_non_files(self) -> None:
+        runtime = ArtifactRuntime(entry_type="directory", stat_size=0)
+        sandbox = Sandbox.create(runtime=runtime)
+
+        for max_bytes in (0, MAX_ARTIFACT_BYTES + 1):
+            with self.assertRaises(A3SBoxError) as raised:
+                sandbox.files.export("/workspace/output", max_bytes=max_bytes)
+            self.assertEqual(raised.exception.code, "invalid_request")
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.export("  ")
+        self.assertEqual(raised.exception.code, "invalid_request")
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.export("/workspace/output", destination="  ")
+        self.assertEqual(raised.exception.code, "invalid_request")
+
+        self.assertFalse(
+            any(
+                request["operation"] == "filesystem_stat"
+                for request in runtime.requests
+            )
+        )
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.export("/workspace/output")
+        self.assertEqual(raised.exception.code, "invalid_request")
+        self.assertFalse(
+            any(request["operation"] == "file_read" for request in runtime.requests)
+        )
+
+        oversized = ArtifactRuntime(stat_size=6)
+        oversized_sandbox = Sandbox.create(runtime=oversized)
+        with self.assertRaises(A3SBoxError) as raised:
+            oversized_sandbox.files.export("/workspace/output", max_bytes=5)
+        self.assertEqual(raised.exception.code, "invalid_request")
+        self.assertFalse(
+            any(request["operation"] == "file_read" for request in oversized.requests)
+        )
+
+    def test_artifact_export_rejects_malformed_and_racing_reads(self) -> None:
+        malformed = ArtifactRuntime(declared_size=6)
+        sandbox = Sandbox.create(runtime=malformed)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.export("/workspace/output")
+        self.assertEqual(raised.exception.code, "bridge_protocol_error")
+
+    def test_malformed_runtime_control_results_fail_closed(self) -> None:
+        cases = (
+            (
+                "sandbox_processes",
+                {
+                    "execution_id": "sandbox-local-1",
+                    "generation": 1,
+                    "processes": [
+                        {"process_id": "init", "pid": 1, "terminal": False},
+                        {"process_id": "init", "pid": 2, "terminal": False},
+                    ],
+                },
+                lambda sandbox: sandbox.processes(),
+            ),
+            (
+                "sandbox_runtime_stats",
+                {
+                    "execution_id": "sandbox-local-1",
+                    "generation": 1,
+                    "timestamp_unix_ns": 0,
+                    "cpu": {
+                        "usage_ns": 1,
+                        "user_ns": 1,
+                        "system_ns": 0,
+                        "throttled_ns": 0,
+                    },
+                    "memory": {
+                        "usage_bytes": 0,
+                        "limit_bytes": None,
+                        "peak_bytes": None,
+                    },
+                    "process_count": 1,
+                    "metrics": {},
+                },
+                lambda sandbox: sandbox.runtime_stats(),
+            ),
+            (
+                "sandbox_events",
+                {
+                    "execution_id": "sandbox-local-1",
+                    "generation": 1,
+                    "events": [
+                        {
+                            "sequence": 7,
+                            "timestamp_unix_ns": 1,
+                            "process_id": None,
+                            "kind": "runtime-warning",
+                            "attributes": {},
+                        }
+                    ],
+                    "next_sequence": 7,
+                },
+                lambda sandbox: sandbox.events(after_sequence=7),
+            ),
+            (
+                "sandbox_update_resources",
+                {
+                    "sandbox_id": "sandbox-local-1",
+                    "generation": 2,
+                    "state": "running",
+                    "isolation": "microvm",
+                },
+                lambda sandbox: sandbox.update_resources(
+                    ExecutionResourceUpdate(cpu_shares=512),
+                    operation_id="malformed-update",
+                ),
+            ),
+        )
+
+        for operation, result, invoke in cases:
+            class MalformedRuntime(FakeRuntime):
+                def request(
+                    self,
+                    request: Mapping[str, object],
+                ) -> dict[str, Any]:
+                    if request["operation"] == operation:
+                        self.requests.append(dict(request))
+                        return result
+                    return super().request(request)
+
+            with self.subTest(operation=operation):
+                sandbox = Sandbox.create(runtime=MalformedRuntime())
+                with self.assertRaises(A3SBoxError) as raised:
+                    invoke(sandbox)
+                self.assertEqual(
+                    raised.exception.code,
+                    "bridge_protocol_error",
+                )
+
+        racing = ArtifactRuntime(data=b"four", stat_size=5)
+        sandbox = Sandbox.create(runtime=racing)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.export("/workspace/output")
+        self.assertEqual(raised.exception.code, "bridge_protocol_error")
+
     def test_lifecycle_logs_and_stats_preserve_request_identity(self) -> None:
         runtime = FakeRuntime()
         sandbox = Sandbox.create(runtime=runtime)
@@ -678,6 +993,20 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(sandbox.state, "running")
         logs = sandbox.logs(tail=1)
         stats = sandbox.stats()
+        processes = sandbox.processes()
+        runtime_stats = sandbox.runtime_stats()
+        events = sandbox.events(
+            after_sequence=7,
+            limit=8,
+            wait_timeout_ms=50,
+        )
+        sandbox.update_resources(
+            ExecutionResourceUpdate(
+                cpu_shares=512,
+                cpuset_cpus="0-1",
+            ),
+            operation_id="python-resources-1",
+        )
         sandbox.stop()
         sandbox.remove()
         sandbox.kill()
@@ -685,6 +1014,11 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(logs[0].message, "sdk-log\n")
         self.assertEqual(logs[0].stream, "stdout")
         self.assertEqual(stats.memory_percent, 50.0)
+        self.assertEqual(processes.processes[0].process_id, "init")
+        self.assertEqual(runtime_stats.cpu.usage_ns, 300)
+        self.assertEqual(runtime_stats.metrics["io.read_bytes"], 64)
+        self.assertEqual(events.events[0].kind, "process-exited")
+        self.assertEqual(events.next_sequence, 8)
         self.assertEqual(sandbox.state, "removed")
         self.assertEqual(
             [request["operation"] for request in runtime.requests],
@@ -694,6 +1028,10 @@ class SdkTests(unittest.TestCase):
                 "sandbox_restart",
                 "sandbox_logs",
                 "sandbox_stats",
+                "sandbox_processes",
+                "sandbox_runtime_stats",
+                "sandbox_events",
+                "sandbox_update_resources",
                 "sandbox_stop",
                 "sandbox_remove",
             ],
@@ -704,7 +1042,114 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(restart["stop_timeout_seconds"], 7)
         self.assertEqual(runtime.requests[3]["generation"], 2)
         self.assertEqual(runtime.requests[3]["tail"], 1)
+        self.assertEqual(runtime.requests[7]["after_sequence"], 7)
+        self.assertEqual(runtime.requests[7]["limit"], 8)
+        self.assertEqual(runtime.requests[7]["wait_timeout_ms"], 50)
+        self.assertEqual(
+            runtime.requests[8]["resources"],
+            {"cpu_shares": 512, "cpuset_cpus": "0-1"},
+        )
+        self.assertEqual(
+            runtime.requests[8]["operation_id"],
+            "python-resources-1",
+        )
         self.assertEqual(runtime.requests[-1]["generation"], 2)
+
+    def test_runtime_control_validates_before_bridge_mutation(self) -> None:
+        runtime = FakeRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        baseline = len(runtime.requests)
+
+        for arguments in (
+            {"limit": 0},
+            {"limit": 4_097},
+            {"after_sequence": -1},
+            {"wait_timeout_ms": -1},
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    sandbox.events(**arguments)
+        for update in (
+            ExecutionResourceUpdate(),
+            ExecutionResourceUpdate(cpu_shares=1),
+            ExecutionResourceUpdate(pids_limit=0),
+            ExecutionResourceUpdate(memory_swap=-2),
+            ExecutionResourceUpdate(cpuset_cpus="2-1"),
+        ):
+            with self.subTest(update=update):
+                with self.assertRaises(ValueError):
+                    sandbox.update_resources(update)
+        with self.assertRaisesRegex(ValueError, "operation_id cannot be empty"):
+            sandbox.update_resources(
+                ExecutionResourceUpdate(cpu_period=100_000),
+                operation_id=" ",
+            )
+
+        self.assertEqual(len(runtime.requests), baseline)
+
+    def test_event_stream_is_backpressured_paused_and_generation_fenced(
+        self,
+    ) -> None:
+        class StreamRuntime(FakeRuntime):
+            def request(
+                self,
+                request: Mapping[str, object],
+            ) -> dict[str, Any]:
+                if request["operation"] == "sandbox_events":
+                    self.requests.append(dict(request))
+                    return event_stream_response(request)
+                return super().request(request)
+
+        runtime = StreamRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        stream = sandbox.stream_events(batch_size=2, wait_timeout_ms=1)
+        events = [next(stream), next(stream), next(stream)]
+        self.assertEqual([event.sequence for event in events], [2, 5, 9])
+        polls = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "sandbox_events"
+        ]
+        self.assertEqual(
+            [request["after_sequence"] for request in polls],
+            [0, 5],
+        )
+        self.assertTrue(all(request["generation"] == 1 for request in polls))
+
+        sandbox.pause()
+        paused = sandbox.events(
+            after_sequence=9,
+            limit=1,
+            wait_timeout_ms=1,
+        )
+        self.assertEqual(paused.events, ())
+        sandbox.resume()
+
+        fenced = sandbox.stream_events(batch_size=1, wait_timeout_ms=1)
+        self.assertEqual(next(fenced).sequence, 2)
+        sandbox.restart(operation_id="python-event-stream-restart")
+        with self.assertRaises(A3SBoxError) as raised:
+            next(fenced)
+        self.assertEqual(raised.exception.code, "conflict")
+
+        cancel = threading.Event()
+        cancel.set()
+        self.assertEqual(list(sandbox.stream_events(cancel_event=cancel)), [])
+
+    def test_event_stream_validates_options_before_runtime_access(self) -> None:
+        runtime = FakeRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        baseline = len(runtime.requests)
+        for arguments in (
+            {"batch_size": 0},
+            {"batch_size": 4_097},
+            {"wait_timeout_ms": 0},
+            {"after_sequence": -1},
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    sandbox.stream_events(**arguments)
+        self.assertEqual(len(runtime.requests), baseline)
 
     def test_management_inspection_and_snapshot_queries_are_typed(self) -> None:
         runtime = FakeRuntime()
@@ -1048,6 +1493,43 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.requests[1]["argv"], ["printf", "42"])
         self.assertEqual(runtime.requests[-1]["operation"], "sandbox_kill")
 
+    async def test_async_artifact_export_matches_sync_contract(self) -> None:
+        runtime = AsyncArtifactRuntime()
+        sandbox = await AsyncSandbox.create(runtime=runtime)
+
+        with TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "note.txt"
+            artifact = await sandbox.files.export(
+                "/workspace/notes.txt",
+                max_bytes=5,
+                destination=destination,
+                user="1000",
+            )
+
+            self.assertEqual(artifact.data, b"hello")
+            self.assertEqual(artifact.size, 5)
+            self.assertEqual(
+                artifact.sha256,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e"
+                "1b161e5c1fa7425e73043362938b9824",
+            )
+            self.assertEqual(artifact.host_path, str(destination))
+            self.assertEqual(destination.read_bytes(), b"hello")
+
+        operations = [request["operation"] for request in runtime.requests]
+        self.assertEqual(
+            operations[-2:],
+            ["filesystem_stat", "file_read"],
+        )
+
+    async def test_async_artifact_export_rejects_stat_read_races(self) -> None:
+        runtime = AsyncArtifactRuntime(data=b"four", stat_size=5)
+        sandbox = await AsyncSandbox.create(runtime=runtime)
+
+        with self.assertRaises(A3SBoxError) as raised:
+            await sandbox.files.export("/workspace/output")
+        self.assertEqual(raised.exception.code, "bridge_protocol_error")
+
     async def test_async_fluent_builders_have_resource_and_script_parity(self) -> None:
         runtime = AsyncFakeRuntime()
         client = A3SAsyncBoxClient(runtime)
@@ -1081,6 +1563,17 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         logs = await sandbox.logs(tail=1)
         stats = await sandbox.stats()
+        processes = await sandbox.processes()
+        runtime_stats = await sandbox.runtime_stats()
+        events = await sandbox.events(
+            after_sequence=10,
+            limit=32,
+            wait_timeout_ms=75,
+        )
+        await sandbox.update_resources(
+            ExecutionResourceUpdate(pids_limit=64),
+            operation_id="python-async-resources-1",
+        )
         sandboxes = await client.list_sandboxes(all=False)
         snapshot = await client.get_filesystem_snapshot("ci-async")
         diagnostics = await client.runtime_diagnostics()
@@ -1090,6 +1583,9 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(logs[0].message, "sdk-log\n")
         self.assertEqual(stats.block_write_bytes, 40)
+        self.assertEqual(processes.processes[1].terminal, True)
+        self.assertEqual(runtime_stats.memory.limit_bytes, 2048)
+        self.assertEqual(events.next_sequence, 11)
         self.assertEqual(sandboxes[0].id, "sandbox-local-1")
         self.assertEqual(snapshot.id, "ci-async")
         self.assertEqual(diagnostics.sdk_version, "3.2.0")
@@ -1101,6 +1597,126 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(restart["operation_id"], "python-async-restart-1")
         self.assertEqual(restart["stop_timeout_seconds"], 9)
+        resource_update = next(
+            request
+            for request in runtime.requests
+            if request["operation"] == "sandbox_update_resources"
+        )
+        self.assertEqual(resource_update["operation_id"], "python-async-resources-1")
+        self.assertEqual(resource_update["resources"], {"pids_limit": 64})
+
+    async def test_async_event_stream_is_backpressured_and_generation_fenced(
+        self,
+    ) -> None:
+        class AsyncStreamRuntime(AsyncFakeRuntime):
+            async def request(
+                self,
+                request: Mapping[str, object],
+            ) -> dict[str, Any]:
+                if request["operation"] == "sandbox_events":
+                    self.requests.append(dict(request))
+                    await asyncio.sleep(0)
+                    return event_stream_response(request)
+                return await super().request(request)
+
+        runtime = AsyncStreamRuntime()
+        sandbox = await AsyncSandbox.create(runtime=runtime)
+        stream = sandbox.stream_events(batch_size=2, wait_timeout_ms=1)
+        events = [await anext(stream), await anext(stream), await anext(stream)]
+        self.assertEqual([event.sequence for event in events], [2, 5, 9])
+        polls = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "sandbox_events"
+        ]
+        self.assertEqual(
+            [request["after_sequence"] for request in polls],
+            [0, 5],
+        )
+
+        fenced = sandbox.stream_events(batch_size=1, wait_timeout_ms=1)
+        self.assertEqual((await anext(fenced)).sequence, 2)
+        await sandbox.restart(operation_id="python-async-event-stream-restart")
+        with self.assertRaises(A3SBoxError) as raised:
+            await anext(fenced)
+        self.assertEqual(raised.exception.code, "conflict")
+        await stream.aclose()
+        await fenced.aclose()
+
+    async def test_async_event_stream_cancellation_reaches_runtime(self) -> None:
+        class BlockingRuntime(AsyncFakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.cancelled = False
+
+            async def request(
+                self,
+                request: Mapping[str, object],
+            ) -> dict[str, Any]:
+                if request["operation"] != "sandbox_events":
+                    return await super().request(request)
+                self.requests.append(dict(request))
+                self.started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                raise AssertionError("unreachable event stream response")
+
+        runtime = BlockingRuntime()
+        sandbox = await AsyncSandbox.create(runtime=runtime)
+        stream = sandbox.stream_events(wait_timeout_ms=1)
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(runtime.started.wait(), timeout=1)
+        pending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await pending
+        self.assertTrue(runtime.cancelled)
+        await stream.aclose()
+
+    async def test_async_local_runtime_cancellation_reaps_bridge_process(
+        self,
+    ) -> None:
+        class BlockingProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.started = asyncio.Event()
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self, _payload: bytes) -> tuple[bytes, bytes]:
+                self.started.set()
+                await asyncio.Future()
+                raise AssertionError("unreachable bridge response")
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self) -> int:
+                self.waited = True
+                return self.returncode or 0
+
+        process = BlockingProcess()
+        with TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "a3s-box"
+            binary.write_bytes(b"fixture")
+            runtime = A3SAsyncLocalRuntime(binary_path=str(binary))
+            with patch(
+                "a3s_box.runtime.asyncio.create_subprocess_exec",
+                return_value=process,
+            ):
+                request = asyncio.create_task(
+                    runtime.request({"operation": "sandbox_events"})
+                )
+                await asyncio.wait_for(process.started.wait(), timeout=1)
+                request.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+        self.assertTrue(process.killed)
+        self.assertTrue(process.waited)
 
     async def test_async_resource_management_matches_sync_surface(self) -> None:
         runtime = AsyncFakeRuntime()

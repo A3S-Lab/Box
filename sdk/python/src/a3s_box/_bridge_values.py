@@ -12,6 +12,14 @@ from .models import (
     BuildImageInfo,
     CommandResult,
     EntryInfo,
+    ExecutionCpuStats,
+    ExecutionEventBatch,
+    ExecutionEventKind,
+    ExecutionMemoryStats,
+    ExecutionProcessInfo,
+    ExecutionProcessInventory,
+    ExecutionRuntimeEvent,
+    ExecutionStats,
     FilesystemSnapshotInfo,
     FilesystemSnapshotSummary,
     ImageHealthCheckInfo,
@@ -211,6 +219,87 @@ def sandbox_stats(result: Mapping[str, object]) -> SandboxStats:
     )
 
 
+def execution_process_inventory(
+    result: Mapping[str, object],
+) -> ExecutionProcessInventory:
+    return ExecutionProcessInventory(
+        execution_id=string(result["execution_id"]),
+        generation=integer(result["generation"]),
+        processes=tuple(
+            ExecutionProcessInfo(
+                process_id=string(item["process_id"]),
+                pid=optional_unsigned_integer(item.get("pid")),
+                terminal=boolean(item["terminal"]),
+            )
+            for item in mapping_sequence(result["processes"])
+        ),
+    )
+
+
+def execution_stats(result: Mapping[str, object]) -> ExecutionStats:
+    cpu = mapping(result["cpu"])
+    memory = mapping(result["memory"])
+    return ExecutionStats(
+        execution_id=string(result["execution_id"]),
+        generation=integer(result["generation"]),
+        timestamp_unix_ns=unsigned_integer(result["timestamp_unix_ns"]),
+        cpu=ExecutionCpuStats(
+            usage_ns=unsigned_integer(cpu["usage_ns"]),
+            user_ns=unsigned_integer(cpu["user_ns"]),
+            system_ns=unsigned_integer(cpu["system_ns"]),
+            throttled_ns=unsigned_integer(cpu["throttled_ns"]),
+        ),
+        memory=ExecutionMemoryStats(
+            usage_bytes=unsigned_integer(memory["usage_bytes"]),
+            limit_bytes=optional_unsigned_integer(memory.get("limit_bytes")),
+            peak_bytes=optional_unsigned_integer(memory.get("peak_bytes")),
+        ),
+        process_count=unsigned_integer(result["process_count"]),
+        metrics=integer_mapping(result["metrics"]),
+    )
+
+
+def execution_event_batch(
+    result: Mapping[str, object],
+) -> ExecutionEventBatch:
+    return ExecutionEventBatch(
+        execution_id=string(result["execution_id"]),
+        generation=integer(result["generation"]),
+        events=tuple(
+            ExecutionRuntimeEvent(
+                sequence=unsigned_integer(item["sequence"]),
+                timestamp_unix_ns=unsigned_integer(item["timestamp_unix_ns"]),
+                process_id=optional_string(item.get("process_id")),
+                kind=execution_event_kind(item["kind"]),
+                attributes=string_mapping(item["attributes"]),
+            )
+            for item in mapping_sequence(result["events"])
+        ),
+        next_sequence=unsigned_integer(result["next_sequence"]),
+    )
+
+
+def execution_event_kind(value: object) -> ExecutionEventKind:
+    kind = string(value)
+    if kind not in {
+        "container-creating",
+        "container-created",
+        "container-started",
+        "container-stopped",
+        "container-deleted",
+        "container-paused",
+        "container-resumed",
+        "resources-updated",
+        "process-created",
+        "process-started",
+        "process-exited",
+        "output-dropped",
+        "runtime-warning",
+    }:
+        protocol_error("an invalid execution event kind")
+    return cast(ExecutionEventKind, kind)
+
+
 def runtime_diagnostics(result: Mapping[str, object]) -> RuntimeDiagnostics:
     virtualization = mapping(result["virtualization"])
     return RuntimeDiagnostics(
@@ -340,6 +429,19 @@ def string_mapping(value: object) -> dict[str, str]:
     return dict(cast(Mapping[str, str], result))
 
 
+def integer_mapping(value: object) -> dict[str, int]:
+    result = mapping(value)
+    if any(
+        not isinstance(key, str)
+        or isinstance(item, bool)
+        or not isinstance(item, int)
+        or item < 0
+        for key, item in result.items()
+    ):
+        protocol_error("a non-integer mapping")
+    return dict(cast(Mapping[str, int], result))
+
+
 def string(value: object) -> str:
     if not isinstance(value, str):
         protocol_error("a non-string value")
@@ -365,6 +467,17 @@ def integer(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         protocol_error("a non-integer value")
     return value
+
+
+def unsigned_integer(value: object) -> int:
+    result = integer(value)
+    if result < 0 or result > (1 << 64) - 1:
+        protocol_error("an out-of-range unsigned integer")
+    return result
+
+
+def optional_unsigned_integer(value: object) -> int | None:
+    return None if value is None else unsigned_integer(value)
 
 
 def optional_int(value: object) -> int | None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +18,15 @@ class CommandResult:
 class WriteInfo:
     path: str
     size: int
+
+
+@dataclass(frozen=True, slots=True)
+class Artifact:
+    path: str
+    data: bytes
+    size: int
+    sha256: str
+    host_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +204,184 @@ class SandboxStats:
     network_tx_bytes: int
     block_read_bytes: int
     block_write_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProcessInfo:
+    process_id: str
+    pid: int | None
+    terminal: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProcessInventory:
+    execution_id: str
+    generation: int
+    processes: tuple[ExecutionProcessInfo, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCpuStats:
+    usage_ns: int
+    user_ns: int
+    system_ns: int
+    throttled_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMemoryStats:
+    usage_bytes: int
+    limit_bytes: int | None
+    peak_bytes: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStats:
+    execution_id: str
+    generation: int
+    timestamp_unix_ns: int
+    cpu: ExecutionCpuStats
+    memory: ExecutionMemoryStats
+    process_count: int
+    metrics: dict[str, int]
+
+
+ExecutionEventKind: TypeAlias = Literal[
+    "container-creating",
+    "container-created",
+    "container-started",
+    "container-stopped",
+    "container-deleted",
+    "container-paused",
+    "container-resumed",
+    "resources-updated",
+    "process-created",
+    "process-started",
+    "process-exited",
+    "output-dropped",
+    "runtime-warning",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRuntimeEvent:
+    sequence: int
+    timestamp_unix_ns: int
+    process_id: str | None
+    kind: ExecutionEventKind
+    attributes: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionEventBatch:
+    execution_id: str
+    generation: int
+    events: tuple[ExecutionRuntimeEvent, ...]
+    next_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResourceUpdate:
+    memory_reservation: int | None = None
+    memory_swap: int | None = None
+    pids_limit: int | None = None
+    cpu_shares: int | None = None
+    cpu_quota: int | None = None
+    cpu_period: int | None = None
+    cpuset_cpus: str | None = None
+
+    def bridge_value(self) -> dict[str, object]:
+        values = {
+            name: value
+            for name, value in (
+                ("memory_reservation", self.memory_reservation),
+                ("memory_swap", self.memory_swap),
+                ("pids_limit", self.pids_limit),
+                ("cpu_shares", self.cpu_shares),
+                ("cpu_quota", self.cpu_quota),
+                ("cpu_period", self.cpu_period),
+                ("cpuset_cpus", self.cpuset_cpus),
+            )
+            if value is not None
+        }
+        if not values:
+            raise ValueError(
+                "resource update must change at least one supported field"
+            )
+        _non_negative_integer(
+            "memory_reservation",
+            self.memory_reservation,
+        )
+        _minimum_integer(
+            "memory_swap",
+            self.memory_swap,
+            -1,
+            (1 << 63) - 1,
+        )
+        _minimum_integer("pids_limit", self.pids_limit, 1)
+        if self.cpu_shares is not None:
+            _minimum_integer("cpu_shares", self.cpu_shares, 2)
+            if self.cpu_shares > 262_144:
+                raise ValueError("cpu_shares must be at most 262144")
+        _minimum_integer(
+            "cpu_quota",
+            self.cpu_quota,
+            1,
+            (1 << 63) - 1,
+        )
+        _minimum_integer("cpu_period", self.cpu_period, 1)
+        if self.cpuset_cpus is not None and not _valid_cpuset(
+            self.cpuset_cpus
+        ):
+            raise ValueError(
+                "cpuset_cpus must be a comma-separated list of indices "
+                "or ascending ranges"
+            )
+        return values
+
+
+def _non_negative_integer(name: str, value: int | None) -> None:
+    _minimum_integer(name, value, 0, (1 << 64) - 1)
+
+
+def _minimum_integer(
+    name: str,
+    value: int | None,
+    minimum: int,
+    maximum: int = (1 << 64) - 1,
+) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+
+
+def _valid_cpuset(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+
+    def index(part: str) -> int | None:
+        if not part or not part.isascii() or not part.isdigit():
+            return None
+        result = int(part)
+        return result if result <= (1 << 32) - 1 else None
+
+    for item in value.strip().split(","):
+        item = item.strip()
+        if "-" not in item:
+            if index(item) is None:
+                return False
+            continue
+        lower_text, upper_text = item.split("-", 1)
+        lower = index(lower_text)
+        upper = index(upper_text)
+        if lower is None or upper is None or lower > upper:
+            return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)

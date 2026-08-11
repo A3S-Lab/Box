@@ -810,6 +810,16 @@ jobs:
           cd src
           cargo test --locked -p a3s-box-core `
             denial_diagnostic_distinguishes_endpoint_policy
+      - name: Test Windows CLI dispatch, build, and retained wait status
+        run: |
+          $runtime = (Resolve-Path `
+            'src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc').Path
+          $env:PATH = "$runtime;$env:PATH"
+          cd src
+          cargo test --locked -p a3s-box-cli --test wait_integration
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p a3s-box-cli --test command_coverage `
+            test_build_from_scratch_copy_metadata_cli_smoke
       - name: Verify Windows artifact bundle
         shell: pwsh
         run: |
@@ -882,6 +892,7 @@ jobs:
     env:
       A3S_BOX_SMOKE_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
       A3S_BOX_HVF_NODE_IMAGE: docker.io/library/node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+      A3S_BOX_HVF_POSTGRES_IMAGE: docker.io/library/postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
       A3S_BOX_ALLOW_REGISTRY_PULL: "1"
       A3S_BOX_SMOKE_TIMEOUT_SECS: "600"
       A3S_REGISTRY_MIRRORS: ${{ vars.HVF_CI_REGISTRY_MIRRORS }}
@@ -916,12 +927,22 @@ jobs:
             echo "libkrun_revision=$(git -C src/deps/libkrun-sys/vendor/libkrun rev-parse HEAD)"
             echo "runner_arch=$(uname -m)"
             echo "hvf=$(sysctl -n kern.hv_support)"
+            echo "postgres_image=$A3S_BOX_HVF_POSTGRES_IMAGE"
           } > "$evidence/metadata.txt"
           cd src
           cargo test --locked --release -p a3s-box-cli --test core_smoke \
             real_core_tsi_published_tcp_nonblocking_accept_and_exec \
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$evidence/test.log"
+      - name: Qualify sequential PostgreSQL SCRAM traffic after TX backpressure
+        run: |
+          unset A3S_DEPS_STUB
+          evidence="$RUNNER_TEMP/a3s-box-hvf-published-port-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cd src
+          cargo test --locked --release -p a3s-box-cli --test core_smoke \
+            real_core_postgres_scram_survives_sequential_published_connections \
+            -- --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$evidence/postgres.log"
       - name: Qualify interrupted auto-removal and archived wait status
         run: |
           unset A3S_DEPS_STUB

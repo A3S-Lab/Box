@@ -185,6 +185,13 @@ func run(ctx context.Context, isolation box.Isolation) (returnErr error) {
 	if _, err := files.Stat(ctx, "/workspace/artifacts/result.txt"); err != nil {
 		return err
 	}
+	artifact, err := files.Export(ctx, "/workspace/artifacts/result.txt", box.ArtifactMaxBytes(5))
+	if err != nil {
+		return err
+	}
+	if string(artifact.Data) != "hello" || artifact.Size != 5 || artifact.SHA256 != "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		return fmt.Errorf("artifact export returned unexpected content or metadata: %+v", artifact)
+	}
 	if entries, err := files.List(ctx, "/workspace/artifacts", 1); err != nil || len(entries) == 0 {
 		return fmt.Errorf("artifact directory is empty: %w", err)
 	}
@@ -202,6 +209,65 @@ func run(ctx context.Context, isolation box.Isolation) (returnErr error) {
 	}
 	if stats, err := sandbox.Stats(ctx); err != nil || stats == nil {
 		return fmt.Errorf("sandbox stats are unavailable: %w", err)
+	}
+	if isolation == box.IsolationSandbox {
+		inventory, err := sandbox.Processes(ctx)
+		if err != nil {
+			return err
+		}
+		if inventory.ExecutionID != sandbox.ID() || inventory.Generation != sandbox.Generation() || len(inventory.Processes) == 0 {
+			return fmt.Errorf("runtime process inventory returned an invalid Sandbox generation: %+v", inventory)
+		}
+		runtimeStats, err := sandbox.RuntimeStats(ctx)
+		if err != nil {
+			return err
+		}
+		if runtimeStats.ExecutionID != sandbox.ID() || runtimeStats.Generation != sandbox.Generation() || runtimeStats.TimestampUnixNS == 0 || runtimeStats.ProcessCount == 0 {
+			return fmt.Errorf("runtime stats returned an invalid Sandbox snapshot: %+v", runtimeStats)
+		}
+		noWait := uint64(0)
+		beforeUpdate, err := sandbox.Events(ctx, box.ExecutionEventsRequest{
+			Limit:         256,
+			WaitTimeoutMS: &noWait,
+		})
+		if err != nil {
+			return err
+		}
+		eventStream, err := sandbox.StreamEvents(box.ExecutionEventStreamOptions{
+			AfterSequence: beforeUpdate.NextSequence,
+			BatchLimit:    256,
+			WaitTimeout:   time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defer eventStream.Close()
+		cpuShares := uint64(1_024)
+		update := box.ExecutionResourceUpdate{CPUShares: &cpuShares}
+		updateOption := box.UpdateResourcesOperationID("go-smoke-resources-" + sandbox.ID())
+		for range 2 {
+			if err := sandbox.UpdateResources(ctx, update, updateOption); err != nil {
+				return err
+			}
+		}
+		streamedEvent, err := eventStream.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if streamedEvent.Kind != box.EventResourcesUpdated {
+			return fmt.Errorf("runtime event stream returned the wrong event: %+v", streamedEvent)
+		}
+		events, err := sandbox.Events(ctx, box.ExecutionEventsRequest{
+			AfterSequence: beforeUpdate.NextSequence,
+			Limit:         256,
+			WaitTimeoutMS: &noWait,
+		})
+		if err != nil {
+			return err
+		}
+		if events.ExecutionID != sandbox.ID() || events.Generation != sandbox.Generation() || countEvents(events.Events, box.EventResourcesUpdated) != 1 {
+			return fmt.Errorf("runtime resource-update replay did not publish exactly one event: %+v", events)
+		}
 	}
 	if err := sandbox.Pause(ctx, true); err != nil {
 		return err
@@ -262,6 +328,16 @@ func run(ctx context.Context, isolation box.Isolation) (returnErr error) {
 		return err
 	}
 	return nil
+}
+
+func countEvents(events []box.ExecutionRuntimeEvent, kind box.ExecutionEventKind) int {
+	count := 0
+	for _, event := range events {
+		if event.Kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func exerciseSnapshot(ctx context.Context, client *box.Client, sandbox *box.Sandbox, image string) error {

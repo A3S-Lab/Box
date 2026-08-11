@@ -193,6 +193,7 @@ async fn copy_file_from_box(
             guest_path: box_path.to_string(),
             data: None,
             user: None,
+            max_bytes: None,
         })
         .await?;
     if !response.success {
@@ -245,6 +246,7 @@ async fn copy_file_to_box(
             guest_path: box_path.to_string(),
             data: Some(base64::engine::general_purpose::STANDARD.encode(&content)),
             user: None,
+            max_bytes: None,
         })
         .await?;
     if !response.success {
@@ -679,6 +681,7 @@ mod tests {
                 guest_path: "/work/data.txt".to_string(),
                 data: None,
                 user: None,
+                max_bytes: None,
             })
             .await
             .unwrap();
