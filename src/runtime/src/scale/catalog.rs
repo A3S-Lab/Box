@@ -14,6 +14,7 @@ pub const SCALE_MANAGED_LABEL: &str = "com.a3s.scale.managed";
 pub const SCALE_SERVICE_LABEL: &str = "com.a3s.scale.service";
 pub const SCALE_SLOT_LABEL: &str = "com.a3s.scale.slot";
 pub const SCALE_TEMPLATE_DIGEST_LABEL: &str = "com.a3s.scale.template-digest";
+pub const SCALE_GUEST_PORT_LABEL: &str = "com.a3s.scale.guest-port";
 
 #[derive(Debug, Error)]
 pub enum ScaleCatalogError {
@@ -95,6 +96,13 @@ impl ScaleServiceCatalog {
         services
     }
 
+    pub fn guest_port(&self, service: &str) -> Result<Option<u16>, ScaleCatalogError> {
+        let service_config = self.plan.config.services.get(service).ok_or_else(|| {
+            ScaleCatalogError::Invalid(format!("service {service:?} not found in compose config"))
+        })?;
+        service_guest_port(service, service_config)
+    }
+
     pub fn create_request(
         &self,
         service: &str,
@@ -105,7 +113,11 @@ impl ScaleServiceCatalog {
             .build_box_config(service, None)
             .map_err(|error| ScaleCatalogError::Invalid(error.to_string()))?;
         config.isolation = self.isolation;
-        let encoded = serde_json::to_vec(&config).map_err(|error| {
+        let guest_port = self.guest_port(service)?;
+        // Scale endpoints are owned by a generation-fenced host relay. Do not
+        // also ask the VM backend to publish the Compose marker port.
+        config.port_map.clear();
+        let encoded = serde_json::to_vec(&(&config, guest_port)).map_err(|error| {
             ScaleCatalogError::Invalid(format!(
                 "failed to encode service {service:?} template: {error}"
             ))
@@ -116,6 +128,9 @@ impl ScaleServiceCatalog {
         labels.insert(SCALE_SERVICE_LABEL.to_string(), service.to_string());
         labels.insert(SCALE_SLOT_LABEL.to_string(), slot.to_string());
         labels.insert(SCALE_TEMPLATE_DIGEST_LABEL.to_string(), digest);
+        if let Some(guest_port) = guest_port {
+            labels.insert(SCALE_GUEST_PORT_LABEL.to_string(), guest_port.to_string());
+        }
 
         Ok(CreateExecutionRequest {
             external_sandbox_id: format!("scale-{service}-{slot}"),
@@ -134,11 +149,7 @@ fn validate_stateless_templates(config: &ComposeConfig) -> Result<(), ScaleCatal
                 "service {name:?} uses depends_on; independently scaled templates cannot own dependency lifecycles"
             )));
         }
-        if !service.ports.is_empty() {
-            return Err(ScaleCatalogError::Invalid(format!(
-                "service {name:?} publishes fixed host ports; independently scaled replicas require runtime-discovered endpoints"
-            )));
-        }
+        service_guest_port(name, service)?;
         if !service.volumes.is_empty() {
             return Err(ScaleCatalogError::Invalid(format!(
                 "service {name:?} mounts shared volumes; Gateway scaling currently accepts only stateless templates"
@@ -151,6 +162,29 @@ fn validate_stateless_templates(config: &ComposeConfig) -> Result<(), ScaleCatal
         }
     }
     Ok(())
+}
+
+fn service_guest_port(
+    name: &str,
+    service: &a3s_box_core::compose::ServiceConfig,
+) -> Result<Option<u16>, ScaleCatalogError> {
+    let [entry] = service.ports.as_slice() else {
+        return if service.ports.is_empty() {
+            Ok(None)
+        } else {
+            Err(ScaleCatalogError::Invalid(format!(
+                "service {name:?} declares multiple ports; Gateway scaling currently publishes exactly one HTTP endpoint"
+            )))
+        };
+    };
+    let mapping = a3s_box_core::parse_port_mapping(entry).map_err(ScaleCatalogError::Invalid)?;
+    if mapping.host_port != 0 {
+        return Err(ScaleCatalogError::Invalid(format!(
+            "service {name:?} publishes fixed host port {}; use 0:{} for a runtime-discovered endpoint",
+            mapping.host_port, mapping.guest_port
+        )));
+    }
+    Ok(Some(mapping.guest_port))
 }
 
 #[cfg(test)]
@@ -198,7 +232,8 @@ mod tests {
     #[test]
     fn catalog_rejects_stateful_or_fixed_endpoint_templates() {
         for (field, expected) in [
-            ("ports = [\"8080:80\"]", "fixed host ports"),
+            ("ports = [\"8080:80\"]", "fixed host port"),
+            ("ports = [\"0:8080\", \"0:9090\"]", "multiple ports"),
             ("volumes = [\"data:/data\"]", "shared volumes"),
             ("depends_on = [\"db\"]", "depends_on"),
             ("networks = [\"backend\"]", "Compose network"),
@@ -226,6 +261,21 @@ mod tests {
         .unwrap();
         let error = catalog.create_request("missing", 0).unwrap_err();
         assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn catalog_converts_one_dynamic_port_into_endpoint_metadata() {
+        let catalog = ScaleServiceCatalog::from_acl_str(
+            r#"service "api" { image = "api:v1"; ports = ["0:8080"] }"#,
+            "gateway-scale",
+            ExecutionIsolation::Sandbox,
+        )
+        .unwrap();
+
+        let request = catalog.create_request("api", 2).unwrap();
+        assert!(request.config.port_map.is_empty());
+        assert_eq!(request.labels[SCALE_GUEST_PORT_LABEL], "8080");
+        assert_eq!(catalog.guest_port("api").unwrap(), Some(8080));
     }
 
     #[test]

@@ -21,6 +21,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Durable standalone Gateway scaling and live replica endpoints.** The
+  machine-facing `scale-api` now journals revision-bound idempotent operations,
+  reconciles deterministic stateless service slots through the canonical local
+  execution manager, adopts exact workloads after restart, and publishes only
+  ready generation-fenced HTTP endpoint relays. Compose ACL templates may
+  declare one dynamic `0:<guest-port>` mapping; fixed or multiple mappings fail
+  closed, endpoint bind/advertise policy is explicit, and authority-only mode
+  cannot be mistaken for workload reconciliation.
 - **Backpressured exact-generation event streams in every native SDK.** Rust
   exposes a `Stream`, synchronous and asynchronous Python expose iterators,
   TypeScript exposes an abortable `AsyncIterable`, and Go exposes a

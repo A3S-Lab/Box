@@ -73,6 +73,8 @@ impl ScaleManager {
                     .unwrap_or(0)
                     .to_string(),
             ),
+            ready_replicas: 0,
+            endpoints: Vec::new(),
         }
     }
 

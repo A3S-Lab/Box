@@ -12,7 +12,9 @@ use axum::{
 };
 use tokio::sync::Mutex;
 
-use super::{DurableScaleAuthority, LocalScaleReconciler, ScaleAuthorityError};
+use super::{
+    DurableScaleAuthority, LocalScaleReconciler, ScaleAuthorityError, ScaleReconcileError,
+};
 
 pub type SharedScaleAuthority = Arc<ScaleApiState>;
 
@@ -39,13 +41,16 @@ impl ScaleApiState {
         })
     }
 
-    async fn observation(&self, service: &str) -> Result<ScaleObservation, String> {
+    async fn observation(&self, service: &str) -> Result<ScaleObservation, ScaleReconcileError> {
+        let mut observation = self.authority.lock().await.observation(service);
         if let Some(reconciler) = &self.reconciler {
-            if !reconciler.knows_service(service) {
-                return Err(format!("service {service:?} has no Box workload template"));
-            }
+            let workloads = reconciler
+                .observation(service, observation.replicas)
+                .await?;
+            observation.ready_replicas = workloads.ready_replicas;
+            observation.endpoints = workloads.endpoints;
         }
-        Ok(self.authority.lock().await.observation(service))
+        Ok(observation)
     }
 
     async fn reconcile_desired_services(&self) {
@@ -97,14 +102,21 @@ async fn observe(
 ) -> Response {
     match authority.observation(&service).await {
         Ok(observation) => (StatusCode::OK, Json(observation)).into_response(),
-        Err(message) => conflict_response(
-            StatusCode::NOT_FOUND,
-            ScaleOperationConflict {
-                code: "unknown_service".to_string(),
-                message,
-                observation: authority.authority.lock().await.observation(&service),
-            },
-        ),
+        Err(error) => {
+            let (status, code) = if matches!(&error, ScaleReconcileError::UnknownService(_)) {
+                (StatusCode::NOT_FOUND, "unknown_service")
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "observation_failed")
+            };
+            conflict_response(
+                status,
+                ScaleOperationConflict {
+                    code: code.to_string(),
+                    message: error.to_string(),
+                    observation: authority.authority.lock().await.observation(&service),
+                },
+            )
+        }
     }
 }
 
@@ -442,6 +454,19 @@ mod tests {
             .unwrap();
         assert_eq!(accepted.actual_replicas, 2);
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+        let observation: ScaleObservation = client
+            .get(&url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(observation.replicas, 2);
+        assert_eq!(observation.ready_replicas, 2);
+        assert!(observation.endpoints.is_empty());
         first_server.abort();
         let _ = first_server.await;
 

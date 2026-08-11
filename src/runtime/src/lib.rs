@@ -181,8 +181,9 @@ pub use pool::WarmPool;
 #[cfg(feature = "scale")]
 pub use scale::{
     serve_scale_api, DurableScaleAuthority, LocalScaleReconciler, ScaleApiState,
-    ScaleAuthorityError, ScaleCatalogError, ScaleManager, ScaleReconcileError,
-    ScaleReconcileReport, ScaleServiceCatalog, SharedScaleAuthority,
+    ScaleAuthorityError, ScaleCatalogError, ScaleEndpointConfig, ScaleEndpointConfigError,
+    ScaleManager, ScaleReconcileError, ScaleReconcileObservation, ScaleReconcileReport,
+    ScaleServiceCatalog, SharedScaleAuthority,
 };
 
 // ── Constants ──

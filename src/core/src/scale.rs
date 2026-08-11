@@ -40,8 +40,24 @@ pub struct ScaleOperationRequest {
 /// Desired replica state returned by the Box scale authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaleObservation {
+    /// Durable desired replica count used for compare-and-set mutations.
     pub replicas: u32,
     pub revision: Option<String>,
+    /// Replicas whose execution and declared service endpoint are ready.
+    #[serde(default)]
+    pub ready_replicas: u32,
+    /// Live, runtime-owned endpoints. These are observations, not durable
+    /// operation-replay receipts, and may change after Box restarts.
+    #[serde(default)]
+    pub endpoints: Vec<ScaleEndpoint>,
+}
+
+/// One live endpoint published for a deterministic replica slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleEndpoint {
+    pub instance_id: String,
+    pub slot: u32,
+    pub url: String,
 }
 
 /// Result of accepting one scale mutation.
@@ -533,5 +549,30 @@ mod tests {
                 "message": "accepted"
             })
         );
+    }
+
+    #[test]
+    fn scale_observation_adds_live_endpoints_compatibly() {
+        let legacy: ScaleObservation = serde_json::from_value(serde_json::json!({
+            "replicas": 2,
+            "revision": "4"
+        }))
+        .unwrap();
+        assert_eq!(legacy.ready_replicas, 0);
+        assert!(legacy.endpoints.is_empty());
+
+        let observation = ScaleObservation {
+            replicas: 2,
+            revision: Some("4".to_string()),
+            ready_replicas: 1,
+            endpoints: vec![ScaleEndpoint {
+                instance_id: "box-api-0".to_string(),
+                slot: 0,
+                url: "http://127.0.0.1:18080".to_string(),
+            }],
+        };
+        let encoded = serde_json::to_value(observation).unwrap();
+        assert_eq!(encoded["ready_replicas"], 1);
+        assert_eq!(encoded["endpoints"][0]["slot"], 0);
     }
 }

@@ -367,7 +367,8 @@ is supplied:
 ```acl
 service "api" {
   image       = "ghcr.io/example/api:v1"
-  command     = ["serve"]
+  command     = ["serve", "--port", "8080"]
+  ports       = ["0:8080"]
   cpus        = 2
   mem_limit   = "768m"
   environment = { MODE = "production" }
@@ -384,10 +385,23 @@ a3s-box scale-api \
 The authority journals compare-and-set revisions and operation receipts before
 converging deterministic replica slots through the same local execution
 manager used by the CLI and SDKs. Restart recovery adopts existing replicas
-instead of creating duplicates. This catalog currently accepts independent,
-stateless templates only: `depends_on`, published ports, volumes, and explicit
-Compose networks are rejected. `--desired-state-only` is an explicit
-diagnostic/migration mode and does not start workloads.
+instead of creating duplicates. A single `0:<guest-port>` mapping declares a
+runtime-discovered HTTP endpoint: Box probes the exact execution generation,
+leases a host TCP relay, and publishes the live URL through `GET
+/v1/scale/{service}` only while that replica is ready. Fixed or multiple port
+mappings, `depends_on`, volumes, and explicit Compose networks are rejected;
+templates without a port remain valid for deployments that provide their own
+stable traffic endpoint.
+
+Endpoint listeners default to loopback. When Gateway runs on another trusted
+host, bind a private interface with `--endpoint-bind-address` and provide the
+reachable DNS name or IP through `--endpoint-advertise-host`; an unspecified
+bind address without an explicit advertised host is rejected. The scale API
+and relay ports have no public authentication boundary and must stay on a
+trusted node/private network. Local execution port relays currently require
+Linux; endpoint-bearing templates fail explicitly on other hosts.
+`--desired-state-only` is an explicit diagnostic/migration mode and does not
+start workloads.
 
 <details>
 <summary><strong>CLI command map</strong></summary>

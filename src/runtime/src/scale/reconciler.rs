@@ -1,10 +1,10 @@
 //! Desired-state reconciliation against the durable local execution facade.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroU16, sync::Arc};
 
 use a3s_box_core::{
-    CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionState,
-    OperationId, ReconcileOutcome,
+    scale::ScaleEndpoint, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
+    ExecutionManager, ExecutionPortConnector, ExecutionState, OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -14,9 +14,10 @@ use tokio::sync::Mutex;
 use crate::{LocalExecutionManager, ManagedExecutionState};
 
 use super::catalog::{
-    ScaleServiceCatalog, SCALE_MANAGED_LABEL, SCALE_SERVICE_LABEL, SCALE_SLOT_LABEL,
-    SCALE_TEMPLATE_DIGEST_LABEL,
+    ScaleServiceCatalog, SCALE_GUEST_PORT_LABEL, SCALE_MANAGED_LABEL, SCALE_SERVICE_LABEL,
+    SCALE_SLOT_LABEL, SCALE_TEMPLATE_DIGEST_LABEL,
 };
+use super::endpoints::{ScaleEndpointConfig, ScaleEndpointOwner, ScaleEndpointTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstancePhase {
@@ -33,7 +34,14 @@ struct ScaleExecution {
     service: String,
     slot: u32,
     template_digest: String,
+    guest_port: Option<NonZeroU16>,
     phase: InstancePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScaleReconcileObservation {
+    pub ready_replicas: u32,
+    pub endpoints: Vec<ScaleEndpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +51,7 @@ pub struct ScaleReconcileReport {
     pub ready_replicas: u32,
     pub created: u32,
     pub removed: u32,
+    pub endpoints: Vec<ScaleEndpoint>,
 }
 
 #[derive(Debug, Error)]
@@ -72,14 +81,25 @@ trait ScaleExecutionLifecycle: Send + Sync {
 pub struct LocalScaleReconciler {
     catalog: ScaleServiceCatalog,
     lifecycle: Arc<dyn ScaleExecutionLifecycle>,
+    endpoint_owner: Option<ScaleEndpointOwner>,
     reconcile_lock: Mutex<()>,
 }
 
 impl LocalScaleReconciler {
     pub fn new(manager: LocalExecutionManager, catalog: ScaleServiceCatalog) -> Self {
+        Self::with_endpoint_config(manager, catalog, ScaleEndpointConfig::default())
+    }
+
+    pub fn with_endpoint_config(
+        manager: LocalExecutionManager,
+        catalog: ScaleServiceCatalog,
+        endpoint_config: ScaleEndpointConfig,
+    ) -> Self {
+        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
         Self {
             catalog,
             lifecycle: Arc::new(LocalScaleExecutionLifecycle { manager }),
+            endpoint_owner: Some(ScaleEndpointOwner::new(endpoint_config, connector)),
             reconcile_lock: Mutex::new(()),
         }
     }
@@ -92,6 +112,7 @@ impl LocalScaleReconciler {
         Self {
             catalog,
             lifecycle,
+            endpoint_owner: None,
             reconcile_lock: Mutex::new(()),
         }
     }
@@ -104,17 +125,17 @@ impl LocalScaleReconciler {
         self.catalog.services()
     }
 
-    pub async fn ready_replicas(&self, service: &str) -> Result<u32, ScaleReconcileError> {
+    pub async fn observation(
+        &self,
+        service: &str,
+        desired_replicas: u32,
+    ) -> Result<ScaleReconcileObservation, ScaleReconcileError> {
         let _guard = self.reconcile_lock.lock().await;
         if !self.catalog.contains(service) {
             return Err(ScaleReconcileError::UnknownService(service.to_string()));
         }
-        Ok(self
-            .service_inventory(service)
-            .await?
-            .into_iter()
-            .filter(|execution| execution.phase == InstancePhase::Ready)
-            .count() as u32)
+        let desired_templates = self.desired_templates(service, desired_replicas)?;
+        self.observation_unlocked(service, &desired_templates).await
     }
 
     pub async fn reconcile(
@@ -127,17 +148,7 @@ impl LocalScaleReconciler {
             return Err(ScaleReconcileError::UnknownService(service.to_string()));
         }
 
-        let desired_templates = (0..desired_replicas)
-            .map(|slot| {
-                self.catalog
-                    .create_request(service, slot)
-                    .map(|request| (slot, request))
-                    .map_err(|error| ScaleReconcileError::Template {
-                        service: service.to_string(),
-                        message: error.to_string(),
-                    })
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let desired_templates = self.desired_templates(service, desired_replicas)?;
         let mut inventory = self.service_inventory(service).await?;
         inventory.sort_by(|left, right| {
             left.slot
@@ -148,11 +159,9 @@ impl LocalScaleReconciler {
         let mut retained = BTreeMap::<u32, ScaleExecution>::new();
         let mut removed = 0_u32;
         for execution in inventory {
-            let expected_digest = desired_templates
-                .get(&execution.slot)
-                .and_then(template_digest);
-            let should_retain = expected_digest
-                .is_some_and(|digest| digest == execution.template_digest)
+            let expected = desired_templates.get(&execution.slot);
+            let should_retain = expected
+                .is_some_and(|request| execution_matches_template(&execution, request))
                 && matches!(
                     execution.phase,
                     InstancePhase::Active | InstancePhase::Ready
@@ -161,43 +170,113 @@ impl LocalScaleReconciler {
             if should_retain {
                 retained.insert(execution.slot, execution);
             } else {
+                if let Some(endpoint_owner) = &self.endpoint_owner {
+                    endpoint_owner.remove(&execution.execution_id).await;
+                }
                 self.lifecycle.ensure_removed(&execution).await?;
                 removed = removed.saturating_add(1);
             }
         }
 
         let mut created = 0_u32;
-        for (slot, request) in desired_templates {
-            if retained.contains_key(&slot) {
+        for (slot, request) in &desired_templates {
+            if retained.contains_key(slot) {
                 continue;
             }
             let operation_id = create_operation_id(
                 service,
-                slot,
-                template_digest(&request).ok_or_else(|| ScaleReconcileError::Template {
+                *slot,
+                template_digest(request).ok_or_else(|| ScaleReconcileError::Template {
                     service: service.to_string(),
                     message: "generated template has no digest label".to_string(),
                 })?,
             )?;
-            self.lifecycle.ensure_running(request, operation_id).await?;
+            self.lifecycle
+                .ensure_running(request.clone(), operation_id)
+                .await?;
             created = created.saturating_add(1);
         }
 
-        let ready_replicas = self
-            .service_inventory(service)
-            .await?
-            .into_iter()
-            .filter(|execution| {
-                execution.slot < desired_replicas && execution.phase == InstancePhase::Ready
-            })
-            .count() as u32;
+        let observation = self
+            .observation_unlocked(service, &desired_templates)
+            .await?;
 
         Ok(ScaleReconcileReport {
             service: service.to_string(),
             desired_replicas,
-            ready_replicas,
+            ready_replicas: observation.ready_replicas,
             created,
             removed,
+            endpoints: observation.endpoints,
+        })
+    }
+
+    fn desired_templates(
+        &self,
+        service: &str,
+        desired_replicas: u32,
+    ) -> Result<BTreeMap<u32, CreateExecutionRequest>, ScaleReconcileError> {
+        (0..desired_replicas)
+            .map(|slot| {
+                self.catalog
+                    .create_request(service, slot)
+                    .map(|request| (slot, request))
+                    .map_err(|error| ScaleReconcileError::Template {
+                        service: service.to_string(),
+                        message: error.to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    async fn observation_unlocked(
+        &self,
+        service: &str,
+        desired_templates: &BTreeMap<u32, CreateExecutionRequest>,
+    ) -> Result<ScaleReconcileObservation, ScaleReconcileError> {
+        let mut inventory = self.service_inventory(service).await?;
+        inventory.sort_by(|left, right| {
+            left.slot
+                .cmp(&right.slot)
+                .then_with(|| left.execution_id.as_str().cmp(right.execution_id.as_str()))
+        });
+        let mut ready = BTreeMap::new();
+        for execution in inventory {
+            let is_desired = desired_templates
+                .get(&execution.slot)
+                .is_some_and(|request| execution_matches_template(&execution, request));
+            if is_desired
+                && execution.phase == InstancePhase::Ready
+                && !ready.contains_key(&execution.slot)
+            {
+                ready.insert(execution.slot, execution);
+            }
+        }
+
+        let targets = ready
+            .values()
+            .filter_map(|execution| {
+                execution.guest_port.map(|guest_port| ScaleEndpointTarget {
+                    execution_id: execution.execution_id.clone(),
+                    generation: execution.generation,
+                    service: execution.service.clone(),
+                    slot: execution.slot,
+                    guest_port,
+                })
+            })
+            .collect::<Vec<_>>();
+        let endpoints = match (&self.endpoint_owner, targets.is_empty()) {
+            (Some(owner), _) => owner.reconcile_service(service, &targets).await?,
+            (None, true) => Vec::new(),
+            (None, false) => {
+                return Err(ScaleReconcileError::Lifecycle(
+                    "scale endpoint publication is not configured".to_string(),
+                ))
+            }
+        };
+        Ok(ScaleReconcileObservation {
+            ready_replicas: ready.len() as u32,
+            endpoints,
         })
     }
 
@@ -220,6 +299,22 @@ fn template_digest(request: &CreateExecutionRequest) -> Option<&str> {
         .labels
         .get(SCALE_TEMPLATE_DIGEST_LABEL)
         .map(String::as_str)
+}
+
+fn template_guest_port(request: &CreateExecutionRequest) -> Option<NonZeroU16> {
+    request
+        .labels
+        .get(SCALE_GUEST_PORT_LABEL)
+        .and_then(|value| value.parse::<u16>().ok())
+        .and_then(NonZeroU16::new)
+}
+
+fn execution_matches_template(
+    execution: &ScaleExecution,
+    request: &CreateExecutionRequest,
+) -> bool {
+    template_digest(request).is_some_and(|digest| digest == execution.template_digest)
+        && template_guest_port(request) == execution.guest_port
 }
 
 fn create_operation_id(
@@ -263,6 +358,22 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
                 })?;
             let template_digest =
                 required_label(&record.labels, SCALE_TEMPLATE_DIGEST_LABEL, &record.id)?;
+            let guest_port = record
+                .labels
+                .get(SCALE_GUEST_PORT_LABEL)
+                .map(|value| {
+                    value
+                        .parse::<u16>()
+                        .ok()
+                        .and_then(NonZeroU16::new)
+                        .ok_or_else(|| {
+                            ScaleReconcileError::Lifecycle(format!(
+                                "scale execution {} has invalid guest port label",
+                                record.id
+                            ))
+                        })
+                })
+                .transpose()?;
             let metadata = record.managed_execution.as_ref().ok_or_else(|| {
                 ScaleReconcileError::Lifecycle(format!(
                     "scale execution {} has no managed lifecycle metadata",
@@ -296,6 +407,7 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
                 service,
                 slot,
                 template_digest,
+                guest_port,
                 phase,
             });
         }
@@ -453,6 +565,7 @@ mod tests {
                     service,
                     slot,
                     template_digest: request.labels[SCALE_TEMPLATE_DIGEST_LABEL].clone(),
+                    guest_port: template_guest_port(&request),
                     phase: InstancePhase::Ready,
                 });
             if self.lose_next_create_response.swap(false, Ordering::SeqCst) {

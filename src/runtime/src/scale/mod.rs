@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 mod api;
 mod authority;
 mod catalog;
+mod endpoints;
 mod manager;
 mod reconciler;
 mod registry;
@@ -21,11 +22,14 @@ mod tests;
 pub use api::{scale_router, serve_scale_api, ScaleApiState, SharedScaleAuthority};
 pub use authority::{DurableScaleAuthority, ScaleAuthorityError};
 pub use catalog::{
-    ScaleCatalogError, ScaleServiceCatalog, SCALE_MANAGED_LABEL, SCALE_SERVICE_LABEL,
-    SCALE_SLOT_LABEL, SCALE_TEMPLATE_DIGEST_LABEL,
+    ScaleCatalogError, ScaleServiceCatalog, SCALE_GUEST_PORT_LABEL, SCALE_MANAGED_LABEL,
+    SCALE_SERVICE_LABEL, SCALE_SLOT_LABEL, SCALE_TEMPLATE_DIGEST_LABEL,
 };
+pub use endpoints::{ScaleEndpointConfig, ScaleEndpointConfigError};
 pub use manager::ScaleManager;
-pub use reconciler::{LocalScaleReconciler, ScaleReconcileError, ScaleReconcileReport};
+pub use reconciler::{
+    LocalScaleReconciler, ScaleReconcileError, ScaleReconcileObservation, ScaleReconcileReport,
+};
 pub use registry::InstanceRegistry;
 
 /// Instances belonging to a single service.
