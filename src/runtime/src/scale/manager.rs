@@ -137,7 +137,7 @@ impl ScaleManager {
             .services
             .iter()
             .filter(|(service, _)| service.as_str() != request.service)
-            .map(|(_, state)| state.instances.len() as u32)
+            .map(|(_, state)| state.target_replicas)
             .sum();
         let available = self.max_instances.saturating_sub(total_other);
         if request.desired_replicas > available {
@@ -172,6 +172,36 @@ impl ScaleManager {
         };
         self.remember_operation(request.clone(), response.clone());
         Ok(response)
+    }
+
+    pub(super) fn finalize_operation_response(
+        &mut self,
+        request: &ScaleOperationRequest,
+        response: ScaleOperationResponse,
+    ) -> Result<(), String> {
+        let receipt = self
+            .operation_receipts
+            .get_mut(&request.operation_id)
+            .ok_or_else(|| {
+                format!(
+                    "scale operation {} has no durable acceptance receipt",
+                    request.operation_id
+                )
+            })?;
+        if receipt.request != *request {
+            return Err(format!(
+                "scale operation {} was accepted with different intent",
+                request.operation_id
+            ));
+        }
+        if response.revision != receipt.response.revision {
+            return Err(format!(
+                "scale operation {} completion changed its authority revision",
+                request.operation_id
+            ));
+        }
+        receipt.response = response;
+        Ok(())
     }
 
     fn remember_operation(

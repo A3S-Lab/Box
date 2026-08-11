@@ -358,6 +358,37 @@ a3s-box compose -f compose.acl config
 a3s-box compose -f compose.acl up -d
 ```
 
+### Run the standalone Gateway scale authority
+
+`scale-api` turns a Gateway replica decision into durable Box executions. The
+service catalog is Box-owned ACL, and the command fails closed unless a catalog
+is supplied:
+
+```acl
+service "api" {
+  image       = "ghcr.io/example/api:v1"
+  command     = ["serve"]
+  cpus        = 2
+  mem_limit   = "768m"
+  environment = { MODE = "production" }
+}
+```
+
+```bash
+a3s-box scale-api \
+  --address 127.0.0.1:9090 \
+  --state "$HOME/.a3s/scale-authority.json" \
+  --services ./scale-services.acl
+```
+
+The authority journals compare-and-set revisions and operation receipts before
+converging deterministic replica slots through the same local execution
+manager used by the CLI and SDKs. Restart recovery adopts existing replicas
+instead of creating duplicates. This catalog currently accepts independent,
+stateless templates only: `depends_on`, published ports, volumes, and explicit
+Compose networks are rejected. `--desired-state-only` is an explicit
+diagnostic/migration mode and does not start workloads.
+
 <details>
 <summary><strong>CLI command map</strong></summary>
 
@@ -370,7 +401,7 @@ a3s-box compose -f compose.acl up -d
 | Networking | `network`, `port`, `port-forward`, `compose` |
 | Security and TEE | `attest`, `seal`, `unseal`, `inject-secret` |
 | Observability | `ps`, `logs`, `inspect`, `stats`, `events`, `df`, `audit`, `monitor` |
-| System | `container-update`, `system-prune`, `pool`, `login`, `logout`, `version`, `info` |
+| System | `scale-api`, `container-update`, `system-prune`, `pool`, `login`, `logout`, `version`, `info` |
 
 </details>
 

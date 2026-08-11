@@ -124,6 +124,23 @@ fn invalid_direction_and_capacity_rejection_preserve_revision() {
 }
 
 #[test]
+fn versioned_capacity_counts_other_services_durable_targets() {
+    let mut manager = ScaleManager::new(3);
+    manager
+        .apply_operation(&operation("scale-v1-web", "0", 0, 2))
+        .unwrap();
+
+    let mut api = operation("scale-v1-api", "0", 0, 2);
+    api.service = "api".to_string();
+    let conflict = manager.apply_operation(&api).unwrap_err();
+
+    assert_eq!(conflict.code, "capacity_exceeded");
+    assert_eq!(conflict.observation.replicas, 0);
+    assert_eq!(manager.scale_observation("web").replicas, 2);
+    assert_eq!(manager.scale_observation("api").replicas, 0);
+}
+
+#[test]
 fn test_process_request_capped_by_max() {
     let mut mgr = ScaleManager::new(5);
 

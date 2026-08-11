@@ -31,6 +31,7 @@ fn spawn_server(address: SocketAddr, state: &Path) -> Server {
                 state.to_str().unwrap(),
                 "--max-instances",
                 "10",
+                "--desired-state-only",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

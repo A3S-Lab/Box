@@ -9,16 +9,23 @@ use serde::{Deserialize, Serialize};
 
 mod api;
 mod authority;
+mod catalog;
 mod manager;
+mod reconciler;
 mod registry;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export public types
-pub use api::{scale_router, serve_scale_api, SharedScaleAuthority};
+pub use api::{scale_router, serve_scale_api, ScaleApiState, SharedScaleAuthority};
 pub use authority::{DurableScaleAuthority, ScaleAuthorityError};
+pub use catalog::{
+    ScaleCatalogError, ScaleServiceCatalog, SCALE_MANAGED_LABEL, SCALE_SERVICE_LABEL,
+    SCALE_SLOT_LABEL, SCALE_TEMPLATE_DIGEST_LABEL,
+};
 pub use manager::ScaleManager;
+pub use reconciler::{LocalScaleReconciler, ScaleReconcileError, ScaleReconcileReport};
 pub use registry::InstanceRegistry;
 
 /// Instances belonging to a single service.

@@ -72,6 +72,26 @@ impl DurableScaleAuthority {
         }
         Ok(response)
     }
+
+    pub fn finalize(
+        &mut self,
+        request: &ScaleOperationRequest,
+        response: ScaleOperationResponse,
+    ) -> Result<ScaleOperationResponse, ScaleAuthorityError> {
+        let previous = self.manager.authority_state();
+        self.manager
+            .finalize_operation_response(request, response.clone())
+            .map_err(ScaleAuthorityError::State)?;
+        if let Err(error) = persist(&self.path, &self.manager.authority_state()) {
+            if let Err(rollback) = self.manager.restore_authority_state(previous) {
+                return Err(ScaleAuthorityError::State(format!(
+                    "{error}; failed to restore in-memory state: {rollback}"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(response)
+    }
 }
 
 fn persist(path: &Path, state: &ScaleAuthorityState) -> Result<(), ScaleAuthorityError> {
@@ -131,6 +151,32 @@ mod tests {
             .apply(&request("scale-v1-stale", "0", 0, 3))
             .unwrap_err();
         assert_eq!(conflict.conflict().unwrap().code, "stale_revision");
+    }
+
+    #[test]
+    fn restart_replays_the_durable_reconciled_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scale-authority.json");
+        let operation = request("scale-v1-finalized", "0", 0, 2);
+        let finalized = {
+            let mut authority = DurableScaleAuthority::open(&path, 10).unwrap();
+            let accepted = authority.apply(&operation).unwrap();
+            authority
+                .finalize(
+                    &operation,
+                    ScaleOperationResponse {
+                        actual_replicas: 1,
+                        message: "Box reconciled one ready replica".to_string(),
+                        ..accepted
+                    },
+                )
+                .unwrap()
+        };
+
+        let mut reopened = DurableScaleAuthority::open(&path, 10).unwrap();
+        assert_eq!(reopened.apply(&operation).unwrap(), finalized);
+        assert_eq!(finalized.actual_replicas, 1);
+        assert_eq!(finalized.revision.as_deref(), Some("1"));
     }
 
     #[test]
