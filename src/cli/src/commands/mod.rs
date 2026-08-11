@@ -47,6 +47,7 @@ mod rm;
 mod rmi;
 mod run;
 mod save;
+mod scale_api;
 mod sdk_bridge;
 mod seal;
 mod shell;
@@ -199,6 +200,9 @@ pub enum Command {
     Pool(pool::PoolArgs),
     /// Open an interactive shell in a running box
     Shell(shell::ShellArgs),
+    /// Serve the machine-facing Gateway scaling authority
+    #[command(name = "scale-api")]
+    ScaleApi(scale_api::ScaleApiArgs),
     /// Structured bridge used by the native language SDKs
     #[command(name = "sdk-bridge", hide = true)]
     SdkBridge(sdk_bridge::SdkBridgeArgs),
@@ -700,6 +704,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Monitor(args) => Box::pin(monitor::execute(args)),
         Command::Pool(args) => Box::pin(pool::execute(args)),
         Command::Shell(args) => Box::pin(shell::execute(args)),
+        Command::ScaleApi(args) => Box::pin(scale_api::execute(args)),
         Command::SdkBridge(args) => Box::pin(sdk_bridge::execute(args)),
     };
     command.await

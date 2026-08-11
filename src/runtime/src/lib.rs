@@ -179,7 +179,9 @@ pub use operator::AutoscalerController;
 pub use pool::WarmPool;
 
 #[cfg(feature = "scale")]
-pub use scale::ScaleManager;
+pub use scale::{
+    serve_scale_api, DurableScaleAuthority, ScaleAuthorityError, ScaleManager, SharedScaleAuthority,
+};
 
 // ── Constants ──
 

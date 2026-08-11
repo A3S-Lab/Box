@@ -7,6 +7,8 @@ use a3s_box_core::scale::{InstanceHealth, InstanceState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod api;
+mod authority;
 mod manager;
 mod registry;
 
@@ -14,6 +16,8 @@ mod registry;
 mod tests;
 
 // Re-export public types
+pub use api::{scale_router, serve_scale_api, SharedScaleAuthority};
+pub use authority::{DurableScaleAuthority, ScaleAuthorityError};
 pub use manager::ScaleManager;
 pub use registry::InstanceRegistry;
 

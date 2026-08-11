@@ -61,7 +61,9 @@ pub use port::{normalize_port_maps, parse_port_mapping, PortMapping, PortProtoco
 pub use pty::PTY_VSOCK_PORT;
 pub use scale::{
     InstanceDeregistration, InstanceEvent, InstanceHealth, InstanceInfo, InstanceRegistration,
-    InstanceState, ScaleConfig, ScaleRequest, ScaleResponse,
+    InstanceState, ScaleConfig, ScaleDirection, ScaleObservation, ScaleOperationConflict,
+    ScaleOperationRequest, ScaleOperationResponse, ScaleRequest, ScaleResponse,
+    SCALE_OPERATION_SCHEMA_VERSION,
 };
 pub use security::{SeccompMode, SecurityConfig};
 pub use snapshot::{

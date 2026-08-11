@@ -14,6 +14,53 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Current version of the Gateway-to-Box scale operation contract.
+pub const SCALE_OPERATION_SCHEMA_VERSION: u32 = 1;
+
+/// Direction asserted by Gateway for a scale transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScaleDirection {
+    Up,
+    Down,
+}
+
+/// Versioned, compare-and-set scale mutation issued by Gateway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleOperationRequest {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub service: String,
+    pub expected_revision: Option<String>,
+    pub direction: ScaleDirection,
+    pub current_replicas: u32,
+    pub desired_replicas: u32,
+    pub reason: String,
+}
+
+/// Desired replica state returned by the Box scale authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleObservation {
+    pub replicas: u32,
+    pub revision: Option<String>,
+}
+
+/// Result of accepting one scale mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleOperationResponse {
+    pub accepted: bool,
+    pub actual_replicas: u32,
+    pub revision: Option<String>,
+    pub message: String,
+}
+
+/// Machine-readable conflict returned without changing desired state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleOperationConflict {
+    pub code: String,
+    pub message: String,
+    pub observation: ScaleObservation,
+}
+
 /// Instance lifecycle state for readiness signaling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceState {
@@ -449,5 +496,42 @@ mod tests {
         set.insert(InstanceState::Busy);
         set.insert(InstanceState::Ready); // duplicate
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn versioned_scale_operation_matches_gateway_wire_shape() {
+        let request: ScaleOperationRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "operation_id": "scale-v1-abc",
+            "service": "api",
+            "expected_revision": "17",
+            "direction": "Up",
+            "current_replicas": 1,
+            "desired_replicas": 3,
+            "reason": "fixture load"
+        }))
+        .unwrap();
+
+        assert_eq!(request.schema_version, SCALE_OPERATION_SCHEMA_VERSION);
+        assert_eq!(request.direction, ScaleDirection::Up);
+        assert_eq!(request.expected_revision.as_deref(), Some("17"));
+        assert_eq!(request.current_replicas, 1);
+        assert_eq!(request.desired_replicas, 3);
+
+        let response = ScaleOperationResponse {
+            accepted: true,
+            actual_replicas: 3,
+            revision: Some("18".to_string()),
+            message: "accepted".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "accepted": true,
+                "actual_replicas": 3,
+                "revision": "18",
+                "message": "accepted"
+            })
+        );
     }
 }

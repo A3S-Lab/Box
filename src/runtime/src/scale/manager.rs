@@ -1,11 +1,14 @@
 //! ScaleManager implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use a3s_box_core::scale::{
-    InstanceEvent, InstanceHealth, InstanceInfo, InstanceState, ScaleRequest, ScaleResponse,
+    InstanceEvent, InstanceHealth, InstanceInfo, InstanceState, ScaleDirection, ScaleObservation,
+    ScaleOperationConflict, ScaleOperationRequest, ScaleOperationResponse, ScaleRequest,
+    ScaleResponse, SCALE_OPERATION_SCHEMA_VERSION,
 };
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 use super::{ServiceHealth, ServiceInstances, TrackedInstance};
 
@@ -19,6 +22,26 @@ pub struct ScaleManager {
     events: Vec<InstanceEvent>,
     /// Maximum events to retain
     max_events: usize,
+    /// Monotonic desired-state revision per service.
+    revisions: HashMap<String, u64>,
+    /// Bounded replay receipts keyed by operation identity.
+    operation_receipts: HashMap<String, ScaleOperationReceipt>,
+    operation_order: VecDeque<String>,
+    max_operation_receipts: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ScaleOperationReceipt {
+    request: ScaleOperationRequest,
+    response: ScaleOperationResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ScaleAuthorityState {
+    pub(super) schema_version: u32,
+    pub(super) targets: HashMap<String, u32>,
+    pub(super) revisions: HashMap<String, u64>,
+    pub(super) receipts: Vec<ScaleOperationReceipt>,
 }
 
 impl ScaleManager {
@@ -29,7 +52,225 @@ impl ScaleManager {
             services: HashMap::new(),
             events: Vec::new(),
             max_events: 1000,
+            revisions: HashMap::new(),
+            operation_receipts: HashMap::new(),
+            operation_order: VecDeque::new(),
+            max_operation_receipts: 10_000,
         }
+    }
+
+    /// Return the authoritative desired replica count and CAS revision.
+    pub fn scale_observation(&self, service: &str) -> ScaleObservation {
+        ScaleObservation {
+            replicas: self
+                .services
+                .get(service)
+                .map_or(0, |state| state.target_replicas),
+            revision: Some(
+                self.revisions
+                    .get(service)
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Apply one versioned scale mutation exactly once.
+    pub fn apply_operation(
+        &mut self,
+        request: &ScaleOperationRequest,
+    ) -> Result<ScaleOperationResponse, ScaleOperationConflict> {
+        let observation = self.scale_observation(&request.service);
+
+        if let Some(receipt) = self.operation_receipts.get(&request.operation_id) {
+            return if receipt.request == *request {
+                Ok(receipt.response.clone())
+            } else {
+                Err(scale_conflict(
+                    "operation_conflict",
+                    "operation_id was already used with a different scale request",
+                    observation,
+                ))
+            };
+        }
+
+        if request.schema_version != SCALE_OPERATION_SCHEMA_VERSION {
+            return Err(scale_conflict(
+                "unsupported_schema",
+                format!(
+                    "scale schema {} is unsupported; expected {}",
+                    request.schema_version, SCALE_OPERATION_SCHEMA_VERSION
+                ),
+                observation,
+            ));
+        }
+        if request.operation_id.trim().is_empty() || request.service.trim().is_empty() {
+            return Err(scale_conflict(
+                "invalid_request",
+                "operation_id and service must be non-empty",
+                observation,
+            ));
+        }
+        if request.expected_revision.as_deref() != observation.revision.as_deref()
+            || request.current_replicas != observation.replicas
+        {
+            return Err(scale_conflict(
+                "stale_revision",
+                "scale request was not derived from the current desired state",
+                observation,
+            ));
+        }
+        let direction_matches = match request.direction {
+            ScaleDirection::Up => request.desired_replicas > request.current_replicas,
+            ScaleDirection::Down => request.desired_replicas < request.current_replicas,
+        };
+        if !direction_matches {
+            return Err(scale_conflict(
+                "invalid_direction",
+                "scale direction does not match the requested replica transition",
+                observation,
+            ));
+        }
+
+        let total_other: u32 = self
+            .services
+            .iter()
+            .filter(|(service, _)| service.as_str() != request.service)
+            .map(|(_, state)| state.instances.len() as u32)
+            .sum();
+        let available = self.max_instances.saturating_sub(total_other);
+        if request.desired_replicas > available {
+            return Err(scale_conflict(
+                "capacity_exceeded",
+                format!(
+                    "requested {} replicas but only {} fit within host capacity",
+                    request.desired_replicas, available
+                ),
+                observation,
+            ));
+        }
+
+        let state = self
+            .services
+            .entry(request.service.clone())
+            .or_insert_with(|| ServiceInstances {
+                target_replicas: 0,
+                instances: Vec::new(),
+            });
+        state.target_replicas = request.desired_replicas;
+        let revision = self.revisions.entry(request.service.clone()).or_insert(0);
+        *revision = revision.saturating_add(1);
+        let response = ScaleOperationResponse {
+            accepted: true,
+            actual_replicas: request.desired_replicas,
+            revision: Some(revision.to_string()),
+            message: format!(
+                "Box accepted service '{}' at {} desired replicas",
+                request.service, request.desired_replicas
+            ),
+        };
+        self.remember_operation(request.clone(), response.clone());
+        Ok(response)
+    }
+
+    fn remember_operation(
+        &mut self,
+        request: ScaleOperationRequest,
+        response: ScaleOperationResponse,
+    ) {
+        while self.operation_order.len() >= self.max_operation_receipts {
+            if let Some(expired) = self.operation_order.pop_front() {
+                self.operation_receipts.remove(&expired);
+            }
+        }
+        self.operation_order.push_back(request.operation_id.clone());
+        self.operation_receipts.insert(
+            request.operation_id.clone(),
+            ScaleOperationReceipt { request, response },
+        );
+    }
+
+    pub(super) fn authority_state(&self) -> ScaleAuthorityState {
+        let receipts = self
+            .operation_order
+            .iter()
+            .filter_map(|operation| self.operation_receipts.get(operation).cloned())
+            .collect();
+        ScaleAuthorityState {
+            schema_version: SCALE_OPERATION_SCHEMA_VERSION,
+            targets: self
+                .services
+                .iter()
+                .map(|(service, state)| (service.clone(), state.target_replicas))
+                .collect(),
+            revisions: self.revisions.clone(),
+            receipts,
+        }
+    }
+
+    pub(super) fn restore_authority_state(
+        &mut self,
+        state: ScaleAuthorityState,
+    ) -> Result<(), String> {
+        if state.schema_version != SCALE_OPERATION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported scale authority schema {}",
+                state.schema_version
+            ));
+        }
+        if state
+            .targets
+            .keys()
+            .any(|service| service.trim().is_empty())
+            || state
+                .revisions
+                .keys()
+                .any(|service| service.trim().is_empty())
+        {
+            return Err("scale authority contains an empty service identity".to_string());
+        }
+        if state
+            .targets
+            .keys()
+            .any(|service| !state.revisions.contains_key(service))
+        {
+            return Err("scale authority target is missing its revision".to_string());
+        }
+
+        let mut receipts = HashMap::new();
+        let mut order = VecDeque::new();
+        for receipt in state.receipts {
+            let operation_id = receipt.request.operation_id.clone();
+            if operation_id.trim().is_empty() || receipts.contains_key(&operation_id) {
+                return Err("scale authority contains an invalid operation receipt".to_string());
+            }
+            order.push_back(operation_id.clone());
+            receipts.insert(operation_id, receipt);
+        }
+        while order.len() > self.max_operation_receipts {
+            if let Some(expired) = order.pop_front() {
+                receipts.remove(&expired);
+            }
+        }
+
+        self.services = state
+            .targets
+            .into_iter()
+            .map(|(service, target_replicas)| {
+                (
+                    service,
+                    ServiceInstances {
+                        target_replicas,
+                        instances: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        self.revisions = state.revisions;
+        self.operation_receipts = receipts;
+        self.operation_order = order;
+        Ok(())
     }
 
     /// Process a scale request and return the response.
@@ -426,5 +667,17 @@ impl ScaleManager {
         } else {
             Vec::new()
         }
+    }
+}
+
+fn scale_conflict(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    observation: ScaleObservation,
+) -> ScaleOperationConflict {
+    ScaleOperationConflict {
+        code: code.into(),
+        message: message.into(),
+        observation,
     }
 }

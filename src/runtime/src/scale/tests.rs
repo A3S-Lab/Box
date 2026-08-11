@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use a3s_box_core::scale::{InstanceHealth, InstanceState, ScaleRequest};
+use a3s_box_core::scale::{
+    InstanceHealth, InstanceState, ScaleDirection, ScaleOperationRequest, ScaleRequest,
+    SCALE_OPERATION_SCHEMA_VERSION,
+};
 use chrono::Utc;
 
 use super::*;
@@ -27,6 +30,97 @@ fn test_process_request_scale_up() {
     assert!(resp.accepted);
     assert_eq!(resp.target_replicas, 3);
     assert_eq!(resp.current_replicas, 0);
+}
+
+fn operation(
+    id: &str,
+    revision: &str,
+    current_replicas: u32,
+    desired_replicas: u32,
+) -> ScaleOperationRequest {
+    ScaleOperationRequest {
+        schema_version: SCALE_OPERATION_SCHEMA_VERSION,
+        operation_id: id.to_string(),
+        service: "web".to_string(),
+        expected_revision: Some(revision.to_string()),
+        direction: if desired_replicas > current_replicas {
+            ScaleDirection::Up
+        } else {
+            ScaleDirection::Down
+        },
+        current_replicas,
+        desired_replicas,
+        reason: "fixture load".to_string(),
+    }
+}
+
+#[test]
+fn versioned_scale_operation_is_cas_guarded_and_exactly_replayable() {
+    let mut manager = ScaleManager::new(10);
+    assert_eq!(manager.scale_observation("web").replicas, 0);
+    assert_eq!(
+        manager.scale_observation("web").revision.as_deref(),
+        Some("0")
+    );
+
+    let first = operation("scale-v1-first", "0", 0, 3);
+    let accepted = manager.apply_operation(&first).unwrap();
+    assert!(accepted.accepted);
+    assert_eq!(accepted.actual_replicas, 3);
+    assert_eq!(accepted.revision.as_deref(), Some("1"));
+
+    let replay = manager.apply_operation(&first).unwrap();
+    assert_eq!(replay, accepted);
+    assert_eq!(
+        manager.scale_observation("web").revision.as_deref(),
+        Some("1")
+    );
+
+    let stale = manager
+        .apply_operation(&operation("scale-v1-stale", "0", 0, 2))
+        .unwrap_err();
+    assert_eq!(stale.code, "stale_revision");
+    assert_eq!(stale.observation.replicas, 3);
+    assert_eq!(stale.observation.revision.as_deref(), Some("1"));
+}
+
+#[test]
+fn operation_identity_conflict_never_changes_desired_state() {
+    let mut manager = ScaleManager::new(10);
+    let first = operation("scale-v1-shared", "0", 0, 2);
+    manager.apply_operation(&first).unwrap();
+
+    let mut conflicting = first;
+    conflicting.desired_replicas = 4;
+    let error = manager.apply_operation(&conflicting).unwrap_err();
+
+    assert_eq!(error.code, "operation_conflict");
+    assert_eq!(manager.scale_observation("web").replicas, 2);
+    assert_eq!(
+        manager.scale_observation("web").revision.as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn invalid_direction_and_capacity_rejection_preserve_revision() {
+    let mut manager = ScaleManager::new(2);
+    let mut invalid = operation("scale-v1-direction", "0", 0, 1);
+    invalid.direction = ScaleDirection::Down;
+    assert_eq!(
+        manager.apply_operation(&invalid).unwrap_err().code,
+        "invalid_direction"
+    );
+
+    let too_large = operation("scale-v1-capacity", "0", 0, 3);
+    assert_eq!(
+        manager.apply_operation(&too_large).unwrap_err().code,
+        "capacity_exceeded"
+    );
+    assert_eq!(
+        manager.scale_observation("web").revision.as_deref(),
+        Some("0")
+    );
 }
 
 #[test]
