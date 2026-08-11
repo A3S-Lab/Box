@@ -117,6 +117,21 @@ impl LocalScaleReconciler {
         }
     }
 
+    #[cfg(test)]
+    fn with_lifecycle_and_endpoint(
+        catalog: ScaleServiceCatalog,
+        lifecycle: Arc<dyn ScaleExecutionLifecycle>,
+        connector: Arc<dyn ExecutionPortConnector>,
+        endpoint_config: ScaleEndpointConfig,
+    ) -> Self {
+        Self {
+            catalog,
+            lifecycle,
+            endpoint_owner: Some(ScaleEndpointOwner::new(endpoint_config, connector)),
+            reconcile_lock: Mutex::new(()),
+        }
+    }
+
     pub fn knows_service(&self, service: &str) -> bool {
         self.catalog.contains(service)
     }
@@ -518,6 +533,10 @@ mod tests {
         ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult, KillOutcome,
     };
     use chrono::Utc;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
 
     use crate::{
         BoxRecord, LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
@@ -526,6 +545,35 @@ mod tests {
     use super::*;
 
     const CATALOG: &str = r#"service "api" { image = "api:v1" }"#;
+    const ENDPOINT_CATALOG: &str = r#"service "api" { image = "api:v1"; ports = ["0:8080"] }"#;
+
+    struct EchoConnector;
+
+    #[async_trait]
+    impl ExecutionPortConnector for EchoConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: std::time::Duration,
+        ) -> ExecutionManagerResult<a3s_box_core::ExecutionPortStream> {
+            let (client, mut server) = tokio::io::duplex(1_024);
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 1_024];
+                loop {
+                    let count = match server.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(count) => count,
+                    };
+                    if server.write_all(&buffer[..count]).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(Box::pin(client))
+        }
+    }
 
     struct FakeLifecycle {
         executions: Mutex<HashMap<String, ScaleExecution>>,
@@ -613,6 +661,51 @@ mod tests {
         assert_eq!(down.removed, 2);
         let inventory = lifecycle.inventory().await.unwrap();
         assert_eq!(inventory[0].slot, 0);
+    }
+
+    #[tokio::test]
+    async fn downscale_waits_for_endpoint_relays_before_removing_the_execution() {
+        let lifecycle = Arc::new(FakeLifecycle::new());
+        let catalog = ScaleServiceCatalog::from_acl_str(
+            ENDPOINT_CATALOG,
+            "gateway-scale",
+            ExecutionIsolation::Sandbox,
+        )
+        .unwrap();
+        let reconciler = Arc::new(LocalScaleReconciler::with_lifecycle_and_endpoint(
+            catalog,
+            lifecycle.clone(),
+            Arc::new(EchoConnector),
+            ScaleEndpointConfig::loopback().with_drain_timeout(std::time::Duration::from_secs(5)),
+        ));
+        let up = reconciler.reconcile("api", 1).await.unwrap();
+        let address = up.endpoints[0]
+            .url
+            .strip_prefix("http://")
+            .unwrap()
+            .parse::<std::net::SocketAddr>()
+            .unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(b"before").await.unwrap();
+        let mut reply = [0_u8; 6];
+        stream.read_exact(&mut reply).await.unwrap();
+
+        let downscale_reconciler = Arc::clone(&reconciler);
+        let downscale = tokio::spawn(async move { downscale_reconciler.reconcile("api", 0).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(lifecycle.inventory().await.unwrap().len(), 1);
+        stream.write_all(b"during").await.unwrap();
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"during");
+        drop(stream);
+
+        let report = tokio::time::timeout(std::time::Duration::from_secs(1), downscale)
+            .await
+            .expect("downscale did not finish after endpoint drain")
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(lifecycle.inventory().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -15,13 +15,14 @@ use a3s_box_core::{
 use thiserror::Error;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{Mutex, Semaphore},
+    sync::{oneshot, Mutex, Semaphore},
     task::{JoinHandle, JoinSet},
 };
 
 use super::reconciler::ScaleReconcileError;
 
 const ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_ENDPOINT_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_ENDPOINT_CONNECTIONS: usize = 1_024;
 
 #[derive(Debug, Error)]
@@ -35,6 +36,7 @@ pub enum ScaleEndpointConfigError {
 pub struct ScaleEndpointConfig {
     bind_address: IpAddr,
     advertise_host: url::Host<String>,
+    drain_timeout: Duration,
 }
 
 impl ScaleEndpointConfig {
@@ -82,6 +84,7 @@ impl ScaleEndpointConfig {
         Ok(Self {
             bind_address,
             advertise_host: parsed,
+            drain_timeout: DEFAULT_ENDPOINT_DRAIN_TIMEOUT,
         })
     }
 
@@ -89,7 +92,13 @@ impl ScaleEndpointConfig {
         Self {
             bind_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             advertise_host: url::Host::Ipv4(Ipv4Addr::LOCALHOST),
+            drain_timeout: DEFAULT_ENDPOINT_DRAIN_TIMEOUT,
         }
+    }
+
+    pub fn with_drain_timeout(mut self, drain_timeout: Duration) -> Self {
+        self.drain_timeout = drain_timeout;
+        self
     }
 
     pub fn bind_address(&self) -> IpAddr {
@@ -131,12 +140,35 @@ pub(super) struct ScaleEndpointTarget {
 struct EndpointLease {
     target: ScaleEndpointTarget,
     endpoint: ScaleEndpoint,
-    task: JoinHandle<()>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl EndpointLease {
+    async fn drain(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        if let Err(error) = task.await {
+            tracing::warn!(
+                execution_id = %self.target.execution_id,
+                service = self.target.service,
+                slot = self.target.slot,
+                %error,
+                "Scale endpoint drain task failed"
+            );
+        }
+    }
 }
 
 impl Drop for EndpointLease {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -167,14 +199,27 @@ impl ScaleEndpointOwner {
             .iter()
             .map(|target| (target.execution_id.as_str().to_string(), target))
             .collect::<BTreeMap<_, _>>();
+        let stale = {
+            let mut leases = self.leases.lock().await;
+            let stale_ids = leases
+                .iter()
+                .filter_map(|(execution_id, lease)| {
+                    let retain = lease.target.service != service
+                        || (lease.task.as_ref().is_some_and(|task| !task.is_finished())
+                            && desired
+                                .get(execution_id)
+                                .is_some_and(|target| lease.target == **target));
+                    (!retain).then(|| execution_id.clone())
+                })
+                .collect::<Vec<_>>();
+            stale_ids
+                .into_iter()
+                .filter_map(|execution_id| leases.remove(&execution_id))
+                .collect::<Vec<_>>()
+        };
+        drain_leases(stale).await;
+
         let mut leases = self.leases.lock().await;
-        leases.retain(|execution_id, lease| {
-            lease.target.service != service
-                || (!lease.task.is_finished()
-                    && desired
-                        .get(execution_id)
-                        .is_some_and(|target| lease.target == **target))
-        });
 
         for target in targets {
             if leases.contains_key(target.execution_id.as_str()) {
@@ -217,18 +262,22 @@ impl ScaleEndpointOwner {
                 slot: target.slot,
                 url: self.config.endpoint_url(address.port()),
             };
+            let (shutdown, shutdown_receiver) = oneshot::channel();
             let task = tokio::spawn(serve_endpoint(
                 listener,
                 Arc::clone(&self.connector),
                 Arc::clone(&self.connection_limit),
                 target.clone(),
+                shutdown_receiver,
+                self.config.drain_timeout,
             ));
             leases.insert(
                 target.execution_id.as_str().to_string(),
                 EndpointLease {
                     target: target.clone(),
                     endpoint,
-                    task,
+                    shutdown: Some(shutdown),
+                    task: Some(task),
                 },
             );
         }
@@ -247,7 +296,22 @@ impl ScaleEndpointOwner {
     }
 
     pub async fn remove(&self, execution_id: &ExecutionId) {
-        self.leases.lock().await.remove(execution_id.as_str());
+        let lease = self.leases.lock().await.remove(execution_id.as_str());
+        if let Some(lease) = lease {
+            lease.drain().await;
+        }
+    }
+}
+
+async fn drain_leases(leases: Vec<EndpointLease>) {
+    let mut drains = JoinSet::new();
+    for lease in leases {
+        drains.spawn(lease.drain());
+    }
+    while let Some(result) = drains.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!(%error, "Scale endpoint lease drain failed");
+        }
     }
 }
 
@@ -285,10 +349,17 @@ async fn serve_endpoint(
     connector: Arc<dyn ExecutionPortConnector>,
     connection_limit: Arc<Semaphore>,
     target: ScaleEndpointTarget,
+    mut shutdown: oneshot::Receiver<()>,
+    drain_timeout: Duration,
 ) {
     let mut relays = JoinSet::new();
     loop {
-        let (host_stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => accepted,
+        };
+        let (host_stream, peer) = match accepted {
             Ok(connection) => connection,
             Err(error) => {
                 tracing::warn!(
@@ -302,9 +373,13 @@ async fn serve_endpoint(
                 continue;
             }
         };
-        let permit = match Arc::clone(&connection_limit).acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => return,
+        let permit = tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            permit = Arc::clone(&connection_limit).acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return,
+            },
         };
         let connector = Arc::clone(&connector);
         let relay_target = target.clone();
@@ -334,6 +409,45 @@ async fn serve_endpoint(
                 );
             }
         }
+    }
+    drop(listener);
+
+    let relay_count = relays.len();
+    let drained = tokio::time::timeout(drain_timeout, async {
+        while let Some(result) = relays.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(
+                    execution_id = %target.execution_id,
+                    service = target.service,
+                    slot = target.slot,
+                    %error,
+                    "Scale endpoint relay task failed during drain"
+                );
+            }
+        }
+    })
+    .await
+    .is_ok();
+    if drained {
+        tracing::debug!(
+            execution_id = %target.execution_id,
+            service = target.service,
+            slot = target.slot,
+            relay_count,
+            "Scale endpoint relays drained"
+        );
+    } else {
+        let forced_relays = relays.len();
+        tracing::warn!(
+            execution_id = %target.execution_id,
+            service = target.service,
+            slot = target.slot,
+            forced_relays,
+            drain_timeout_ms = drain_timeout.as_millis(),
+            "Scale endpoint drain timed out; aborting remaining relays"
+        );
+        relays.abort_all();
+        while relays.join_next().await.is_some() {}
     }
 }
 
@@ -439,12 +553,102 @@ mod tests {
         let mut reply = [0_u8; 5];
         stream.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"ready");
+        drop(stream);
 
         assert!(owner
             .reconcile_service("api", &[])
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn endpoint_removal_stops_accepting_before_existing_relays_drain() {
+        let owner = Arc::new(ScaleEndpointOwner::new(
+            ScaleEndpointConfig::loopback().with_drain_timeout(Duration::from_secs(5)),
+            Arc::new(EchoConnector),
+        ));
+        let endpoint = owner
+            .reconcile_service("api", &[target()])
+            .await
+            .unwrap()
+            .remove(0);
+        let address = endpoint
+            .url
+            .strip_prefix("http://")
+            .unwrap()
+            .parse::<SocketAddr>()
+            .unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(b"before").await.unwrap();
+        let mut reply = [0_u8; 6];
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"before");
+
+        let removal_owner = Arc::clone(&owner);
+        let execution_id = target().execution_id;
+        let removal = tokio::spawn(async move {
+            removal_owner.remove(&execution_id).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!removal.is_finished());
+        if let Ok(Ok(mut rejected)) =
+            tokio::time::timeout(Duration::from_millis(100), TcpStream::connect(address)).await
+        {
+            let _ = rejected.write_all(b"new").await;
+            let mut rejected_reply = [0_u8; 3];
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    rejected.read_exact(&mut rejected_reply),
+                )
+                .await
+                .map_or(true, |result| result.is_err()),
+                "retiring endpoint relayed a newly opened connection"
+            );
+        }
+        stream.write_all(b"during").await.unwrap();
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"during");
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(1), removal)
+            .await
+            .expect("endpoint relay did not drain")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn endpoint_removal_force_closes_relays_after_the_bounded_deadline() {
+        let owner = ScaleEndpointOwner::new(
+            ScaleEndpointConfig::loopback().with_drain_timeout(Duration::from_millis(20)),
+            Arc::new(EchoConnector),
+        );
+        let endpoint = owner
+            .reconcile_service("api", &[target()])
+            .await
+            .unwrap()
+            .remove(0);
+        let address = endpoint
+            .url
+            .strip_prefix("http://")
+            .unwrap()
+            .parse::<SocketAddr>()
+            .unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(b"ready").await.unwrap();
+        let mut reply = [0_u8; 5];
+        stream.read_exact(&mut reply).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), owner.remove(&target().execution_id))
+            .await
+            .expect("endpoint drain exceeded its bounded deadline");
+
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("forced endpoint relay remained open");
+        assert!(matches!(read, Ok(0) | Err(_)));
     }
 
     #[test]

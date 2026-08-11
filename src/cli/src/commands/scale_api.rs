@@ -3,6 +3,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::Duration,
 };
 
 use a3s_box_runtime::{
@@ -47,6 +48,10 @@ pub struct ScaleApiArgs {
     #[arg(long, value_name = "HOST", requires = "services")]
     endpoint_advertise_host: Option<String>,
 
+    /// Seconds to drain existing replica relay connections after endpoint withdrawal.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=300))]
+    endpoint_drain_timeout_secs: u64,
+
     /// Maximum aggregate desired replicas accepted by this authority.
     #[arg(long, default_value_t = 1000)]
     max_instances: u32,
@@ -76,7 +81,8 @@ pub async fn execute(args: ScaleApiArgs) -> Result<(), Box<dyn std::error::Error
                         .into(),
                 ),
             };
-        let endpoint_config = ScaleEndpointConfig::new(args.endpoint_bind_address, advertise_host)?;
+        let endpoint_config = ScaleEndpointConfig::new(args.endpoint_bind_address, advertise_host)?
+            .with_drain_timeout(Duration::from_secs(args.endpoint_drain_timeout_secs));
         ScaleApiState::with_reconciler(
             authority,
             LocalScaleReconciler::with_endpoint_config(manager, catalog, endpoint_config),
@@ -113,6 +119,7 @@ mod tests {
         assert!(args.desired_state_only);
         assert_eq!(args.endpoint_bind_address, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(args.endpoint_advertise_host.is_none());
+        assert_eq!(args.endpoint_drain_timeout_secs, 3);
     }
 
     #[test]
@@ -134,6 +141,8 @@ mod tests {
             "10.0.0.7",
             "--endpoint-advertise-host",
             "box.internal",
+            "--endpoint-drain-timeout-secs",
+            "4",
         ])
         .unwrap();
         let super::super::Command::ScaleApi(args) = cli.command else {
@@ -147,6 +156,7 @@ mod tests {
             args.endpoint_advertise_host.as_deref(),
             Some("box.internal")
         );
+        assert_eq!(args.endpoint_drain_timeout_secs, 4);
         assert_eq!(
             args.services.as_deref(),
             Some(std::path::Path::new("services.acl"))

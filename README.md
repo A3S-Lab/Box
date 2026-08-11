@@ -379,7 +379,8 @@ service "api" {
 a3s-box scale-api \
   --address 127.0.0.1:9090 \
   --state "$HOME/.a3s/scale-authority.json" \
-  --services ./scale-services.acl
+  --services ./scale-services.acl \
+  --endpoint-drain-timeout-secs 3
 ```
 
 The authority journals compare-and-set revisions and operation receipts before
@@ -392,6 +393,13 @@ leases a host TCP relay, and publishes the live URL through `GET
 mappings, `depends_on`, volumes, and explicit Compose networks are rejected;
 templates without a port remain valid for deployments that provide their own
 stable traffic endpoint.
+
+During scale-down, Gateway removes retiring replica slots from its atomic
+backend snapshot before it sends the mutation. Box then closes each retiring
+listener, lets already established relay connections finish, and only removes
+the execution after the relay set is empty or the bounded drain deadline
+expires. `--endpoint-drain-timeout-secs` defaults to 3 seconds and accepts
+1–300 seconds; connections still open at the deadline are force-closed.
 
 Endpoint listeners default to loopback. When Gateway runs on another trusted
 host, bind a private interface with `--endpoint-bind-address` and provide the

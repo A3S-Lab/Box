@@ -28,7 +28,10 @@ All notable changes to A3S Box will be documented in this file.
   ready generation-fenced HTTP endpoint relays. Compose ACL templates may
   declare one dynamic `0:<guest-port>` mapping; fixed or multiple mappings fail
   closed, endpoint bind/advertise policy is explicit, and authority-only mode
-  cannot be mistaken for workload reconciliation.
+  cannot be mistaken for workload reconciliation. Scale-down now closes a
+  retiring listener before waiting for existing relays to drain, force-closes
+  them at a configurable bounded deadline, and removes the execution only
+  after that drain phase.
 - **Backpressured exact-generation event streams in every native SDK.** Rust
   exposes a `Stream`, synchronous and asynchronous Python expose iterators,
   TypeScript exposes an abortable `AsyncIterable`, and Go exposes a
