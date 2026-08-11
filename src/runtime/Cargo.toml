@@ -25,7 +25,7 @@ required-features = ["vm"]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []
 pool = ["vm"]
-scale = []
+scale = ["dep:axum"]
 compose = ["vm"]
 operator = []
 build = ["dep:a3s-acl"]
@@ -62,7 +62,7 @@ spki = { workspace = true }
 base64 = { workspace = true }
 
 # HTTP client
-axum = { workspace = true }
+axum = { workspace = true, optional = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 oci-reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
