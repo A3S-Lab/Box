@@ -223,6 +223,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **OCI lifecycle identity after a failed scale attempt.** Box now includes the
+  exact runtime container target in OCI `create` and `start` operation IDs.
+  Replaying one execution remains stable, while a replacement execution for
+  the same deterministic Gateway scale slot cannot collide with the failed
+  execution retained in OCI Runtime's durable operation journal.
 - **Partial OCI live-resource updates.** Box now validates each resource change
   against the complete resulting Sandbox configuration but sends OCI Runtime
   only the fields selected by that operation. CPU quota and period remain one

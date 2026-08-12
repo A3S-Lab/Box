@@ -675,10 +675,10 @@ impl OciLifecycleAdapter {
         let started = match self
             .client
             .start(StartRequest {
-                context: operation_context(
+                context: start_operation_context(
                     preparation.operation_seed.as_str(),
                     preparation.execution_generation,
-                    "start",
+                    &target,
                     requested.class(),
                 )?,
                 target: target.clone(),
@@ -801,10 +801,10 @@ impl OciLifecycleAdapter {
         let started = self
             .client
             .start(StartRequest {
-                context: operation_context(
+                context: start_operation_context(
                     operation_seed.as_str(),
                     execution_generation,
-                    "start",
+                    &target,
                     required,
                 )?,
                 target: target.clone(),
@@ -1351,14 +1351,15 @@ impl OciLocalExecutionBackend {
         let execution_id = self.execution_id(record)?;
         let metadata = self.metadata(record)?;
         let isolation = oci_isolation_request(record.isolation);
-        let create_context = operation_context(
+        let runtime_container_id = runtime_container_id(&execution_id)?;
+        let create_context = create_operation_context(
             metadata.operation_id.as_str(),
             metadata.generation,
-            "create",
+            &runtime_container_id,
             isolation.class(),
         )?;
         Ok(OciBundlePreparationContext {
-            runtime_container_id: runtime_container_id(&execution_id)?,
+            runtime_container_id,
             create_context,
             isolation,
             attachment_capabilities: info.attachments.clone(),
@@ -2099,6 +2100,29 @@ pub(super) fn operation_context(
     OciOperationId::new(id)
         .map(OperationContext::new)
         .map_err(|error| sdk_error(operation, error))
+}
+
+fn create_operation_context(
+    seed: &str,
+    generation: ExecutionGeneration,
+    runtime_container_id: &ContainerId,
+    isolation: IsolationClass,
+) -> ExecutionManagerResult<OperationContext> {
+    operation_context(
+        seed,
+        generation,
+        "create",
+        (runtime_container_id, isolation),
+    )
+}
+
+fn start_operation_context(
+    seed: &str,
+    generation: ExecutionGeneration,
+    target: &ContainerTarget,
+    isolation: IsolationClass,
+) -> ExecutionManagerResult<OperationContext> {
+    operation_context(seed, generation, "start", (target, isolation))
 }
 
 fn validate_created_record(

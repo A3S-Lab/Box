@@ -1464,39 +1464,59 @@ fn maps_product_isolation_without_selecting_a_driver() {
 }
 
 #[test]
-fn operation_ids_are_stable_and_separate_by_generation_and_stage() {
+fn lifecycle_operation_ids_are_stable_and_fenced_by_runtime_target() {
     let generation = ExecutionGeneration::new(7).expect("Box generation");
-    let first = operation_context(
+    let first_id = ContainerId::new("a3s-box-first").expect("first runtime ID");
+    let second_id = ContainerId::new("a3s-box-second").expect("second runtime ID");
+    let first_target = ContainerTarget::exact(first_id.clone(), RUNTIME_GENERATION);
+    let second_target = ContainerTarget::exact(second_id.clone(), RUNTIME_GENERATION);
+    let first = create_operation_context(
         "box-operation",
         generation,
-        "create",
+        &first_id,
         IsolationClass::DedicatedVm,
     )
     .expect("first context");
-    let replay = operation_context(
+    let replay = create_operation_context(
         "box-operation",
         generation,
-        "create",
+        &first_id,
         IsolationClass::DedicatedVm,
     )
     .expect("replayed context");
-    let start = operation_context(
+    let second_execution = create_operation_context(
         "box-operation",
         generation,
-        "start",
+        &second_id,
+        IsolationClass::DedicatedVm,
+    )
+    .expect("second execution context");
+    let start = start_operation_context(
+        "box-operation",
+        generation,
+        &first_target,
         IsolationClass::DedicatedVm,
     )
     .expect("start context");
-    let next_generation = operation_context(
+    let second_start = start_operation_context(
+        "box-operation",
+        generation,
+        &second_target,
+        IsolationClass::DedicatedVm,
+    )
+    .expect("second start context");
+    let next_generation = create_operation_context(
         "box-operation",
         ExecutionGeneration::new(8).expect("next Box generation"),
-        "create",
+        &first_id,
         IsolationClass::DedicatedVm,
     )
     .expect("next-generation context");
 
     assert_eq!(first.operation_id, replay.operation_id);
+    assert_ne!(first.operation_id, second_execution.operation_id);
     assert_ne!(first.operation_id, start.operation_id);
+    assert_ne!(start.operation_id, second_start.operation_id);
     assert_ne!(first.operation_id, next_generation.operation_id);
 }
 
@@ -1986,11 +2006,31 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
         assert_eq!(creates.len(), 1);
         assert_eq!(creates[0].isolation, expected_request);
         assert_eq!(
+            creates[0].context,
+            create_operation_context(
+                operation.as_str(),
+                ExecutionGeneration::INITIAL,
+                &creates[0].id,
+                expected_request.class(),
+            )
+            .expect("target-fenced create context")
+        );
+        assert_eq!(
             creates[0].attachments.schema_version(),
             ATTACHMENT_SCHEMA_V1
         );
         assert_eq!(creates[0].attachments.process_io().stdin, IoMode::Null);
         assert_eq!(starts.len(), 1);
+        assert_eq!(
+            starts[0].context,
+            start_operation_context(
+                operation.as_str(),
+                ExecutionGeneration::INITIAL,
+                &starts[0].target,
+                expected_request.class(),
+            )
+            .expect("target-fenced start context")
+        );
         assert_ne!(
             creates[0].context.operation_id,
             starts[0].context.operation_id
