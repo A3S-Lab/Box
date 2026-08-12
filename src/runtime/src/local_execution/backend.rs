@@ -86,6 +86,17 @@ pub trait LocalExecutionBackend: Send + Sync {
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation>;
 
+    /// Return runtime-generated environment for a generation-fenced session.
+    ///
+    /// Values such as restricted-egress proxy credentials are intentionally
+    /// kept in the live backend rather than persisted in [`BoxRecord`].
+    async fn session_environment(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     async fn pause(
         &self,
         record: &BoxRecord,

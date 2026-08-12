@@ -359,9 +359,10 @@ impl VmController {
     ///
     /// Searches in order:
     /// 1. Same directory as current executable
-    /// 2. `~/.a3s/bin/` (SDK-extracted shim)
-    /// 3. target/debug or target/release (for development)
-    /// 4. PATH
+    /// 2. Parent of a Cargo integration-test `deps/` directory
+    /// 3. `~/.a3s/bin/` (SDK-extracted shim)
+    /// 4. target/debug or target/release (for development)
+    /// 5. PATH
     pub fn find_shim() -> Result<PathBuf> {
         // On Windows the binary has a .exe suffix; on other platforms it's empty.
         #[cfg(target_os = "windows")]
@@ -375,6 +376,14 @@ impl VmController {
                 let shim_path = exe_dir.join(shim_name);
                 if shim_path.exists() {
                     return Ok(shim_path);
+                }
+                if exe_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
+                    if let Some(profile_dir) = exe_dir.parent() {
+                        let shim_path = profile_dir.join(shim_name);
+                        if shim_path.exists() {
+                            return Ok(shim_path);
+                        }
+                    }
                 }
             }
         }
@@ -501,7 +510,7 @@ impl VmmProvider for VmController {
         }
 
         // Spawn shim subprocess
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         tracing::info!(
             shim = %self.shim_path.display(),
             box_id = %spec.box_id,
@@ -509,7 +518,7 @@ impl VmmProvider for VmController {
             net_proxy_fd = spec.network.as_ref().and_then(|net| net.net_proxy_fd),
             "Spawning shim subprocess"
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         tracing::info!(
             shim = %self.shim_path.display(),
             box_id = %spec.box_id,

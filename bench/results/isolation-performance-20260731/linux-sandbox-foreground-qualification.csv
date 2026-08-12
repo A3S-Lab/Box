@@ -1,0 +1,4 @@
+case,status,elapsed_ms,box_dirs,matching_processes,failure_class
+noop,fail,4779,1,1,sandbox_logs_did_not_finish_draining
+sleep_one,fail,5422,1,1,sandbox_logs_did_not_finish_draining
+echo_one,fail,4659,1,1,sandbox_logs_did_not_finish_draining

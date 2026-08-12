@@ -1,0 +1,83 @@
+{
+  "active_isolations": [
+    "microvm"
+  ],
+  "benchmark_mode": "standard",
+  "box": {
+    "binary": "a3s-box",
+    "sha256": "22e59449ed8a1164983a3f9a4038142f3fa50027a34fa12a9be38b294c13cfe7",
+    "source_commit": "d895fa75c7ef24f35257bf3c221f3b681820cd90",
+    "version": "a3s-box 3.2.0"
+  },
+  "final_resources": {
+    "box_dirs": 13,
+    "shims": 9
+  },
+  "finished_at": "2026-07-31T09:36:23.218525+00:00",
+  "finished_load_average": [
+    5.947,
+    7.823,
+    9.669
+  ],
+  "host": {
+    "cpu_affinity": [],
+    "cpu_count": 10,
+    "cpu_model": "Apple M2 Pro",
+    "load_average": [
+      5.371,
+      9.294,
+      10.723
+    ],
+    "machine": "arm64",
+    "memory_bytes": 17179869184,
+    "process_nice": 15,
+    "release": "25.3.0",
+    "system": "Darwin"
+  },
+  "host_lane": "macos-arm64-hvf",
+  "image": "docker.io/library/alpine:3.22",
+  "image_sha256": "b00c22537264b9f57edade2e85f2ebc6a9153eb09eba7bb1ef1c6575bafdd3ec",
+  "isolations_requested": [
+    "microvm"
+  ],
+  "oci_runtime_artifacts": {},
+  "oci_runtime_commit": "6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2",
+  "operator_cleanup": {
+    "apfs_mounts": 0,
+    "box_dirs": 0,
+    "shim_processes": 0
+  },
+  "parameters": {
+    "concurrency": 4,
+    "concurrency_runs": 5,
+    "cpu_mib": 256,
+    "exec_runs": 30,
+    "fork_runs": 3,
+    "io_mib": 256,
+    "lifecycle_runs": 20,
+    "memory_mib": 512,
+    "metadata_files": 2000,
+    "network_mib": 64,
+    "network_requests": 50,
+    "pool_runs": 20,
+    "pool_size": 4,
+    "workload_runs": 5
+  },
+  "post_run_operator_observation": {
+    "apfs_mounts": 13,
+    "box_dirs": 13,
+    "shim_processes": 9
+  },
+  "resource_delta": {
+    "box_dirs": 13,
+    "shims": 9
+  },
+  "run_id": "20260731T093127Z",
+  "schema": "a3s.box.isolation-mechanisms.v1",
+  "start_resources": {
+    "box_dirs": 0,
+    "shims": 0
+  },
+  "started_at": "2026-07-31T09:31:27.544490+00:00",
+  "unexpected_failures": 7
+}

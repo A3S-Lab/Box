@@ -244,9 +244,6 @@ fn validate_managed_records(records: &[BoxRecord]) -> Result<(), String> {
         let Some(metadata) = &record.managed_execution else {
             continue;
         };
-        metadata
-            .validate()
-            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
         ExecutionId::new(record.id.clone())
             .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
         record

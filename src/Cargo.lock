@@ -52,13 +52,17 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
+ "hex",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
  "windows-sys 0.48.0",
 ]
 
@@ -142,6 +146,7 @@ version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "libc",
+ "serde",
  "serde_json",
  "smoltcp",
  "tempfile",
@@ -170,6 +175,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "http 0.2.12",
  "libc",
  "oci-distribution",
  "oci-spec 0.6.7",

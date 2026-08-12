@@ -1,6 +1,6 @@
-#![cfg(any(target_os = "macos", all(test, unix)))]
+#![cfg(unix)]
 
-//! Pure-Rust userspace network proxy for libkrun on macOS.
+//! Pure-Rust userspace network proxy for libkrun MicroVMs.
 //!
 //! Uses a Unix datagram `socketpair()` to connect libkrun's virtio-net backend
 //! to the userspace gateway and provides the gateway services needed by the guest:
@@ -19,8 +19,10 @@ mod tests;
 
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
-use std::os::unix::net::UnixDatagram;
+use std::net::{
+    IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket,
+};
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -36,6 +38,9 @@ use smoltcp::wire::{
     EthernetFrame, EthernetProtocol, IpAddress, IpCidr, IpEndpoint, IpProtocol, Ipv4Address,
     Ipv4Packet, TcpPacket,
 };
+
+use a3s_box_core::vmm::NetworkEgressConfig;
+use a3s_box_core::EgressProtocol;
 
 use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
@@ -148,6 +153,7 @@ struct ProxyEngineConfig {
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
     bridge: Option<BridgePort>,
+    egress: Option<NetworkEgressConfig>,
 }
 
 struct ProxyEngine {
@@ -166,6 +172,7 @@ struct ProxyEngine {
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
     last_stats_write: std::time::Instant,
+    egress: Option<NetworkEgressConfig>,
 }
 
 impl ProxyEngine {
@@ -181,6 +188,7 @@ impl ProxyEngine {
             stats,
             stats_path,
             bridge,
+            egress,
         } = config;
 
         let mut device = UnixgramDevice::new(socket, bridge, Arc::clone(&stats));
@@ -241,6 +249,7 @@ impl ProxyEngine {
             stats,
             stats_path,
             last_stats_write: std::time::Instant::now(),
+            egress,
         }
     }
 
@@ -381,25 +390,69 @@ impl ProxyEngine {
         self.sockets.add(socket)
     }
 
+    fn outbound_connection_limit(&self) -> usize {
+        self.egress
+            .as_ref()
+            .map(|config| config.limits.max_concurrent_connections as usize)
+            .unwrap_or(MAX_OUTBOUND_CONNECTIONS)
+            .min(MAX_OUTBOUND_CONNECTIONS)
+    }
+
+    fn outbound_pending_limit(&self) -> usize {
+        self.egress
+            .as_ref()
+            .map(|config| config.limits.max_pending_connections as usize)
+            .unwrap_or(MAX_OUTBOUND_CONNECTIONS)
+            .min(self.outbound_connection_limit())
+    }
+
+    fn outbound_connect_timeout(&self) -> Duration {
+        self.egress
+            .as_ref()
+            .map(|config| Duration::from_millis(u64::from(config.limits.connect_timeout_ms)))
+            .unwrap_or(OUTBOUND_CONNECT_TIMEOUT)
+    }
+
+    fn outbound_idle_timeout(&self) -> smoltcp::time::Duration {
+        self.egress
+            .as_ref()
+            .map(|config| {
+                smoltcp::time::Duration::from_millis(u64::from(config.limits.idle_timeout_ms))
+            })
+            .unwrap_or(TCP_IDLE_TIMEOUT)
+    }
+
     // ── Discover guest outbound TCP connections ──────────────────────────────
 
     fn accept_outbound_flows(&mut self) {
+        let connection_limit = self.outbound_connection_limit();
+        let pending_limit = self.outbound_pending_limit();
+        let connect_timeout = self.outbound_connect_timeout();
+        let idle_timeout = self.outbound_idle_timeout();
+        let gateway_proxy_port = self
+            .egress
+            .as_ref()
+            .and_then(|config| config.http_proxy.map(|route| route.guest_port));
         let queued_flows: HashSet<_> = self
             .device
             .rx_queue
             .iter()
-            .filter_map(|frame| outbound_syn_flow(frame, self.guest_ip, self.gateway_ip))
+            .filter_map(|frame| {
+                outbound_syn_flow(frame, self.guest_ip, self.gateway_ip, gateway_proxy_port)
+            })
             .collect();
 
         for flow in queued_flows {
             if self.outbound_flow_exists(flow) {
                 continue;
             }
-            if self.pending_outbound.len() + self.active_outbound.len() >= MAX_OUTBOUND_CONNECTIONS
-                || self.outbound_connectors.load(Ordering::Relaxed) >= MAX_OUTBOUND_CONNECTIONS
+            if self.pending_outbound.len() + self.active_outbound.len() >= connection_limit
+                || self.pending_outbound.len() >= pending_limit
+                || self.outbound_connectors.load(Ordering::Relaxed) >= pending_limit
             {
                 tracing::warn!(
-                    limit = MAX_OUTBOUND_CONNECTIONS,
+                    connection_limit,
+                    pending_limit,
                     "NetProxy outbound connection limit reached"
                 );
                 continue;
@@ -408,6 +461,9 @@ impl ProxyEngine {
             let connect_result = match spawn_outbound_connect(
                 flow,
                 Arc::clone(&self.outbound_connectors),
+                self.gateway_ip,
+                self.egress.clone(),
+                connect_timeout,
             ) {
                 Ok(receiver) => receiver,
                 Err(error) => {
@@ -428,7 +484,7 @@ impl ProxyEngine {
                 continue;
             }
             socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
-            socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
+            socket.set_timeout(Some(idle_timeout));
             let handle = self.sockets.add(socket);
 
             self.pending_outbound.push(PendingOutboundConnection {
@@ -461,6 +517,7 @@ impl ProxyEngine {
     /// This runs before `iface.poll`, so an aborted smoltcp socket gets a chance
     /// to emit its reset before cleanup removes it.
     fn poll_outbound_connectors(&mut self) {
+        let connect_timeout = self.outbound_connect_timeout();
         for pending in &mut self.pending_outbound {
             if pending.failed || pending.host_stream.is_some() {
                 continue;
@@ -477,9 +534,7 @@ impl ProxyEngine {
                     pending.failed = true;
                 }
                 Err(TryRecvError::Empty) => {
-                    if pending.started_at.elapsed()
-                        > OUTBOUND_CONNECT_TIMEOUT + Duration::from_secs(1)
-                    {
+                    if pending.started_at.elapsed() > connect_timeout + Duration::from_secs(1) {
                         tracing::debug!(flow = ?pending.flow, "NetProxy host TCP connection timed out");
                         self.sockets.get_mut::<tcp::Socket>(pending.handle).abort();
                         pending.failed = true;
@@ -496,6 +551,7 @@ impl ProxyEngine {
     // ── Promote pending → active ──────────────────────────────────────────────
 
     fn promote_established(&mut self) {
+        let connect_timeout = self.outbound_connect_timeout();
         for pf in &mut self.port_forwards {
             let mut still_pending = Vec::new();
             let mut to_remove = Vec::new();
@@ -512,7 +568,7 @@ impl ProxyEngine {
                         tracing::debug!(handle = ?pending.handle, state = ?socket.state(), "NetProxy guest TCP connection closed before establishment");
                         to_remove.push(pending.handle);
                     }
-                    _ if pending.started_at.elapsed() > OUTBOUND_CONNECT_TIMEOUT => {
+                    _ if pending.started_at.elapsed() > connect_timeout => {
                         tracing::debug!(handle = ?pending.handle, "NetProxy guest TCP connection timed out");
                         to_remove.push(pending.handle);
                     }
@@ -683,6 +739,7 @@ fn outbound_syn_flow(
     frame: &[u8],
     expected_guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
+    gateway_proxy_port: Option<u16>,
 ) -> Option<OutboundFlow> {
     let ethernet = EthernetFrame::new_checked(frame).ok()?;
     if ethernet.dst_addr() != GATEWAY_MAC || ethernet.ethertype() != EthernetProtocol::Ipv4 {
@@ -695,17 +752,16 @@ fn outbound_syn_flow(
     }
     let guest_ip = Ipv4Addr::from(ipv4.src_addr().0);
     let remote_ip = Ipv4Addr::from(ipv4.dst_addr().0);
+    let tcp = TcpPacket::new_checked(ipv4.payload()).ok()?;
+    if !tcp.syn() || tcp.ack() || tcp.src_port() == 0 || tcp.dst_port() == 0 {
+        return None;
+    }
     if guest_ip != expected_guest_ip
-        || remote_ip == gateway_ip
+        || (remote_ip == gateway_ip && gateway_proxy_port != Some(tcp.dst_port()))
         || remote_ip.is_unspecified()
         || remote_ip.is_multicast()
         || remote_ip == Ipv4Addr::BROADCAST
     {
-        return None;
-    }
-
-    let tcp = TcpPacket::new_checked(ipv4.payload()).ok()?;
-    if !tcp.syn() || tcp.ack() || tcp.src_port() == 0 || tcp.dst_port() == 0 {
         return None;
     }
 
@@ -720,6 +776,9 @@ fn outbound_syn_flow(
 fn spawn_outbound_connect(
     flow: OutboundFlow,
     connector_count: Arc<AtomicUsize>,
+    gateway_ip: Ipv4Addr,
+    egress: Option<NetworkEgressConfig>,
+    connect_timeout: Duration,
 ) -> io::Result<Receiver<io::Result<TcpStream>>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     connector_count.fetch_add(1, Ordering::Relaxed);
@@ -727,13 +786,14 @@ fn spawn_outbound_connect(
     let spawn = std::thread::Builder::new()
         .name("a3s-netproxy-connect".to_string())
         .spawn(move || {
-            let address = SocketAddr::V4(SocketAddrV4::new(flow.remote_ip, flow.remote_port));
             let result =
-                TcpStream::connect_timeout(&address, OUTBOUND_CONNECT_TIMEOUT).and_then(|stream| {
-                    stream.set_nonblocking(true)?;
-                    let _ = stream.set_nodelay(true);
-                    Ok(stream)
-                });
+                outbound_connect_target(flow, gateway_ip, egress.as_ref(), connect_timeout)
+                    .and_then(|address| TcpStream::connect_timeout(&address, connect_timeout))
+                    .and_then(|stream| {
+                        stream.set_nonblocking(true)?;
+                        let _ = stream.set_nodelay(true);
+                        Ok(stream)
+                    });
             let _ = sender.send(result);
             thread_count.fetch_sub(1, Ordering::Relaxed);
         });
@@ -745,6 +805,84 @@ fn spawn_outbound_connect(
             Err(error)
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct EgressPolicyQuery {
+    protocol: EgressProtocol,
+    address: IpAddr,
+    port: u16,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EgressPolicyResponse {
+    allowed: bool,
+}
+
+fn outbound_connect_target(
+    flow: OutboundFlow,
+    gateway_ip: Ipv4Addr,
+    egress: Option<&NetworkEgressConfig>,
+    timeout: Duration,
+) -> io::Result<SocketAddr> {
+    let original = SocketAddr::V4(SocketAddrV4::new(flow.remote_ip, flow.remote_port));
+    let Some(egress) = egress else {
+        return Ok(original);
+    };
+
+    if let Some(route) = egress
+        .http_proxy
+        .filter(|route| flow.remote_ip == gateway_ip && flow.remote_port == route.guest_port)
+    {
+        if route.guest_port == 0 || !route.host_address.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "restricted egress proxy route is not loopback-scoped",
+            ));
+        }
+        return Ok(route.host_address);
+    }
+
+    authorize_raw_egress(egress, flow, timeout)?;
+    Ok(original)
+}
+
+fn authorize_raw_egress(
+    egress: &NetworkEgressConfig,
+    flow: OutboundFlow,
+    timeout: Duration,
+) -> io::Result<()> {
+    let mut stream = UnixStream::connect(&egress.policy_socket_path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let mut request = serde_json::to_vec(&EgressPolicyQuery {
+        protocol: EgressProtocol::Tcp,
+        address: IpAddr::V4(flow.remote_ip),
+        port: flow.remote_port,
+    })
+    .map_err(io::Error::other)?;
+    request.push(b'\n');
+    stream.write_all(&request)?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut response = Vec::with_capacity(64);
+    stream.take(1025).read_to_end(&mut response)?;
+    if response.len() > 1024 || response.last() != Some(&b'\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "egress policy channel returned an invalid response",
+        ));
+    }
+    let response: EgressPolicyResponse = serde_json::from_slice(&response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !response.allowed {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "egress policy denied outbound connection",
+        ));
+    }
+    Ok(())
 }
 
 /// Move as much data as each non-blocking endpoint can currently accept.

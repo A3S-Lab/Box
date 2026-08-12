@@ -21,6 +21,9 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 flate2 = "1.0"
 base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
@@ -33,4 +36,5 @@ name = "a3s_box_core"
 path = "src/lib.rs"
 
 [dev-dependencies]
+libc = { workspace = true }
 tempfile = { workspace = true }

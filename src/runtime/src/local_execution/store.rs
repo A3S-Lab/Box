@@ -208,6 +208,9 @@ impl LocalExecutionManager {
         update: RuntimeUpdate,
     ) -> ExecutionManagerResult<BoxRecord> {
         let execution_id = execution_id(record)?;
+        if to == ManagedExecutionState::Running {
+            self.require_running_receipt(record).await?;
+        }
         let current_generation = generation(record, &execution_id)?;
         let expected_generation = if matches!(
             (from, to),
@@ -243,6 +246,69 @@ impl LocalExecutionManager {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub(super) async fn require_running_receipt(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<()> {
+        let Some(metadata) = record.managed_execution.as_ref() else {
+            return Err(ExecutionManagerError::Internal(format!(
+                "execution {} has no managed lifecycle metadata",
+                record.id
+            )));
+        };
+        if !crate::security_receipt::required(&metadata.plan) {
+            return Ok(());
+        }
+
+        let target_generation = crate::security_receipt::target_launch_generation(record)
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        let receipt_record = record.clone();
+        let validation_task = tokio::task::spawn_blocking(move || {
+            crate::security_receipt::load_for_generation(&receipt_record, target_generation)
+        })
+        .await;
+        let expected_preparation = if record.status == ManagedExecutionState::Resuming.as_status()
+            && metadata.paused_with_memory
+        {
+            a3s_box_core::SecurityReceiptPreparation::ReadyToResume
+        } else {
+            a3s_box_core::SecurityReceiptPreparation::ReadyToLaunch
+        };
+        let validation_error = match validation_task {
+            Ok(Ok(Some(receipt))) if receipt.evidence.preparation == expected_preparation => None,
+            Ok(Ok(Some(receipt))) => Some(format!(
+                "receipt preparation {:?} does not match expected {:?}",
+                receipt.evidence.preparation, expected_preparation
+            )),
+            Ok(Ok(None)) => Some("required receipt loader returned no receipt".to_string()),
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(format!("security receipt validation task failed: {error}")),
+        };
+        if let Some(receipt_error) = validation_error {
+            let mut rollback_errors = Vec::new();
+            match self.backend.kill(record).await {
+                Ok(_) | Err(ExecutionManagerError::NotFound(_)) => {}
+                Err(error) => rollback_errors.push(format!("backend rollback failed: {error}")),
+            }
+            if let Err(error) =
+                crate::security_receipt::remove_uncommitted(&record.box_dir, target_generation)
+            {
+                rollback_errors.push(format!("receipt rollback failed: {error}"));
+            }
+            let suffix = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", rollback_errors.join("; "))
+            };
+            return Err(ExecutionManagerError::Internal(format!(
+                "required security receipt validation failed for generation {} of {}: {receipt_error}{suffix}",
+                target_generation.get(),
+                record.id
+            )));
+        }
+        Ok(())
     }
 }
 

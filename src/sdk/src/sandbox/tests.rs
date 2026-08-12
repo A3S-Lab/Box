@@ -84,6 +84,7 @@ impl RecordingRuntime {
             plan: resolve_execution(&config).unwrap(),
             resources: config.resources,
             started_at: Utc::now(),
+            security_receipt: None,
         }
     }
 
@@ -154,6 +155,7 @@ impl ExecutionManager for RecordingRuntime {
             generation: lease.generation,
             state: *self.state.lock().unwrap(),
             plan: lease.plan,
+            security_receipt: None,
         })
     }
 

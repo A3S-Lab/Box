@@ -205,7 +205,7 @@ impl VmManager {
             Ok((instance_spec, bundle_spec))
         })();
 
-        let (instance_spec, _bundle_spec) = match prepare {
+        let (instance_spec, bundle_spec) = match prepare {
             Ok(value) => value,
             Err(error) => {
                 self.cleanup_boot_failure().await;
@@ -233,6 +233,64 @@ impl VmManager {
             log_worker_ready_path: sandbox_dir.join("bundle").join("log-worker.ready"),
         };
         let launch_start = std::time::Instant::now();
+        if let Err(error) = self.validate_host_mount_configuration() {
+            self.cleanup_boot_failure().await;
+            return Err(error);
+        }
+        if crate::security_receipt::required(&execution_plan) {
+            let receipt_result = async {
+                let prepared = crate::security_receipt::PreparedSecurityReceipt {
+                    manifest_digest: None,
+                    artifacts: a3s_box_core::SecurityReceiptArtifactDigests {
+                        runtime_sha256: runtime.runtime_sha256.clone(),
+                        agent_sha256: runtime.agent_sha256.clone(),
+                    },
+                    owner: a3s_box_core::SecurityReceiptOwnerIdentity {
+                        platform: capabilities.platform.clone(),
+                        effective_uid: Some(user_namespace.effective_uid),
+                        effective_gid: Some(user_namespace.effective_gid),
+                        username: user_namespace.username.clone(),
+                    },
+                    runtime_controls: crate::security_receipt::sandbox_runtime_controls(
+                        &self.config,
+                        &bundle_spec,
+                    )?,
+                    host_capability_digest: a3s_box_core::canonical_json_digest(&capabilities)?,
+                    preparation: a3s_box_core::SecurityReceiptPreparation::ReadyToLaunch,
+                };
+                let receipt = crate::security_receipt::publish_prepared(
+                    &self.home_dir,
+                    &self.box_id,
+                    &self.config,
+                    &execution_plan,
+                    self.security_context.as_ref(),
+                    &layout.rootfs_path,
+                    prepared,
+                )
+                .await?;
+                Ok::<_, BoxError>(receipt)
+            }
+            .await;
+            match receipt_result {
+                Ok(Some(receipt)) => {
+                    self.published_security_receipt_generation = Some(receipt.evidence.generation);
+                }
+                Ok(None) => {
+                    self.cleanup_boot_failure().await;
+                    return Err(BoxError::StateError(
+                        "required security receipt publication returned no receipt".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    self.cleanup_boot_failure().await;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = self.validate_host_mount_configuration() {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        }
         let controller = A3sOciController::new(runtime);
         let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match controller.start(launch).await {
             Ok(handler) => Box::new(handler),
@@ -291,6 +349,7 @@ impl VmManager {
             "sandbox.start_total",
             boot_start.elapsed(),
         );
+        self.published_security_receipt_generation = None;
         Ok(())
     }
 
@@ -299,14 +358,49 @@ impl VmManager {
         layout: &super::BoxLayout,
         instance_spec: &crate::vmm::InstanceSpec,
     ) -> Result<(Vec<SandboxMount>, Vec<SandboxTmpfs>)> {
+        // Bundle compilation is the final boundary before A3S OCI receives
+        // host paths. Recheck both filesystem identity and request-to-plan
+        // correspondence here, after layout preparation.
+        self.validate_host_mount_configuration()?;
+
         let mut mounts = Vec::new();
         let mut user_destinations = HashSet::new();
         for volume in &self.config.volumes {
-            let mount = parse_sandbox_volume(volume)?;
+            let mount = parse_sandbox_volume_inner(volume, !self.host_mount_policy_enabled())?;
+            if self.host_mount_policy_enabled()
+                && !self.managed_volume_sources.contains(&mount.source)
+            {
+                let plan = self.resolved_execution_plan.as_ref().ok_or_else(|| {
+                    BoxError::StateError(
+                        "host mount policy has no resolved execution plan".to_string(),
+                    )
+                })?;
+                crate::host_mount_policy::validate_runtime_host_mount(
+                    plan,
+                    &mount.source,
+                    mount.destination.to_str().ok_or_else(|| {
+                        BoxError::ConfigError("Sandbox volume destination is not UTF-8".to_string())
+                    })?,
+                    mount.read_only,
+                )?;
+            }
             user_destinations.insert(mount.destination.clone());
             mounts.push(mount);
         }
         if !user_destinations.contains(Path::new("/workspace")) {
+            if self.host_mount_policy_enabled() && !self.config.workspace.as_os_str().is_empty() {
+                let plan = self.resolved_execution_plan.as_ref().ok_or_else(|| {
+                    BoxError::StateError(
+                        "host mount policy has no resolved execution plan".to_string(),
+                    )
+                })?;
+                crate::host_mount_policy::validate_runtime_host_mount(
+                    plan,
+                    &layout.workspace_path,
+                    "/workspace",
+                    false,
+                )?;
+            }
             mounts.insert(
                 0,
                 SandboxMount {
@@ -398,19 +492,29 @@ impl VmManager {
             );
         }
 
-        // Named volumes are resolved to host paths before VmManager boots, so
-        // their names are not present in BoxConfig. Match only mount roots that
-        // are registered in A3S's volume store; arbitrary bind mounts remain
-        // external and are never chowned implicitly.
-        for volume in volumes.values() {
-            let Ok(source) = PathBuf::from(&volume.mount_point).canonicalize() else {
-                // A stale, unused volume entry must not prevent unrelated boxes
-                // from starting. A mounted missing path already fails while the
-                // Sandbox volume specification is canonicalized.
-                continue;
-            };
-            if mounts.iter().any(|mount| mount.source == source) {
-                managed.insert(source);
+        let host_policy_enabled = self
+            .resolved_execution_plan
+            .as_ref()
+            .and_then(|plan| plan.security_policy.as_ref())
+            .and_then(|policy| policy.host_mounts.as_ref())
+            .is_some();
+        if host_policy_enabled {
+            // With policy enabled, only the exact named volumes carried by the
+            // persisted request are managed provenance. Merely pointing at a
+            // different registered volume must not bypass host-bind admission.
+            managed.extend(self.managed_volume_sources.iter().cloned());
+        } else {
+            // Preserve legacy behavior when the optional policy is absent.
+            for volume in volumes.values() {
+                let Ok(source) = PathBuf::from(&volume.mount_point).canonicalize() else {
+                    // A stale, unused volume entry must not prevent unrelated boxes
+                    // from starting. A mounted missing path already fails while the
+                    // Sandbox volume specification is canonicalized.
+                    continue;
+                };
+                if mounts.iter().any(|mount| mount.source == source) {
+                    managed.insert(source);
+                }
             }
         }
 
@@ -418,32 +522,22 @@ impl VmManager {
     }
 }
 
+#[cfg(test)]
 fn parse_sandbox_volume(value: &str) -> Result<SandboxMount> {
-    let (without_mode, read_only) = match value.rsplit_once(':') {
-        Some((prefix, "ro")) => (prefix, true),
-        Some((prefix, "rw")) => (prefix, false),
-        _ => (value, false),
-    };
-    let (source, destination) = without_mode.rsplit_once(':').ok_or_else(|| {
-        BoxError::ConfigError(format!(
-            "Invalid Sandbox volume {value:?}; expected host:guest[:ro|rw]"
-        ))
-    })?;
-    if source.is_empty() {
-        return Err(BoxError::ConfigError(format!(
-            "Sandbox volume source is empty: {value:?}"
-        )));
-    }
-    let source = PathBuf::from(source);
-    if !source.exists() {
+    parse_sandbox_volume_inner(value, true)
+}
+
+fn parse_sandbox_volume_inner(value: &str, create_missing: bool) -> Result<SandboxMount> {
+    let bind = a3s_box_core::HostBindMount::parse(value)?;
+    let source = bind.source;
+    if !source.exists() && create_missing {
         std::fs::create_dir_all(&source).map_err(BoxError::IoError)?;
     }
     let source = source.canonicalize().map_err(BoxError::IoError)?;
-    let destination = normalized_container_path(destination, "volume destination")?;
     Ok(SandboxMount {
         source,
-        destination,
-        read_only,
+        destination: PathBuf::from(bind.destination),
+        read_only: bind.read_only,
     })
 }
 
@@ -732,7 +826,12 @@ fn combined_runtime_digest(runtime_sha256: &str, agent_sha256: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use a3s_box_core::{volume::VolumeConfig, BoxConfig, EventEmitter};
+    use std::collections::BTreeMap;
+
+    use a3s_box_core::{
+        volume::VolumeConfig, BoxConfig, CreateExecutionRequest, EventEmitter, ExecutionIsolation,
+        ExecutionRecordPolicy, HostMountPolicy, SandboxSecurityPolicy,
+    };
 
     use super::*;
 
@@ -756,6 +855,59 @@ mod tests {
         assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
         assert!(normalized_container_path("relative", "test path").is_err());
         assert!(normalized_container_path("/work/../escape", "test path").is_err());
+    }
+
+    #[test]
+    fn sandbox_bundle_compilation_rejects_runtime_mount_drift() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let config = BoxConfig {
+            isolation: ExecutionIsolation::Sandbox,
+            volumes: vec![format!("{}:/workspace:ro", source.display())],
+            security_policy: Some(
+                SandboxSecurityPolicy::new().host_mounts(HostMountPolicy::agent_safe()),
+            ),
+            ..BoxConfig::default()
+        };
+        let request = CreateExecutionRequest {
+            external_sandbox_id: "sandbox-mount-drift".to_string(),
+            config: config.clone(),
+            labels: BTreeMap::new(),
+            policy: ExecutionRecordPolicy::default(),
+            rootfs_snapshot_id: None,
+        };
+        let plan =
+            crate::host_mount_policy::resolve_managed_execution_plan(directory.path(), &request)
+                .unwrap();
+        let mut manager = VmManager::with_box_id(
+            config,
+            EventEmitter::new(16),
+            "sandbox-mount-drift".to_string(),
+        );
+        manager.home_dir = directory.path().to_path_buf();
+        manager.resolved_execution_plan = Some(plan);
+        manager.config.volumes = vec![format!("{}:/workspace:rw", source.display())];
+        let layout = crate::vm::BoxLayout {
+            rootfs_path: directory.path().join("rootfs"),
+            exec_socket_path: directory.path().join("exec.sock"),
+            pty_socket_path: directory.path().join("pty.sock"),
+            attest_socket_path: directory.path().join("attest.sock"),
+            port_forward_socket_path: directory.path().join("portfwd.sock"),
+            workspace_path: directory.path().join("workspace"),
+            console_output: None,
+            oci_config: None,
+            prefer_image_rootfs_metadata: false,
+            tee_instance_config: None,
+        };
+
+        let error = manager
+            .compile_sandbox_mounts(&layout, &crate::vmm::InstanceSpec::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("host mount changed after planning"));
+        assert!(!directory.path().join("sandbox").exists());
     }
 
     #[test]

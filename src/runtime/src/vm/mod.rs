@@ -1,5 +1,6 @@
 //! VM Manager - Lifecycle management for MicroVM instances.
 
+pub(crate) mod egress;
 mod layout;
 mod network;
 mod ready;
@@ -11,6 +12,7 @@ mod windows_stop;
 
 pub(crate) use layout::{persistent_rootfs_generation_exists, runtime_socket_dir};
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -292,9 +294,16 @@ pub struct VmManager {
     #[cfg(unix)]
     pub(crate) exec_client: Option<ExecClient>,
 
-    /// Network backend manager for bridge networking (None if TSI mode).
-    /// Platform-specific: passt on Linux, gvproxy on macOS.
+    /// Network backend manager for an attached virtio-net device.
+    ///
+    /// Ordinary Linux bridges use passt. Restricted Unix MicroVM egress and
+    /// built-in macOS networking use the inherited userspace netproxy. Direct
+    /// TSI and intentionally disconnected guests do not allocate a manager.
     pub(crate) net_manager: Option<Box<dyn crate::network::NetworkBackend>>,
+
+    /// Generation-scoped proxy and authorization channel prepared before a
+    /// restricted MicroVM starts.
+    pub(crate) prepared_egress: Option<egress::PreparedMicrovmEgress>,
 
     /// A3S home directory (~/.a3s)
     pub(crate) home_dir: PathBuf,
@@ -307,6 +316,10 @@ pub struct VmManager {
     /// Reused anonymous volumes must survive failed restarts because they may
     /// contain data from an existing stopped box.
     pub(crate) created_anonymous_volumes: Vec<String>,
+
+    /// Canonical A3S-managed named-volume roots authorized by the persisted
+    /// creation request. Other paths under the volume store remain host binds.
+    pub(crate) managed_volume_sources: HashSet<PathBuf>,
 
     /// OCI image config resolved during the last successful boot.
     pub(crate) image_config: Option<crate::oci::OciImageConfig>,
@@ -352,6 +365,13 @@ pub struct VmManager {
 
     /// Backend-neutral resolution captured before any boot side effects.
     pub(crate) resolved_execution_plan: Option<ResolvedExecutionPlan>,
+
+    /// Managed request and generation identity used to seal required receipts.
+    pub(crate) security_context: Option<crate::security_receipt::ManagedSecurityContext>,
+
+    /// Receipt published by the current boot attempt but not yet committed by
+    /// a successful readiness result.
+    pub(crate) published_security_receipt_generation: Option<a3s_box_core::ExecutionGeneration>,
 }
 
 impl VmManager {
@@ -370,9 +390,11 @@ impl VmManager {
             #[cfg(unix)]
             exec_client: None,
             net_manager: None,
+            prepared_egress: None,
             home_dir,
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
+            managed_volume_sources: HashSet::new(),
             image_config: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
@@ -387,6 +409,8 @@ impl VmManager {
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
+            security_context: None,
+            published_security_receipt_generation: None,
         }
     }
 
@@ -404,9 +428,11 @@ impl VmManager {
             #[cfg(unix)]
             exec_client: None,
             net_manager: None,
+            prepared_egress: None,
             home_dir,
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
+            managed_volume_sources: HashSet::new(),
             image_config: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
@@ -421,6 +447,8 @@ impl VmManager {
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
+            security_context: None,
+            published_security_receipt_generation: None,
         }
     }
 
@@ -439,6 +467,25 @@ impl VmManager {
 
         if let Some(mut net_manager) = self.net_manager.take() {
             net_manager.stop();
+        }
+        if let Err(error) = self.stop_prepared_egress().await {
+            tracing::warn!(
+                box_id = %self.box_id,
+                error = %error,
+                "Failed to stop restricted egress after boot failure"
+            );
+        }
+
+        if let Some(generation) = self.published_security_receipt_generation.take() {
+            let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+            if let Err(error) = crate::security_receipt::remove_uncommitted(&box_dir, generation) {
+                tracing::warn!(
+                    box_id = %self.box_id,
+                    generation = generation.get(),
+                    error = %error,
+                    "Failed to remove an uncommitted security receipt after boot failure"
+                );
+            }
         }
 
         self.cleanup_created_anonymous_volumes();
@@ -498,6 +545,20 @@ impl VmManager {
             );
         }
 
+        let sandbox_dir = box_dir.join("sandbox");
+        match std::fs::remove_dir_all(&sandbox_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    box_id = %self.box_id,
+                    path = %sandbox_dir.display(),
+                    error = %error,
+                    "Failed to remove Sandbox preparation artifacts after boot failure"
+                );
+            }
+        }
+
         match std::fs::remove_dir_all(&socket_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -548,9 +609,11 @@ impl VmManager {
             #[cfg(unix)]
             exec_client: None,
             net_manager: None,
+            prepared_egress: None,
             home_dir,
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
+            managed_volume_sources: HashSet::new(),
             image_config: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
@@ -565,6 +628,8 @@ impl VmManager {
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
+            security_context: None,
+            published_security_receipt_generation: None,
         }
     }
 
@@ -777,6 +842,36 @@ impl VmManager {
     /// Return the immutable execution resolution captured for this boot.
     pub fn resolved_execution_plan(&self) -> Option<&ResolvedExecutionPlan> {
         self.resolved_execution_plan.as_ref()
+    }
+
+    fn validate_host_mount_configuration(&self) -> Result<()> {
+        let Some(plan) = self.resolved_execution_plan.as_ref() else {
+            if self
+                .config
+                .security_policy
+                .as_ref()
+                .and_then(|policy| policy.host_mount_policy())
+                .is_some()
+            {
+                return Err(BoxError::StateError(
+                    "host mount policy requires a resolved managed execution plan".to_string(),
+                ));
+            }
+            return Ok(());
+        };
+        crate::host_mount_policy::validate_runtime_mount_configuration(
+            plan,
+            &self.config,
+            &self.managed_volume_sources,
+        )
+    }
+
+    fn host_mount_policy_enabled(&self) -> bool {
+        self.resolved_execution_plan
+            .as_ref()
+            .and_then(|plan| plan.security_policy.as_ref())
+            .and_then(|policy| policy.host_mounts.as_ref())
+            .is_some()
     }
 
     /// Get the exit code of the container, if it has exited.
@@ -1091,6 +1186,16 @@ impl VmManager {
 
     /// Boot the VM.
     pub async fn boot(&mut self) -> Result<()> {
+        // Keep the public boot future small. The platform setup path carries a
+        // sizeable launch spec and several rollback states across await points;
+        // embedding that state in callers such as the warm-pool replenisher can
+        // otherwise overflow Tokio's default test/task stack as the lifecycle
+        // grows. One heap indirection also gives future lifecycle additions a
+        // stable stack budget.
+        Box::pin(self.boot_inner()).await
+    }
+
+    async fn boot_inner(&mut self) -> Result<()> {
         let boot_span = tracing::info_span!("vm_boot", box_id = %self.box_id);
         // Check and transition state: Created → booting
         {
@@ -1104,8 +1209,38 @@ impl VmManager {
         self.preserve_rootfs_on_boot_failure =
             self.config.persistent && layout::persistent_rootfs_generation_exists(&box_dir)?;
 
-        let execution_plan = a3s_box_core::resolve_execution(&self.config)?;
+        let execution_plan = match self.resolved_execution_plan.clone() {
+            Some(plan) => plan,
+            None => a3s_box_core::resolve_execution(&self.config)?,
+        };
         self.resolved_execution_plan = Some(execution_plan.clone());
+        if crate::security_receipt::required(&execution_plan) {
+            if self.security_context.is_none() {
+                return Err(BoxError::StateError(
+                    "required security receipt has no managed execution context".to_string(),
+                ));
+            }
+            if self.provider.is_some() {
+                return Err(BoxError::StateError(
+                    "required security receipts do not support an unverified injected VMM provider"
+                        .to_string(),
+                ));
+            }
+        }
+        if egress::requires_generation_context(&execution_plan) {
+            if self.security_context.is_none() {
+                return Err(BoxError::StateError(
+                    "restricted MicroVM egress has no managed execution generation".to_string(),
+                ));
+            }
+            if self.provider.is_some() {
+                return Err(BoxError::StateError(
+                    "restricted MicroVM egress does not support an unverified injected VMM provider"
+                        .to_string(),
+                ));
+            }
+        }
+        self.validate_host_mount_configuration()?;
         if execution_plan.backend.is_sandbox() {
             let boot_start = std::time::Instant::now();
             return self
@@ -1163,6 +1298,13 @@ impl VmManager {
             return Err(e);
         }
 
+        // 1.75. Start the generation-scoped proxy and raw-connect policy
+        // channel before the spec can expose any restricted network route.
+        if let Err(error) = self.prepare_microvm_egress(&execution_plan).await {
+            self.cleanup_boot_failure().await;
+            return Err(error);
+        }
+
         // 2. Build InstanceSpec
         let mut spec = match self.build_instance_spec(&layout) {
             Ok(s) => s,
@@ -1172,12 +1314,17 @@ impl VmManager {
             }
         };
 
-        // 2.5. Configure bridge networking if requested
+        // 2.5. Configure the mandatory egress netproxy or a user bridge.
         let bridge_network = match &self.config.network {
             a3s_box_core::NetworkMode::Bridge { network } => Some(network.clone()),
             _ => None,
         };
-        if let Some(network_name) = bridge_network {
+        if let Some(egress) = self.prepared_egress_network() {
+            if let Err(error) = self.configure_restricted_network(&mut spec, egress) {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        } else if let Some(network_name) = bridge_network {
             let net_config = match self.setup_bridge_network(&network_name) {
                 Ok(n) => n,
                 Err(e) => {
@@ -1251,6 +1398,7 @@ impl VmManager {
         }
 
         // 3. Initialize VMM provider (use injected provider or default to VmController)
+        let mut receipt_runtime_sha256 = None;
         if self.provider.is_none() {
             let shim_path = match VmController::find_shim() {
                 Ok(p) => p,
@@ -1259,6 +1407,15 @@ impl VmManager {
                     return Err(e);
                 }
             };
+            if crate::security_receipt::required(&execution_plan) {
+                receipt_runtime_sha256 = match crate::security_receipt::sha256_file(&shim_path) {
+                    Ok(digest) => Some(digest),
+                    Err(error) => {
+                        self.cleanup_boot_failure().await;
+                        return Err(error);
+                    }
+                };
+            }
             let controller = match VmController::new(shim_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1270,14 +1427,94 @@ impl VmManager {
         }
 
         // 4. Start VM via provider
-        let handler = {
-            let provider = self
-                .provider
-                .as_ref()
-                .ok_or_else(|| BoxError::BoxBootError {
-                    message: "VMM provider not initialized".to_string(),
-                    hint: Some("Ensure VmManager has a provider set before boot".to_string()),
+        if let Err(error) = self.validate_host_mount_configuration() {
+            self.cleanup_boot_failure().await;
+            return Err(error);
+        }
+        if crate::security_receipt::required(&execution_plan) {
+            let receipt_result = async {
+                let executable = Path::new(&spec.entrypoint.executable);
+                let agent_relative = executable.strip_prefix("/").map_err(|_| {
+                    BoxError::StateError(format!(
+                        "required security receipt cannot resolve guest executable {}",
+                        spec.entrypoint.executable
+                    ))
                 })?;
+                if agent_relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    return Err(BoxError::StateError(format!(
+                        "required security receipt rejects non-normal guest executable {}",
+                        spec.entrypoint.executable
+                    )));
+                }
+                let prepared = crate::security_receipt::PreparedSecurityReceipt {
+                    manifest_digest: None,
+                    artifacts: a3s_box_core::SecurityReceiptArtifactDigests {
+                        runtime_sha256: receipt_runtime_sha256.clone().ok_or_else(|| {
+                            BoxError::StateError(
+                                "required security receipt has no VMM artifact digest".to_string(),
+                            )
+                        })?,
+                        agent_sha256: crate::security_receipt::sha256_file(
+                            &layout.rootfs_path.join(agent_relative),
+                        )?,
+                    },
+                    owner: crate::security_receipt::host_owner_identity(),
+                    runtime_controls: crate::security_receipt::microvm_runtime_controls(
+                        &self.config,
+                    )?,
+                    host_capability_digest: a3s_box_core::canonical_json_digest(
+                        &a3s_box_core::PlatformCapabilities::current(),
+                    )?,
+                    preparation: a3s_box_core::SecurityReceiptPreparation::ReadyToLaunch,
+                };
+                let receipt = crate::security_receipt::publish_prepared(
+                    &self.home_dir,
+                    &self.box_id,
+                    &self.config,
+                    &execution_plan,
+                    self.security_context.as_ref(),
+                    &layout.rootfs_path,
+                    prepared,
+                )
+                .await?;
+                Ok::<_, BoxError>(receipt)
+            }
+            .await;
+            match receipt_result {
+                Ok(Some(receipt)) => {
+                    self.published_security_receipt_generation = Some(receipt.evidence.generation);
+                }
+                Ok(None) => {
+                    self.cleanup_boot_failure().await;
+                    return Err(BoxError::StateError(
+                        "required security receipt publication returned no receipt".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    self.cleanup_boot_failure().await;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = self.validate_host_mount_configuration() {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        }
+        let handler = {
+            let provider = match self.provider.as_ref() {
+                Some(provider) => provider,
+                None => {
+                    let error = BoxError::BoxBootError {
+                        message: "VMM provider not initialized".to_string(),
+                        hint: Some("Ensure VmManager has a provider set before boot".to_string()),
+                    };
+                    self.cleanup_boot_failure().await;
+                    return Err(error);
+                }
+            };
             let vm_start_span = tracing::info_span!(parent: &boot_span, "vm_start");
             match async { provider.start(&spec).await }
                 .instrument(vm_start_span)
@@ -1375,6 +1612,7 @@ impl VmManager {
 
         tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
 
+        self.published_security_receipt_generation = None;
         Ok(())
     }
 
@@ -1433,6 +1671,7 @@ impl VmManager {
 
         // Mark as stopped first — ensures state is correct even if handler.stop() fails.
         *state = BoxState::Stopped;
+        drop(state);
 
         // Stop the VM handler and capture its exit code before it's dropped.
         // A stop failure must NOT skip the host-resource teardown below (network
@@ -1569,6 +1808,16 @@ impl VmManager {
             net.stop();
         }
         self.net_manager = None;
+        if let Err(error) = self.stop_prepared_egress().await {
+            tracing::error!(
+                box_id = %self.box_id,
+                error = %error,
+                "Failed to stop restricted egress; continuing teardown"
+            );
+            if stop_error.is_none() {
+                stop_error = Some(error);
+            }
+        }
 
         // Cleanup rootfs provider (unmount overlay if applicable)
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
@@ -1767,6 +2016,9 @@ impl VmManager {
 
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {
+                if !self.prepared_egress_is_running() {
+                    return Ok(false);
+                }
                 // Check if handler reports VM is running
                 if let Some(ref handler) = *self.handler.read().await {
                     Ok(handler.is_running())
@@ -2042,6 +2294,152 @@ mod tests {
         }
     }
 
+    #[test]
+    fn boot_future_keeps_a_bounded_caller_stack_footprint() {
+        let mut manager = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(16),
+            "boot-future-size".to_string(),
+        );
+        let future = manager.boot();
+
+        assert!(
+            std::mem::size_of_val(&future) <= 128,
+            "VmManager::boot must keep its launch state boxed"
+        );
+    }
+
+    #[cfg(unix)]
+    fn restricted_manager(
+        home_dir: &std::path::Path,
+        box_id: &str,
+    ) -> (VmManager, ResolvedExecutionPlan, std::path::PathBuf) {
+        let config = BoxConfig {
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .egress(a3s_box_core::EgressPolicy::DenyAll),
+            ),
+            ..BoxConfig::default()
+        };
+        let plan = a3s_box_core::resolve_execution(&config).unwrap();
+        let mut manager = VmManager::with_box_id(config, EventEmitter::new(16), box_id.to_string());
+        manager.home_dir = home_dir.to_path_buf();
+        manager.resolved_execution_plan = Some(plan.clone());
+        manager.security_context = Some(crate::security_receipt::ManagedSecurityContext {
+            generation: a3s_box_core::ExecutionGeneration::INITIAL,
+            request_digest: "sha256:test-request".to_string(),
+        });
+        let policy_socket = runtime_socket_dir(home_dir, box_id).join("egress-generation-1.sock");
+        (manager, plan, policy_socket)
+    }
+
+    #[tokio::test]
+    async fn required_receipt_without_managed_context_fails_before_layout_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = BoxConfig {
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .receipt(a3s_box_core::ReceiptPolicy::Required),
+            ),
+            ..BoxConfig::default()
+        };
+        let mut manager =
+            VmManager::with_box_id(config, EventEmitter::new(16), "receipt-context".to_string());
+        manager.home_dir = directory.path().to_path_buf();
+
+        let error = manager.boot().await.unwrap_err().to_string();
+
+        assert!(error.contains("no managed execution context"));
+        assert!(!directory.path().join("boxes").exists());
+        assert!(manager.handler.read().await.is_none());
+        assert!(manager.provider.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricted_egress_without_managed_context_fails_before_layout_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = BoxConfig {
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .egress(a3s_box_core::EgressPolicy::DenyAll),
+            ),
+            ..BoxConfig::default()
+        };
+        let mut manager =
+            VmManager::with_box_id(config, EventEmitter::new(16), "egress-context".to_string());
+        manager.home_dir = directory.path().to_path_buf();
+
+        let error = manager.boot().await.unwrap_err().to_string();
+
+        assert!(
+            error.contains("no managed execution generation"),
+            "unexpected error: {error}"
+        );
+        assert!(!directory.path().join("boxes").exists());
+        assert!(manager.handler.read().await.is_none());
+        assert!(manager.prepared_egress.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovered_restricted_vm_without_its_generation_proxy_is_unhealthy() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manager, _, _) = restricted_manager(directory.path(), "recovered-restricted-egress");
+        *manager.state.write().await = BoxState::Ready;
+        *manager.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::new(AtomicBool::new(false)),
+        }));
+
+        assert!(!manager.health_check().await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unlinked_generation_policy_socket_makes_restricted_vm_unhealthy() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut manager, plan, policy_socket) =
+            restricted_manager(directory.path(), "unlinked-restricted-egress");
+        manager.prepare_microvm_egress(&plan).await.unwrap();
+        assert!(manager.prepared_egress_is_running());
+
+        std::fs::remove_file(&policy_socket).unwrap();
+
+        assert!(!manager.prepared_egress_is_running());
+        manager.stop_prepared_egress().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn boot_failure_stops_generation_proxy_and_removes_policy_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut manager, plan, policy_socket) =
+            restricted_manager(directory.path(), "restricted-boot-failure");
+        manager.prepare_microvm_egress(&plan).await.unwrap();
+        assert!(policy_socket.exists());
+
+        manager.cleanup_boot_failure().await;
+
+        assert!(manager.prepared_egress.is_none());
+        assert!(!policy_socket.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn destroy_stops_generation_proxy_and_removes_policy_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut manager, plan, policy_socket) =
+            restricted_manager(directory.path(), "restricted-destroy");
+        manager.prepare_microvm_egress(&plan).await.unwrap();
+        *manager.state.write().await = BoxState::Ready;
+        assert!(policy_socket.exists());
+
+        manager.destroy().await.unwrap();
+
+        assert!(manager.prepared_egress.is_none());
+        assert!(!policy_socket.exists());
+    }
+
     // Regression: a handler-stop failure must still run the host teardown
     // (overlay unmount, socket + box dirs). Pre-fix, destroy_with_options
     // returned early on the stop error and leaked the box directory on every
@@ -2135,6 +2533,13 @@ mod tests {
         std::fs::write(&sentinel, b"persistent guest data").unwrap();
         std::fs::create_dir_all(vm.socket_dir()).unwrap();
         std::fs::write(vm.socket_dir().join("stale.sock"), b"stale").unwrap();
+        let receipt = box_dir.join("security/receipts/generation-1.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, b"uncommitted").unwrap();
+        vm.published_security_receipt_generation = Some(a3s_box_core::ExecutionGeneration::INITIAL);
+        let sandbox_artifact = box_dir.join("sandbox/bundle/config.json");
+        std::fs::create_dir_all(sandbox_artifact.parent().unwrap()).unwrap();
+        std::fs::write(&sandbox_artifact, b"uncommitted").unwrap();
         vm.preserve_rootfs_on_boot_failure = true;
 
         vm.cleanup_boot_failure().await;
@@ -2149,6 +2554,8 @@ mod tests {
             !vm.socket_dir().exists(),
             "transient sockets should still be removed after a failed restart"
         );
+        assert!(!receipt.exists());
+        assert!(!box_dir.join("sandbox").exists());
     }
 
     #[tokio::test]

@@ -29,7 +29,9 @@ Options:
 Checks:
   host     summary has result=pass and failed_iterations=0, final
            shim/mount/box/socket counts do not exceed the start sample, and
-           start/final/iteration CLI snapshots plus per-iteration logs exist.
+           start/final/iteration CLI snapshots plus per-iteration logs exist;
+           selected restricted-egress logs contain all 14 required case
+           markers exactly once.
   cluster  summary result=pass, selected nodes are nonzero, evidence proves
            the RuntimeClass object, runtimeClassName, kubectl exec, and
            selected-node labels and placement via explicit artifacts, failed
@@ -960,7 +962,7 @@ require_host_selected_suites() {
     local suites key value selected=0
 
     suites="$(require_kv_nonempty "$metadata" selected_suites "host")"
-    for key in core host linux_run cri bench; do
+    for key in core host linux_run cri egress bench; do
         value="$(host_selected_suite_flag "$suites" "$key")" ||
             fail "host metadata selected_suites missing $key flag"
         case "$value" in
@@ -984,6 +986,53 @@ require_host_iteration_log() {
     require_nonempty_file "$EVIDENCE_DIR/iteration-${iteration}-${name}.log"
 }
 
+verify_host_egress_log() {
+    local path="$1"
+    local label="$2"
+    local expected_cases=(
+        unsupported_preflight
+        dedicated_kernel_boot
+        deny_all
+        hostname_allow
+        hostname_deny
+        proxy_bypass
+        direct_ipv4
+        dns_udp_ipv6_doh_quic
+        raw_ipv4
+        concurrent_isolation
+        generation_restart
+        policy_channel_failure
+        decision_logs
+        cleanup
+    )
+    local marker_count case_name expected count
+
+    require_nonempty_file "$path"
+    marker_count="$(grep -cE '^A3S_EGRESS_CASE[[:space:]]' "$path" 2>/dev/null || true)"
+    if [ "$marker_count" -ne "${#expected_cases[@]}" ]; then
+        fail "$label has wrong A3S_EGRESS_CASE marker count: found=$marker_count expected=${#expected_cases[@]}"
+    fi
+
+    if grep -qE '^A3S_EGRESS_CASE case=[^[:space:]]+ result=(fail|error)$' "$path"; then
+        fail "$label contains a failed restricted-egress case"
+    fi
+
+    for case_name in "${expected_cases[@]}"; do
+        expected="A3S_EGRESS_CASE case=$case_name result=pass"
+        count="$(grep -cFx "$expected" "$path" 2>/dev/null || true)"
+        case "$count" in
+            1)
+                ;;
+            0)
+                fail "$label missing passing restricted-egress case: $case_name"
+                ;;
+            *)
+                fail "$label has duplicate passing restricted-egress case: $case_name count=$count"
+                ;;
+        esac
+    done
+}
+
 require_host_declared_suite_logs() {
     local suites="$1"
     local iterations="$2"
@@ -1001,6 +1050,11 @@ require_host_declared_suite_logs() {
         fi
         if [ "$(host_selected_suite_flag "$suites" cri)" = "1" ]; then
             require_host_iteration_log "$iteration" cri
+        fi
+        if [ "$(host_selected_suite_flag "$suites" egress)" = "1" ]; then
+            verify_host_egress_log \
+                "$EVIDENCE_DIR/iteration-${iteration}-egress.log" \
+                "host iteration $iteration restricted-egress log"
         fi
         if [ "$(host_selected_suite_flag "$suites" bench)" = "1" ]; then
             require_host_iteration_log "$iteration" bench-leak

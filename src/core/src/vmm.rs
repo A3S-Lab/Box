@@ -9,8 +9,8 @@
 //! - [`VmmProvider`] — start VMs from an [`InstanceSpec`]
 //! - [`VmHandler`] — lifecycle operations on a running VM
 
-use std::net::Ipv4Addr;
-#[cfg(target_os = "macos")]
+use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(unix)]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
@@ -53,28 +53,32 @@ pub struct TeeInstanceConfig {
     pub tee_type: String,
 }
 
-/// Network instance configuration for the network backend (passt on Linux, gvproxy on macOS).
+/// Network instance configuration for one virtio-net backend.
+///
+/// Ordinary Linux bridge networking uses passt. The built-in userspace
+/// netproxy serves macOS bridge/default networking and the restricted
+/// MicroVM egress path on Unix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkInstanceConfig {
-    /// Path to the network backend Unix socket (passt on Linux, gvproxy on macOS).
+    /// Path to the network backend Unix socket when a pathname transport is used.
     pub net_socket_path: PathBuf,
 
     /// Optional JSON stats file written by the userspace network backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_stats_path: Option<PathBuf>,
 
-    /// Pre-opened Unix datagram socket fd inherited by the shim on macOS.
-    #[cfg(target_os = "macos")]
+    /// Pre-opened Unix datagram socket fd inherited by the shim.
+    #[cfg(unix)]
     #[serde(default)]
     pub net_socket_fd: Option<RawFd>,
 
-    /// Proxy-side Unix datagram socket fd inherited by the shim on macOS.
-    #[cfg(target_os = "macos")]
+    /// Proxy-side Unix datagram socket fd inherited by the shim.
+    #[cfg(unix)]
     #[serde(default)]
     pub net_proxy_fd: Option<RawFd>,
 
     /// Shared Unix-datagram Ethernet switch directory for this bridge network.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_socket_dir: Option<PathBuf>,
 
@@ -93,6 +97,47 @@ pub struct NetworkInstanceConfig {
     /// DNS servers to configure inside the guest.
     #[serde(default)]
     pub dns_servers: Vec<Ipv4Addr>,
+
+    /// Mandatory host authorization channel for restricted MicroVM egress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<NetworkEgressConfig>,
+}
+
+/// Host-side controls consumed by the inherited userspace netproxy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkEgressConfig {
+    /// Owner-only Unix socket consulted before every raw outbound connection.
+    pub policy_socket_path: PathBuf,
+    /// Guest gateway route for the mandatory HTTP/HTTPS proxy, when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_proxy: Option<NetworkHttpProxyRoute>,
+    /// Resource limits copied from the normalized generation policy.
+    pub limits: crate::security_policy::EgressPolicyLimits,
+}
+
+/// One guest-visible gateway port routed to a loopback-only host proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkHttpProxyRoute {
+    pub guest_port: u16,
+    pub host_address: SocketAddr,
+}
+
+/// Whether libkrun may transparently impersonate guest internet sockets.
+///
+/// This value is carried separately from [`NetworkInstanceConfig`] because a
+/// VM without a virtio-net device can mean either the default TSI transport or
+/// an intentionally disconnected guest. Older serialized specs did not carry
+/// this field, so the default preserves their TSI behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TsiMode {
+    /// Allow libkrun to hijack guest internet sockets through TSI.
+    #[default]
+    Enabled,
+    /// Keep plain vsock control channels but do not hijack internet sockets.
+    Disabled,
 }
 
 /// Complete configuration for a VM instance.
@@ -181,6 +226,13 @@ pub struct InstanceSpec {
     #[serde(default)]
     pub network: Option<NetworkInstanceConfig>,
 
+    /// Explicit TSI socket-hijack mode.
+    ///
+    /// A disabled value is required for `NetworkMode::None` and for network
+    /// transports that install their own mandatory egress boundary.
+    #[serde(default)]
+    pub tsi_mode: TsiMode,
+
     /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls).
     #[serde(default)]
     pub resource_limits: ResourceLimits,
@@ -218,6 +270,7 @@ impl Default for InstanceSpec {
             port_map: Vec::new(),
             user: None,
             network: None,
+            tsi_mode: TsiMode::Enabled,
             resource_limits: ResourceLimits::default(),
             log_config: crate::log::LogConfig::default(),
         }
@@ -425,6 +478,7 @@ mod tests {
         assert!(spec.tee_config.is_none());
         assert!(spec.user.is_none());
         assert!(spec.network.is_none());
+        assert_eq!(spec.tsi_mode, TsiMode::Enabled);
         assert!(spec.console_output.is_none());
     }
 
@@ -459,6 +513,7 @@ mod tests {
             port_map: vec!["8080:80".to_string()],
             user: Some("1000:1000".to_string()),
             network: None,
+            tsi_mode: TsiMode::Disabled,
             resource_limits: ResourceLimits::default(),
             log_config: crate::log::LogConfig::default(),
         };
@@ -482,6 +537,18 @@ mod tests {
         );
         assert_eq!(deserialized.port_map, vec!["8080:80"]);
         assert_eq!(deserialized.user, Some("1000:1000".to_string()));
+        assert_eq!(deserialized.tsi_mode, TsiMode::Disabled);
+    }
+
+    #[test]
+    fn legacy_instance_spec_defaults_to_tsi_enabled() {
+        let value = serde_json::to_value(InstanceSpec::default()).unwrap();
+        let mut object = value.as_object().unwrap().clone();
+        object.remove("tsi_mode");
+
+        let decoded: InstanceSpec = serde_json::from_value(object.into()).unwrap();
+
+        assert_eq!(decoded.tsi_mode, TsiMode::Enabled);
     }
 
     #[test]
@@ -508,17 +575,25 @@ mod tests {
             network: Some(NetworkInstanceConfig {
                 net_socket_path: PathBuf::from("/tmp/net.sock"),
                 net_stats_path: Some(PathBuf::from("/tmp/net.stats.json")),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 net_socket_fd: Some(42),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 net_proxy_fd: Some(43),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 bridge_socket_dir: Some(PathBuf::from("/tmp/a3s-switch")),
                 ip_address: "10.0.0.2".parse().unwrap(),
                 gateway: "10.0.0.1".parse().unwrap(),
                 prefix_len: 24,
                 mac_address: [0x02, 0x42, 0xac, 0x11, 0x00, 0x02],
                 dns_servers: vec!["8.8.8.8".parse().unwrap()],
+                egress: Some(NetworkEgressConfig {
+                    policy_socket_path: PathBuf::from("/tmp/egress-policy.sock"),
+                    http_proxy: Some(NetworkHttpProxyRoute {
+                        guest_port: 3128,
+                        host_address: "127.0.0.1:43128".parse().unwrap(),
+                    }),
+                    limits: crate::EgressPolicyLimits::default(),
+                }),
             }),
             ..Default::default()
         };
@@ -531,14 +606,20 @@ mod tests {
             net.net_stats_path,
             Some(PathBuf::from("/tmp/net.stats.json"))
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         assert_eq!(net.net_socket_fd, Some(42));
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         assert_eq!(net.net_proxy_fd, Some(43));
         assert_eq!(net.ip_address, "10.0.0.2".parse::<Ipv4Addr>().unwrap());
         assert_eq!(net.gateway, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(net.prefix_len, 24);
         assert_eq!(net.dns_servers.len(), 1);
+        let egress = net.egress.unwrap();
+        assert_eq!(
+            egress.policy_socket_path,
+            PathBuf::from("/tmp/egress-policy.sock")
+        );
+        assert_eq!(egress.http_proxy.unwrap().guest_port, 3128);
     }
 
     #[test]

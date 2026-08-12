@@ -165,14 +165,59 @@ runtime state changes instead of being silently stored or weakened.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, and copy-on-write restore.
 - **Networking and Compose** — TSI, named bridge networks, peer discovery, TCP
-  publishing, generation-fenced Sandbox loopback forwarding, and an explicit
-  Compose subset. ACL is the canonical project format; YAML is a bounded
-  compatibility input.
+  publishing, generation-fenced Sandbox loopback forwarding, an optional
+  generation-scoped MicroVM egress boundary, and an explicit Compose subset.
+  ACL is the canonical project format; YAML is a bounded compatibility input.
 - **Startup acceleration** — rootfs and layer caches, pre-booted warm pools,
   build leases, one-shot pool routing, and opt-in Linux/KVM snapshot-fork.
-- **Security and operations** — resource and syscall controls, audit evidence,
-  stats, events, Prometheus metrics, health monitoring, SEV-SNP-oriented TEE
+- **Security and operations** — resource and syscall controls, optional host
+  bind admission, generation-scoped security receipts, audit evidence, stats,
+  events, Prometheus metrics, health monitoring, SEV-SNP-oriented TEE
   workflows, sealing, and secret injection.
+
+`CreateExecutionRequest` can opt into `ReceiptPolicy::Required`. The runtime
+then publishes an immutable `SecurityReceiptV1` before the backend launch call
+and returns it through `ExecutionLease.security_receipt` and
+`ExecutionStatus.security_receipt`. Receipts live under the execution-owned
+`security/receipts/` directory, bind the resolved policy and runtime controls
+to one generation, and never include environment values or secret contents.
+A missing, malformed, stale, or mismatched required receipt prevents a
+generation from being recovered as running. This local evidence is separate
+from the best-effort audit event log and is not remote attestation; see the
+[optional security policy threat model](docs/optional-security-policy-threat-model.md).
+
+The core policy model defines normalized `DenyAll` and `Allowlist` egress
+semantics for HTTP/HTTPS hostname rules and TCP/UDP IP/CIDR rules, including
+IDNA normalization and bounded connection, DNS, timeout, and decision-log
+resources.
+
+The internal Unix MicroVM path now implements the first enforceable subset.
+For a restricted policy with `NetworkMode::Tsi`, Box replaces direct TSI
+internet-socket handling with an isolated virtio-net gateway. Raw IPv4 TCP
+connects consult an owner-only, generation-scoped policy channel, while
+HTTP/HTTPS hostname traffic uses an authenticated loopback host proxy exposed
+at `10.90.0.1:3128`. Guest proxy variables are replaced, guest DNS forwarding
+is disabled, proxy health participates in VM health, and teardown removes the
+generation socket and listeners.
+
+This is a backend-scoped guardrail qualification, not a blanket production
+security or release qualification. Host-independent tests cover policy
+decisions, routing, authentication, failure, and cleanup. The complete
+14-case real-host matrix passes on both Apple Silicon/HVF and Linux
+x86_64/KVM, including bypass attempts, policy-channel failure, generation
+isolation, decision logs, and cleanup. Retained `G2` runs completed on
+2026-07-31: HVF ran for 7,203 seconds across 286 passing iterations, and KVM
+ran for 7,215 seconds across 336 passing iterations. Every iteration contained
+all 14 required passing markers exactly once, both runs had zero failed
+iterations, and final shim, mount, box-directory, socket-directory, and state
+size counters matched their starting values.
+
+That evidence qualifies only the `SEC-01` restricted-egress subset on the two
+named host/backend classes. It does not qualify the broader Box capability
+matrix. Sandbox, Bridge and disabled transports, raw UDP, raw IPv6, published
+ports, sidecars, warm pools, snapshot-fork, and VM restore remain rejected
+with restricted egress. The local machine bridge is still protocol v2, so
+public cross-language policy builders remain roadmap work.
 
 A few common workflows:
 
@@ -300,8 +345,8 @@ or go directly to the [Rust](src/sdk/README.md),
 
 | Path | Status | Host and current boundary |
 | --- | --- | --- |
-| Linux MicroVM | Primary local runtime; conditional real-host gate | KVM and libkrun; the self-hosted KVM job must be armed explicitly and hosted CI does not prove a real boot |
-| macOS MicroVM | Implemented and build-checked | Apple Silicon and Hypervisor.framework; real HVF host validation is still required, and Intel macOS is unsupported |
+| Linux MicroVM | Primary local runtime; restricted-egress `G2` qualified | KVM and libkrun; the qualification covers `SEC-01` on real x86_64/KVM only, while broader release evidence still requires an explicitly armed self-hosted job |
+| macOS MicroVM | Implemented; restricted-egress `G2` qualified | Apple Silicon and Hypervisor.framework; the qualification covers `SEC-01` on HVF only, broader release soak evidence remains required, and Intel macOS is unsupported |
 | Windows MicroVM | Implemented and real-host soak validated | x86_64 WHPX; currently one vCPU, with no interactive exec, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Preview and real-runtime CI validated | Explicit `--isolation sandbox` through the packaged A3S OCI Runtime; shares the host kernel and rejects VM-only features |
 | Kubernetes | Preview | CRI v1 server plus containerd runtime-v2 shim and opt-in `runtimeClassName: a3s-box`; complete CRI conformance is not claimed |
@@ -313,8 +358,8 @@ or go directly to the [Rust](src/sdk/README.md),
 | --- | --- | --- |
 | Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
 | Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles, then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
-| Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
-| macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
+| Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`; the restricted-egress lane also passed a retained 7,215-second `G2` run with 336 iterations and zero failures on real x86_64/KVM. | The workflow is conditionally skipped without the enrolled runner. This `G2` result qualifies only the exact 14-case `SEC-01` restricted-egress contract; other capabilities keep their own release-evidence requirements. |
+| macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target; the restricted-egress lane also passed a retained 7,203-second `G2` run with 286 iterations and zero failures on a real Apple Silicon/HVF host. | This `G2` result qualifies only the exact 14-case `SEC-01` restricted-egress contract; other capabilities keep their own release-evidence requirements. |
 | SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
 
 An implemented API is not a production guarantee for every host or threat
@@ -385,8 +430,11 @@ Repository components are grouped by responsibility:
 
 ## Documentation
 
+- [Optional security policy roadmap](ROADMAP.md)
+- [Optional security policy threat model](docs/optional-security-policy-threat-model.md)
 - [Host integration and real-runtime validation](docs/host-integration.md)
 - [Cross-capability soak test plan](docs/soak-test-plan.md)
+- [Isolation and mechanism performance report (2026-07-31)](docs/isolation-performance-report-20260731.md)
 - [Shared-kernel Sandbox threat model](docs/host-sandbox-backend-design.md)
 - [Windows WHPX support](docs/windows-whpx.md)
 - [SDK API and programmable CI/CD](docs/sdk-api-and-programmable-cicd.md)

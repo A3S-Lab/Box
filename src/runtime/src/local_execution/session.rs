@@ -27,13 +27,15 @@ impl ExecutionSessionManager for LocalExecutionManager {
         mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecOutput> {
         request.streaming = false;
-        let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
-        inherit_container_environment(&record.env, &mut request.env);
+        let (record, runtime_environment, client, stream) =
+            self.bind_exec(execution_id, generation).await?;
+        inherit_container_environment(&record.env, &runtime_environment, &mut request.env);
         debug_session_environment(
             execution_id,
             generation,
             "execute",
             &record.env,
+            &runtime_environment,
             &request.env,
         );
         client
@@ -48,13 +50,15 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
-        inherit_container_environment(&record.env, &mut request.env);
+        let (record, runtime_environment, client, stream) =
+            self.bind_exec(execution_id, generation).await?;
+        inherit_container_environment(&record.env, &runtime_environment, &mut request.env);
         debug_session_environment(
             execution_id,
             generation,
             "start_process",
             &record.env,
+            &runtime_environment,
             &request.env,
         );
         let stream = client
@@ -77,12 +81,14 @@ impl ExecutionSessionManager for LocalExecutionManager {
         let record = self
             .require_running_record(execution_id, generation)
             .await?;
-        inherit_container_environment(&record.env, &mut request.env);
+        let runtime_environment = self.backend.session_environment(&record).await?;
+        inherit_container_environment(&record.env, &runtime_environment, &mut request.env);
         debug_session_environment(
             execution_id,
             generation,
             "start_pty",
             &record.env,
+            &runtime_environment,
             &request.env,
         );
         let socket_path = record.exec_socket_path.with_file_name("pty.sock");
@@ -108,7 +114,8 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
-        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        let (_record, _runtime_environment, client, stream) =
+            self.bind_exec(execution_id, generation).await?;
         client
             .file_transfer_on_stream(stream, &request)
             .await
@@ -121,7 +128,8 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
-        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        let (_record, _runtime_environment, client, stream) =
+            self.bind_exec(execution_id, generation).await?;
         client
             .filesystem_on_stream(stream, &request)
             .await
@@ -134,10 +142,16 @@ impl LocalExecutionManager {
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
-    ) -> ExecutionManagerResult<(BoxRecord, ExecClient, tokio::net::UnixStream)> {
+    ) -> ExecutionManagerResult<(
+        BoxRecord,
+        Vec<(String, String)>,
+        ExecClient,
+        tokio::net::UnixStream,
+    )> {
         let record = self
             .require_running_record(execution_id, generation)
             .await?;
+        let runtime_environment = self.backend.session_environment(&record).await?;
         let client = ExecClient::for_socket(&record.exec_socket_path);
         let stream = client
             .open_stream()
@@ -145,7 +159,7 @@ impl LocalExecutionManager {
             .map_err(|error| session_error(execution_id, "connect exec", error))?;
         self.require_same_runtime(&record, execution_id, generation)
             .await?;
-        Ok((record, client, stream))
+        Ok((record, runtime_environment, client, stream))
     }
 
     async fn require_same_runtime(
@@ -176,11 +190,18 @@ impl LocalExecutionManager {
 /// The guest normally inherits these values from guest-init, but the execution
 /// contract must not depend on which user a later request selects. Per-request
 /// values remain authoritative, matching OCI/Docker exec environment semantics.
-fn inherit_container_environment(container: &HashMap<String, String>, request: &mut Vec<String>) {
+fn inherit_container_environment(
+    container: &HashMap<String, String>,
+    runtime: &[(String, String)],
+    request: &mut Vec<String>,
+) {
     let mut merged: BTreeMap<String, String> = container
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    for (key, value) in runtime {
+        merged.insert(key.clone(), value.clone());
+    }
     let mut malformed = Vec::new();
     for entry in std::mem::take(request) {
         if let Some((key, value)) = entry.split_once('=') {
@@ -207,10 +228,14 @@ fn debug_session_environment(
     generation: ExecutionGeneration,
     operation: &str,
     container: &HashMap<String, String>,
+    runtime: &[(String, String)],
     request: &[String],
 ) {
     let mut container_keys: Vec<&str> = container.keys().map(String::as_str).collect();
     container_keys.sort_unstable();
+    let mut runtime_keys: Vec<&str> = runtime.iter().map(|(key, _)| key.as_str()).collect();
+    runtime_keys.sort_unstable();
+    runtime_keys.dedup();
     let mut request_keys: Vec<&str> = request
         .iter()
         .filter_map(|entry| entry.split_once('=').map(|(key, _)| key))
@@ -225,6 +250,8 @@ fn debug_session_environment(
         operation,
         container_env_count = container.len(),
         container_env_keys = ?container_keys,
+        runtime_env_count = runtime.len(),
+        runtime_env_keys = ?runtime_keys,
         merged_request_env_count = request.len(),
         merged_request_env_keys = ?request_keys,
         malformed_request_entries,
@@ -369,7 +396,7 @@ mod tests {
         ]);
         let mut request = vec!["BETA=request".to_string(), "GAMMA=request".to_string()];
 
-        inherit_container_environment(&container, &mut request);
+        inherit_container_environment(&container, &[], &mut request);
 
         assert_eq!(
             request,
@@ -378,11 +405,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_environment_overrides_persisted_values_and_request_remains_authoritative() {
+        let container = HashMap::from([
+            ("HTTP_PROXY".to_string(), "persisted".to_string()),
+            ("NO_PROXY".to_string(), "persisted".to_string()),
+        ]);
+        let runtime = vec![
+            ("HTTP_PROXY".to_string(), "generation-token".to_string()),
+            ("NO_PROXY".to_string(), "localhost".to_string()),
+        ];
+        let mut request = vec!["NO_PROXY=*".to_string()];
+
+        inherit_container_environment(&container, &runtime, &mut request);
+
+        assert_eq!(request, ["HTTP_PROXY=generation-token", "NO_PROXY=*"]);
+    }
+
+    #[test]
     fn malformed_request_entries_are_preserved_after_inherited_values() {
         let container = HashMap::from([("ALPHA".to_string(), "container".to_string())]);
         let mut request = vec!["MALFORMED".to_string()];
 
-        inherit_container_environment(&container, &mut request);
+        inherit_container_environment(&container, &[], &mut request);
 
         assert_eq!(request, ["ALPHA=container", "MALFORMED"]);
     }

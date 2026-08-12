@@ -1071,9 +1071,11 @@ mod tests {
             #[cfg(unix)]
             exec_client: None,
             net_manager: None,
+            prepared_egress: None,
             home_dir: home_dir.to_path_buf(),
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
+            managed_volume_sources: std::collections::HashSet::new(),
             image_config: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
@@ -1088,6 +1090,8 @@ mod tests {
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
+            security_context: None,
+            published_security_receipt_generation: None,
         }
     }
 

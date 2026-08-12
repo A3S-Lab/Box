@@ -2,6 +2,7 @@ use super::device::{is_tx_backpressure, NetStatsSnapshot, MAX_FRAME};
 use super::manager::{parse_port_forwards, write_stats_file};
 use super::*;
 
+use a3s_box_core::vmm::{NetworkEgressConfig, NetworkHttpProxyRoute};
 use smoltcp::wire::EthernetAddress;
 
 const TEST_GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 88, 0, 2);
@@ -55,6 +56,7 @@ fn test_guest_and_proxy(dns_servers: Vec<Ipv4Addr>) -> (TestGuest, ProxyEngine) 
         stats,
         stats_path: None,
         bridge: None,
+        egress: None,
     });
     (guest, proxy)
 }
@@ -156,7 +158,7 @@ fn outbound_syn_flow_preserves_original_destination() {
     let frame = outbound_syn_frame(GATEWAY_MAC.0, guest, 50123, remote, 443, false);
 
     assert_eq!(
-        outbound_syn_flow(&frame, guest, gateway),
+        outbound_syn_flow(&frame, guest, gateway, None),
         Some(OutboundFlow {
             guest_ip: guest,
             guest_port: 50123,
@@ -172,11 +174,147 @@ fn outbound_syn_flow_ignores_retransmitted_handshake_ack_and_peer_mac() {
     let gateway = Ipv4Addr::new(10, 88, 0, 1);
     let remote = Ipv4Addr::new(93, 184, 216, 34);
     let ack = outbound_syn_frame(GATEWAY_MAC.0, guest, 50123, remote, 443, true);
-    assert_eq!(outbound_syn_flow(&ack, guest, gateway), None);
+    assert_eq!(outbound_syn_flow(&ack, guest, gateway, None), None);
 
     let peer_mac = [0x02, 0x42, 10, 88, 0, 3];
     let peer = outbound_syn_frame(peer_mac, guest, 50123, remote, 443, false);
-    assert_eq!(outbound_syn_flow(&peer, guest, gateway), None);
+    assert_eq!(outbound_syn_flow(&peer, guest, gateway, None), None);
+}
+
+#[test]
+fn restricted_gateway_proxy_flow_is_discovered_only_on_declared_port() {
+    let guest = Ipv4Addr::new(10, 88, 0, 2);
+    let gateway = Ipv4Addr::new(10, 88, 0, 1);
+    let frame = outbound_syn_frame(GATEWAY_MAC.0, guest, 50123, gateway, 3128, false);
+    let expected = OutboundFlow {
+        guest_ip: guest,
+        guest_port: 50123,
+        remote_ip: gateway,
+        remote_port: 3128,
+    };
+
+    assert_eq!(
+        outbound_syn_flow(&frame, guest, gateway, Some(3128)),
+        Some(expected)
+    );
+    assert_eq!(outbound_syn_flow(&frame, guest, gateway, None), None);
+    assert_eq!(outbound_syn_flow(&frame, guest, gateway, Some(3129)), None);
+}
+
+#[test]
+fn restricted_egress_maps_only_the_declared_gateway_proxy_route() {
+    let directory = tempfile::tempdir().unwrap();
+    let host_proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let host_address = host_proxy.local_addr().unwrap();
+    let egress = NetworkEgressConfig {
+        policy_socket_path: directory.path().join("missing-policy.sock"),
+        http_proxy: Some(NetworkHttpProxyRoute {
+            guest_port: 3128,
+            host_address,
+        }),
+        limits: Default::default(),
+    };
+    let proxy_flow = OutboundFlow {
+        guest_ip: TEST_GUEST_IP,
+        guest_port: 50_123,
+        remote_ip: TEST_GATEWAY_IP,
+        remote_port: 3128,
+    };
+
+    assert_eq!(
+        outbound_connect_target(
+            proxy_flow,
+            TEST_GATEWAY_IP,
+            Some(&egress),
+            Duration::from_secs(1),
+        )
+        .unwrap(),
+        host_address
+    );
+
+    let bypass = OutboundFlow {
+        remote_port: 3129,
+        ..proxy_flow
+    };
+    let error = outbound_connect_target(
+        bypass,
+        TEST_GATEWAY_IP,
+        Some(&egress),
+        Duration::from_millis(50),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    ));
+}
+
+#[test]
+fn restricted_raw_tcp_requires_policy_channel_allow_response() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("policy.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        for allowed in [false, true] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).unwrap();
+            assert!(request.contains("\"protocol\":\"tcp\""));
+            assert!(request.contains("\"address\":\"93.184.216.34\""));
+            assert!(request.contains("\"port\":443"));
+            stream
+                .write_all(format!("{{\"allowed\":{allowed}}}\n").as_bytes())
+                .unwrap();
+        }
+    });
+    let egress = NetworkEgressConfig {
+        policy_socket_path: socket_path,
+        http_proxy: None,
+        limits: Default::default(),
+    };
+    let flow = OutboundFlow {
+        guest_ip: TEST_GUEST_IP,
+        guest_port: 50_123,
+        remote_ip: Ipv4Addr::new(93, 184, 216, 34),
+        remote_port: 443,
+    };
+
+    let denied =
+        outbound_connect_target(flow, TEST_GATEWAY_IP, Some(&egress), Duration::from_secs(1))
+            .unwrap_err();
+    assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        outbound_connect_target(flow, TEST_GATEWAY_IP, Some(&egress), Duration::from_secs(1),)
+            .unwrap(),
+        SocketAddr::V4(SocketAddrV4::new(flow.remote_ip, flow.remote_port))
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn restricted_proxy_route_rejects_non_loopback_host_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let egress = NetworkEgressConfig {
+        policy_socket_path: directory.path().join("policy.sock"),
+        http_proxy: Some(NetworkHttpProxyRoute {
+            guest_port: 3128,
+            host_address: "192.0.2.10:3128".parse().unwrap(),
+        }),
+        limits: Default::default(),
+    };
+    let flow = OutboundFlow {
+        guest_ip: TEST_GUEST_IP,
+        guest_port: 50_123,
+        remote_ip: TEST_GATEWAY_IP,
+        remote_port: 3128,
+    };
+
+    assert_eq!(
+        outbound_connect_target(flow, TEST_GATEWAY_IP, Some(&egress), Duration::from_secs(1),)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
 }
 
 #[test]
@@ -195,6 +333,7 @@ fn proxy_engine_enables_any_ip_for_transparent_outbound_tcp() {
         stats: Arc::new(NetStats::default()),
         stats_path: None,
         bridge: None,
+        egress: None,
     });
 
     assert!(engine.iface.any_ip());

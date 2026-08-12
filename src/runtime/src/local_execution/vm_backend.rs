@@ -79,7 +79,7 @@ impl VmLocalExecutionBackend {
             ))
         })?;
         metadata
-            .validate()
+            .validate_with_home(&self.home_dir)
             .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
         if record.isolation != metadata.request.config.isolation {
             return Err(ExecutionManagerError::Internal(format!(
@@ -92,6 +92,18 @@ impl VmLocalExecutionBackend {
 
     fn new_manager(&self, record: &BoxRecord) -> ExecutionManagerResult<VmManager> {
         let metadata = self.metadata(record)?;
+        let security_context = if crate::security_receipt::required(&metadata.plan)
+            || crate::vm::egress::requires_generation_context(&metadata.plan)
+        {
+            Some(crate::security_receipt::ManagedSecurityContext {
+                generation: crate::security_receipt::target_launch_generation(record)
+                    .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?,
+                request_digest: a3s_box_core::canonical_json_digest(&metadata.request)
+                    .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?,
+            })
+        } else {
+            None
+        };
         let mut config = metadata.request.config.clone();
         if let Some(shm_size) = metadata.request.policy.shm_size {
             let has_shared_memory_mount = config
@@ -109,8 +121,14 @@ impl VmLocalExecutionBackend {
             manager.set_pull_progress_fn(pull_progress_fn);
         }
         manager.anonymous_volumes = record.anonymous_volumes.clone();
+        manager.managed_volume_sources = crate::host_mount_policy::named_volume_sources(
+            &self.home_dir,
+            &metadata.request.policy.volume_names,
+        )
+        .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
         manager.set_log_config(record.log_config.clone());
         manager.resolved_execution_plan = Some(metadata.plan.clone());
+        manager.security_context = security_context;
         Ok(manager)
     }
 
@@ -558,6 +576,22 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         self.inspect_registered(record, manager).await
     }
 
+    async fn session_environment(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<Vec<(String, String)>> {
+        let metadata = self.metadata(record)?;
+        if metadata.plan.backend.is_sandbox() {
+            return Ok(Vec::new());
+        }
+        let shared = self.require_microvm(record).await?;
+        let manager = shared.lock().await;
+        require_recorded_pid(record, &manager).await?;
+        manager
+            .managed_session_environment()
+            .map_err(|error| runtime_error("bind session environment", record, error))
+    }
+
     async fn pause(
         &self,
         record: &BoxRecord,
@@ -593,6 +627,22 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let metadata = self.metadata(record)?;
+        if crate::security_receipt::required(&metadata.plan) {
+            let receipt_record = record.clone();
+            let target_generation = crate::security_receipt::target_launch_generation(record)
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+            tokio::task::spawn_blocking(move || {
+                crate::security_receipt::publish_resume(&receipt_record, target_generation)
+            })
+            .await
+            .map_err(|error| {
+                ExecutionManagerError::Internal(format!(
+                    "security receipt publication task failed for {}: {error}",
+                    record.id
+                ))
+            })?
+            .map_err(|error| runtime_error("publish resume receipt", record, error))?;
+        }
         if metadata.plan.backend.is_sandbox() {
             return self.resume_sandbox(record).await;
         }

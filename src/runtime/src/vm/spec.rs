@@ -53,6 +53,22 @@ fn secure_guest_control_file(path: &Path) -> Result<()> {
 impl VmManager {
     /// Build InstanceSpec from config and layout.
     pub(crate) fn build_instance_spec(&mut self, layout: &BoxLayout) -> Result<InstanceSpec> {
+        // Revalidate the persisted bind identities and the raw request mapping
+        // immediately before any shares or file-mount staging are compiled.
+        self.validate_host_mount_configuration()?;
+
+        if self.host_mount_policy_enabled() && !self.config.workspace.as_os_str().is_empty() {
+            let plan = self.resolved_execution_plan.as_ref().ok_or_else(|| {
+                BoxError::StateError("host mount policy has no resolved execution plan".to_string())
+            })?;
+            crate::host_mount_policy::validate_runtime_host_mount(
+                plan,
+                &layout.workspace_path,
+                "/workspace",
+                false,
+            )?;
+        }
+
         // Build filesystem mounts
         let mut fs_mounts = vec![FsMount {
             tag: "workspace".to_string(),
@@ -75,7 +91,9 @@ impl VmManager {
             .map(|volume| Self::parse_volume_spec(volume))
             .collect::<Result<Vec<_>>>()?;
         for (i, volume) in parsed_volumes.iter().enumerate() {
-            let mount = Self::prepare_volume_mount(volume, i, &filemounts_dir)?;
+            let expected_source = self.expected_policy_volume_source(volume)?;
+            let mount =
+                Self::prepare_volume_mount(volume, i, &filemounts_dir, expected_source.as_deref())?;
             fs_mounts.push(mount);
         }
 
@@ -155,6 +173,12 @@ impl VmManager {
         // (which would drop PID 1 and break init). Only the legacy
         // no-guest-init path falls back to the shim's set_uid.
         let has_guest_init = guest_init_exec.is_some();
+        if self.prepared_egress.is_some() && !has_guest_init {
+            return Err(BoxError::BoxBootError {
+                message: "restricted MicroVM egress requires the managed guest init".to_string(),
+                hint: Some("use an A3S Box image with /sbin/init installed".to_string()),
+            });
+        }
         let workdir = Self::effective_workdir(&self.config, layout.oci_config.as_ref());
         let user = Self::effective_user(&self.config, layout.oci_config.as_ref());
 
@@ -180,6 +204,7 @@ impl VmManager {
                 }
             };
             a3s_box_core::env::merge_env_pairs(&mut container_env, &self.config.extra_env);
+            self.apply_microvm_egress_environment(&mut container_env);
 
             // Stage process configuration in the guest rootfs instead of adding
             // user-controlled exec/argv strings to libkrun's kernel command line.
@@ -523,6 +548,12 @@ impl VmManager {
             // legacy no-guest-init path uses the shim's set_uid.
             user: if has_guest_init { None } else { user },
             network: None, // Network config is set by CLI when --network is specified
+            tsi_mode: match &self.config.network {
+                a3s_box_core::NetworkMode::Tsi => a3s_box_core::vmm::TsiMode::Enabled,
+                a3s_box_core::NetworkMode::Bridge { .. } | a3s_box_core::NetworkMode::None => {
+                    a3s_box_core::vmm::TsiMode::Disabled
+                }
+            },
             resource_limits: self.config.resource_limits.clone(),
             log_config: self.log_config.clone(),
             // KSM page-merging: config field, or the A3S_BOX_KSM env override.
@@ -689,42 +720,56 @@ impl VmManager {
     /// not consume the host/guest separator. The guest always uses an absolute
     /// Linux path, even when the host path is a Windows drive or UNC path.
     fn parse_volume_spec(volume: &str) -> Result<ParsedVolumeMount> {
-        let (mount, read_only) = match volume.rsplit_once(':') {
-            Some((mount, "ro")) => (mount, true),
-            Some((mount, "rw")) => (mount, false),
-            Some((mount, mode)) if mount.contains(':') && !mode.starts_with('/') => {
+        if let Some((mount, mode)) = volume.rsplit_once(':') {
+            if !matches!(mode, "ro" | "rw") && mount.contains(':') && !mode.starts_with('/') {
                 return Err(BoxError::ConfigError(format!(
-                    "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
-                    mode, volume
+                    "Invalid volume mode '{mode}' (expected 'ro' or 'rw'): {volume}"
                 )));
             }
-            _ => (volume, false),
-        };
-
-        let (host_path, guest_path) = mount.rsplit_once(':').ok_or_else(|| {
+        }
+        let bind = a3s_box_core::HostBindMount::parse(volume).map_err(|error| {
             BoxError::ConfigError(format!(
-                "Invalid volume format (expected host:guest[:ro|rw]): {}",
-                volume
+                "Invalid volume format (expected host:guest[:ro|rw]): {volume}: {error}"
             ))
         })?;
-        if host_path.is_empty() || !guest_path.starts_with('/') {
-            return Err(BoxError::ConfigError(format!(
-                "Invalid volume format (expected host:guest[:ro|rw]): {}",
-                volume
-            )));
-        }
 
         Ok(ParsedVolumeMount {
-            host_path: PathBuf::from(host_path),
-            guest_path: guest_path.to_string(),
-            read_only,
+            host_path: bind.source,
+            guest_path: bind.destination,
+            read_only: bind.read_only,
         })
+    }
+
+    fn expected_policy_volume_source(&self, volume: &ParsedVolumeMount) -> Result<Option<PathBuf>> {
+        if !self.host_mount_policy_enabled() {
+            return Ok(None);
+        }
+        let source = volume.host_path.canonicalize().map_err(|error| {
+            BoxError::ConfigError(format!(
+                "host mount policy cannot resolve {} during MicroVM share compilation: {error}",
+                volume.host_path.display()
+            ))
+        })?;
+        if self.managed_volume_sources.contains(&source) {
+            return Ok(Some(source));
+        }
+        let plan = self.resolved_execution_plan.as_ref().ok_or_else(|| {
+            BoxError::StateError("host mount policy has no resolved execution plan".to_string())
+        })?;
+        crate::host_mount_policy::validate_runtime_host_mount(
+            plan,
+            &source,
+            &volume.guest_path,
+            volume.read_only,
+        )?;
+        Ok(Some(source))
     }
 
     fn prepare_volume_mount(
         volume: &ParsedVolumeMount,
         index: usize,
         filemounts_dir: &Path,
+        expected_source: Option<&Path>,
     ) -> Result<FsMount> {
         let host_path = volume.host_path.clone();
         if !host_path.exists() {
@@ -747,6 +792,16 @@ impl VmManager {
                 ),
                 hint: None,
             })?;
+        if let Some(expected) = expected_source {
+            if expected != host_path {
+                return Err(BoxError::ConfigError(format!(
+                    "host mount source changed during MicroVM share compilation for {}: expected {}, found {}",
+                    volume.guest_path,
+                    expected.display(),
+                    host_path.display()
+                )));
+            }
+        }
 
         let host_path = if host_path.is_file() {
             Self::stage_single_file_mount(&host_path, &volume.guest_path, index, filemounts_dir)?
@@ -773,7 +828,7 @@ impl VmManager {
     #[cfg(test)]
     fn parse_volume_mount(volume: &str, index: usize, filemounts_dir: &Path) -> Result<FsMount> {
         let parsed_volume = Self::parse_volume_spec(volume)?;
-        Self::prepare_volume_mount(&parsed_volume, index, filemounts_dir)
+        Self::prepare_volume_mount(&parsed_volume, index, filemounts_dir, None)
     }
 
     /// Stage a single-file bind source into a per-box directory so virtio-fs (which
@@ -851,11 +906,16 @@ impl VmManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
 
     use a3s_box_core::config::BoxConfig;
     use a3s_box_core::event::EventEmitter;
+    use a3s_box_core::{
+        CreateExecutionRequest, EgressPolicy, ExecutionGeneration, ExecutionRecordPolicy,
+        HostMountPolicy, SandboxSecurityPolicy,
+    };
 
     use super::*;
     use tempfile::tempdir;
@@ -961,6 +1021,21 @@ mod tests {
             .unwrap()
     }
 
+    fn staged_environment(layout: &BoxLayout) -> BTreeMap<String, String> {
+        fs::read_to_string(
+            layout
+                .rootfs_path
+                .join(RUNTIME_ENV_PATH.trim_start_matches('/')),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (key, value) = line.split_once('=').unwrap();
+            (key.to_string(), b64d(value))
+        })
+        .collect()
+    }
+
     #[test]
     fn test_build_instance_spec_passes_configured_virtiofs_cache_mode() {
         let dir = tempdir().unwrap();
@@ -973,6 +1048,184 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(env_value(&spec, "A3S_VIRTIOFS_CACHE"), Some("always"));
+    }
+
+    #[test]
+    fn instance_spec_distinguishes_tsi_from_no_network() {
+        let tsi_dir = tempdir().unwrap();
+        let tsi_layout = test_layout(tsi_dir.path(), None, true);
+        let mut tsi_vm = test_vm_manager(BoxConfig::default());
+        let tsi_spec = tsi_vm.build_instance_spec(&tsi_layout).unwrap();
+
+        let none_dir = tempdir().unwrap();
+        let none_layout = test_layout(none_dir.path(), None, true);
+        let mut none_vm = test_vm_manager(BoxConfig {
+            network: a3s_box_core::NetworkMode::None,
+            ..BoxConfig::default()
+        });
+        let none_spec = none_vm.build_instance_spec(&none_layout).unwrap();
+
+        assert_eq!(tsi_spec.tsi_mode, a3s_box_core::vmm::TsiMode::Enabled);
+        assert_eq!(none_spec.tsi_mode, a3s_box_core::vmm::TsiMode::Disabled);
+        assert!(tsi_spec.network.is_none());
+        assert!(none_spec.network.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricted_egress_is_staged_only_for_guest_and_disables_direct_tsi() {
+        let home = tempdir().unwrap();
+        let layout_dir = tempdir().unwrap();
+        let mut oci_config = test_oci_config(None, None);
+        oci_config.env = vec![
+            (
+                "HTTP_PROXY".to_string(),
+                "http://attacker.invalid".to_string(),
+            ),
+            (
+                "ALL_PROXY".to_string(),
+                "socks5://attacker.invalid".to_string(),
+            ),
+            ("NO_PROXY".to_string(), "*".to_string()),
+            ("KEEP_ME".to_string(), "safe".to_string()),
+        ];
+        let layout = test_layout(layout_dir.path(), Some(oci_config), true);
+        let config = BoxConfig {
+            security_policy: Some(
+                SandboxSecurityPolicy::new()
+                    .egress(EgressPolicy::allow_domains(["api.example.com"])),
+            ),
+            extra_env: vec![
+                (
+                    "https_proxy".to_string(),
+                    "http://override.invalid".to_string(),
+                ),
+                ("no_proxy".to_string(), "*".to_string()),
+            ],
+            ..BoxConfig::default()
+        };
+        let plan = a3s_box_core::resolve_execution(&config).unwrap();
+        let mut vm = VmManager::with_box_id(
+            config,
+            EventEmitter::new(16),
+            "restricted-egress-env".to_string(),
+        );
+        vm.home_dir = home.path().to_path_buf();
+        vm.resolved_execution_plan = Some(plan.clone());
+        vm.security_context = Some(crate::security_receipt::ManagedSecurityContext {
+            generation: ExecutionGeneration::INITIAL,
+            request_digest: "sha256:test-request".to_string(),
+        });
+        vm.prepare_microvm_egress(&plan).await.unwrap();
+
+        let mut spec = vm.build_instance_spec(&layout).unwrap();
+        let environment = staged_environment(&layout);
+        let proxy_url = environment.get("HTTP_PROXY").unwrap();
+        assert!(proxy_url.starts_with("http://a3s:"));
+        assert!(proxy_url.ends_with("@10.90.0.1:3128"));
+        for key in ["http_proxy", "HTTPS_PROXY", "https_proxy"] {
+            assert_eq!(environment.get(key), Some(proxy_url));
+        }
+        assert_eq!(
+            environment.get("NO_PROXY").map(String::as_str),
+            Some("localhost,127.0.0.1,::1")
+        );
+        assert_eq!(
+            environment.get("no_proxy").map(String::as_str),
+            Some("localhost,127.0.0.1,::1")
+        );
+        assert!(!environment.contains_key("ALL_PROXY"));
+        assert!(!environment.contains_key("all_proxy"));
+        assert_eq!(environment.get("KEEP_ME").map(String::as_str), Some("safe"));
+        assert!(spec
+            .entrypoint
+            .env
+            .iter()
+            .all(|(key, value)| !key.to_ascii_lowercase().contains("proxy")
+                && !value.contains(proxy_url)));
+        assert!(!serde_json::to_string(&spec).unwrap().contains(proxy_url));
+
+        let egress = vm.prepared_egress_network().unwrap();
+        vm.configure_restricted_network(&mut spec, egress).unwrap();
+        assert_eq!(spec.tsi_mode, a3s_box_core::vmm::TsiMode::Disabled);
+        let network = spec.network.as_ref().unwrap();
+        assert!(network.egress.is_some());
+        assert!(network.dns_servers.is_empty());
+        assert_eq!(env_value(&spec, "A3S_NET_IP"), Some("10.90.0.2/24"));
+        assert_eq!(env_value(&spec, "A3S_NET_GATEWAY"), Some("10.90.0.1"));
+        assert_eq!(env_value(&spec, "A3S_NET_DNS"), Some(""));
+        assert!(!serde_json::to_string(&spec).unwrap().contains(proxy_url));
+
+        if let Some(ref mut network) = vm.net_manager {
+            network.stop();
+        }
+        vm.net_manager = None;
+        vm.stop_prepared_egress().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricted_egress_requires_managed_guest_init() {
+        let home = tempdir().unwrap();
+        let layout_dir = tempdir().unwrap();
+        let layout = test_layout(layout_dir.path(), None, false);
+        let config = BoxConfig {
+            security_policy: Some(SandboxSecurityPolicy::new().egress(EgressPolicy::DenyAll)),
+            ..BoxConfig::default()
+        };
+        let plan = a3s_box_core::resolve_execution(&config).unwrap();
+        let mut vm = VmManager::with_box_id(
+            config,
+            EventEmitter::new(16),
+            "restricted-egress-no-init".to_string(),
+        );
+        vm.home_dir = home.path().to_path_buf();
+        vm.resolved_execution_plan = Some(plan.clone());
+        vm.security_context = Some(crate::security_receipt::ManagedSecurityContext {
+            generation: ExecutionGeneration::INITIAL,
+            request_digest: "sha256:test-request".to_string(),
+        });
+        vm.prepare_microvm_egress(&plan).await.unwrap();
+
+        let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+
+        assert!(error.contains("requires the managed guest init"));
+        vm.cleanup_boot_failure().await;
+        assert!(vm.prepared_egress.is_none());
+    }
+
+    #[test]
+    fn microvm_share_compilation_rejects_runtime_mount_drift() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        let config = BoxConfig {
+            volumes: vec![format!("{}:/workspace:ro", source.display())],
+            security_policy: Some(
+                SandboxSecurityPolicy::new().host_mounts(HostMountPolicy::agent_safe()),
+            ),
+            ..BoxConfig::default()
+        };
+        let request = CreateExecutionRequest {
+            external_sandbox_id: "microvm-mount-drift".to_string(),
+            config: config.clone(),
+            labels: BTreeMap::new(),
+            policy: ExecutionRecordPolicy::default(),
+            rootfs_snapshot_id: None,
+        };
+        let plan =
+            crate::host_mount_policy::resolve_managed_execution_plan(directory.path(), &request)
+                .unwrap();
+        let layout = test_layout(directory.path(), None, false);
+        let mut vm = test_vm_manager(config);
+        vm.home_dir = directory.path().to_path_buf();
+        vm.resolved_execution_plan = Some(plan);
+        vm.config.volumes = vec![format!("{}:/workspace:rw", source.display())];
+
+        let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+
+        assert!(error.contains("host mount changed after planning"));
+        assert!(!directory.path().join("boxes/test-box/.filemounts").exists());
     }
 
     #[test]

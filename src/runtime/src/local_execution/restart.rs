@@ -243,6 +243,7 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<ExecutionLease> {
         let intent = restart_intent(record)?;
         let id = execution_id(record)?;
+        self.require_running_receipt(record).await?;
         match self
             .transition(
                 record,

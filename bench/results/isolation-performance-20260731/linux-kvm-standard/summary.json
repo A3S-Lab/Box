@@ -1,0 +1,650 @@
+[
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 3721.514,
+      "mean": 3461.315,
+      "min": 3271.155,
+      "p50": 3420.061,
+      "p95": 3721.514
+    },
+    "mechanism": "bind_metadata_create_delete",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 579.109,
+      "p05": 537.416,
+      "p50": 584.785
+    },
+    "rate_unit": "files/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "file"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 364.748,
+      "mean": 344.467,
+      "min": 314.308,
+      "p50": 364.42,
+      "p95": 364.748
+    },
+    "mechanism": "bind_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 747.103,
+      "p05": 701.854,
+      "p50": 702.485
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2059.031,
+      "mean": 1204.529,
+      "min": 615.079,
+      "p50": 665.365,
+      "p95": 2059.031
+    },
+    "mechanism": "bind_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 287.39,
+      "p05": 124.33,
+      "p50": 384.751
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 6331.987,
+      "mean": 6248.237,
+      "min": 5975.472,
+      "p50": 6327.638,
+      "p95": 6331.987
+    },
+    "mechanism": "bridge_host_http_64k_downloads",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 10.248,
+      "p05": 10.107,
+      "p50": 10.114
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2417.866,
+      "mean": 2239.523,
+      "min": 2069.642,
+      "p50": 2219.124,
+      "p95": 2373.74
+    },
+    "mechanism": "cold_noop_lifecycle",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 0.447,
+      "p05": 0.414,
+      "p50": 0.441
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 1566.973,
+      "mean": 1546.762,
+      "min": 1516.563,
+      "p50": 1566.515,
+      "p95": 1566.973
+    },
+    "mechanism": "cpu_sha256",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 165.549,
+      "p05": 163.372,
+      "p50": 163.42
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 114.198,
+      "mean": 113.97,
+      "min": 113.855,
+      "p50": 113.943,
+      "p95": 114.198
+    },
+    "mechanism": "exec_noop",
+    "observed_unit": "",
+    "passed": 30,
+    "rate_per_second": {
+      "mean": 8.774,
+      "p05": 8.757,
+      "p50": 8.776
+    },
+    "rate_unit": "operations/s",
+    "samples": 30,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 5075.599,
+      "mean": 4954.645,
+      "min": 4876.278,
+      "p50": 4925.115,
+      "p95": 5075.599
+    },
+    "mechanism": "host_http_64k_downloads",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 12.92,
+      "p05": 12.609,
+      "p50": 12.995
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "mechanism": "host_http_64k_downloads_first_attempt_failures",
+    "observed": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p50": 0.0
+    },
+    "observed_unit": "requests",
+    "passed": 5,
+    "rate_unit": "",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 314.371,
+      "mean": 314.314,
+      "min": 314.21,
+      "p50": 314.338,
+      "p95": 314.371
+    },
+    "mechanism": "host_http_requests",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 159.077,
+      "p05": 159.048,
+      "p50": 159.064
+    },
+    "rate_unit": "requests/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "request"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "mechanism": "host_http_requests_first_attempt_failures",
+    "observed": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p50": 0.0
+    },
+    "observed_unit": "requests",
+    "passed": 5,
+    "rate_unit": "",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "mechanism": "idle_memory",
+    "observed": {
+      "max": 81395712.0,
+      "mean": 81395712.0,
+      "min": 81395712.0,
+      "p50": 81395712.0
+    },
+    "observed_unit": "bytes",
+    "passed": 1,
+    "rate_unit": "",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 114.127,
+      "mean": 114.009,
+      "min": 113.911,
+      "p50": 113.987,
+      "p95": 114.127
+    },
+    "mechanism": "memory_zero_copy",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 4490.869,
+      "p05": 4486.218,
+      "p50": 4491.726
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 615.198,
+      "mean": 424.959,
+      "min": 364.448,
+      "p50": 365.766,
+      "p95": 615.198
+    },
+    "mechanism": "named_volume_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 627.549,
+      "p05": 416.126,
+      "p50": 699.902
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2677.412,
+      "mean": 1238.923,
+      "min": 614.949,
+      "p50": 767.865,
+      "p95": 2677.412
+    },
+    "mechanism": "named_volume_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 285.81,
+      "p05": 95.615,
+      "p50": 333.392
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 4931.511,
+      "mean": 4251.898,
+      "min": 3627.17,
+      "p50": 4434.586,
+      "p95": 4931.511
+    },
+    "mechanism": "parallel_4_cold_noop",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 0.952,
+      "p05": 0.811,
+      "p50": 0.902
+    },
+    "rate_unit": "operations/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 6829.389,
+      "mean": 6829.389,
+      "min": 6829.389,
+      "p50": 6829.389,
+      "p95": 6829.389
+    },
+    "mechanism": "pool_cold_fill",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 0.586,
+      "p05": 0.586,
+      "p50": 0.586
+    },
+    "rate_unit": "VMs/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "VM"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2620.069,
+      "mean": 2620.069,
+      "min": 2620.069,
+      "p50": 2620.069,
+      "p95": 2620.069
+    },
+    "mechanism": "preflight_noop",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 0.382,
+      "p05": 0.382,
+      "p50": 0.382
+    },
+    "rate_unit": "operations/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 618.332,
+      "mean": 415.271,
+      "min": 314.459,
+      "p50": 364.512,
+      "p95": 618.332
+    },
+    "mechanism": "rootfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 650.059,
+      "p05": 414.017,
+      "p50": 702.309
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2071.222,
+      "mean": 976.764,
+      "min": 665.097,
+      "p50": 715.583,
+      "p95": 2071.222
+    },
+    "mechanism": "rootfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 316.993,
+      "p05": 123.599,
+      "p50": 357.75
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 3120.338,
+      "mean": 2899.739,
+      "min": 2559.223,
+      "p50": 3019.657,
+      "p95": 3120.338
+    },
+    "mechanism": "snapshot_fork_fill",
+    "observed_unit": "",
+    "passed": 3,
+    "rate_per_second": {
+      "mean": 1.39,
+      "p05": 1.282,
+      "p50": 1.325
+    },
+    "rate_unit": "VMs/s",
+    "samples": 3,
+    "skipped": 0,
+    "work_unit": "VM"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2873.861,
+      "mean": 2399.822,
+      "min": 2218.389,
+      "p50": 2320.437,
+      "p95": 2873.861
+    },
+    "mechanism": "tee_simulated_lifecycle",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 0.419,
+      "p05": 0.348,
+      "p50": 0.431
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 114.381,
+      "mean": 114.097,
+      "min": 113.964,
+      "p50": 114.039,
+      "p95": 114.381
+    },
+    "mechanism": "tmpfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2243.715,
+      "p05": 2238.132,
+      "p50": 2244.852
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2267.429,
+      "mean": 895.35,
+      "min": 214.154,
+      "p50": 214.339,
+      "p95": 2267.429
+    },
+    "mechanism": "tmpfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 772.19,
+      "p05": 112.903,
+      "p50": 1194.372
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2471.738,
+      "mean": 2279.09,
+      "min": 2118.939,
+      "p50": 2267.988,
+      "p95": 2471.738
+    },
+    "mechanism": "volume_backed_init",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 0.44,
+      "p05": 0.405,
+      "p50": 0.431
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2267.929,
+      "mean": 1841.05,
+      "min": 164.076,
+      "p50": 2068.165,
+      "p95": 2267.913
+    },
+    "mechanism": "warm_pool_acquire",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 1.003,
+      "p05": 0.441,
+      "p50": 0.483
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 1,
+    "host_lane": "a3s-os-linux-x86_64-kvm",
+    "isolation": "sandbox",
+    "mechanism": "preflight_noop",
+    "notes": [
+      "command failed; inspect sample log"
+    ],
+    "observed_unit": "",
+    "passed": 0,
+    "rate_unit": "",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": ""
+  }
+]

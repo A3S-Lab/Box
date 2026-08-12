@@ -3,11 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
-    ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionSnapshotId, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
-    OperationId, ReconcileOutcome, RestartExecutionOptions, SnapshotImageConfig,
+    BoxConfig, CreateExecutionRequest, EgressIpRule, EgressPolicy, ExecEvent, ExecRequest,
+    ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy,
+    ExecutionSessionManager, ExecutionSnapshotId, ExecutionState, HostMountPolicy,
+    KillExecutionOptions, KillOutcome, NetworkMode, OperationId, ReceiptPolicy, ReconcileOutcome,
+    RestartExecutionOptions, SandboxSecurityPolicy, SnapshotImageConfig,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -39,6 +40,7 @@ struct FakeBackend {
     fail_kill_after_effect: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
+    publish_security_receipts: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
     last_kill_signal: Mutex<Option<Option<i32>>>,
     last_kill_timeout: Mutex<Option<Option<u64>>>,
@@ -99,6 +101,15 @@ impl LocalExecutionBackend for FakeBackend {
         #[cfg(target_os = "linux")]
         write_fake_sandbox_bundle(record)?;
         write_fake_resolved_image_config(record)?;
+        if self.publish_security_receipts.load(Ordering::Relaxed)
+            && record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| crate::security_receipt::required(&metadata.plan))
+        {
+            crate::security_receipt::publish_test_receipt(record)
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        }
         let handle = Self::handle(record);
         executions.insert(
             record.id.clone(),
@@ -168,6 +179,15 @@ impl LocalExecutionBackend for FakeBackend {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         self.resumes.fetch_add(1, Ordering::Relaxed);
+        if self.publish_security_receipts.load(Ordering::Relaxed)
+            && record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| crate::security_receipt::required(&metadata.plan))
+        {
+            crate::security_receipt::publish_test_receipt(record)
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        }
         let mut executions = self.executions.lock().unwrap();
         let execution = executions
             .get_mut(&record.id)
@@ -440,6 +460,238 @@ async fn create_rejects_unsupported_microvm_security_before_store_or_backend() {
     }
 }
 
+#[tokio::test]
+async fn unsupported_egress_boundaries_leave_no_record_or_backend_resources() {
+    let (_directory, manager, backend) = harness();
+    let mut cases = vec![(
+        "sandbox-deny-all",
+        BoxConfig {
+            isolation: ExecutionIsolation::Sandbox,
+            security_policy: Some(SandboxSecurityPolicy::new().egress(EgressPolicy::DenyAll)),
+            ..BoxConfig::default()
+        },
+        "restricted egress",
+    )];
+    #[cfg(unix)]
+    cases.extend([
+        (
+            "microvm-bridge",
+            BoxConfig {
+                network: NetworkMode::Bridge {
+                    network: "backend".to_string(),
+                },
+                security_policy: Some(SandboxSecurityPolicy::new().egress(EgressPolicy::DenyAll)),
+                ..BoxConfig::default()
+            },
+            "requires TSI",
+        ),
+        (
+            "microvm-udp",
+            BoxConfig {
+                security_policy: Some(SandboxSecurityPolicy::new().egress(
+                    EgressPolicy::allowlist([], [EgressIpRule::udp("192.0.2.1/32", 53)]),
+                )),
+                ..BoxConfig::default()
+            },
+            "UDP",
+        ),
+        (
+            "microvm-ipv6",
+            BoxConfig {
+                security_policy: Some(SandboxSecurityPolicy::new().egress(
+                    EgressPolicy::allowlist([], [EgressIpRule::tcp("2001:db8::/32", 443)]),
+                )),
+                ..BoxConfig::default()
+            },
+            "IPv6",
+        ),
+    ]);
+    #[cfg(not(unix))]
+    cases.push((
+        "microvm-no-policy-channel",
+        BoxConfig {
+            security_policy: Some(SandboxSecurityPolicy::new().egress(EgressPolicy::DenyAll)),
+            ..BoxConfig::default()
+        },
+        "Unix host",
+    ));
+
+    for (name, config, expected) in cases {
+        let mut create_request = request(name);
+        create_request.config = config;
+
+        let error = manager
+            .create_and_start(create_request, &operation(&format!("{name}-create")))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ExecutionManagerError::InvalidRequest(message) if message.contains(expected)
+        ));
+        assert!(!manager.state_path().exists());
+        assert!(!manager.home_dir.join("boxes").exists());
+        assert_eq!(backend.start_attempts.load(Ordering::Relaxed), 0);
+        assert!(backend.executions.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn missing_required_receipt_rolls_back_backend_before_running_is_persisted() {
+    let (_directory, manager, backend) = harness();
+    let mut create_request = request("missing-required-receipt");
+    create_request.config.security_policy =
+        Some(SandboxSecurityPolicy::new().receipt(ReceiptPolicy::Required));
+
+    let error = manager
+        .create_and_start(
+            create_request,
+            &operation("missing-required-receipt-create"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::Internal(message)
+            if message.contains("required security receipt validation failed")
+    ));
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 1);
+    let execution = backend.executions.lock().unwrap();
+    assert_eq!(execution.len(), 1);
+    assert_eq!(
+        execution.values().next().unwrap().state,
+        ExecutionState::Stopped
+    );
+    drop(execution);
+    let records = ManagedExecutionStore::new(manager.state_path().to_path_buf())
+        .list()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].managed_state().unwrap(),
+        Some(ManagedExecutionState::Starting)
+    );
+}
+
+#[tokio::test]
+async fn required_receipts_are_exposed_and_follow_resume_and_restart_generations() {
+    let (_directory, manager, backend) = harness();
+    backend
+        .publish_security_receipts
+        .store(true, Ordering::Relaxed);
+    let mut create_request = request("required-receipt-lifecycle");
+    create_request.config.extra_env = vec![(
+        "A3S_TEST_SECRET".to_string(),
+        "must-not-appear-in-receipt".to_string(),
+    )];
+    create_request.config.security_policy =
+        Some(SandboxSecurityPolicy::new().receipt(ReceiptPolicy::Required));
+
+    let initial = manager
+        .create_and_start(
+            create_request,
+            &operation("required-receipt-lifecycle-create"),
+        )
+        .await
+        .unwrap();
+    let initial_receipt = initial.security_receipt.as_ref().unwrap();
+    assert_eq!(initial_receipt.evidence.generation, initial.generation);
+    assert!(!serde_json::to_string(initial_receipt)
+        .unwrap()
+        .contains("must-not-appear-in-receipt"));
+    let status = manager.inspect(&initial.execution_id).await.unwrap();
+    assert_eq!(status.security_receipt, initial.security_receipt);
+
+    let paused = manager
+        .pause(&initial.execution_id, initial.generation, true)
+        .await
+        .unwrap();
+    assert_eq!(paused.generation.get(), 2);
+    assert!(paused.security_receipt.is_none());
+
+    let resumed = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap();
+    assert_eq!(resumed.generation.get(), 3);
+    assert_eq!(
+        resumed
+            .security_receipt
+            .as_ref()
+            .unwrap()
+            .evidence
+            .generation,
+        resumed.generation
+    );
+    assert_eq!(
+        resumed
+            .security_receipt
+            .as_ref()
+            .unwrap()
+            .evidence
+            .preparation,
+        a3s_box_core::SecurityReceiptPreparation::ReadyToResume
+    );
+
+    let restarted = manager
+        .restart(
+            &resumed.execution_id,
+            resumed.generation,
+            &operation("required-receipt-lifecycle-restart"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted.generation.get(), 4);
+    assert_eq!(
+        restarted
+            .security_receipt
+            .as_ref()
+            .unwrap()
+            .evidence
+            .generation,
+        restarted.generation
+    );
+
+    let receipt_directory = manager
+        .home_dir
+        .join("boxes")
+        .join(restarted.execution_id.as_str())
+        .join("security/receipts");
+    assert!(receipt_directory.join("generation-1.json").is_file());
+    assert!(!receipt_directory.join("generation-2.json").exists());
+    assert!(receipt_directory.join("generation-3.json").is_file());
+    assert!(receipt_directory.join("generation-4.json").is_file());
+}
+
+#[tokio::test]
+async fn denied_host_mount_leaves_no_record_or_backend_resources() {
+    let (directory, manager, backend) = harness();
+    let source = directory.path().join("sensitive-bind");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join(".env"), b"TOKEN=secret").unwrap();
+    let mut create_request = request("denied-host-mount");
+    create_request.config.volumes = vec![format!("{}:/workspace:ro", source.display())];
+    create_request.config.security_policy =
+        Some(SandboxSecurityPolicy::new().host_mounts(HostMountPolicy::agent_safe()));
+
+    let error = manager
+        .create(create_request, &operation("denied-host-mount-create"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("host mount policy denied")
+    ));
+    assert!(!manager.state_path().exists());
+    assert!(!manager.home_dir.join("boxes").exists());
+    assert_eq!(backend.start_attempts.load(Ordering::Relaxed), 0);
+    assert!(backend.executions.lock().unwrap().is_empty());
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn create_rejects_health_check_before_store_or_backend() {
@@ -692,6 +944,113 @@ async fn create_reserves_without_start_and_start_is_generation_fenced() {
             .state,
         ExecutionState::Running
     );
+}
+
+#[tokio::test]
+async fn host_mount_policy_survives_restart_and_control_plane_recovery() {
+    let (directory, manager, backend) = harness();
+    let source = directory.path().join("policy-workspace");
+    std::fs::create_dir_all(&source).unwrap();
+    let mut create_request = request("host-policy-lifecycle");
+    create_request.config.volumes = vec![format!("{}:/workspace:ro", source.display())];
+    create_request.config.security_policy =
+        Some(SandboxSecurityPolicy::new().host_mounts(HostMountPolicy::agent_safe()));
+
+    let reservation = manager
+        .create(create_request, &operation("host-policy-create"))
+        .await
+        .unwrap();
+    let first = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap();
+    assert_eq!(first.plan, reservation.plan);
+    let original_plan = first.plan.clone();
+    let restarted = manager
+        .restart(
+            &first.execution_id,
+            first.generation,
+            &operation("host-policy-restart"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(restarted.plan, original_plan);
+    assert_eq!(restarted.plan.host_mounts.len(), 1);
+
+    let recovered_manager = LocalExecutionManager::new(
+        manager.state_path().to_path_buf(),
+        manager.home_dir.clone(),
+        backend,
+    );
+    let recovered = recovered_manager
+        .inspect(&first.execution_id)
+        .await
+        .unwrap();
+
+    assert_eq!(recovered.state, ExecutionState::Running);
+    assert_eq!(recovered.generation, restarted.generation);
+    assert_eq!(recovered.plan, original_plan);
+}
+
+#[tokio::test]
+async fn filesystem_snapshot_reference_does_not_select_the_restoring_request_policy() {
+    let (directory, manager, _backend) = harness();
+    let snapshot_id = ExecutionSnapshotId::new("shared-restore-source").unwrap();
+    let snapshot_rootfs = directory.path().join("shared-restore-rootfs");
+    std::fs::create_dir_all(&snapshot_rootfs).unwrap();
+    let mut snapshot_metadata = a3s_box_core::SnapshotMetadata::new(
+        snapshot_id.to_string(),
+        snapshot_id.to_string(),
+        "source-execution".to_string(),
+        "alpine:3.20".to_string(),
+    );
+    snapshot_metadata.image_config = Some(SnapshotImageConfig::default());
+    crate::SnapshotStore::new(&directory.path().join("home/snapshots"))
+        .unwrap()
+        .save(snapshot_metadata, &snapshot_rootfs)
+        .unwrap();
+    let source = directory.path().join("restore-policy-workspace");
+    std::fs::create_dir_all(&source).unwrap();
+
+    let mut unrestricted = request("restore-unrestricted");
+    unrestricted.rootfs_snapshot_id = Some(snapshot_id.clone());
+    unrestricted.config.security_policy =
+        Some(SandboxSecurityPolicy::new().egress(EgressPolicy::Unrestricted));
+    let unrestricted = manager
+        .create(unrestricted, &operation("restore-unrestricted-create"))
+        .await
+        .unwrap();
+
+    let mut mount_restricted = request("restore-host-policy");
+    mount_restricted.rootfs_snapshot_id = Some(snapshot_id.clone());
+    mount_restricted.config.volumes = vec![format!("{}:/workspace:ro", source.display())];
+    mount_restricted.config.security_policy =
+        Some(SandboxSecurityPolicy::new().host_mounts(HostMountPolicy::agent_safe()));
+    let mount_restricted = manager
+        .create(mount_restricted, &operation("restore-host-policy-create"))
+        .await
+        .unwrap();
+
+    assert_ne!(
+        unrestricted.plan.security_policy_digest,
+        mount_restricted.plan.security_policy_digest
+    );
+    assert!(unrestricted.plan.host_mounts.is_empty());
+    assert_eq!(mount_restricted.plan.host_mounts.len(), 1);
+    for execution_id in [&unrestricted.execution_id, &mount_restricted.execution_id] {
+        assert_eq!(
+            persisted(&manager, execution_id)
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .request
+                .rootfs_snapshot_id
+                .as_ref(),
+            Some(&snapshot_id)
+        );
+    }
 }
 
 #[cfg(not(windows))]

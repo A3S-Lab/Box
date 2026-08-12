@@ -1,4 +1,5 @@
 use crate::network::NetworkMode;
+use crate::security_policy::SandboxSecurityPolicy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -293,6 +294,13 @@ pub struct BoxConfig {
     #[serde(default)]
     pub isolation: ExecutionIsolation,
 
+    /// Optional request-scoped security controls.
+    ///
+    /// Omitting this field preserves the behavior and serialized meaning of
+    /// configurations created before optional security policies were added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_policy: Option<SandboxSecurityPolicy>,
+
     /// OCI image reference (e.g., "nginx:alpine", "ghcr.io/org/app:latest")
     #[serde(default)]
     pub image: String,
@@ -473,6 +481,7 @@ impl Default for BoxConfig {
     fn default() -> Self {
         Self {
             isolation: ExecutionIsolation::default(),
+            security_policy: None,
             image: String::new(),
             // Empty path signals the runtime to create a per-box workspace
             // under ~/.a3s/boxes/<box_id>/workspace/ at boot time.
@@ -652,6 +661,28 @@ mod tests {
         assert!(config.workdir.is_none());
         assert!(config.hostname.is_none());
         assert!(config.add_hosts.is_empty());
+        assert!(config.security_policy.is_none());
+    }
+
+    #[test]
+    fn test_box_config_omits_absent_security_policy() {
+        let value = serde_json::to_value(BoxConfig::default()).unwrap();
+        assert!(value.get("security_policy").is_none());
+
+        let legacy = serde_json::json!({
+            "image": "test",
+            "workspace": "",
+            "resources": {
+                "vcpus": 2,
+                "memory_mb": 512,
+                "disk_mb": 4096,
+                "timeout": 3600
+            },
+            "log_level": "Info",
+            "debug_grpc": false
+        });
+        let parsed: BoxConfig = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.security_policy.is_none());
     }
 
     #[test]

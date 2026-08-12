@@ -5,32 +5,18 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "macOS userspace network proxy for A3S Box libkrun VMs"
+description = "Policy-aware userspace network proxy for A3S Box libkrun VMs"
 
 [lib]
 name = "a3s_box_netproxy"
 path = "src/lib.rs"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 a3s-box-core = { version = "3.2", path = "../core" }
 libc = { workspace = true }
 tracing = { workspace = true }
-smoltcp = { version = "0.11", default-features = false, features = [
-    "medium-ethernet",
-    "proto-ipv4",
-    "socket-tcp",
-    "socket-udp",
-    "log",
-    "std",
-    "alloc",
-] }
-
-[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
-# The implementation is shipped only on macOS, but its Unix datagram, packet,
-# and proxy state tests also run on Linux CI and production validation hosts.
-a3s-box-core = { version = "3.2", path = "../core" }
-libc = { workspace = true }
-tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 smoltcp = { version = "0.11", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",

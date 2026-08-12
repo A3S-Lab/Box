@@ -1,0 +1,587 @@
+[
+  {
+    "elapsed_unit": "ms",
+    "failed": 1,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 1790.009,
+      "mean": 1654.668,
+      "min": 1568.515,
+      "p50": 1622.845,
+      "p95": 1790.009
+    },
+    "mechanism": "bind_metadata_create_delete",
+    "notes": [
+      "command failed; inspect sample log"
+    ],
+    "observed_unit": "",
+    "passed": 4,
+    "rate_per_second": {
+      "mean": 1211.583,
+      "p05": 1117.313,
+      "p50": 1221.522
+    },
+    "rate_unit": "files/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "file"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 240.505,
+      "mean": 235.364,
+      "min": 228.329,
+      "p50": 236.034,
+      "p95": 240.505
+    },
+    "mechanism": "bind_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1087.993,
+      "p05": 1064.426,
+      "p50": 1084.59
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 390.679,
+      "mean": 328.926,
+      "min": 285.809,
+      "p50": 336.375,
+      "p95": 390.679
+    },
+    "mechanism": "bind_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 788.357,
+      "p05": 655.27,
+      "p50": 761.056
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2338.738,
+      "mean": 2215.09,
+      "min": 2144.624,
+      "p50": 2199.156,
+      "p95": 2322.047
+    },
+    "mechanism": "cold_noop_lifecycle",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 0.452,
+      "p05": 0.428,
+      "p50": 0.454
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 1742.06,
+      "mean": 1734.704,
+      "min": 1731.584,
+      "p50": 1732.496,
+      "p95": 1742.06
+    },
+    "mechanism": "cpu_sha256",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 147.576,
+      "p05": 146.952,
+      "p50": 147.764
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 182.873,
+      "mean": 135.612,
+      "min": 123.357,
+      "p50": 128.928,
+      "p95": 181.72
+    },
+    "mechanism": "exec_noop",
+    "observed_unit": "",
+    "passed": 30,
+    "rate_per_second": {
+      "mean": 7.476,
+      "p05": 5.503,
+      "p50": 7.748
+    },
+    "rate_unit": "operations/s",
+    "samples": 30,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 1,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 3096.92,
+      "mean": 2926.881,
+      "min": 2785.117,
+      "p50": 2832.124,
+      "p95": 3096.92
+    },
+    "mechanism": "host_http_64k_downloads",
+    "notes": [
+      "command failed; inspect sample log"
+    ],
+    "observed_unit": "",
+    "passed": 4,
+    "rate_per_second": {
+      "mean": 21.906,
+      "p05": 20.666,
+      "p50": 21.381
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "mechanism": "host_http_64k_downloads_first_attempt_failures",
+    "observed": {
+      "max": 24.0,
+      "mean": 13.25,
+      "min": 7.0,
+      "p50": 9.0
+    },
+    "observed_unit": "requests",
+    "passed": 4,
+    "rate_unit": "",
+    "samples": 4,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 5,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "mechanism": "host_http_requests",
+    "notes": [
+      "command failed; inspect sample log"
+    ],
+    "observed_unit": "",
+    "passed": 0,
+    "rate_unit": "",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "mechanism": "idle_memory",
+    "observed": {
+      "max": 135593984.0,
+      "mean": 135593984.0,
+      "min": 135593984.0,
+      "p50": 135593984.0
+    },
+    "observed_unit": "bytes",
+    "passed": 1,
+    "rate_unit": "",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 129.903,
+      "mean": 107.234,
+      "min": 74.541,
+      "p50": 127.075,
+      "p95": 129.903
+    },
+    "mechanism": "memory_zero_copy",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 5104.714,
+      "p05": 3941.401,
+      "p50": 4029.118
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 238.788,
+      "mean": 234.956,
+      "min": 227.235,
+      "p50": 236.026,
+      "p95": 238.788
+    },
+    "mechanism": "named_volume_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1089.929,
+      "p05": 1072.079,
+      "p50": 1084.628
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 395.328,
+      "mean": 343.618,
+      "min": 289.232,
+      "p50": 343.855,
+      "p95": 395.328
+    },
+    "mechanism": "named_volume_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 752.431,
+      "p05": 647.564,
+      "p50": 744.501
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 3332.489,
+      "mean": 3133.727,
+      "min": 2739.175,
+      "p50": 3188.025,
+      "p95": 3332.489
+    },
+    "mechanism": "parallel_4_cold_noop",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1.282,
+      "p05": 1.2,
+      "p50": 1.255
+    },
+    "rate_unit": "operations/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 6808.582,
+      "mean": 6808.582,
+      "min": 6808.582,
+      "p50": 6808.582,
+      "p95": 6808.582
+    },
+    "mechanism": "pool_cold_fill",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 0.587,
+      "p05": 0.587,
+      "p50": 0.587
+    },
+    "rate_unit": "VMs/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "VM"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 5806.835,
+      "mean": 5806.835,
+      "min": 5806.835,
+      "p50": 5806.835,
+      "p95": 5806.835
+    },
+    "mechanism": "preflight_noop",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 0.172,
+      "p05": 0.172,
+      "p50": 0.172
+    },
+    "rate_unit": "operations/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 233.791,
+      "mean": 232.645,
+      "min": 231.315,
+      "p50": 233.105,
+      "p95": 233.791
+    },
+    "mechanism": "rootfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1100.415,
+      "p05": 1094.995,
+      "p50": 1098.22
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 1408.107,
+      "mean": 609.697,
+      "min": 341.287,
+      "p50": 451.577,
+      "p95": 1408.107
+    },
+    "mechanism": "rootfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 549.743,
+      "p05": 181.804,
+      "p50": 566.902
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 29162.255,
+      "mean": 28992.34,
+      "min": 28683.485,
+      "p50": 29131.279,
+      "p95": 29162.255
+    },
+    "mechanism": "snapshot_fork_fill",
+    "observed_unit": "",
+    "passed": 3,
+    "rate_per_second": {
+      "mean": 0.138,
+      "p05": 0.137,
+      "p50": 0.137
+    },
+    "rate_unit": "VMs/s",
+    "samples": 3,
+    "skipped": 0,
+    "work_unit": "VM"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2304.599,
+      "mean": 2203.622,
+      "min": 2152.751,
+      "p50": 2166.934,
+      "p95": 2304.599
+    },
+    "mechanism": "tee_simulated_lifecycle",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 0.454,
+      "p05": 0.434,
+      "p50": 0.455
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 132.877,
+      "mean": 129.821,
+      "min": 127.541,
+      "p50": 129.136,
+      "p95": 132.877
+    },
+    "mechanism": "tmpfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1972.323,
+      "p05": 1926.593,
+      "p50": 1982.414
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 237.673,
+      "mean": 195.594,
+      "min": 134.84,
+      "p50": 185.253,
+      "p95": 237.673
+    },
+    "mechanism": "tmpfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1366.148,
+      "p05": 1077.112,
+      "p50": 1381.892
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2400.382,
+      "mean": 2247.673,
+      "min": 2160.657,
+      "p50": 2202.373,
+      "p95": 2400.382
+    },
+    "mechanism": "volume_backed_init",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 0.445,
+      "p05": 0.417,
+      "p50": 0.445
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "macos-arm64-hvf",
+    "isolation": "microvm",
+    "latency_ms": {
+      "max": 2601.991,
+      "mean": 1756.189,
+      "min": 239.72,
+      "p50": 1953.253,
+      "p95": 2096.862
+    },
+    "mechanism": "warm_pool_acquire",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 0.904,
+      "p05": 0.384,
+      "p50": 0.511
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  }
+]

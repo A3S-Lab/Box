@@ -108,9 +108,20 @@ require_runtime() {
 
 # Count host-side resources that a leak would grow.
 shim_count() {
-  local count
-  count=$(pgrep -xc 'a3s-box-shim' 2>/dev/null || pgrep -fc 'a3s-box-shim' 2>/dev/null || true)
-  echo "${count:-0}"
+  local count=""
+  if command -v pgrep >/dev/null 2>&1; then
+    count=$(pgrep -xc 'a3s-box-shim' 2>/dev/null) || true
+    case "$count" in
+      ''|*[!0-9]*) ;;
+      *) echo "$count"; return ;;
+    esac
+
+    count=$(pgrep -fc '[a]3s-box-shim' 2>/dev/null) || true
+  fi
+  case "$count" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$count" ;;
+  esac
 }
 mount_count() { mount 2>/dev/null | awk '/\/\.a3s\/boxes|\/a3s\/boxes/ { n++ } END { print n + 0 }'; }
 boxdir_count() { find "${HOME}/.a3s/boxes" -mindepth 1 -maxdepth 1 -print 2>/dev/null | awk 'END { print NR + 0 }'; }

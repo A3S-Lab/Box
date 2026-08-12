@@ -1,15 +1,18 @@
 //! Network management for container-to-container communication.
 //!
 //! Provides `NetworkStore` for persisting network state and
-//! platform-specific network backend managers for bridge networking:
+//! platform-specific network backend managers for virtio-net networking:
 //! - Linux: `PasstManager` (passt Unix stream socket)
-//! - macOS: `NetProxyManager` (pure-Rust vfkit server, no external binary)
+//! - Unix: `NetProxyManager` (inherited pure-Rust userspace gateway)
+//!
+//! Linux bridge networking uses passt. Restricted MicroVM egress on Linux and
+//! built-in macOS networking use the inherited netproxy.
 
 #[cfg(any(target_os = "linux", test))]
 mod passt;
 mod store;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub use a3s_box_netproxy::NetProxyManager;
 #[cfg(any(target_os = "linux", test))]
 pub use passt::{terminate_passt, PasstManager};
@@ -23,7 +26,7 @@ pub trait NetworkBackend: Send + Sync {
     fn stop(&mut self);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 impl NetworkBackend for NetProxyManager {
     fn socket_path(&self) -> &std::path::Path {
         self.socket_path()

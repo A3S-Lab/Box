@@ -1,0 +1,528 @@
+[
+  {
+    "elapsed_unit": "ms",
+    "failed": 5,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "mechanism": "bind_metadata_create_delete",
+    "notes": [
+      "command failed; inspect sample log"
+    ],
+    "observed_unit": "",
+    "passed": 0,
+    "rate_unit": "",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 114.554,
+      "mean": 114.142,
+      "min": 113.98,
+      "p50": 114.046,
+      "p95": 114.554
+    },
+    "mechanism": "bind_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2242.838,
+      "p05": 2234.756,
+      "p50": 2244.709
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 415.433,
+      "mean": 404.741,
+      "min": 364.525,
+      "p50": 414.572,
+      "p95": 415.433
+    },
+    "mechanism": "bind_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 634.195,
+      "p05": 616.224,
+      "p50": 617.505
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 1468.294,
+      "mean": 1446.757,
+      "min": 1415.832,
+      "p50": 1466.416,
+      "p95": 1468.294
+    },
+    "mechanism": "cpu_sha256",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 177.0,
+      "p05": 174.352,
+      "p50": 174.575
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 915.731,
+      "mean": 712.676,
+      "min": 615.223,
+      "p50": 714.934,
+      "p95": 765.961
+    },
+    "mechanism": "detached_remove",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 1.414,
+      "p05": 1.092,
+      "p50": 1.399
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 1218.815,
+      "mean": 1003.581,
+      "min": 865.178,
+      "p50": 1015.514,
+      "p95": 1118.608
+    },
+    "mechanism": "detached_start",
+    "observed_unit": "",
+    "passed": 20,
+    "rate_per_second": {
+      "mean": 1.005,
+      "p05": 0.82,
+      "p50": 0.985
+    },
+    "rate_unit": "operations/s",
+    "samples": 20,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 114.588,
+      "mean": 108.934,
+      "min": 63.775,
+      "p50": 113.898,
+      "p95": 114.175
+    },
+    "mechanism": "exec_noop",
+    "observed_unit": "",
+    "passed": 30,
+    "rate_per_second": {
+      "mean": 9.465,
+      "p05": 8.758,
+      "p50": 8.779
+    },
+    "rate_unit": "operations/s",
+    "samples": 30,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "mechanism": "host_network",
+    "notes": [
+      "current Sandbox networking exposes loopback only; TSI and named bridge networking are MicroVM-only"
+    ],
+    "observed_unit": "",
+    "passed": 0,
+    "rate_unit": "",
+    "samples": 1,
+    "skipped": 1,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "mechanism": "idle_memory",
+    "observed": {
+      "max": 7544832.0,
+      "mean": 7544832.0,
+      "min": 7544832.0,
+      "p50": 7544832.0
+    },
+    "observed_unit": "bytes",
+    "passed": 1,
+    "rate_unit": "",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": ""
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 114.395,
+      "mean": 104.109,
+      "min": 64.137,
+      "p50": 114.024,
+      "p95": 114.395
+    },
+    "mechanism": "memory_zero_copy",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 5186.381,
+      "p05": 4475.71,
+      "p50": 4490.3
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 114.037,
+      "mean": 113.987,
+      "min": 113.955,
+      "p50": 113.993,
+      "p95": 114.037
+    },
+    "mechanism": "named_volume_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2245.873,
+      "p05": 2244.892,
+      "p50": 2245.76
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 368.162,
+      "mean": 366.003,
+      "min": 364.41,
+      "p50": 365.203,
+      "p95": 368.162
+    },
+    "mechanism": "named_volume_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 699.46,
+      "p05": 695.345,
+      "p50": 700.98
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 2471.681,
+      "mean": 2142.45,
+      "min": 1823.801,
+      "p50": 2173.949,
+      "p95": 2471.681
+    },
+    "mechanism": "parallel_4_detached_remove",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1.891,
+      "p05": 1.618,
+      "p50": 1.84
+    },
+    "rate_unit": "operations/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 1774.013,
+      "mean": 1574.663,
+      "min": 1427.318,
+      "p50": 1575.065,
+      "p95": 1774.013
+    },
+    "mechanism": "parallel_4_detached_start",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2.553,
+      "p05": 2.255,
+      "p50": 2.54
+    },
+    "rate_unit": "operations/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 765.625,
+      "mean": 765.625,
+      "min": 765.625,
+      "p50": 765.625,
+      "p95": 765.625
+    },
+    "mechanism": "persistent_preflight_remove",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 1.306,
+      "p05": 1.306,
+      "p50": 1.306
+    },
+    "rate_unit": "operations/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 1416.993,
+      "mean": 1416.993,
+      "min": 1416.993,
+      "p50": 1416.993,
+      "p95": 1416.993
+    },
+    "mechanism": "persistent_preflight_start",
+    "observed_unit": "",
+    "passed": 1,
+    "rate_per_second": {
+      "mean": 0.706,
+      "p05": 0.706,
+      "p50": 0.706
+    },
+    "rate_unit": "operations/s",
+    "samples": 1,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 114.416,
+      "mean": 104.23,
+      "min": 63.95,
+      "p50": 114.298,
+      "p95": 114.416
+    },
+    "mechanism": "rootfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2592.404,
+      "p05": 2237.443,
+      "p50": 2239.751
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 465.023,
+      "mean": 415.179,
+      "min": 364.488,
+      "p50": 415.283,
+      "p95": 465.023
+    },
+    "mechanism": "rootfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 620.283,
+      "p05": 550.511,
+      "p50": 616.447
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 118.172,
+      "mean": 114.838,
+      "min": 113.905,
+      "p50": 114.053,
+      "p95": 118.172
+    },
+    "mechanism": "tmpfs_warm_read",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 2229.686,
+      "p05": 2166.339,
+      "p50": 2244.561
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 264.791,
+      "mean": 224.98,
+      "min": 214.145,
+      "p50": 214.411,
+      "p95": 264.791
+    },
+    "mechanism": "tmpfs_write",
+    "observed_unit": "",
+    "passed": 5,
+    "rate_per_second": {
+      "mean": 1145.832,
+      "p05": 966.802,
+      "p50": 1193.97
+    },
+    "rate_unit": "MiB/s",
+    "samples": 5,
+    "skipped": 0,
+    "work_unit": "MiB"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 667.91,
+      "mean": 600.437,
+      "min": 514.769,
+      "p50": 565.134,
+      "p95": 667.91
+    },
+    "mechanism": "volume_backed_init_remove",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 1.68,
+      "p05": 1.497,
+      "p50": 1.767
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  },
+  {
+    "elapsed_unit": "ms",
+    "failed": 0,
+    "host_lane": "a3s-os-linux-x86_64-sandbox-persistent",
+    "isolation": "sandbox",
+    "latency_ms": {
+      "max": 1115.713,
+      "mean": 976.009,
+      "min": 865.543,
+      "p50": 965.61,
+      "p95": 1115.713
+    },
+    "mechanism": "volume_backed_init_start",
+    "observed_unit": "",
+    "passed": 10,
+    "rate_per_second": {
+      "mean": 1.03,
+      "p05": 0.896,
+      "p50": 1.035
+    },
+    "rate_unit": "operations/s",
+    "samples": 10,
+    "skipped": 0,
+    "work_unit": "operation"
+  }
+]

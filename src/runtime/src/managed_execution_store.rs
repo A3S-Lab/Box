@@ -429,9 +429,6 @@ fn validate_new_record(record: &BoxRecord) -> ManagedExecutionStoreResult<Execut
         .managed_execution
         .as_ref()
         .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
-    metadata
-        .validate()
-        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
     let state = record
         .managed_state()
         .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?

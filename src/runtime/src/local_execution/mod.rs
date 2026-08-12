@@ -35,6 +35,8 @@ use a3s_box_core::{
 };
 
 pub use backend::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
+#[cfg(test)]
+pub(crate) use record::build_managed_record as build_managed_record_for_test;
 use record::{build_managed_record, status_from_record};
 use store::RuntimeUpdate;
 #[cfg(feature = "vm")]

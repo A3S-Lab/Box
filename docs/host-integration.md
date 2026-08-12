@@ -14,12 +14,13 @@ capability scenario has soak coverage.
 | Level | Host requirements | Command |
 | --- | --- | --- |
 | Stub baseline | macOS or Linux with Rust, C compiler, and protoc | `scripts/host-integration-smoke.sh` |
-| Core MicroVM smoke | macOS Apple Silicon/HVF or Linux KVM, libkrun, Linux guest init, runnable image | `scripts/host-integration-smoke.sh --core` |
+| Core MicroVM smoke | macOS Apple Silicon/HVF or Linux KVM, libkrun, a matching Rust musl target/linker for the Linux guest init, runnable image | `scripts/host-integration-smoke.sh --core` |
 | Native local SDK smoke | Same as the selected MicroVM or certified Linux Sandbox backend, plus Python 3.10+, Node.js 20+, and Go 1.25+ | `scripts/local-sdk-smoke.sh microvm` or `scripts/local-sdk-smoke.sh sandbox` |
 | Host command and warm-pool smoke | Same as core smoke; optional registry credentials for push coverage | `scripts/host-integration-smoke.sh --host` |
 | Linux Dockerfile `RUN` | Linux, root, chroot-capable filesystem, local Alpine OCI archive | `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` |
 | CRI smoke | macOS or Linux MicroVM host, `crictl`, CRI images | `scripts/host-integration-smoke.sh --cri` |
-| Host soak | Same as the selected host-backed suites; enough time to expose leaks and lost updates | `scripts/host-integration-smoke.sh --no-pure --core --host --soak` |
+| Restricted-egress smoke | Apple Silicon/HVF or Linux/KVM with the same guest assets as core smoke | `scripts/host-integration-smoke.sh --egress` |
+| Host soak | Same as the selected host-backed suites; enough time to expose leaks and lost updates | `scripts/host-integration-smoke.sh --no-pure --core --host --egress --soak` |
 | Production cluster validation | Explicitly enrolled production Linux nodes with `/dev/kvm`, containerd RuntimeClass wiring, labels, taints, and rollback prepared | See [`production-cluster-tests.md`](./production-cluster-tests.md) |
 | Cross-capability promotion | The host and isolation lanes required by the affected public capabilities | See [`soak-test-plan.md`](./soak-test-plan.md) |
 
@@ -72,10 +73,14 @@ not accepted as a guest artifact. The runner expects the Linux binary under
 ## Linux core smoke
 
 Use a host with `/dev/kvm` available to the current user. For offline runs, use
-the same OCI archive variables as macOS.
+the same OCI archive variables as macOS. Install the musl linker and matching
+Rust target first; the runner builds guest init as a static guest binary rather
+than accepting the host's glibc-dynamic artifact.
 
 ```bash
 cd crates/box
+sudo apt-get install musl-tools
+rustup target add --toolchain stable x86_64-unknown-linux-musl
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
 export A3S_BOX_SMOKE_IMAGE_TAR="$A3S_BOX_TEST_ALPINE_TAR"
 export A3S_BOX_SMOKE_SKIP_PULL=1
@@ -360,6 +365,54 @@ export A3S_BOX_PUSH_PASSWORD='...'
 scripts/host-integration-smoke.sh --host
 ```
 
+## Restricted-egress smoke
+
+The restricted-egress suite uses host-local fixtures and a real libkrun guest.
+It does not depend on public DNS or third-party services. The matrix covers
+unsupported-policy preflight, dedicated-kernel boot, deny-all, hostname
+allow/deny, proxy and direct-IP bypass, DNS/UDP/IPv6/DoH/QUIC attempts, raw
+IPv4 policy enforcement, concurrent execution isolation, generation restart,
+policy-channel failure, decision logs, and final cleanup.
+
+```bash
+cd crates/box
+export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
+export A3S_BOX_HOST_SMOKE_IMAGE=docker.io/library/alpine:3.22
+export CARGO_BUILD_JOBS=1
+export CARGO_INCREMENTAL=0
+
+scripts/host-integration-smoke.sh --no-pure --egress
+```
+
+The test prints one
+`A3S_EGRESS_CASE case=<name> result=pass` marker for each of the 14 required
+cases. A successful one-pass run is `R0` evidence for that exact host and
+revision, not a `G2` qualification.
+
+For the restricted-egress-only `G2` profile, retain the matching OCI archive
+and run:
+
+```bash
+scripts/host-integration-smoke.sh \
+  --no-pure \
+  --egress \
+  --soak \
+  --soak-no-bench \
+  --soak-duration 7200 \
+  --soak-verify-min-duration-secs 7200 \
+  --soak-verify-min-sample-span-secs 7200 \
+  --soak-verify-min-samples 24 \
+  --soak-verify-max-sample-gap-secs 600
+```
+
+The retained 2026-07-31 runs passed this profile on both current Unix
+MicroVM lanes: Apple Silicon/HVF completed 286 iterations in 7,203 seconds,
+and Linux x86_64/KVM completed 336 iterations in 7,215 seconds. Both had zero
+failed iterations, exactly 14 passing case markers in every iteration,
+continuous samples within the declared gap, and no final resource-count
+growth. This qualifies only the restricted-egress `SEC-01` contract on those
+host/backend classes.
+
 ## CRI smoke
 
 The CRI smoke is experimental and intentionally opt-in. It starts the
@@ -398,11 +451,13 @@ scripts/host-integration-smoke.sh \
   --no-pure \
   --core \
   --host \
+  --egress \
   --soak \
   --soak-duration 7200 \
   --soak-verify-min-duration-secs 7200 \
   --soak-verify-min-sample-span-secs 7200 \
-  --soak-verify-min-samples 4
+  --soak-verify-min-samples 24 \
+  --soak-verify-max-sample-gap-secs 600
 ```
 
 For a short rehearsal, cap the loop instead of waiting for the time limit:
@@ -412,6 +467,7 @@ scripts/host-integration-smoke.sh \
   --no-pure \
   --core \
   --host \
+  --egress \
   --soak \
   --soak-iterations 1 \
   --soak-duration 0
@@ -423,15 +479,17 @@ directory with the release candidate when the soak is used as a gate. The runner
 verifies the bundle before returning success, including resource counters and
 required snapshot/log files. `metadata.txt` must include parseable `started_at`,
 non-negative integer soak gate fields, and `selected_suites` flags for `core`,
-`host`, `linux_run`, `cri`, and `bench`; every selected suite must have its
-corresponding per-iteration log, with bench requiring both `bench-leak` and
-`bench-race` logs. `resource-samples.tsv` timestamps must be parseable and
-monotonic, counters must be non-negative integers, there must be exactly one
-`start` row and one `final` row, and `summary.txt` duration must not be shorter
-than the sampled time span. Pass the `--soak-verify-*` options on release-gate
-runs so the runner also enforces minimum duration, sample span, and sample count
-before returning success. Saved bundles keep those gate values in `metadata.txt`,
-so later verifier runs enforce the recorded gates even when the re-check command
+`host`, `linux_run`, `cri`, `egress`, and `bench`; every selected suite must
+have its corresponding per-iteration log. Bench requires both `bench-leak` and
+`bench-race` logs. Egress requires all 14 exact passing case markers once in
+every iteration log; a missing, failed, duplicate, or unknown marker rejects
+the bundle. `resource-samples.tsv` timestamps must be parseable and monotonic,
+counters must be non-negative integers, there must be exactly one `start` row
+and one `final` row, and `summary.txt` duration must not be shorter than the
+sampled time span. Pass the `--soak-verify-*` options on release-gate runs so
+the runner also enforces minimum duration, sample span, and sample count before
+returning success. Saved bundles keep those gate values in `metadata.txt`, so
+later verifier runs enforce the recorded gates even when the re-check command
 does not repeat every `--min-*` option.
 Failed host soaks write `result=fail` plus the failed
 iteration count and, when available, `exit_code`, `failed_at`, and
@@ -442,7 +500,8 @@ deploy/scripts/verify-soak-evidence.sh \
   --kind host \
   --min-duration-secs 7200 \
   --min-sample-span-secs 7200 \
-  --min-samples 4 \
+  --min-samples 24 \
+  --max-sample-gap-secs 600 \
   <evidence-dir>
 ```
 

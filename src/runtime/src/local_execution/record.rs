@@ -21,9 +21,13 @@ pub(crate) fn build_managed_record(
     now: DateTime<Utc>,
 ) -> ExecutionManagerResult<BoxRecord> {
     validate_health_policy(&request.policy)?;
-    let metadata =
-        ManagedExecutionMetadata::new(operation_id, ExecutionGeneration::INITIAL, request.clone())
-            .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
+    let metadata = ManagedExecutionMetadata::new_with_home(
+        home_dir,
+        operation_id,
+        ExecutionGeneration::INITIAL,
+        request.clone(),
+    )
+    .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
     let config = &request.config;
     let policy = &request.policy;
     let short_id = BoxRecord::make_short_id(execution_id.as_str());
@@ -225,6 +229,12 @@ pub(crate) fn lease_from_record(record: &BoxRecord) -> ExecutionManagerResult<Ex
         plan: metadata.plan.clone(),
         resources: metadata.request.config.resources.clone(),
         started_at,
+        security_receipt: if record.status == ManagedExecutionState::Running.as_status() {
+            crate::security_receipt::load_for_record(record)
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?
+        } else {
+            None
+        },
     })
 }
 
@@ -239,6 +249,12 @@ pub(crate) fn status_from_record(
         generation: metadata.generation,
         state,
         plan: metadata.plan.clone(),
+        security_receipt: if state == ExecutionState::Running {
+            crate::security_receipt::load_for_record(record)
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?
+        } else {
+            None
+        },
     })
 }
 

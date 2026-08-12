@@ -3,8 +3,9 @@
 # Run the macOS/Linux validation ladder for a3s-box.
 #
 # Default mode runs deterministic stub-backed checks that do not need a
-# hypervisor. Pass --core, --host, --linux-run, --cri, or --all to run the
-# ignored host-backed suites on machines with HVF/KVM and real guest assets.
+# hypervisor. Pass --core, --host, --linux-run, --cri, --egress, or --all to
+# run the ignored host-backed suites on machines with HVF/KVM and real guest
+# assets.
 
 set -Eeuo pipefail
 
@@ -17,6 +18,7 @@ RUN_CORE=0
 RUN_HOST=0
 RUN_LINUX_RUN=0
 RUN_CRI=0
+RUN_EGRESS=0
 RUN_SOAK=0
 SOAK_DURATION_SECS="${A3S_BOX_SOAK_DURATION_SECS:-7200}"
 SOAK_ITERATIONS="${A3S_BOX_SOAK_ITERATIONS:-0}"
@@ -47,7 +49,8 @@ Options:
   --host         Run ignored host_smoke VM, warm-pool, Compose, and optional registry suites.
   --linux-run    Run the Linux-only Dockerfile RUN chroot smoke.
   --cri          Run the ignored crictl CRI smoke with A3S_BOX_CRI_SMOKE=1.
-  --all          Run --core, --host, --linux-run, and --cri after the pure checks.
+  --egress       Run the ignored real restricted-egress matrix.
+  --all          Run --core, --host, --linux-run, --cri, and --egress after the pure checks.
   --soak         Repeat selected real suites and leak/race checks for soak validation.
   --soak-duration SECS
                  Time limit for --soak (default: 7200, or A3S_BOX_SOAK_DURATION_SECS).
@@ -91,6 +94,7 @@ Common environment:
 Examples:
   scripts/host-integration-smoke.sh
   A3S_BOX_TEST_ALPINE_TAR=/tmp/alpine.tar scripts/host-integration-smoke.sh --core
+  A3S_BOX_TEST_ALPINE_TAR=/tmp/alpine.tar scripts/host-integration-smoke.sh --egress
   sudo -E scripts/host-integration-smoke.sh --linux-run
   A3S_BOX_TEST_ALPINE_TAR=/tmp/alpine.tar scripts/host-integration-smoke.sh --all
   A3S_BOX_TEST_ALPINE_TAR=/tmp/alpine.tar scripts/host-integration-smoke.sh --no-pure --core --host --soak
@@ -117,11 +121,15 @@ while [ "$#" -gt 0 ]; do
         --cri)
             RUN_CRI=1
             ;;
+        --egress)
+            RUN_EGRESS=1
+            ;;
         --all)
             RUN_CORE=1
             RUN_HOST=1
             RUN_LINUX_RUN=1
             RUN_CRI=1
+            RUN_EGRESS=1
             ;;
         --soak)
             RUN_SOAK=1
@@ -344,11 +352,6 @@ guest_init_exists() {
         [ -x "$WORKSPACE/target/$target/release/a3s-box-guest-init" ]; then
         return 0
     fi
-    if [ "$(host_os)" = "Linux" ]; then
-        [ -x "$WORKSPACE/target/debug/a3s-box-guest-init" ] ||
-            [ -x "$WORKSPACE/target/release/a3s-box-guest-init" ]
-        return
-    fi
     return 1
 }
 
@@ -399,7 +402,13 @@ EOF
 build_guest_init() {
     case "$(host_os)" in
         Linux)
-            run_real cargo build -p a3s-box-guest-init
+            local target
+            target="$(guest_target)"
+            if [ "$target" = "unsupported" ]; then
+                echo "unsupported Linux architecture for guest init build: $(host_arch)" >&2
+                exit 1
+            fi
+            run_real cargo build -p a3s-box-guest-init --target "$target"
             ;;
         Darwin)
             local target
@@ -506,10 +515,31 @@ run_cri_suite() {
         cargo test -p a3s-box-cri --test crictl_smoke -- --ignored --nocapture --test-threads=1
 }
 
+run_egress_suite() {
+    require_image_source "restricted egress smoke"
+    build_real_binaries
+    log "Running real restricted-egress matrix"
+    run_real cargo test -p a3s-box-cli --test egress_smoke \
+        test_real_restricted_egress_matrix \
+        -- --ignored --nocapture --test-threads=1
+}
+
 shim_count() {
-    local count
-    count="$(pgrep -xc 'a3s-box-shim' 2>/dev/null || pgrep -fc 'a3s-box-shim' 2>/dev/null || true)"
-    echo "${count:-0}"
+    local count=""
+    if have_cmd pgrep; then
+        count="$(pgrep -xc 'a3s-box-shim' 2>/dev/null)" || true
+        if is_non_negative_int "$count"; then
+            echo "$count"
+            return
+        fi
+
+        count="$(pgrep -fc '[a]3s-box-shim' 2>/dev/null)" || true
+    fi
+    if is_non_negative_int "$count"; then
+        echo "$count"
+    else
+        echo 0
+    fi
 }
 
 mount_count() {
@@ -588,7 +618,7 @@ write_soak_metadata() {
         cargo --version 2>/dev/null || true
         echo "a3s_box:"
         "${A3S_BOX:-a3s-box}" --version 2>/dev/null || true
-        echo "selected_suites=core=$RUN_CORE host=$RUN_HOST linux_run=$RUN_LINUX_RUN cri=$RUN_CRI bench=$SOAK_RUN_BENCH"
+        echo "selected_suites=core=$RUN_CORE host=$RUN_HOST linux_run=$RUN_LINUX_RUN cri=$RUN_CRI egress=$RUN_EGRESS bench=$SOAK_RUN_BENCH"
         echo "soak_duration_secs=$SOAK_DURATION_SECS"
         echo "soak_iterations=$SOAK_ITERATIONS"
         echo "soak_interval_secs=$SOAK_INTERVAL_SECS"
@@ -641,7 +671,10 @@ run_soak_step() {
     log "Soak iteration $iteration: $name (log: $log_file)"
 
     set +e
-    ( "$@" ) >"$log_file" 2>&1
+    (
+        set -Eeuo pipefail
+        "$@"
+    ) >"$log_file" 2>&1
     local rc=$?
     set -e
 
@@ -680,6 +713,9 @@ run_soak_iteration() {
     fi
     if [ "$RUN_CRI" -eq 1 ]; then
         run_soak_step "$iteration" cri run_cri_suite || rc=1
+    fi
+    if [ "$RUN_EGRESS" -eq 1 ]; then
+        run_soak_step "$iteration" egress run_egress_suite || rc=1
     fi
     if [ "$SOAK_RUN_BENCH" -eq 1 ]; then
         run_soak_step "$iteration" bench-leak run_bench_leak || rc=1
@@ -788,8 +824,9 @@ run_soak_suite() {
         [ "$RUN_HOST" -eq 0 ] &&
         [ "$RUN_LINUX_RUN" -eq 0 ] &&
         [ "$RUN_CRI" -eq 0 ] &&
+        [ "$RUN_EGRESS" -eq 0 ] &&
         [ "$SOAK_RUN_BENCH" -eq 0 ]; then
-        echo "--soak has no selected work; choose --core, --host, --linux-run, --cri, or leave bench enabled" >&2
+        echo "--soak has no selected work; choose --core, --host, --linux-run, --cri, --egress, or leave bench enabled" >&2
         exit 2
     fi
 
@@ -891,6 +928,10 @@ else
 
     if [ "$RUN_CRI" -eq 1 ]; then
         run_cri_suite
+    fi
+
+    if [ "$RUN_EGRESS" -eq 1 ]; then
+        run_egress_suite
     fi
 fi
 

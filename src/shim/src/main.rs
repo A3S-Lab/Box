@@ -20,12 +20,14 @@ use a3s_box_core::error::{BoxError, Result};
 #[cfg(target_os = "windows")]
 use a3s_box_core::exec::WINDOWS_STOP_REQUEST_FILE;
 use a3s_box_core::vmm::InstanceSpec;
+#[cfg(unix)]
+use a3s_box_core::vmm::NetworkInstanceConfig;
 use a3s_box_core::EXEC_VSOCK_PORT;
 #[cfg(target_os = "windows")]
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_core::{ATTEST_VSOCK_PORT, PORT_FWD_VSOCK_PORT, PTY_VSOCK_PORT};
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use a3s_box_netproxy::{spawn_inherited_netproxy, InheritedNetProxyConfig};
 use clap::Parser;
 use krun::KrunContext;
@@ -469,7 +471,9 @@ fn parse_cpuset_spec(spec: &str) -> std::result::Result<Vec<usize>, String> {
 #[cfg(not(target_os = "windows"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn tsi_port_map_for_spec(spec: &InstanceSpec) -> Vec<String> {
-    if native_bridge_port_forwarding_handles_spec(spec) {
+    if spec.tsi_mode == a3s_box_core::vmm::TsiMode::Disabled
+        || native_bridge_port_forwarding_handles_spec(spec)
+    {
         return Vec::new();
     }
 
@@ -594,6 +598,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Create libkrun context
     tracing::debug!("Creating libkrun context");
     let ctx = KrunContext::create()?;
+
+    if spec.tsi_mode == a3s_box_core::vmm::TsiMode::Disabled {
+        tracing::info!("Disabling libkrun TSI internet-socket hijack");
+        ctx.disable_tsi_hijack()?;
+    }
 
     // Configure VM resources
     tracing::debug!(
@@ -732,7 +741,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Must be called before add_vsock_port to avoid EINVAL from libkrun.
     // Skip entries handled by bridge-native forwarding or host_port=0
     // auto-assignment, which would fail with EINVAL in libkrun's TSI.
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
         let valid_port_map = tsi_port_map_for_spec(spec);
 
@@ -889,10 +898,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         tracing::info!("TEE simulation mode: A3S_TEE_SIMULATE=1 included in entrypoint env");
     }
 
-    // Configure networking: virtio-net (passt on Linux, gvproxy on macOS) or TSI (default)
+    // Configure networking: pathname passt/vfkit, inherited netproxy, or
+    // direct TSI when no virtio-net device is present.
     #[cfg(not(target_os = "windows"))]
     if let Some(ref net_config) = spec.network {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         tracing::info!(
             ip = %net_config.ip_address,
             gateway = %net_config.gateway,
@@ -902,48 +912,23 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             net_proxy_fd = net_config.net_proxy_fd,
             "Configuring virtio-net networking"
         );
-        #[cfg(not(target_os = "macos"))]
-        tracing::info!(
-            ip = %net_config.ip_address,
-            gateway = %net_config.gateway,
-            mac = ?net_config.mac_address,
-            socket = %net_config.net_socket_path.display(),
-            "Configuring virtio-net networking"
-        );
-
-        #[cfg(target_os = "linux")]
-        let socket_str =
-            net_config
-                .net_socket_path
-                .to_str()
-                .ok_or_else(|| BoxError::BoxBootError {
-                    message: format!(
-                        "Invalid network socket path: {}",
-                        net_config.net_socket_path.display()
-                    ),
-                    hint: None,
-                })?;
-
-        #[cfg(target_os = "linux")]
-        ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
-        #[cfg(target_os = "macos")]
-        if let Some(fd) = net_config.net_socket_fd {
-            if let Some(proxy_fd) = net_config.net_proxy_fd {
-                spawn_inherited_netproxy(
-                    proxy_fd,
-                    InheritedNetProxyConfig {
-                        guest_ip: net_config.ip_address,
-                        gateway: net_config.gateway,
-                        prefix_len: net_config.prefix_len,
-                        dns_servers: &net_config.dns_servers,
-                        port_map: &spec.port_map,
-                        stats_path: net_config.net_stats_path.clone(),
-                        bridge_socket_dir: net_config.bridge_socket_dir.clone(),
-                        own_mac: net_config.mac_address,
-                    },
-                )?;
-            }
-            log_inherited_net_fd(fd);
+        if let Some((fd, proxy_fd)) = inherited_netproxy_fds(net_config)? {
+            validate_inherited_net_fd(fd, "virtio-net")?;
+            validate_inherited_net_fd(proxy_fd, "netproxy")?;
+            spawn_inherited_netproxy(
+                proxy_fd,
+                InheritedNetProxyConfig {
+                    guest_ip: net_config.ip_address,
+                    gateway: net_config.gateway,
+                    prefix_len: net_config.prefix_len,
+                    dns_servers: &net_config.dns_servers,
+                    port_map: &spec.port_map,
+                    stats_path: net_config.net_stats_path.clone(),
+                    bridge_socket_dir: net_config.bridge_socket_dir.clone(),
+                    own_mac: net_config.mac_address,
+                    egress: net_config.egress.as_ref(),
+                },
+            )?;
             ctx.add_net_unixgram_fd(fd, &net_config.mac_address)?;
         } else {
             let socket_str =
@@ -957,6 +942,9 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                         ),
                         hint: None,
                     })?;
+            #[cfg(target_os = "linux")]
+            ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
+            #[cfg(target_os = "macos")]
             ctx.add_net_unixgram(socket_str, &net_config.mac_address)?;
         }
 
@@ -1323,10 +1311,55 @@ fn kernel_format_from_magic(magic: [u8; 4]) -> Option<u32> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn log_inherited_net_fd(fd: i32) {
+#[cfg(unix)]
+fn inherited_netproxy_fds(network: &NetworkInstanceConfig) -> Result<Option<(i32, i32)>> {
+    match (network.net_socket_fd, network.net_proxy_fd) {
+        (Some(net_fd), Some(proxy_fd)) if net_fd == proxy_fd => Err(BoxError::BoxBootError {
+            message: "Inherited virtio-net and netproxy descriptors must be distinct".to_string(),
+            hint: None,
+        }),
+        (Some(net_fd), Some(proxy_fd)) => Ok(Some((net_fd, proxy_fd))),
+        (None, None) if network.egress.is_none() => Ok(None),
+        (None, None) => Err(BoxError::BoxBootError {
+            message: "Restricted egress requires an inherited userspace netproxy".to_string(),
+            hint: None,
+        }),
+        _ => Err(BoxError::BoxBootError {
+            message: "Inherited virtio-net requires both socket descriptors".to_string(),
+            hint: None,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn validate_inherited_net_fd(fd: i32, role: &str) -> Result<()> {
+    if fd < 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!("Invalid inherited {role} descriptor: {fd}"),
+            hint: None,
+        });
+    }
+
     let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if fd_flags < 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Cannot inspect inherited {role} descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
     let file_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if file_flags < 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Cannot inspect inherited {role} descriptor status {fd}: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
 
     let mut sock_type: libc::c_int = 0;
     let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -1339,16 +1372,56 @@ fn log_inherited_net_fd(fd: i32) {
             &mut opt_len,
         )
     };
+    if sock_type_ret != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Cannot inspect inherited {role} socket {fd}: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if sock_type != libc::SOCK_DGRAM {
+        return Err(BoxError::BoxBootError {
+            message: format!("Inherited {role} descriptor {fd} is not a datagram socket"),
+            hint: None,
+        });
+    }
+
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut address_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let address_ret = unsafe {
+        libc::getsockname(
+            fd,
+            &mut address as *mut _ as *mut libc::sockaddr,
+            &mut address_len,
+        )
+    };
+    if address_ret != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Cannot inspect inherited {role} socket address {fd}: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if i32::from(address.ss_family) != libc::AF_UNIX {
+        return Err(BoxError::BoxBootError {
+            message: format!("Inherited {role} descriptor {fd} is not a Unix socket"),
+            hint: None,
+        });
+    }
 
     tracing::info!(
         fd,
+        role,
         fd_flags,
         file_flags,
-        sock_type_ret,
         sock_type,
-        last_os_error = %std::io::Error::last_os_error(),
         "Validated inherited network socket fd"
     );
+    Ok(())
 }
 
 /// Apply OCI USER directive to the krun context.
@@ -1598,6 +1671,18 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_tsi_port_map_for_spec_skips_disconnected_guest() {
+        let spec = InstanceSpec {
+            port_map: vec!["8080:80".to_string()],
+            tsi_mode: a3s_box_core::vmm::TsiMode::Disabled,
+            ..Default::default()
+        };
+
+        assert!(tsi_port_map_for_spec(&spec).is_empty());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_tsi_port_map_for_spec_skips_macos_bridge_ports() {
@@ -1628,18 +1713,59 @@ mod tests {
         a3s_box_core::vmm::NetworkInstanceConfig {
             net_socket_path: std::path::PathBuf::from("/tmp/a3s-box-test-net.sock"),
             net_stats_path: Some(std::path::PathBuf::from("/tmp/a3s-box-test-net.stats.json")),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_socket_fd: Some(42),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_proxy_fd: Some(43),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             bridge_socket_dir: Some(std::path::PathBuf::from("/tmp/a3s-switch")),
             ip_address: "10.89.0.2".parse().unwrap(),
             gateway: "10.89.0.1".parse().unwrap(),
             prefix_len: 24,
             mac_address: [0x02, 0x42, 0x0a, 0x59, 0x00, 0x02],
             dns_servers: vec!["8.8.8.8".parse().unwrap()],
+            egress: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_netproxy_requires_a_complete_descriptor_pair() {
+        let mut network = test_network_config();
+        assert_eq!(inherited_netproxy_fds(&network).unwrap(), Some((42, 43)));
+
+        network.net_proxy_fd = network.net_socket_fd;
+        assert!(inherited_netproxy_fds(&network).is_err());
+
+        network.net_proxy_fd = None;
+        assert!(inherited_netproxy_fds(&network).is_err());
+
+        network.net_socket_fd = None;
+        assert_eq!(inherited_netproxy_fds(&network).unwrap(), None);
+
+        network.egress = Some(a3s_box_core::vmm::NetworkEgressConfig {
+            policy_socket_path: std::path::PathBuf::from("/tmp/policy.sock"),
+            http_proxy: None,
+            limits: a3s_box_core::EgressPolicyLimits::default(),
+        });
+        assert!(inherited_netproxy_fds(&network).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_network_descriptor_validation_rejects_invalid_or_stream_fds() {
+        use std::os::fd::AsRawFd;
+
+        assert!(validate_inherited_net_fd(-1, "test").is_err());
+
+        let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        validate_inherited_net_fd(datagram.as_raw_fd(), "test").unwrap();
+
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(validate_inherited_net_fd(stream.as_raw_fd(), "test").is_err());
+
+        let udp = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        assert!(validate_inherited_net_fd(udp.as_raw_fd(), "test").is_err());
     }
 
     #[cfg(target_os = "linux")]

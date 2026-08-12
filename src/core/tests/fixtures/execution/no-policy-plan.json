@@ -1,0 +1,6 @@
+{
+  "requested_isolation": "microvm",
+  "backend": "krun",
+  "isolation_class": "hardware-vm",
+  "required_controls": []
+}

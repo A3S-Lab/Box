@@ -7,6 +7,7 @@ pub mod audit;
 pub mod compose;
 pub mod config;
 pub mod dns;
+pub mod egress;
 pub mod env;
 pub mod error;
 pub mod event;
@@ -14,6 +15,7 @@ pub mod exec;
 pub mod execution;
 pub mod fs_atomic;
 pub mod guest_exec;
+pub mod host_mount_policy;
 pub mod lifecycle_profile;
 pub mod log;
 pub mod network;
@@ -24,6 +26,8 @@ pub mod pty;
 pub mod rootfs_metadata;
 pub mod scale;
 pub mod security;
+pub mod security_policy;
+pub mod security_receipt;
 pub mod snapshot;
 pub mod tee;
 pub mod traits;
@@ -37,6 +41,10 @@ pub mod workload;
 pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};
 pub use compose::ComposeConfig;
 pub use config::{BoxConfig, ExecutionIsolation, ResourceConfig, ResourceLimits};
+pub use egress::{
+    CompiledEgressPolicy, EgressDecisionDestination, EgressDecisionProtocol, EgressDecisionReason,
+    EgressEvaluation, EGRESS_DECISION_SCHEMA_V1,
+};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};
@@ -47,8 +55,13 @@ pub use exec::{
 };
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
 pub use execution::{
-    resolve_execution, validate_microvm_compatibility, validate_sandbox_compatibility,
-    ExecutionBackend, IsolationClass, ResolvedExecutionPlan,
+    resolve_execution, resolve_execution_with_host_mounts, validate_microvm_compatibility,
+    validate_sandbox_compatibility, ExecutionBackend, IsolationClass, ResolvedExecutionPlan,
+};
+pub use host_mount_policy::{
+    HostBindMount, HostMountAssessment, HostMountAuthorization, HostMountFinding,
+    HostMountIdentity, HostMountOutcome, HostMountPolicyEvaluator, HostMountRisk,
+    HostMountSourceKind, ResolvedHostMount,
 };
 pub use network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode, NetworkPolicy};
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
@@ -62,6 +75,18 @@ pub use scale::{
     InstanceState, ScaleConfig, ScaleRequest, ScaleResponse,
 };
 pub use security::{SeccompMode, SecurityConfig};
+pub use security_policy::{
+    EgressAllowlist, EgressHttpRule, EgressHttpScheme, EgressIpRule, EgressPolicy,
+    EgressPolicyLimits, EgressProtocol, HostMountPolicy, HostMountPolicyMode, HostMountProfile,
+    ReceiptPolicy, ResolvedSandboxSecurityPolicy, SandboxSecurityPolicy,
+    SECURITY_POLICY_SCHEMA_VERSION,
+};
+pub use security_receipt::{
+    canonical_json_digest, SecurityReceiptArtifactDigests, SecurityReceiptEvidenceV1,
+    SecurityReceiptIdMapping, SecurityReceiptImageIdentity, SecurityReceiptOwnerIdentity,
+    SecurityReceiptPreparation, SecurityReceiptResources, SecurityReceiptRuntimeControls,
+    SecurityReceiptV1, SECURITY_RECEIPT_V1_SCHEMA,
+};
 pub use snapshot::{
     SnapshotConfig, SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata,
 };

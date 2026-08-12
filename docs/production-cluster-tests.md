@@ -141,7 +141,7 @@ export A3S_BOX_TEST_ALPINE_TAR=/opt/a3s-images/alpine-oci.tar
 export A3S_BOX_SMOKE_SKIP_PULL=1
 export A3S_BOX_HOST_SMOKE_TIMEOUT_SECS=300
 
-scripts/host-integration-smoke.sh --core --host --no-pure
+scripts/host-integration-smoke.sh --core --host --egress --no-pure
 bench/bench.sh leak
 bench/bench.sh race
 ```
@@ -149,6 +149,8 @@ bench/bench.sh race
 Pass criteria:
 
 - `core_smoke` and `host_smoke` pass on every admitted node.
+- all 14 restricted-egress cases pass once and the final cleanup returns to
+  the node baseline.
 - `bench/bench.sh leak` returns to the baseline count for shims, mounts, and
   box directories.
 - `bench/bench.sh race` reports no lost update and leaves no race boxes behind.
@@ -247,6 +249,7 @@ scripts/host-integration-smoke.sh \
   --no-pure \
   --core \
   --host \
+  --egress \
   --soak \
   --soak-duration 7200 \
   --soak-verify-min-duration-secs 7200 \

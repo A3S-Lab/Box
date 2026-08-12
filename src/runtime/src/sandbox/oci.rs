@@ -24,6 +24,8 @@ pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+pub(crate) const SANDBOX_SECCOMP_POSTURE: &str =
+    "default-deny:errno,clone-namespace-mask,clone3-enosys";
 const LINUX_EPERM: u32 = 1;
 const LINUX_ENOSYS: u32 = 38;
 const LINUX_CLONE_NAMESPACE_MASK: u64 =
@@ -321,6 +323,33 @@ fn compile_capabilities(requested: &[String]) -> Result<oci_spec::runtime::Linux
         .ambient(HashSet::<Capability>::new())
         .build()
         .map_err(oci_error)
+}
+
+pub(crate) fn effective_capability_names(requested: &[String]) -> Result<Vec<String>> {
+    let capabilities = compile_capabilities(requested)?;
+    let bounding = capabilities.bounding().as_ref().ok_or_else(|| {
+        BoxError::StateError("compiled Sandbox capability bounding set is missing".to_string())
+    })?;
+    let mut names = bounding
+        .iter()
+        .map(|capability| {
+            serde_json::to_value(capability)
+                .map_err(|error| {
+                    BoxError::SerializationError(format!(
+                        "failed to encode Sandbox capability: {error}"
+                    ))
+                })?
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| {
+                    BoxError::SerializationError(
+                        "compiled Sandbox capability is not a string".to_string(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    names.sort();
+    Ok(names)
 }
 
 fn parse_allowed_capability(value: &str) -> Result<Capability> {
@@ -1343,6 +1372,49 @@ mod tests {
             .unwrap();
         assert!(!bounding.iter().any(|value| value == "CAP_SYS_ADMIN"));
         assert!(!bounding.iter().any(|value| value == "CAP_NET_RAW"));
+    }
+
+    #[test]
+    fn security_receipt_controls_match_the_compiled_sandbox_bundle() {
+        let mut input = sample_input();
+        input.requested_capabilities = vec!["AUDIT_WRITE".to_string()];
+        let config = BoxConfig {
+            resources: a3s_box_core::ResourceConfig {
+                vcpus: 2,
+                memory_mb: 512,
+                ..a3s_box_core::ResourceConfig::default()
+            },
+            cap_drop: vec!["net_raw".to_string()],
+            ..BoxConfig::default()
+        };
+
+        let controls = crate::security_receipt::sandbox_runtime_controls(&config, &input).unwrap();
+        let compiled = as_json(&compile_oci_spec(&input).unwrap());
+        let mut compiled_capabilities = compiled["process"]["capabilities"]["bounding"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        compiled_capabilities.sort();
+
+        assert_eq!(controls.capabilities, compiled_capabilities);
+        assert_eq!(controls.dropped_capabilities, vec!["CAP_NET_RAW"]);
+        assert_eq!(controls.uid_mappings[0].host_id, 100000);
+        assert_eq!(controls.gid_mappings[0].host_id, 200000);
+        assert_eq!(controls.seccomp, SANDBOX_SECCOMP_POSTURE);
+        assert!(controls.no_new_privileges);
+        assert_eq!(controls.resources.vcpus, 2);
+        assert_eq!(controls.resources.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(controls.resources.pids_limit, Some(512));
+        assert_eq!(controls.resources.cpu_quota, Some(200000));
+        assert_eq!(controls.resources.cpu_period, Some(100000));
+        assert_eq!(controls.resources.cpuset_cpus.as_deref(), Some("0-1"));
+        assert_eq!(
+            controls.resources.memory_reservation,
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(controls.resources.memory_swap, Some(1024 * 1024 * 1024));
     }
 
     #[test]

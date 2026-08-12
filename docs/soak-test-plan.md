@@ -35,13 +35,13 @@ evidence system.
 
 | Entry point | Existing coverage | Current limitation |
 | --- | --- | --- |
-| `scripts/host-integration-smoke.sh --soak` | Repeats real MicroVM core, host command, Dockerfile `RUN`, Compose, CRI, leak, and state-race suites; records host resource counts and verifies evidence | Sampling follows whole-suite iterations; it does not yet report per-capability operation rates, daemon RSS/FD slopes, or independent periodic samples |
+| `scripts/host-integration-smoke.sh --soak` | Repeats real MicroVM core, host command, Dockerfile `RUN`, Compose, CRI, restricted-egress, leak, and state-race suites; records host resource counts and verifies evidence | Sampling follows whole-suite iterations; it does not yet report per-capability operation rates, daemon RSS/FD slopes, or independent periodic samples |
 | `scripts/local-sdk-smoke.sh` | One real Rust/Python/TypeScript/Go pass for MicroVM or certified Sandbox execution, including builders, lifecycle, resources, diagnostics, and snapshots | Functional smoke only; no duration loop, concurrency mix, cancellation, or longitudinal resource gates |
 | `scripts/macos-fault-soak.sh` | Isolated Apple Silicon/HVF lifecycle churn with CLI/shim termination and resource samples | Covers lifecycle recovery, not the complete image/build/storage/network/SDK surface |
 | `scripts/windows-whpx-soak.ps1` | Repeats the eleven Windows-supported real tests and rejects residual A3S Box processes | Uses a Windows-specific summary and has no shared cross-capability verifier or long-term handle/RSS slope gate |
 | `deploy/scripts/runtimeclass-soak.sh` | RuntimeClass jobs, long-lived services, exec, logs, events, cleanup, node selection, sampling, and verified cluster evidence | Cluster-focused; it does not replace node-local image, build, SDK, warm-pool, or TEE lanes |
 | `src/sdk/tests/soak_kvm.rs` | Sustained legacy pipeline fork/snapshot churn, leak checks, and orchestrator RSS bound on real KVM | Covers the optional pipeline layer, not the complete native SDK operation inventory |
-| `deploy/scripts/verify-soak-evidence.sh` | Strict host and cluster evidence validation, including duration, sample span, sample gap, cleanup, and Kubernetes structure | Needs a capability-result schema before it can prove every row in this plan |
+| `deploy/scripts/verify-soak-evidence.sh` | Strict host and cluster evidence validation, including duration, sample span, sample gap, cleanup, Kubernetes structure, and the exact 14-case restricted-egress contract when selected | Needs a general capability-result schema before it can prove every other row in this plan |
 
 ## Profiles
 
@@ -102,6 +102,7 @@ Status has a narrow meaning:
 | `STO-01` | Storage and volumes | Bind/named/tmpfs churn, large and small files, permission/ownership replay, concurrent readers/writers, in-use delete, diff/export/commit, process interruption | Content hashes and metadata remain correct; read-only/in-use fences hold; no mount/temp-file/volume leak; cleanup returns to baseline | Partial |
 | `SNP-01` | Filesystem snapshots | Capture, list/get/size, concurrent restore fan-out, independent mutation, delete fencing, source removal, restart, and interrupted capture/restore | Restores preserve expected image defaults and Unix metadata; copies are independent; no partial snapshot is published; final snapshot count/bytes return to baseline | Partial |
 | `NET-01` | Networking and Compose | TSI outbound churn, named bridge peers, DNS/aliases, TCP publication and port reuse, connection pressure, Compose up/logs/down, netproxy/passt termination | Success/latency stay within threshold; no cross-network reachability; published ports close on cleanup; no network, forwarder, FD, or route leak | Partial |
+| `SEC-01` | Optional execution policy and restricted MicroVM egress | Repeated deny-all and allowlist generations; hostname allow/deny, proxy bypass, direct/raw IPv4, DNS/UDP/IPv6/DoH/QUIC bypass, concurrent policy isolation, restart, policy-channel failure, decision logs, and cleanup | Every iteration contains exactly one passing marker for all 14 required cases; unsupported combinations reject before mutation; policy-channel loss fails closed; no generation, shim, socket, or box state survives cleanup | Partial overall; the restricted-egress subscenario has retained, verified `G2` evidence on real Apple Silicon/HVF and Linux x86_64/KVM, while other optional-policy controls and backends remain outside this qualification |
 | `POL-01` | Warm pool and snapshot-fork | Long-running pool daemon, acquire/release churn, min/max resize, lease expiry, deferred main, build leases, snapshot-fork fan-out, daemon/client termination | No double lease or stale template reuse; idle/active/leased counts reconcile; snapshot count is flat; p95 acquire latency and RSS slope stay within bounds | Partial |
 | `SDK-01` | Rust, Python, TypeScript, and Go SDKs | Run the checked native operation inventory in all languages under sequential and concurrent loops on MicroVM and Sandbox; retry restart IDs and stale generations; terminate clients mid-operation | Identical typed outcomes and stable error codes; no inventory drift; deterministic cleanup; bridge timeout/process/RSS/FD counts stay bounded | Partial: one-pass native smoke and legacy KVM pipeline soak exist |
 | `OBS-01` | Observability and safety | Continuous logs, stats, events, monitor health/metrics, audit reads, log rotation, slow readers, daemon restart, and state reconciliation | Sample sequence is monotonic; stream identity and timestamps remain usable; no writer deadlock or unbounded log growth; daemon RSS under 50 MiB/day after warm-up | Partial |
@@ -109,6 +110,24 @@ Status has a narrow meaning:
 | `K8S-01` | Kubernetes CRI and RuntimeClass | Short Job churn plus Redis/Postgres/nginx/Python services, exec/log/stats, deletion during boot, CRI/shim/containerd restart, cleanup and optional node reboot | Existing cluster verifier passes; success rate at least 99.5% excluding declared faults; no Warning events, unexpected restarts, Pending/Unknown workloads, or residual resources | Existing |
 | `WIN-01` | Windows | Repeat every supported WHPX core-smoke test, including long argv, ports, bind/named volumes, stats, commit, snapshots, and 2,048-file virtio-fs scans | Every test passes within its timeout; no A3S CLI/shim/forwarder process remains; handle/RSS/disk trends remain within recorded bounds | Existing core loop; longitudinal trend verification is partial |
 | `UPG-01` | Packaging, upgrade, and recovery | Start long-lived resources on version N, upgrade to N+1, reconcile/restart/use/remove them, then exercise supported rollback on a canary; include host reboot where allowed | State migration is atomic; unknown future schema fails closed; supported resources remain usable; rollback policy is explicit; cleanup needs no manual repair | Planned |
+
+### Retained restricted-egress G2 qualification
+
+The 2026-07-31 `SEC-01` guardrail runs used the same retained source snapshot
+and recorded the architecture-specific OCI image digest plus the Rust, Cargo,
+and libkrun versions inside each evidence bundle.
+
+| Real host lane | Summary | Resource sampling | Case and cleanup evidence |
+| --- | --- | --- | --- |
+| Apple Silicon/HVF | 7,203 seconds, 286 iterations, 0 failed | 574 samples, 7,202-second span, 35-second maximum gap | 4,004 passing case markers; final shim, mount, box-directory, socket-directory, and state-size counters equal the start |
+| Linux x86_64/KVM | 7,215 seconds, 336 iterations, 0 failed | 674 samples, 7,215-second span, 22-second maximum gap | 4,704 passing case markers; final shim, mount, box-directory, socket-directory, and state-size counters equal the start |
+
+Both archives pass `verify-soak-evidence.sh` with a minimum duration and sample
+span of 7,200 seconds, at least 24 samples, and a maximum sample gap of 600
+seconds. They qualify only the exact restricted-egress contract on these two
+host/backend classes. They do not satisfy any other row, an `R24` release gate,
+or a general A3S Box production claim. The bundles are retained privately
+because raw host evidence can contain machine metadata.
 
 This matrix is the coverage audit for the current root README. Adding a public
 capability requires adding or updating a row here in the same change.
@@ -245,11 +264,12 @@ remain incomplete even when these commands pass.
 ```bash
 # One-iteration host rehearsal.
 scripts/host-integration-smoke.sh \
-  --no-pure --core --host --soak --soak-iterations 1 --soak-duration 0
+  --no-pure --core --host --egress --soak \
+  --soak-iterations 1 --soak-duration 0
 
 # Two-hour KVM/HVF host guardrail.
 scripts/host-integration-smoke.sh \
-  --no-pure --core --host --soak \
+  --no-pure --core --host --egress --soak \
   --soak-duration 7200 \
   --soak-verify-min-duration-secs 7200 \
   --soak-verify-min-sample-span-secs 7200 \
@@ -290,8 +310,9 @@ hard gate, status, and implementation owner queue.
 - Record daemon RSS, CPU, FD/handle, disk, resource inventory, and operation
   latency with a shared schema.
 - Add `capability-results.tsv`, `faults.tsv`, and start/final typed inventories.
-- Extend `verify-soak-evidence.sh` and its self-test to require declared
-  scenario coverage and cleanup.
+- Extend the implemented restricted-egress case contract into a general
+  `capability-results.tsv` contract covering every declared scenario and
+  cleanup requirement.
 - Add selectable native SDK, certified Sandbox, and R17 Provider soak lanes.
 
 Completion: `RUN-02`, `PRO-01`, `SDK-01`, `OBS-01`, and `WIN-01` produce

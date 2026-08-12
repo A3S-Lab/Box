@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::vmm::NetworkEgressConfig;
 
 use super::device::{BridgePort, NetStats, NetStatsSnapshot};
 use super::{PortForward, ProxyEngine, ProxyEngineConfig};
@@ -23,8 +24,10 @@ pub struct NetProxyManager {
 }
 
 impl NetProxyManager {
-    /// Create a new manager. Socket will be placed at
-    /// `~/.a3s/boxes/<box_id>/sockets/net.sock`.
+    /// Create a manager for one box.
+    ///
+    /// `spawn()` creates an inherited socketpair. The paths are retained for
+    /// bounded stats publication and compatibility cleanup.
     pub fn new(box_dir: &Path) -> Self {
         let socket_dir = box_dir.join("sockets");
         Self {
@@ -106,6 +109,7 @@ pub struct InheritedNetProxyConfig<'a> {
     pub stats_path: Option<PathBuf>,
     pub bridge_socket_dir: Option<PathBuf>,
     pub own_mac: [u8; 6],
+    pub egress: Option<&'a NetworkEgressConfig>,
 }
 
 pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) -> Result<()> {
@@ -118,6 +122,7 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
         stats_path,
         bridge_socket_dir,
         own_mac,
+        egress,
     } = config;
     let socket = unsafe { UnixDatagram::from_raw_fd(fd) };
     let port_forwards = parse_port_forwards(port_map, guest_ip)
@@ -125,6 +130,7 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
     let dns_servers = dns_servers.to_vec();
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(NetStats::default());
+    let egress = egress.cloned();
     let bridge = bridge_socket_dir
         .as_deref()
         .map(|directory| BridgePort::bind(directory, own_mac))
@@ -153,6 +159,7 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
                 stats,
                 stats_path,
                 bridge,
+                egress,
             });
             engine.run();
             tracing::info!("NetProxy thread exiting");

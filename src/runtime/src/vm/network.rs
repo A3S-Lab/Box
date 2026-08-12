@@ -8,6 +8,75 @@ use crate::vmm::NetworkInstanceConfig;
 use super::VmManager;
 
 impl VmManager {
+    /// Materialize the restricted virtio-net boundary in the launch spec.
+    pub(crate) fn configure_restricted_network(
+        &mut self,
+        spec: &mut crate::vmm::InstanceSpec,
+        egress: a3s_box_core::vmm::NetworkEgressConfig,
+    ) -> Result<()> {
+        let net_config = self.setup_restricted_default_network(egress)?;
+        let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
+        spec.entrypoint
+            .env
+            .push(("A3S_NET_IP".to_string(), ip_cidr));
+        spec.entrypoint.env.push((
+            "A3S_NET_GATEWAY".to_string(),
+            net_config.gateway.to_string(),
+        ));
+        spec.entrypoint
+            .env
+            .push(("A3S_NET_DNS".to_string(), String::new()));
+        spec.network = Some(net_config);
+        spec.tsi_mode = a3s_box_core::vmm::TsiMode::Disabled;
+        Ok(())
+    }
+
+    /// Attach the per-VM userspace gateway used by an enabled egress policy.
+    ///
+    /// A virtio-net device disables libkrun's direct TSI socket path. The
+    /// inherited netproxy then consults the generation policy channel before
+    /// every raw TCP connect and exposes only the declared host HTTP proxy at
+    /// the gateway service port. Guest DNS forwarding is deliberately absent;
+    /// hostname resolution belongs to the mandatory host proxy.
+    #[cfg(unix)]
+    pub(crate) fn setup_restricted_default_network(
+        &mut self,
+        egress: a3s_box_core::vmm::NetworkEgressConfig,
+    ) -> Result<NetworkInstanceConfig> {
+        let ip = super::egress::RESTRICTED_GUEST_IP;
+        let gateway = super::egress::RESTRICTED_GATEWAY_IP;
+        let prefix_len = super::egress::RESTRICTED_PREFIX_LEN;
+        let dns_servers = Vec::new();
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let mut netproxy = crate::network::NetProxyManager::new(&box_dir);
+        netproxy.spawn(ip, gateway, prefix_len, &dns_servers, &self.config.port_map)?;
+        let config = NetworkInstanceConfig {
+            net_socket_path: netproxy.socket_path().to_path_buf(),
+            net_stats_path: Some(netproxy.stats_path().to_path_buf()),
+            net_socket_fd: netproxy.net_socket_fd(),
+            net_proxy_fd: netproxy.net_proxy_fd(),
+            bridge_socket_dir: None,
+            ip_address: ip,
+            gateway,
+            prefix_len,
+            mac_address: [0x02, 0x42, 0x0a, 0x5a, 0x00, 0x02],
+            dns_servers,
+            egress: Some(egress),
+        };
+        self.net_manager = Some(Box::new(netproxy));
+        Ok(config)
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn setup_restricted_default_network(
+        &mut self,
+        _egress: a3s_box_core::vmm::NetworkEgressConfig,
+    ) -> Result<NetworkInstanceConfig> {
+        Err(BoxError::NetworkError(
+            "restricted MicroVM egress requires a Unix host".to_string(),
+        ))
+    }
+
     /// Configure an isolated virtio-net backend for a default-network box that
     /// publishes host ports on macOS.
     ///
@@ -43,6 +112,7 @@ impl VmManager {
             prefix_len,
             mac_address: [0x02, 0x42, 0x0a, 0x59, 0x00, 0x02],
             dns_servers,
+            egress: None,
         };
         self.net_manager = Some(Box::new(netproxy));
         Ok(config)
@@ -155,7 +225,7 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         #[cfg(target_os = "linux")]
-        let (socket_path, net_stats_path, _net_socket_fd, _net_proxy_fd) = {
+        let (socket_path, net_stats_path, net_socket_fd, net_proxy_fd) = {
             // passt drops privileges to `nobody` when launched as root, so its
             // socket must live in the world-traversable runtime socket directory
             // (next to the exec/PTY sockets), not under the box's 0700 home.
@@ -181,20 +251,26 @@ impl VmManager {
             (path, Some(stats_path), fd, proxy_fd)
         };
 
+        #[cfg(target_os = "linux")]
+        let bridge_socket_dir = None;
+        #[cfg(target_os = "macos")]
+        let bridge_socket_dir = Some(macos_bridge_socket_dir(&self.home_dir, network_name));
+
         Ok(NetworkInstanceConfig {
             net_socket_path: socket_path,
             net_stats_path,
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_socket_fd,
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_proxy_fd,
-            #[cfg(target_os = "macos")]
-            bridge_socket_dir: Some(macos_bridge_socket_dir(&self.home_dir, network_name)),
+            #[cfg(unix)]
+            bridge_socket_dir,
             ip_address: ip,
             gateway,
             prefix_len,
             mac_address,
             dns_servers,
+            egress: None,
         })
     }
 

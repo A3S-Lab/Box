@@ -24,7 +24,7 @@ Options:
   -h, --help   Show this help.
 
 Checks:
-  - host verifier positive and leak-detection paths;
+  - host verifier positive, restricted-egress matrix, and leak-detection paths;
   - host runner pass and failure summaries without booting a VM;
   - host and RuntimeClass runner verifier gate forwarding;
   - minimum soak duration, sample-count, sample-span, and max-gap enforcement;
@@ -113,7 +113,7 @@ make_host_bundle() {
     cat >"$dir/metadata.txt" <<'EOF'
 run_id=synthetic-host
 started_at=2026-06-29T00:00:00Z
-selected_suites=core=0 host=0 linux_run=0 cri=0 bench=1
+selected_suites=core=0 host=0 linux_run=0 cri=0 egress=0 bench=1
 soak_duration_secs=7200
 soak_iterations=2
 soak_interval_secs=0
@@ -143,6 +143,46 @@ EOF
     write_nonempty_file "$dir/iteration-1-bench-race.log"
     write_nonempty_file "$dir/iteration-2-bench-leak.log"
     write_nonempty_file "$dir/iteration-2-bench-race.log"
+}
+
+write_host_egress_log() {
+    local path="$1"
+    local case_name
+    : >"$path"
+    for case_name in \
+        unsupported_preflight \
+        dedicated_kernel_boot \
+        deny_all \
+        hostname_allow \
+        hostname_deny \
+        proxy_bypass \
+        direct_ipv4 \
+        dns_udp_ipv6_doh_quic \
+        raw_ipv4 \
+        concurrent_isolation \
+        generation_restart \
+        policy_channel_failure \
+        decision_logs \
+        cleanup
+    do
+        printf 'A3S_EGRESS_CASE case=%s result=pass\n' "$case_name" >>"$path"
+    done
+}
+
+enable_host_egress_evidence() {
+    local dir="$1"
+    local iteration
+    awk -F= '
+        $1 == "selected_suites" {
+            print "selected_suites=core=0 host=0 linux_run=0 cri=0 egress=1 bench=1"
+            next
+        }
+        { print }
+    ' "$dir/metadata.txt" >"$dir/metadata.with-egress.txt"
+    mv "$dir/metadata.with-egress.txt" "$dir/metadata.txt"
+    for iteration in 1 2; do
+        write_host_egress_log "$dir/iteration-${iteration}-egress.log"
+    done
 }
 
 make_host_failure_bundle() {
@@ -795,11 +835,58 @@ mv "$host_bad_selected_suites/metadata.bad.txt" "$host_bad_selected_suites/metad
 expect_failure host-bad-selected-suites 'host metadata selected_suites missing core flag' \
     "$VERIFY_SCRIPT" --kind host "$host_bad_selected_suites"
 
+host_bad_egress_flag="$TMP_ROOT/host-bad-egress-flag"
+make_host_bundle "$host_bad_egress_flag"
+awk -F= '
+    $1 == "selected_suites" {
+        print "selected_suites=core=0 host=0 linux_run=0 cri=0 egress=maybe bench=1"
+        next
+    }
+    { print }
+' "$host_bad_egress_flag/metadata.txt" >"$host_bad_egress_flag/metadata.bad.txt"
+mv "$host_bad_egress_flag/metadata.bad.txt" "$host_bad_egress_flag/metadata.txt"
+expect_failure host-bad-egress-flag 'host metadata selected_suites egress must be 0 or 1' \
+    "$VERIFY_SCRIPT" --kind host "$host_bad_egress_flag"
+
 host_missing_declared_log="$TMP_ROOT/host-missing-declared-log"
 make_host_bundle "$host_missing_declared_log"
 rm "$host_missing_declared_log/iteration-2-bench-race.log"
 expect_failure host-missing-declared-log 'missing required file: .*iteration-2-bench-race.log' \
     "$VERIFY_SCRIPT" --kind host "$host_missing_declared_log"
+
+host_egress_pass="$TMP_ROOT/host-egress-pass"
+make_host_bundle "$host_egress_pass"
+enable_host_egress_evidence "$host_egress_pass"
+"$VERIFY_SCRIPT" --kind host "$host_egress_pass" >"$host_egress_pass/verify.out"
+require_grep 'PASS: host soak evidence verified' "$host_egress_pass/verify.out"
+
+host_egress_missing_log="$TMP_ROOT/host-egress-missing-log"
+make_host_bundle "$host_egress_missing_log"
+enable_host_egress_evidence "$host_egress_missing_log"
+rm "$host_egress_missing_log/iteration-2-egress.log"
+expect_failure host-egress-missing-log 'missing required file: .*iteration-2-egress.log' \
+    "$VERIFY_SCRIPT" --kind host "$host_egress_missing_log"
+
+host_egress_missing_case="$TMP_ROOT/host-egress-missing-case"
+make_host_bundle "$host_egress_missing_case"
+enable_host_egress_evidence "$host_egress_missing_case"
+sed '/case=decision_logs /d' "$host_egress_missing_case/iteration-1-egress.log" \
+    >"$host_egress_missing_case/iteration-1-egress.without-case.log"
+mv "$host_egress_missing_case/iteration-1-egress.without-case.log" \
+    "$host_egress_missing_case/iteration-1-egress.log"
+expect_failure host-egress-missing-case 'wrong A3S_EGRESS_CASE marker count' \
+    "$VERIFY_SCRIPT" --kind host "$host_egress_missing_case"
+
+host_egress_failed_case="$TMP_ROOT/host-egress-failed-case"
+make_host_bundle "$host_egress_failed_case"
+enable_host_egress_evidence "$host_egress_failed_case"
+sed 's/case=raw_ipv4 result=pass/case=raw_ipv4 result=fail/' \
+    "$host_egress_failed_case/iteration-1-egress.log" \
+    >"$host_egress_failed_case/iteration-1-egress.failed.log"
+mv "$host_egress_failed_case/iteration-1-egress.failed.log" \
+    "$host_egress_failed_case/iteration-1-egress.log"
+expect_failure host-egress-failed-case 'contains a failed restricted-egress case' \
+    "$VERIFY_SCRIPT" --kind host "$host_egress_failed_case"
 
 log "Verifying host soak runner rehearsal summary"
 host_runner_dir="$TMP_ROOT/host-runner"

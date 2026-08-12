@@ -13,7 +13,8 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_TYPE_DISK,
 };
 
 /// Stable identity of one regular file on a Windows volume.
@@ -73,6 +74,21 @@ fn open_and_validate(
 /// Return the volume/file identity after verifying that `file` is a regular
 /// disk file and its handle does not refer to a reparse point.
 pub fn regular_file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
+    file_identity(file, false)
+}
+
+/// Open a file or directory without following its final reparse point and
+/// return its stable volume/file identity.
+pub(crate) fn path_identity_no_follow(path: &Path) -> io::Result<WindowsFileIdentity> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path)?;
+    file_identity(&file, true)
+}
+
+fn file_identity(file: &File, allow_directory: bool) -> io::Result<WindowsFileIdentity> {
     let handle = file.as_raw_handle() as HANDLE;
     let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
     // SAFETY: `handle` belongs to `file`; the output points to writable storage
@@ -88,12 +104,16 @@ pub fn regular_file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
             "refusing to follow a Windows reparse point",
         ));
     }
-    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
-        || unsafe { GetFileType(handle) } != FILE_TYPE_DISK
+    if unsafe { GetFileType(handle) } != FILE_TYPE_DISK
+        || (!allow_directory && information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Windows guest path is not a regular disk file",
+            if allow_directory {
+                "Windows host path is not a disk file or directory"
+            } else {
+                "Windows guest path is not a regular disk file"
+            },
         ));
     }
 

@@ -1,0 +1,42 @@
+{
+  "date": "2026-07-31",
+  "linux_x86_64": {
+    "a3s_box": "b7cb4524bb85cda42d59178d1d2de4832a88979aa93e21996361b27e559f58e5",
+    "a3s_box_guest_init": "580037f864acea3da03eba46be0d2db2438c1fd9bf18c9a269029d8648d54fa9",
+    "a3s_box_shim": "17580a9e2765b2faa64b1eeed6f189c604c471914d255ca389836c73aa0d8da4",
+    "a3s_oci": "d3cd50fde24f9e56bdf8ccd7da10f5e8566386cb58600cbd4191c35d505d1193",
+    "a3s_oci_agent": "b8d7cc08b9517aa861d70d7b2a7b183b8f9f7e296127d9ecaef547e86898cf93",
+    "image_archive": "c18b0d9489eeebc11596b9d5a1b6a5301cd763ea0cfdeed2df103d084466ab7c",
+    "libkrun": "d07b3410332a13598b143c13582829baa0671eb742cbda1d2b956dc41bfb1bfb",
+    "libkrunfw": "c29492267947a7f40218a9a181fe5aa3e9bcb96efbd0e3fab3d1839f5a0a9eff"
+  },
+  "macos_arm64": {
+    "a3s_box": "22e59449ed8a1164983a3f9a4038142f3fa50027a34fa12a9be38b294c13cfe7",
+    "a3s_box_guest_init": "3044132418464329b111dde7a4500f4bce7dadf66a2623a741f01b2f4040f2ac",
+    "a3s_box_shim": "6252013666c969833d630c31aa3d2a00c9c42a45b2b8db882ce85e10797bd407",
+    "image_archive": "b00c22537264b9f57edade2e85f2ebc6a9153eb09eba7bb1ef1c6575bafdd3ec",
+    "libkrun": "6a99b9bec1d760e34cedfd92fe65b6daa51c7ccf2fa51a2986e950f8293a87c7",
+    "libkrunfw": "3291f69eb643b8c2a969e3a00b417a76d418ad791aa170f1f6435fc94b536ca2"
+  },
+  "result_files": {
+    "README.md": "d036c3239b9f937e70a97b31078b27ff3054eeafef61a90872586ebb9f1e592d",
+    "linux-kvm-standard/metadata.json": "549bbcc6bc1ed91b160b06662f89f6ca41b419aefaa79425087b333b25a11856",
+    "linux-kvm-standard/samples.csv": "aa1f55bec3cd7d4a6f7c670c4025a4620645e322e55127fc56ed0b556770e4bb",
+    "linux-kvm-standard/summary.json": "6e4d28d47be941b49967b9de05fa70614f97eb2f4ddc518d8fc4950604931155",
+    "linux-kvm-standard/summary.md": "971e91a5a2b32f617c57f37bc4243de2b10b5c08cc49c9745f800246e72a7cf8",
+    "linux-sandbox-foreground-qualification.csv": "e96c203b4fc014786c0089e482162b7370276bb6fb656be4563d65d686c28f60",
+    "linux-sandbox-persistent/metadata.json": "6c5bdee7deb185e90478ddee315de224322a0d3d6adb7702ea44543971c4859f",
+    "linux-sandbox-persistent/samples.csv": "c55298b4a4c5f33264549783a6205fee35974f5461046f333fee88dcd2f10225",
+    "linux-sandbox-persistent/summary.json": "afc98eea44a8a6eef92297d49dde8e3b901f5c1514afaa387bde2727b2d687c1",
+    "linux-sandbox-persistent/summary.md": "9be028325553acd5e4fb3f160bf60582257fef8945dd8033a93127d2b9838060",
+    "macos-hvf-microvm/metadata.json": "d04e0ffdd4953560d2830fdceda9c413df7881d3bb964a36cf4aa4004b5dd7a5",
+    "macos-hvf-microvm/samples.csv": "0edb3edfc2b4426e0733cfc7c72c60cd0419223abfbfa284a96971cb3e4ebbc1",
+    "macos-hvf-microvm/summary.json": "f7df2959141eef5d67b0048ec86024969a346e48c50cc79de6ff4a45a84607a9",
+    "macos-hvf-microvm/summary.md": "e18d9a3238cb4bf49e55d0931766b0de1505e4fd74df15a4d5c9b3b4559592b6"
+  },
+  "schema": "a3s.box.isolation-performance-artifacts.v1",
+  "source": {
+    "a3s_box_commit": "d895fa75c7ef24f35257bf3c221f3b681820cd90",
+    "a3s_oci_runtime_commit": "6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2"
+  }
+}

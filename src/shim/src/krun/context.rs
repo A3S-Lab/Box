@@ -10,7 +10,7 @@ use std::{ffi::CString, ptr};
 
 use super::check_status;
 use a3s_box_core::error::{BoxError, Result};
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use libkrun_sys::krun_add_net_unixgram;
 #[cfg(not(target_os = "windows"))]
 use libkrun_sys::krun_add_vsock_port2;
@@ -23,9 +23,10 @@ use libkrun_sys::{krun_add_net_unixstream, krun_split_irqchip};
 #[cfg(unix)]
 use libkrun_sys::{krun_add_virtio_console_default, krun_disable_implicit_console};
 use libkrun_sys::{
-    krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_init_log, krun_set_console_output,
-    krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root, krun_set_vm_config,
-    krun_set_workdir, krun_setgid, krun_setuid, krun_start_enter,
+    krun_add_virtiofs, krun_add_vsock, krun_create_ctx, krun_disable_implicit_vsock, krun_free_ctx,
+    krun_init_log, krun_set_console_output, krun_set_env, krun_set_exec, krun_set_rlimits,
+    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid,
+    krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -100,6 +101,20 @@ impl KrunContext {
             "krun_set_vm_config",
             krun_set_vm_config(self.ctx_id, cpus, memory_mib),
         )
+    }
+
+    /// Keep the vsock control plane while disabling TSI internet-socket hijack.
+    ///
+    /// libkrun otherwise chooses TSI implicitly whenever no virtio-net device
+    /// is attached. Replacing that implicit device with an explicit plain
+    /// vsock is what makes a disconnected VM materially different from the
+    /// default TSI transport.
+    pub unsafe fn disable_tsi_hijack(&self) -> Result<()> {
+        check_status(
+            "krun_disable_implicit_vsock",
+            krun_disable_implicit_vsock(self.ctx_id),
+        )?;
+        check_status("krun_add_vsock", krun_add_vsock(self.ctx_id, 0))
     }
 
     /// Set the root filesystem path for the VM.
@@ -350,16 +365,16 @@ impl KrunContext {
         )
     }
 
-    /// Add a virtio-net device connected to a gvproxy Unix datagram socket (macOS).
+    /// Add a virtio-net device connected to a vfkit Unix datagram socket (macOS).
     ///
     /// Uses the vfkit protocol (NET_FLAG_VFKIT) for handshake with gvproxy.
     ///
     /// # Arguments
     /// * `socket_path` - Path to the gvproxy Unix datagram socket
     /// * `mac` - MAC address as 6 bytes
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     pub unsafe fn add_net_unixgram(&self, socket_path: &str, mac: &[u8; 6]) -> Result<()> {
-        tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via gvproxy (vfkit)");
+        tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via vfkit unixgram");
 
         let path_c = CString::new(socket_path)
             .map_err(|e| BoxError::NetworkError(format!("invalid gvproxy socket path: {}", e)))?;
@@ -382,8 +397,8 @@ impl KrunContext {
         )
     }
 
-    /// Add a virtio-net device connected to an inherited Unix datagram fd (macOS).
-    #[cfg(target_os = "macos")]
+    /// Add a virtio-net device connected to an inherited Unix datagram fd.
+    #[cfg(unix)]
     pub unsafe fn add_net_unixgram_fd(&self, fd: i32, mac: &[u8; 6]) -> Result<()> {
         tracing::debug!(fd, mac = ?mac, "Adding virtio-net via inherited unixgram fd");
 

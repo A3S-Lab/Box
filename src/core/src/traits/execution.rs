@@ -362,6 +362,10 @@ pub struct ExecutionLease {
     pub plan: ResolvedExecutionPlan,
     pub resources: ResourceConfig,
     pub started_at: DateTime<Utc>,
+    /// Immutable evidence for the running generation when the creation policy
+    /// requires a durable security receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_receipt: Option<crate::SecurityReceiptV1>,
 }
 
 /// Result of atomically capturing one execution filesystem.
@@ -394,6 +398,9 @@ pub struct ExecutionStatus {
     pub generation: ExecutionGeneration,
     pub state: ExecutionState,
     pub plan: ResolvedExecutionPlan,
+    /// Immutable evidence for the current running generation, when required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_receipt: Option<crate::SecurityReceiptV1>,
 }
 
 /// Result of an idempotent runtime kill request.
@@ -715,6 +722,33 @@ mod tests {
         assert_eq!(request.policy, ExecutionRecordPolicy::default());
         assert_eq!(request.policy.restart_policy, ExecutionRestartPolicy::No);
         assert!(request.rootfs_snapshot_id.is_none());
+    }
+
+    #[test]
+    fn legacy_execution_responses_default_without_security_receipts() {
+        let plan = crate::resolve_execution(&BoxConfig::default()).unwrap();
+        let lease: ExecutionLease = serde_json::from_value(serde_json::json!({
+            "execution_id": "execution-1",
+            "generation": 1,
+            "plan": plan,
+            "resources": BoxConfig::default().resources,
+            "started_at": "2026-07-30T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(lease.security_receipt.is_none());
+        assert!(serde_json::to_value(&lease)
+            .unwrap()
+            .get("security_receipt")
+            .is_none());
+
+        let status: ExecutionStatus = serde_json::from_value(serde_json::json!({
+            "execution_id": "execution-1",
+            "generation": 1,
+            "state": "running",
+            "plan": lease.plan
+        }))
+        .unwrap();
+        assert!(status.security_receipt.is_none());
     }
 
     #[test]

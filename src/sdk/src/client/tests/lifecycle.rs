@@ -179,6 +179,7 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
         plan,
         resources: config.resources,
         started_at: Utc::now(),
+        security_receipt: None,
     };
     let manager = Arc::new(RecordingExecutionManager {
         calls: std::sync::Mutex::new(Vec::new()),

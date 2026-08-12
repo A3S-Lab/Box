@@ -1,0 +1,99 @@
+{
+  "active_isolations": [
+    "microvm"
+  ],
+  "benchmark_mode": "standard",
+  "box": {
+    "binary": "a3s-box",
+    "sha256": "b7cb4524bb85cda42d59178d1d2de4832a88979aa93e21996361b27e559f58e5",
+    "source_commit": "d895fa75c7ef24f35257bf3c221f3b681820cd90",
+    "version": "a3s-box 3.2.0"
+  },
+  "final_resources": {
+    "box_dirs": 13,
+    "shims": 0
+  },
+  "finished_at": "2026-07-31T09:03:58.500214+00:00",
+  "finished_load_average": [
+    1.951,
+    2.326,
+    2.035
+  ],
+  "host": {
+    "cpu_affinity": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "cpu_count": 8,
+    "cpu_model": "Intel Xeon Processor (Icelake)",
+    "load_average": [
+      1.395,
+      2.718,
+      2.011
+    ],
+    "machine": "x86_64",
+    "memory_bytes": 33634086912,
+    "process_nice": 10,
+    "release": "6.8.0-49-generic",
+    "system": "Linux"
+  },
+  "host_lane": "a3s-os-linux-x86_64-kvm",
+  "image": "docker.io/library/alpine:3.22",
+  "image_sha256": "c18b0d9489eeebc11596b9d5a1b6a5301cd763ea0cfdeed2df103d084466ab7c",
+  "isolations_requested": [
+    "microvm",
+    "sandbox"
+  ],
+  "oci_runtime_artifacts": {
+    "agent": {
+      "path": "a3s-oci-agent",
+      "sha256": "b8d7cc08b9517aa861d70d7b2a7b183b8f9f7e296127d9ecaef547e86898cf93"
+    },
+    "runtime": {
+      "path": "a3s-oci",
+      "sha256": "d3cd50fde24f9e56bdf8ccd7da10f5e8566386cb58600cbd4191c35d505d1193"
+    }
+  },
+  "oci_runtime_commit": "6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2",
+  "operator_cleanup": {
+    "box_dirs": 0,
+    "mounts": 0,
+    "shim_processes": 0
+  },
+  "parameters": {
+    "concurrency": 4,
+    "concurrency_runs": 5,
+    "cpu_mib": 256,
+    "exec_runs": 30,
+    "fork_runs": 3,
+    "io_mib": 256,
+    "lifecycle_runs": 20,
+    "memory_mib": 512,
+    "metadata_files": 2000,
+    "network_mib": 64,
+    "network_requests": 50,
+    "pool_runs": 20,
+    "pool_size": 4,
+    "workload_runs": 5
+  },
+  "post_run_operator_observation": {
+    "box_dirs": 13,
+    "overlay_mounts": 13,
+    "shim_processes": 3
+  },
+  "resource_accounting_note": "The original run counted shims by process comm and missed three shims whose comm title was libkrun VM. The harness now counts argv[0].",
+  "resource_delta": {
+    "box_dirs": 13,
+    "shims": 0
+  },
+  "run_id": "20260731T085904Z",
+  "schema": "a3s.box.isolation-mechanisms.v1",
+  "start_resources": {
+    "box_dirs": 0,
+    "shims": 0
+  },
+  "started_at": "2026-07-31T08:59:05.219522+00:00",
+  "unexpected_failures": 1
+}

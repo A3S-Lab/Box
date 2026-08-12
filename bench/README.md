@@ -27,6 +27,70 @@ PNPM_PROJECT=/path/to/app bench/bench.sh pnpm
 just bench-pnpm           # reduced pnpm fixture
 ```
 
+## Isolation and mechanism matrix
+
+[`isolation_mechanisms.py`](./isolation_mechanisms.py) records a broader,
+cross-platform matrix as raw CSV plus JSON and Markdown summaries. It covers
+cached-image lifecycle, persistent exec, idle memory, CPU and memory streams,
+rootfs/CoW, explicit tmpfs, bind mounts, named volumes, initialization,
+host-local HTTP, four-way concurrency, warm pools, snapshot-fork, and
+development-only TEE simulation where the host supports each mechanism.
+
+Use a short, dedicated state path. Sandbox runtime sockets are subject to the
+Unix socket path-length limit, and the harness intentionally refuses an unsafe
+long path.
+
+```bash
+python3 bench/isolation_mechanisms.py \
+  --box target/release/a3s-box \
+  --image docker.io/library/alpine:3.22 \
+  --image-tar /path/to/alpine-oci.tar \
+  --result-dir /tmp/a3s-box-isolation-results \
+  --state-dir /tmp/a3sp \
+  --host-lane linux-x86_64-kvm \
+  --isolations microvm,sandbox
+```
+
+The normal matrix treats `run --rm ... true` as the isolation preflight. A
+failed isolation remains in `samples.csv`, while supported isolation levels
+continue. The current Sandbox backend exposes loopback only and does not
+provide the MicroVM TSI, named bridge, warm-pool, snapshot-fork, or TEE
+mechanisms.
+
+Use the explicit persistent mode to benchmark the supported detached Sandbox
+lifecycle and its exec/storage paths independently of the foreground
+`run --rm` path:
+
+```bash
+python3 bench/isolation_mechanisms.py \
+  --box target/release/a3s-box \
+  --image docker.io/library/alpine:3.22 \
+  --image-tar /path/to/alpine-oci.tar \
+  --result-dir /tmp/a3s-box-sandbox-results \
+  --state-dir /tmp/a3sp-sandbox \
+  --host-lane linux-x86_64-sandbox \
+  --isolations sandbox \
+  --sandbox-persistent \
+  --skip-tee --skip-bridge --skip-pool
+```
+
+Each result directory contains:
+
+- `samples.csv` — every pass, failure, skip, latency, rate, observation, and
+  first-attempt network retry count;
+- `metadata.json` — exact binary/image hashes, source revisions, host
+  properties, affinity, nice level, parameters, and resource deltas;
+- `summary.json` and `summary.md` — nearest-rank p50/p95 aggregates;
+- `logs/` — one command log per sample;
+- `fixtures/` — benchmark-owned bind and HTTP fixtures, which can be omitted
+  when archiving results.
+
+`--image-tar` loads a local archive before sampling. Consequently,
+`cold_noop_lifecycle` means a new execution from a cached image; it does not
+include registry pull time. A non-zero exit is expected when any sample fails
+or the final shim/box-directory inventory exceeds its starting value. Preserve
+the result directory before cleaning a failed dedicated state directory.
+
 Tunables (env):
 
 | Var | Default | Meaning |

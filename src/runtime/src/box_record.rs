@@ -1,7 +1,7 @@
 //! Canonical persisted metadata schema for local box executions.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use a3s_box_core::config::ResourceLimits;
 use a3s_box_core::log::LogConfig;
@@ -213,9 +213,45 @@ impl BoxRecord {
         let Some(metadata) = self.managed_execution.as_ref() else {
             return Ok(None);
         };
+        if metadata
+            .request
+            .config
+            .security_policy
+            .as_ref()
+            .and_then(|policy| policy.host_mount_policy())
+            .is_some()
+        {
+            metadata.validate_with_home(self.managed_home_dir()?)?;
+        } else {
+            metadata.validate()?;
+        }
         let state = ManagedExecutionState::from_status(&self.status)?;
         validate_pending_operation(state, metadata)?;
+        if state == ManagedExecutionState::Running {
+            crate::security_receipt::load_for_record(self)?;
+        }
         Ok(Some(state))
+    }
+
+    fn managed_home_dir(&self) -> a3s_box_core::Result<&Path> {
+        let boxes_dir = self.box_dir.parent().ok_or_else(|| {
+            a3s_box_core::BoxError::StateError(format!(
+                "managed execution box path has no parent: {}",
+                self.box_dir.display()
+            ))
+        })?;
+        if boxes_dir.file_name().and_then(|name| name.to_str()) != Some("boxes") {
+            return Err(a3s_box_core::BoxError::StateError(format!(
+                "managed execution box path is outside the boxes directory: {}",
+                self.box_dir.display()
+            )));
+        }
+        boxes_dir.parent().ok_or_else(|| {
+            a3s_box_core::BoxError::StateError(format!(
+                "managed execution boxes path has no home: {}",
+                boxes_dir.display()
+            ))
+        })
     }
 
     /// Render a concise lifecycle status with health, exit, and restart annotations.
@@ -419,6 +455,30 @@ impl ManagedExecutionMetadata {
             ));
         }
         let plan = a3s_box_core::resolve_execution(&request.config)?;
+        Self::from_plan(operation_id, generation, request, plan)
+    }
+
+    pub(crate) fn new_with_home(
+        home_dir: &Path,
+        operation_id: OperationId,
+        generation: ExecutionGeneration,
+        request: CreateExecutionRequest,
+    ) -> a3s_box_core::Result<Self> {
+        if request.external_sandbox_id.trim().is_empty() {
+            return Err(a3s_box_core::BoxError::ConfigError(
+                "external sandbox ID cannot be empty".to_string(),
+            ));
+        }
+        let plan = crate::host_mount_policy::resolve_managed_execution_plan(home_dir, &request)?;
+        Self::from_plan(operation_id, generation, request, plan)
+    }
+
+    fn from_plan(
+        operation_id: OperationId,
+        generation: ExecutionGeneration,
+        request: CreateExecutionRequest,
+        plan: ResolvedExecutionPlan,
+    ) -> a3s_box_core::Result<Self> {
         Ok(Self {
             operation_id,
             generation,
@@ -439,7 +499,22 @@ impl ManagedExecutionMetadata {
             ));
         }
         let resolved = a3s_box_core::resolve_execution(&self.request.config)?;
-        if !execution_plan_matches(&resolved, &self.plan) {
+        self.validate_against(&resolved)
+    }
+
+    pub(crate) fn validate_with_home(&self, home_dir: &Path) -> a3s_box_core::Result<()> {
+        if self.request.external_sandbox_id.trim().is_empty() {
+            return Err(a3s_box_core::BoxError::StateError(
+                "managed execution has an empty external sandbox ID".to_string(),
+            ));
+        }
+        let resolved =
+            crate::host_mount_policy::resolve_managed_execution_plan(home_dir, &self.request)?;
+        self.validate_against(&resolved)
+    }
+
+    fn validate_against(&self, resolved: &ResolvedExecutionPlan) -> a3s_box_core::Result<()> {
+        if !execution_plan_matches(resolved, &self.plan) {
             return Err(a3s_box_core::BoxError::StateError(
                 "managed execution plan does not match its persisted creation request".to_string(),
             ));
@@ -718,6 +793,140 @@ mod tests {
         );
         assert_eq!(encoded["managed_execution"]["generation"], 1);
         assert_eq!(encoded["managed_execution"]["paused_with_memory"], true);
+        assert!(encoded["managed_execution"]["request"]["config"]
+            .get("security_policy")
+            .is_none());
+        assert!(encoded["managed_execution"]["plan"]
+            .get("security_policy")
+            .is_none());
+        assert!(encoded["managed_execution"]["plan"]
+            .get("security_policy_digest")
+            .is_none());
+    }
+
+    #[test]
+    fn managed_execution_persists_and_validates_security_policy_identity() {
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .egress(a3s_box_core::EgressPolicy::Unrestricted),
+            ),
+            ..Default::default()
+        };
+        let metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-policy").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-policy".to_string(),
+                config,
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        let decoded: ManagedExecutionMetadata = serde_json::from_value(encoded).unwrap();
+        decoded.validate().unwrap();
+        let digest = decoded.plan.security_policy_digest.as_deref().unwrap();
+        assert!(digest.starts_with("sha256:"));
+
+        let mut value = minimal_record();
+        value["managed_execution"] = serde_json::to_value(decoded).unwrap();
+        let mut record: BoxRecord = serde_json::from_value(value).unwrap();
+        record
+            .managed_execution
+            .as_mut()
+            .unwrap()
+            .plan
+            .security_policy_digest = Some(format!("sha256:{}", "0".repeat(64)));
+        assert!(record.managed_state().is_err());
+    }
+
+    #[test]
+    fn managed_host_mount_policy_round_trips_and_revalidates_recovery_evidence() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("a3s-home");
+        let source = fixture.path().join("workspace");
+        let box_dir = home.join("boxes/11111111-1111-4111-8111-111111111111");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            volumes: vec![format!("{}:/workspace:ro", source.display())],
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .host_mounts(a3s_box_core::HostMountPolicy::agent_safe()),
+            ),
+            ..Default::default()
+        };
+        let metadata = ManagedExecutionMetadata::new_with_home(
+            &home,
+            OperationId::new("create-op-host-policy").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-host-policy".to_string(),
+                config,
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        let decoded: ManagedExecutionMetadata = serde_json::from_value(encoded).unwrap();
+        decoded.validate_with_home(&home).unwrap();
+        assert_eq!(decoded.plan.host_mounts.len(), 1);
+        assert_eq!(decoded.plan.host_mounts[0].destination, "/workspace");
+
+        let mut value = minimal_record();
+        value["box_dir"] = serde_json::to_value(box_dir).unwrap();
+        value["managed_execution"] = serde_json::to_value(decoded).unwrap();
+        let record: BoxRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            record.managed_state().unwrap(),
+            Some(ManagedExecutionState::Created)
+        );
+    }
+
+    #[test]
+    fn managed_host_mount_recovery_rejects_plan_tampering_and_source_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("a3s-home");
+        let source = fixture.path().join("workspace");
+        std::fs::create_dir_all(&source).unwrap();
+        let config = a3s_box_core::BoxConfig {
+            volumes: vec![format!("{}:/workspace:ro", source.display())],
+            security_policy: Some(
+                a3s_box_core::SandboxSecurityPolicy::new()
+                    .host_mounts(a3s_box_core::HostMountPolicy::agent_safe()),
+            ),
+            ..Default::default()
+        };
+        let metadata = ManagedExecutionMetadata::new_with_home(
+            &home,
+            OperationId::new("create-op-host-tamper").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-host-tamper".to_string(),
+                config,
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut tampered = metadata.clone();
+        tampered.plan.host_mounts[0].read_only = false;
+        assert!(tampered.validate_with_home(&home).is_err());
+
+        std::fs::rename(&source, fixture.path().join("old-workspace")).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        assert!(metadata.validate_with_home(&home).is_err());
     }
 
     #[test]
