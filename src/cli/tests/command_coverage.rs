@@ -77,6 +77,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "monitor",
     "pool",
     "shell",
+    "scale-api",
     "help",
 ];
 

@@ -47,6 +47,8 @@ const ATTACHMENTS_DIGEST: &str =
 #[cfg(any(unix, windows))]
 #[path = "oci_backend_tests/process_restart.rs"]
 mod process_restart;
+#[path = "oci_backend_tests/resource_update_contract.rs"]
+mod resource_update_contract;
 
 #[derive(Clone)]
 struct FakeContainer {
@@ -4214,13 +4216,15 @@ async fn resource_update_persists_complete_intent_and_replays_locally() {
         .pids()
         .as_ref()
         .expect("PID resources");
-    assert_eq!(memory.limit(), Some(128 * 1024 * 1024));
+    assert_eq!(memory.limit(), None);
     assert_eq!(memory.reservation(), Some(64 * 1024 * 1024));
+    assert_eq!(memory.swap(), None);
     assert_eq!(cpu.shares(), Some(512));
     assert_eq!(cpu.quota(), Some(50_000));
     assert_eq!(cpu.period(), Some(100_000));
     assert_eq!(cpu.cpus().as_deref(), Some("0-1"));
     assert_eq!(pids.limit(), 64);
+    assert!(runtime_request.resources.devices().is_none());
 
     let record = persisted(&manager, &lease.execution_id);
     assert_eq!(record.status, ManagedExecutionState::Running.as_status());

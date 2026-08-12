@@ -17,7 +17,9 @@ use a3s_box_core::{
     FilesystemResponse as BoxFilesystemResponse, KillOutcome, OperationId as BoxOperationId,
     MAX_BOUNDED_FILE_BYTES,
 };
-use a3s_oci_sdk::oci_spec::runtime::ContainerState;
+use a3s_oci_sdk::oci_spec::runtime::{
+    ContainerState, LinuxCpuBuilder, LinuxMemoryBuilder, LinuxPidsBuilder, LinuxResourcesBuilder,
+};
 use a3s_oci_sdk::{
     runtime_bundle_handoff_directory as sdk_runtime_bundle_handoff_directory,
     AttachmentCapabilities, ContainerId, ContainerOperationRequest, ContainerRecord,
@@ -2210,10 +2212,80 @@ fn compile_resource_update(
     }
     let mut config = metadata.request.config.clone();
     update.apply_to(&mut config.resource_limits);
-    let resources = crate::sandbox::oci::SandboxResources::from_box_config(&config)
+    let effective = crate::sandbox::oci::SandboxResources::from_box_config(&config)
         .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
-    crate::sandbox::oci::compile_resources(&resources)
-        .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))
+
+    // OCI Runtime treats linux.resources as a partial live update. Recompiling
+    // the full launch profile here would resend immutable device policy and
+    // overwrite unrelated cgroup values. Validate the complete resulting Box
+    // intent above, then emit only fields selected by this operation. CPU quota
+    // and period are coupled because they share one atomic cgroup setting.
+    let mut resources = LinuxResourcesBuilder::default();
+
+    if update.memory_reservation.is_some() || update.memory_swap.is_some() {
+        let mut memory = LinuxMemoryBuilder::default();
+        if update.memory_reservation.is_some() {
+            let reservation = effective.memory_reservation.ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {} lost its validated memory reservation update",
+                    record.id
+                ))
+            })?;
+            memory = memory.reservation(reservation);
+        }
+        if update.memory_swap.is_some() {
+            let swap = effective.memory_swap.ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {} lost its validated memory swap update",
+                    record.id
+                ))
+            })?;
+            memory = memory.swap(swap);
+        }
+        resources = resources.memory(memory.build().map_err(resource_update_compilation_error)?);
+    }
+
+    let changes_cpu_max = update.cpu_quota.is_some() || update.cpu_period.is_some();
+    if update.cpu_shares.is_some() || changes_cpu_max || update.cpuset_cpus.is_some() {
+        let mut cpu = LinuxCpuBuilder::default();
+        if update.cpu_shares.is_some() {
+            let shares = effective.cpu_shares.ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {} lost its validated CPU shares update",
+                    record.id
+                ))
+            })?;
+            cpu = cpu.shares(shares);
+        }
+        if changes_cpu_max {
+            cpu = cpu.quota(effective.cpu_quota).period(effective.cpu_period);
+        }
+        if update.cpuset_cpus.is_some() {
+            let cpuset = effective.cpuset_cpus.clone().ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {} lost its validated CPU set update",
+                    record.id
+                ))
+            })?;
+            cpu = cpu.cpus(cpuset);
+        }
+        resources = resources.cpu(cpu.build().map_err(resource_update_compilation_error)?);
+    }
+
+    if update.pids_limit.is_some() {
+        resources = resources.pids(
+            LinuxPidsBuilder::default()
+                .limit(effective.pids_limit)
+                .build()
+                .map_err(resource_update_compilation_error)?,
+        );
+    }
+
+    resources.build().map_err(resource_update_compilation_error)
+}
+
+fn resource_update_compilation_error(error: impl std::fmt::Display) -> ExecutionManagerError {
+    ExecutionManagerError::InvalidRequest(format!("failed to compile OCI resource update: {error}"))
 }
 
 fn validate_updated_record(

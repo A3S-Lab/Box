@@ -223,6 +223,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Partial OCI live-resource updates.** Box now validates each resource change
+  against the complete resulting Sandbox configuration but sends OCI Runtime
+  only the fields selected by that operation. CPU quota and period remain one
+  atomic pair, while unrelated memory, PID, CPU, and immutable device policy
+  are preserved instead of being resent. The deterministic CLI coverage list
+  also includes the standalone `scale-api` command.
 - **Production-shaped macOS TX-backpressure qualification.** The physical
   Apple Silicon/HVF gate now starts the exact digest-pinned PostgreSQL 17 image
   from Box #204 and completes two sequential SCRAM-SHA-256 authentications and
