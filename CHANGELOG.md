@@ -4,6 +4,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Scale reconciliation now resumes a retained active replica slot until it is
+  ready instead of treating the mere presence of a still-starting execution as
+  convergence. Idempotent passes still skip slots that are already ready.
+
 ### Removed
 
 - **Box-local Lambda lifecycle API.** The unpublished `a3s-box-lambda` crate

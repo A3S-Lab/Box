@@ -195,8 +195,14 @@ impl LocalScaleReconciler {
 
         let mut created = 0_u32;
         for (slot, request) in &desired_templates {
-            if retained.contains_key(slot) {
-                continue;
+            let retained_phase = retained.get(slot).map(|execution| execution.phase);
+            match retained_phase {
+                Some(InstancePhase::Ready) => continue,
+                Some(InstancePhase::Active) => {}
+                Some(InstancePhase::Terminal | InstancePhase::Removing) => {
+                    unreachable!("only active or ready executions are retained")
+                }
+                None => created = created.saturating_add(1),
             }
             let operation_id = create_operation_id(
                 service,
@@ -209,7 +215,6 @@ impl LocalScaleReconciler {
             self.lifecycle
                 .ensure_running(request.clone(), operation_id)
                 .await?;
-            created = created.saturating_add(1);
         }
 
         let observation = self
@@ -721,6 +726,76 @@ mod tests {
         assert_eq!(recovered.ready_replicas, 1);
         assert_eq!(recovered.created, 0);
         assert_eq!(lifecycle.inventory().await.unwrap().len(), 1);
+    }
+
+    struct ConvergingLifecycle {
+        execution: Mutex<Option<ScaleExecution>>,
+        ensure_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ScaleExecutionLifecycle for ConvergingLifecycle {
+        async fn inventory(&self) -> Result<Vec<ScaleExecution>, ScaleReconcileError> {
+            Ok(self.execution.lock().await.clone().into_iter().collect())
+        }
+
+        async fn ensure_running(
+            &self,
+            request: CreateExecutionRequest,
+            _operation_id: OperationId,
+        ) -> Result<(), ScaleReconcileError> {
+            let phase = if self.ensure_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                InstancePhase::Active
+            } else {
+                InstancePhase::Ready
+            };
+            *self.execution.lock().await = Some(ScaleExecution {
+                execution_id: ExecutionId::new("api-0").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                service: request.labels[SCALE_SERVICE_LABEL].clone(),
+                slot: request.labels[SCALE_SLOT_LABEL].parse().unwrap(),
+                template_digest: request.labels[SCALE_TEMPLATE_DIGEST_LABEL].clone(),
+                guest_port: template_guest_port(&request),
+                phase,
+            });
+            Ok(())
+        }
+
+        async fn ensure_removed(
+            &self,
+            _execution: &ScaleExecution,
+        ) -> Result<(), ScaleReconcileError> {
+            *self.execution.lock().await = None;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_active_slot_continues_startup_convergence() {
+        let lifecycle = Arc::new(ConvergingLifecycle {
+            execution: Mutex::new(None),
+            ensure_calls: AtomicUsize::new(0),
+        });
+        let catalog = ScaleServiceCatalog::from_acl_str(
+            CATALOG,
+            "gateway-scale",
+            ExecutionIsolation::Sandbox,
+        )
+        .unwrap();
+        let reconciler = LocalScaleReconciler::with_lifecycle(catalog, lifecycle.clone());
+
+        let first = reconciler.reconcile("api", 1).await.unwrap();
+        assert_eq!(first.ready_replicas, 0);
+        assert_eq!(first.created, 1);
+
+        let second = reconciler.reconcile("api", 1).await.unwrap();
+        assert_eq!(second.ready_replicas, 1);
+        assert_eq!(second.created, 0);
+        assert_eq!(lifecycle.ensure_calls.load(Ordering::SeqCst), 2);
+
+        let replay = reconciler.reconcile("api", 1).await.unwrap();
+        assert_eq!(replay.created, 0);
+        assert_eq!(lifecycle.ensure_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
