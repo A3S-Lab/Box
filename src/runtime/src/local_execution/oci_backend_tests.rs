@@ -1464,6 +1464,54 @@ fn maps_product_isolation_without_selecting_a_driver() {
 }
 
 #[test]
+fn runtime_process_identity_exposes_only_shared_host_kernel_pid() {
+    for (index, isolation, driver, expected_pid) in [
+        (
+            0,
+            IsolationClass::SharedHostKernel,
+            DriverKind::NativeLinux,
+            Some(std::process::id()),
+        ),
+        (
+            1,
+            IsolationClass::SharedGuestKernel,
+            DriverKind::LibkrunKvm,
+            None,
+        ),
+        (
+            2,
+            IsolationClass::DedicatedVm,
+            DriverKind::LibkrunWhpx,
+            None,
+        ),
+    ] {
+        let runtime_id =
+            ContainerId::new(format!("a3s-box-process-identity-{index}")).expect("runtime ID");
+        let runtime = runtime_record(
+            &runtime_id,
+            RUNTIME_GENERATION,
+            ContainerState::Running,
+            driver,
+            isolation,
+            CONFIG_DIGEST,
+            Some(ATTACHMENTS_DIGEST),
+        )
+        .expect("runtime record");
+        let binding = OciRuntimeBinding::from_record(test_endpoint(), &runtime_id, &runtime)
+            .expect("runtime binding");
+
+        let (pid, pid_start_time) =
+            runtime_process_identity(&binding, &runtime).expect("runtime process identity");
+
+        assert_eq!(pid, expected_pid);
+        assert_eq!(
+            pid_start_time,
+            expected_pid.and_then(crate::process::pid_start_time)
+        );
+    }
+}
+
+#[test]
 fn lifecycle_operation_ids_are_stable_and_fenced_by_runtime_target() {
     let generation = ExecutionGeneration::new(7).expect("Box generation");
     let first_id = ContainerId::new("a3s-box-first").expect("first runtime ID");
@@ -2051,8 +2099,16 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
                 .digest()
                 .expect("submitted attachment digest")
         );
-        assert_eq!(persisted.pid, None);
-        assert_eq!(persisted.pid_start_time, None);
+        if isolation == ExecutionIsolation::Sandbox {
+            assert_eq!(persisted.pid, Some(std::process::id()));
+            assert_eq!(
+                persisted.pid_start_time,
+                crate::process::pid_start_time(std::process::id())
+            );
+        } else {
+            assert_eq!(persisted.pid, None);
+            assert_eq!(persisted.pid_start_time, None);
+        }
         assert!(persisted.exec_socket_path.as_os_str().is_empty());
         assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
         assert_eq!(provider.cleanups.load(Ordering::SeqCst), 0);
@@ -4884,11 +4940,17 @@ fn runtime_record(
     config_digest: &str,
     attachments_digest: Option<&str>,
 ) -> OciResult<ContainerRecord> {
+    let pid = if isolation == IsolationClass::SharedHostKernel {
+        i32::try_from(std::process::id())
+            .map_err(|error| Error::new(ErrorCode::Internal, error.to_string()))?
+    } else {
+        4242
+    };
     let state = StateBuilder::default()
         .version("1.3.0")
         .id(id.as_str())
         .status(status)
-        .pid(4242)
+        .pid(pid)
         .bundle(std::env::temp_dir().join("a3s-box-oci-backend-tests"))
         .build()
         .map_err(|error| Error::new(ErrorCode::Internal, error.to_string()))?;

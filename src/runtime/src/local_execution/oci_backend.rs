@@ -1371,21 +1371,21 @@ impl OciLocalExecutionBackend {
     fn handle(
         &self,
         record: &BoxRecord,
+        runtime: &ContainerRecord,
         binding: OciRuntimeBinding,
         console_log: PathBuf,
         anonymous_volumes: Vec<String>,
-    ) -> LocalExecutionHandle {
-        LocalExecutionHandle {
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        let (pid, pid_start_time) = runtime_process_identity(&binding, runtime)?;
+        Ok(LocalExecutionHandle {
             started_at: record.started_at.unwrap_or_else(Utc::now),
-            // OCI init PIDs are runtime identities and may be guest PIDs. Never
-            // reinterpret them as a Box-owned host process identity.
-            pid: None,
-            pid_start_time: None,
+            pid,
+            pid_start_time,
             exec_socket_path: PathBuf::new(),
             console_log,
             anonymous_volumes,
             oci_runtime: Some(binding),
-        }
+        })
     }
 
     async fn current_runtime(
@@ -1509,12 +1509,13 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 self.provider
                     .ensure_log_projection(record, &binding)
                     .await?;
-                return Ok(self.handle(
+                return self.handle(
                     record,
+                    &runtime,
                     binding,
                     record.console_log.clone(),
                     record.anonymous_volumes.clone(),
-                ));
+                );
             }
             return Err(ExecutionManagerError::Conflict {
                 execution_id,
@@ -1577,8 +1578,17 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
             .await;
         match launch {
             Ok(launch) if *launch.record.state.status() == ContainerState::Running => {
+                let handle = self.handle(
+                    record,
+                    &launch.record,
+                    launch.binding,
+                    console_log,
+                    anonymous_volumes,
+                );
+                // The runtime generation owns the prepared rootfs even when
+                // publishing its host-process identity fails closed.
                 resources.disarm();
-                Ok(self.handle(record, launch.binding, console_log, anonymous_volumes))
+                handle
             }
             Ok(_) => {
                 // A runtime generation exists and owns the prepared rootfs even
@@ -1675,20 +1685,22 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 state: ExecutionState::Paused,
                 handle: Some(self.handle(
                     record,
+                    &runtime,
                     binding,
                     record.console_log.clone(),
                     record.anonymous_volumes.clone(),
-                )),
+                )?),
                 exit_code: None,
             }),
             ContainerState::Running => Ok(LocalExecutionObservation {
                 state: ExecutionState::Running,
                 handle: Some(self.handle(
                     record,
+                    &runtime,
                     binding,
                     record.console_log.clone(),
                     record.anonymous_volumes.clone(),
-                )),
+                )?),
                 exit_code: None,
             }),
             ContainerState::Stopped => self.terminal_observation(record, &runtime, &binding).await,
@@ -1714,15 +1726,17 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 "execution {execution_id} has no exact A3S OCI binding to pause"
             ))
         })?;
-        self.adapter
+        let runtime = self
+            .adapter
             .set_paused(&execution_id, generation, &operation_seed, &binding, true)
             .await?;
-        Ok(self.handle(
+        self.handle(
             record,
+            &runtime,
             binding,
             record.console_log.clone(),
             record.anonymous_volumes.clone(),
-        ))
+        )
     }
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
@@ -1734,15 +1748,17 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 "execution {execution_id} has no exact A3S OCI binding to resume"
             ))
         })?;
-        self.adapter
+        let runtime = self
+            .adapter
             .set_paused(&execution_id, generation, &operation_seed, &binding, false)
             .await?;
-        Ok(self.handle(
+        self.handle(
             record,
+            &runtime,
             binding,
             record.console_log.clone(),
             record.anonymous_volumes.clone(),
-        ))
+        )
     }
 
     async fn preflight_resource_update(
@@ -2324,6 +2340,51 @@ fn validate_updated_record(
         )));
     }
     Ok(())
+}
+
+fn runtime_process_identity(
+    binding: &OciRuntimeBinding,
+    record: &ContainerRecord,
+) -> ExecutionManagerResult<(Option<u32>, Option<u64>)> {
+    binding.validate_record(record)?;
+    if *record.state.status() != ContainerState::Running {
+        return Err(ExecutionManagerError::Internal(format!(
+            "A3S OCI returned runtime state {:?} while publishing the active handle for {} generation {:?}",
+            record.state.status(),
+            binding.target.id,
+            binding.target.generation
+        )));
+    }
+
+    match record.isolation {
+        IsolationClass::SharedHostKernel => {
+            let pid = record
+                .state
+                .pid()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid != 0)
+                .ok_or_else(|| {
+                    ExecutionManagerError::Internal(format!(
+                        "A3S OCI returned no valid host init PID for {} generation {:?}",
+                        binding.target.id, binding.target.generation
+                    ))
+                })?;
+            let pid_start_time = crate::process::pid_start_time(pid);
+            #[cfg(target_os = "linux")]
+            if pid_start_time.is_none() {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "A3S OCI host init PID {pid} for {} generation {:?} has no live Linux process identity",
+                    binding.target.id, binding.target.generation
+                )));
+            }
+            Ok((Some(pid), pid_start_time))
+        }
+        IsolationClass::DedicatedVm | IsolationClass::SharedGuestKernel => {
+            // OCI init PIDs for VM-backed isolation are guest identities. They
+            // must never authorize access to a host process or network namespace.
+            Ok((None, None))
+        }
+    }
 }
 
 fn validate_file_response(

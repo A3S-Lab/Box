@@ -42,7 +42,10 @@ pub struct BoxRecord {
     /// `dead`. Managed executions additionally use the durable transition
     /// states defined by [`ManagedExecutionState`].
     pub status: String,
-    /// Shim process PID while the execution is active.
+    /// Host-visible runtime PID while the execution is active.
+    ///
+    /// OCI SDK routes populate this only for shared-host-kernel isolation;
+    /// guest and VM runtime PIDs are never persisted as host identities.
     pub pid: Option<u32>,
     /// Start-time identity token used to reject a reused PID.
     #[serde(default)]
