@@ -8,7 +8,8 @@ All notable changes to A3S Box will be documented in this file.
 
 - Scale reconciliation now resumes a retained active replica slot until it is
   ready instead of treating the mere presence of a still-starting execution as
-  convergence. Idempotent passes still skip slots that are already ready.
+  convergence. A retained paused lease is resumed through the canonical local
+  lifecycle facade, while idempotent passes still skip slots already running.
 
 ### Removed
 

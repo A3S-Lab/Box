@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, num::NonZeroU16, sync::Arc};
 
 use a3s_box_core::{
-    scale::ScaleEndpoint, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
+    scale::ScaleEndpoint, CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease,
     ExecutionManager, ExecutionPortConnector, ExecutionState, OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
@@ -354,6 +354,45 @@ struct LocalScaleExecutionLifecycle {
     manager: LocalExecutionManager,
 }
 
+impl LocalScaleExecutionLifecycle {
+    async fn ensure_lease_running(&self, lease: ExecutionLease) -> Result<(), ScaleReconcileError> {
+        let status = self
+            .manager
+            .inspect(&lease.execution_id)
+            .await
+            .map_err(lifecycle_error)?;
+        if status.generation != lease.generation {
+            return Err(ScaleReconcileError::Lifecycle(format!(
+                "scale execution {} changed from generation {} to {} while ensuring it is running",
+                lease.execution_id,
+                lease.generation.get(),
+                status.generation.get()
+            )));
+        }
+        match status.state {
+            ExecutionState::Running => Ok(()),
+            ExecutionState::Paused => self
+                .manager
+                .resume(&lease.execution_id, lease.generation)
+                .await
+                .map(|_| ())
+                .map_err(lifecycle_error),
+            ExecutionState::Created | ExecutionState::Creating => {
+                Err(ScaleReconcileError::Lifecycle(format!(
+                    "scale execution {} is still converging",
+                    lease.execution_id
+                )))
+            }
+            ExecutionState::Stopped | ExecutionState::Failed => {
+                Err(ScaleReconcileError::Lifecycle(format!(
+                    "scale execution {} is terminal",
+                    lease.execution_id
+                )))
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
     async fn inventory(&self) -> Result<Vec<ScaleExecution>, ScaleReconcileError> {
@@ -445,12 +484,14 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
             .await
             .map_err(lifecycle_error)?;
         let reservation = match outcome {
-            ReconcileOutcome::Ready(_) => return Ok(()),
+            ReconcileOutcome::Ready(lease) => return self.ensure_lease_running(lease).await,
             ReconcileOutcome::Created(reservation) => reservation,
             ReconcileOutcome::Absent => match self.manager.create(request, &operation_id).await {
                 Ok(reservation) => reservation,
                 Err(create_error) => match self.manager.reconcile(&operation_id).await {
-                    Ok(ReconcileOutcome::Ready(_)) => return Ok(()),
+                    Ok(ReconcileOutcome::Ready(lease)) => {
+                        return self.ensure_lease_running(lease).await;
+                    }
                     Ok(ReconcileOutcome::Created(reservation)) => reservation,
                     _ => return Err(lifecycle_error(create_error)),
                 },
@@ -474,7 +515,7 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
         {
             Ok(_) => Ok(()),
             Err(start_error) => match self.manager.reconcile(&operation_id).await {
-                Ok(ReconcileOutcome::Ready(_)) => Ok(()),
+                Ok(ReconcileOutcome::Ready(lease)) => self.ensure_lease_running(lease).await,
                 _ => Err(lifecycle_error(start_error)),
             },
         }
@@ -811,6 +852,7 @@ mod tests {
 
     struct RecordingBackend {
         running: StdMutex<HashSet<String>>,
+        paused: StdMutex<HashSet<String>>,
         starts: AtomicUsize,
         lose_next_start_response: AtomicBool,
     }
@@ -819,6 +861,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 running: StdMutex::new(HashSet::new()),
+                paused: StdMutex::new(HashSet::new()),
                 starts: AtomicUsize::new(0),
                 lose_next_start_response: AtomicBool::new(false),
             }
@@ -854,9 +897,16 @@ mod tests {
             &self,
             record: &BoxRecord,
         ) -> ExecutionManagerResult<LocalExecutionObservation> {
-            if self.running.lock().unwrap().contains(&record.id) {
+            let state = if self.running.lock().unwrap().contains(&record.id) {
+                Some(ExecutionState::Running)
+            } else if self.paused.lock().unwrap().contains(&record.id) {
+                Some(ExecutionState::Paused)
+            } else {
+                None
+            };
+            if let Some(state) = state {
                 Ok(LocalExecutionObservation {
-                    state: ExecutionState::Running,
+                    state,
                     handle: Some(Self::handle(record)),
                     exit_code: None,
                 })
@@ -871,25 +921,24 @@ mod tests {
 
         async fn pause(
             &self,
-            _record: &BoxRecord,
+            record: &BoxRecord,
             _keep_memory: bool,
         ) -> ExecutionManagerResult<LocalExecutionHandle> {
-            Err(ExecutionManagerError::Unavailable(
-                "pause unsupported".into(),
-            ))
+            self.running.lock().unwrap().remove(&record.id);
+            self.paused.lock().unwrap().insert(record.id.clone());
+            Ok(Self::handle(record))
         }
 
-        async fn resume(
-            &self,
-            _record: &BoxRecord,
-        ) -> ExecutionManagerResult<LocalExecutionHandle> {
-            Err(ExecutionManagerError::Unavailable(
-                "resume unsupported".into(),
-            ))
+        async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+            self.paused.lock().unwrap().remove(&record.id);
+            self.running.lock().unwrap().insert(record.id.clone());
+            Ok(Self::handle(record))
         }
 
         async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
-            let removed = self.running.lock().unwrap().remove(&record.id);
+            let was_running = self.running.lock().unwrap().remove(&record.id);
+            let was_paused = self.paused.lock().unwrap().remove(&record.id);
+            let removed = was_running || was_paused;
             Ok(if removed {
                 KillOutcome::Killed
             } else {
@@ -931,5 +980,39 @@ mod tests {
         assert_eq!(down.removed, 2);
         assert_eq!(down.ready_replicas, 0);
         assert!(reopened.managed_records().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_execution_facade_resumes_a_retained_paused_slot() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let state = directory.path().join("boxes.json");
+        let backend = Arc::new(RecordingBackend::new());
+        let manager = LocalExecutionManager::new(&state, &home, backend);
+        let catalog = ScaleServiceCatalog::from_acl_str(
+            CATALOG,
+            "gateway-scale",
+            ExecutionIsolation::Sandbox,
+        )
+        .unwrap();
+        let reconciler = LocalScaleReconciler::new(manager.clone(), catalog);
+
+        let up = reconciler.reconcile("api", 1).await.unwrap();
+        assert_eq!(up.ready_replicas, 1);
+        let record = manager.managed_records().await.unwrap().pop().unwrap();
+        let execution_id = ExecutionId::new(record.id).unwrap();
+        let generation = record.managed_execution.unwrap().generation;
+        manager
+            .pause(&execution_id, generation, true)
+            .await
+            .unwrap();
+
+        let resumed = reconciler.reconcile("api", 1).await.unwrap();
+        assert_eq!(resumed.ready_replicas, 1);
+        assert_eq!(resumed.created, 0);
+        assert_eq!(
+            manager.inspect(&execution_id).await.unwrap().state,
+            ExecutionState::Running
+        );
     }
 }
