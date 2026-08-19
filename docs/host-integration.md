@@ -273,7 +273,7 @@ a3s-box run --rm --timeout 120 --cpus 4 --memory 8g \
   -w /workspace \
   --tmpfs /workspace/node_modules:size=4g \
   node:24-bookworm -- \
-  sh -lc 'corepack enable && corepack prepare pnpm@11.10.0 --activate && pnpm --filter @a3s-lab/web build'
+  sh -lc 'corepack enable && corepack prepare pnpm@11.10.0 --activate && pnpm --filter @a3s-lab/ui build'
 ```
 
 `--package-cache pnpm` keeps the pnpm store, Corepack home, pnpm home, and npm
