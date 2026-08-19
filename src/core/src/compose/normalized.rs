@@ -45,6 +45,10 @@ pub struct NormalizedServiceConfig {
     /// Environment files in precedence order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
+    /// Canonically ordered transient environment references. Keys are guest
+    /// variables and values are caller process-environment variable names.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_environment: BTreeMap<String, String>,
     /// Validated and normalized TCP port mappings.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<String>,
@@ -276,6 +280,7 @@ impl From<NormalizedServiceConfig> for ServiceConfig {
                 EnvVars::Map(service.environment.into_iter().collect())
             },
             env_file: list_or_empty(service.env_file),
+            secret_environment: service.secret_environment.into_iter().collect(),
             ports: service.ports,
             volumes: service.volumes,
             depends_on: if service.depends_on.is_empty() {

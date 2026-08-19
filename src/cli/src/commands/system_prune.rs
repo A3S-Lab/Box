@@ -50,19 +50,24 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
     let mut state = StateFile::load_default()?;
     let all_boxes = state.list(true);
 
-    let to_remove: Vec<(String, String, std::path::PathBuf)> = all_boxes
+    let to_remove: Vec<crate::state::BoxRecord> = all_boxes
         .iter()
         .filter(|r| is_prunable_box(r))
-        .map(|r| (r.id.clone(), r.name.clone(), r.box_dir.clone()))
+        .map(|record| (*record).clone())
         .collect();
 
-    for (box_id, name, box_dir) in &to_remove {
-        if box_dir.exists() {
-            let _ = std::fs::remove_dir_all(box_dir);
+    for record in &to_remove {
+        if let Err(error) = crate::cleanup::cleanup_removed_box(record) {
+            tracing::warn!(
+                box_id = %record.id,
+                error = %error,
+                "Failed to clean system-pruned Box resources; preserving its state"
+            );
+            continue;
         }
-        if state.remove(box_id).is_ok() {
+        if state.remove(&record.id).is_ok() {
             boxes_removed += 1;
-            println!("Removed box: {name}");
+            println!("Removed box: {}", record.name);
         }
     }
 

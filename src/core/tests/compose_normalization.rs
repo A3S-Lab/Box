@@ -184,3 +184,52 @@ services:
     );
     assert_eq!(error.diagnostics()[0].path, "/services/api/networks");
 }
+
+#[test]
+fn acl_transient_secret_references_never_resolve_into_configuration() {
+    let source = r#"
+service "api" {
+  image = "api:latest"
+  secret_environment = {
+    DATABASE_URL = "DATABASE_URL_SECRET"
+  }
+}
+"#;
+    let plaintext = "postgres://must-not-enter-compose-data";
+    let environment = HashMap::from([("DATABASE_URL_SECRET".to_string(), plaintext.to_string())]);
+
+    let normalized = normalize_compose(source, ComposeSourceFormat::Acl, &environment)
+        .expect("normalize transient Secret reference");
+    assert_eq!(
+        normalized.services["api"].secret_environment["DATABASE_URL"],
+        "DATABASE_URL_SECRET"
+    );
+    assert!(!normalized.to_canonical_json().unwrap().contains(plaintext));
+}
+
+#[test]
+fn transient_secret_references_reject_value_expansion_and_literal_collisions() {
+    for source in [
+        r#"service "api" {
+  image = "api:latest"
+  secret_environment = { TOKEN = env("TOKEN_SECRET") }
+}"#,
+        r#"service "api" {
+  image = "api:latest"
+  secret_environment = { TOKEN = "${TOKEN_SECRET}" }
+}"#,
+        r#"service "api" {
+  image = "api:latest"
+  environment = { TOKEN = "literal" }
+  secret_environment = { TOKEN = "TOKEN_SECRET" }
+}"#,
+    ] {
+        let error = normalize_compose(
+            source,
+            ComposeSourceFormat::Acl,
+            &HashMap::from([("TOKEN_SECRET".to_string(), "plaintext".to_string())]),
+        )
+        .expect_err("Secret references must remain non-sensitive names");
+        assert!(!error.to_string().contains("plaintext"));
+    }
+}

@@ -8,6 +8,7 @@ mod args;
 mod lifecycle;
 mod operations;
 mod read;
+pub(crate) mod secrets;
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +39,8 @@ const LABEL_PROJECT: &str = "com.a3s.compose.project";
 const LABEL_SERVICE: &str = "com.a3s.compose.service";
 /// Label key for the normalized service configuration digest.
 const LABEL_CONFIG_HASH: &str = "com.a3s.compose.config-hash";
+/// Label key for the non-sensitive transient Secret-set identity.
+pub(crate) const LABEL_SECRET_ID: &str = "com.a3s.compose.secret-identity";
 type ExistingService = (ServiceBox, Option<String>);
 
 /// Default compose file names to search for.
@@ -345,6 +348,7 @@ async fn execute_up(
     // checks and image metadata before creating networks, box directories, or
     // starting a VM. Metadata resolution may populate the image cache.
     validate_compose_health_support(&project).await?;
+    secrets::preflight(&project.config).await?;
     if isolation.is_sandbox() {
         let default_network = project.default_network_name();
         for service_name in &project.service_order {
@@ -437,13 +441,42 @@ async fn execute_up(
         let mut desired_box_config = project.build_box_config(svc_name, Some(&default_net))?;
         desired_box_config.isolation = isolation;
         let config_hash = service_config_hash(service, &desired_box_config)?;
-        if let Some((existing, existing_hash)) = find_existing_service(project_name, svc_name)? {
-            if existing.is_active() && existing_hash.as_deref() == Some(config_hash.as_str()) {
+        let existing = find_existing_service(project_name, svc_name)?;
+        if let Some((existing, existing_hash)) = existing.as_ref() {
+            if existing.is_active()
+                && existing_hash.as_deref() == Some(config_hash.as_str())
+                && service.secret_environment.is_empty()
+            {
                 println!("  [=] {} is unchanged and already running", svc_name);
                 continue;
             }
+        }
 
-            if existing.is_active() {
+        // Resolve Secret material before replacing an existing service. A
+        // missing/invalid value therefore leaves the previous generation live.
+        let box_id = uuid::Uuid::new_v4().to_string();
+        let mut box_config = desired_box_config;
+        let mut secret_lease =
+            match secrets::project_service(service, &box_id, &mut box_config).await {
+                Ok(lease) => lease,
+                Err(error) => {
+                    return rollback_compose_up(
+                        &mut state,
+                        &started_services,
+                        &created_networks,
+                        error,
+                    )
+                    .await;
+                }
+            };
+
+        if let Some((existing, existing_hash)) = existing {
+            if existing.is_active()
+                && existing_hash.as_deref() == Some(config_hash.as_str())
+                && !service.secret_environment.is_empty()
+            {
+                println!("  [~] Refreshing Secret-backed service {}...", svc_name);
+            } else if existing.is_active() {
                 println!("  [~] Recreating changed service {}...", svc_name);
             } else {
                 println!("  [~] Recreating existing service {}...", svc_name);
@@ -492,7 +525,6 @@ async fn execute_up(
             println!(" ✓");
         }
 
-        let mut box_config = desired_box_config;
         let (resolved_volumes, volume_names) = match resolve_service_volumes(&box_config.volumes) {
             Ok(volumes) => volumes,
             Err(error) => {
@@ -520,9 +552,19 @@ async fn execute_up(
         // Create VmManager and boot
         let emitter = EventEmitter::new(256);
         let box_name = format!("{}-{}", project_name, svc_name);
-        let mut vm = VmManager::new(box_config, emitter);
+        let mut vm = VmManager::with_box_id(box_config, emitter, box_id.clone());
+        if let Some(lease) = secret_lease.as_ref() {
+            if let Err(error) = lease.configure_vm(&mut vm) {
+                return rollback_compose_up(
+                    &mut state,
+                    &started_services,
+                    &created_networks,
+                    error,
+                )
+                .await;
+            }
+        }
         vm.set_healthcheck_disabled(project.healthcheck_disabled(svc_name));
-        let box_id = vm.box_id().to_string();
         let box_dir = home.join("boxes").join(&box_id);
         let initial_exec_socket_path = box_dir.join("sockets").join("exec.sock");
 
@@ -642,9 +684,13 @@ async fn execute_up(
         // Build labels with compose metadata
         let svc = project.config.services.get(svc_name);
         let mut labels = svc.map(|s| s.labels.to_map()).unwrap_or_default();
+        labels.remove(LABEL_SECRET_ID);
         labels.insert(LABEL_PROJECT.to_string(), project_name.to_string());
         labels.insert(LABEL_SERVICE.to_string(), svc_name.to_string());
         labels.insert(LABEL_CONFIG_HASH.to_string(), config_hash);
+        if let Some(lease) = secret_lease.as_ref() {
+            labels.insert(LABEL_SECRET_ID.to_string(), lease.identity().to_string());
+        }
 
         // Get service config for extra fields
         let port_map: Vec<String> = svc.map(|s| s.ports.clone()).unwrap_or_default();
@@ -775,6 +821,9 @@ async fn execute_up(
                 .await;
         }
         started_services.push(service_box);
+        if let Some(lease) = secret_lease.as_mut() {
+            lease.persist();
+        }
 
         // Compose returns after startup, so health ownership must outlive this
         // CLI process. A generation-fenced worker updates the same state record.

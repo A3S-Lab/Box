@@ -6,7 +6,7 @@ mod audit;
 mod build;
 mod commit;
 pub(crate) mod common;
-mod compose;
+pub(crate) mod compose;
 mod container_update;
 mod cp;
 mod create;

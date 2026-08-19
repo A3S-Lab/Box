@@ -2,12 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use a3s_box_core::config::{validate_vcpu_count, TeeConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::guest_exec::{
     GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
 };
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
+use sha2::{Digest, Sha256};
 
 use crate::oci::OciImageConfig;
 use crate::rootfs::GUEST_WORKDIR;
@@ -19,10 +23,10 @@ const SBIN_INIT: &str = "/sbin/init";
 const USR_SBIN_INIT: &str = "/usr/sbin/init";
 
 #[derive(Debug)]
-struct ParsedVolumeMount {
-    host_path: PathBuf,
-    guest_path: String,
-    read_only: bool,
+pub(crate) struct ParsedVolumeMount {
+    pub(crate) host_path: PathBuf,
+    pub(crate) guest_path: String,
+    pub(crate) read_only: bool,
 }
 
 /// Read an environment variable, returning `None` if unset or empty.
@@ -93,7 +97,13 @@ impl VmManager {
             .map(|volume| Self::parse_volume_spec(volume))
             .collect::<Result<Vec<_>>>()?;
         for (i, volume) in parsed_volumes.iter().enumerate() {
-            let mount = Self::prepare_volume_mount(volume, i, &filemounts_dir)?;
+            let mount = Self::prepare_volume_mount(
+                volume,
+                i,
+                &filemounts_dir,
+                self.managed_secret_root.as_deref(),
+                &self.box_id,
+            )?;
             fs_mounts.push(mount);
         }
 
@@ -711,7 +721,7 @@ impl VmManager {
     /// Parse a volume mount string from the right so colons in a host path do
     /// not consume the host/guest separator. The guest always uses an absolute
     /// Linux path, even when the host path is a Windows drive or UNC path.
-    fn parse_volume_spec(volume: &str) -> Result<ParsedVolumeMount> {
+    pub(crate) fn parse_volume_spec(volume: &str) -> Result<ParsedVolumeMount> {
         let (mount, read_only) = match volume.rsplit_once(':') {
             Some((mount, "ro")) => (mount, true),
             Some((mount, "rw")) => (mount, false),
@@ -748,9 +758,18 @@ impl VmManager {
         volume: &ParsedVolumeMount,
         index: usize,
         filemounts_dir: &Path,
+        managed_secret_root: Option<&Path>,
+        box_id: &str,
     ) -> Result<FsMount> {
         let host_path = volume.host_path.clone();
+        let managed_secret_root = managed_secret_root.filter(|root| host_path.starts_with(root));
         if !host_path.exists() {
+            if managed_secret_root.is_some() {
+                return Err(BoxError::ConfigError(format!(
+                    "Managed transient Secret source is missing: {}",
+                    host_path.display()
+                )));
+            }
             std::fs::create_dir_all(&host_path).map_err(|e| BoxError::BoxBootError {
                 message: format!(
                     "Failed to create volume host directory {}: {}",
@@ -759,6 +778,17 @@ impl VmManager {
                 ),
                 hint: None,
             })?;
+        }
+        if managed_secret_root.is_some() {
+            let metadata = std::fs::symlink_metadata(&host_path).map_err(BoxError::IoError)?;
+            if !volume.read_only
+                || !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+            {
+                return Err(BoxError::ConfigError(
+                    "Managed transient Secret mounts must be read-only regular files".into(),
+                ));
+            }
         }
         let host_path = host_path
             .canonicalize()
@@ -772,7 +802,22 @@ impl VmManager {
             })?;
 
         let host_path = if host_path.is_file() {
-            Self::stage_single_file_mount(&host_path, &volume.guest_path, index, filemounts_dir)?
+            if let Some(root) = managed_secret_root.filter(|root| host_path.starts_with(root)) {
+                Self::stage_managed_secret_file_mount(
+                    &host_path,
+                    &volume.guest_path,
+                    index,
+                    root,
+                    box_id,
+                )?
+            } else {
+                Self::stage_single_file_mount(
+                    &host_path,
+                    &volume.guest_path,
+                    index,
+                    filemounts_dir,
+                )?
+            }
         } else {
             host_path
         };
@@ -796,7 +841,70 @@ impl VmManager {
     #[cfg(test)]
     fn parse_volume_mount(volume: &str, index: usize, filemounts_dir: &Path) -> Result<FsMount> {
         let parsed_volume = Self::parse_volume_spec(volume)?;
-        Self::prepare_volume_mount(&parsed_volume, index, filemounts_dir)
+        Self::prepare_volume_mount(&parsed_volume, index, filemounts_dir, None, "test-box")
+    }
+
+    /// Stage a managed Secret file only inside its validated tmpfs identity.
+    /// A cross-filesystem fallback into the ordinary per-box directory would
+    /// turn transient Secret bytes into durable host data and is forbidden.
+    fn stage_managed_secret_file_mount(
+        source: &Path,
+        guest_path: &str,
+        index: usize,
+        root: &Path,
+        box_id: &str,
+    ) -> Result<PathBuf> {
+        let relative = source.strip_prefix(root).map_err(|_| {
+            BoxError::ConfigError("Managed Secret source escaped its configured root".into())
+        })?;
+        let components = relative.components().collect::<Vec<_>>();
+        let identity = match components.as_slice() {
+            [std::path::Component::Normal(identity), std::path::Component::Normal(_)]
+                if identity.len() == 64
+                    && identity
+                        .as_encoded_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_hexdigit()) =>
+            {
+                identity
+            }
+            _ => {
+                return Err(BoxError::ConfigError(
+                    "Managed Secret source has an invalid identity path".into(),
+                ))
+            }
+        };
+        let basename = Path::new(guest_path).file_name().ok_or_else(|| {
+            BoxError::ConfigError(format!(
+                "Single-file bind guest path has no file name: {guest_path}"
+            ))
+        })?;
+        let owner = hex::encode(Sha256::digest(box_id.as_bytes()));
+        let stage_dir = root
+            .join(identity)
+            .join(".mounts")
+            .join(owner)
+            .join(index.to_string());
+        std::fs::create_dir_all(&stage_dir).map_err(BoxError::IoError)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(BoxError::IoError)?;
+
+        let staged = stage_dir.join(basename);
+        let temporary = stage_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        let result = (|| -> std::io::Result<()> {
+            std::fs::copy(source, &temporary)?;
+            #[cfg(unix)]
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o400))?;
+            std::fs::File::open(&temporary)?.sync_all()?;
+            std::fs::rename(&temporary, &staged)?;
+            std::fs::File::open(&stage_dir)?.sync_all()
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result.map_err(BoxError::IoError)?;
+        Ok(stage_dir)
     }
 
     /// Stage a single-file bind source into a per-box directory so virtio-fs (which
@@ -1226,6 +1334,95 @@ mod tests {
             "staged file under guest basename must exist"
         );
         assert_eq!(std::fs::read(&staged).unwrap(), b"DATA");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_secret_single_file_staging_never_uses_durable_box_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let transient = TempDir::new().unwrap();
+        let durable = TempDir::new().unwrap();
+        let identity = "a".repeat(64);
+        let secret_dir = transient.path().join(&identity);
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        let source = secret_dir.join("000.secret");
+        std::fs::write(&source, b"TRANSIENT").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let parsed = VmManager::parse_volume_spec(&format!(
+            "{}:/.a3s-box-secrets/{identity}/000.secret:ro",
+            source.display()
+        ))
+        .unwrap();
+
+        let mount = VmManager::prepare_volume_mount(
+            &parsed,
+            0,
+            durable.path(),
+            Some(transient.path()),
+            "compose-box-id",
+        )
+        .unwrap();
+
+        assert!(mount.host_path.starts_with(&secret_dir));
+        assert!(!mount.host_path.starts_with(durable.path()));
+        let staged = mount.host_path.join("000.secret");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"TRANSIENT");
+        let metadata = std::fs::metadata(&staged).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o400);
+        assert_eq!(metadata.nlink(), 1);
+    }
+
+    #[test]
+    fn missing_managed_secret_source_is_never_created_as_a_directory() {
+        let transient = TempDir::new().unwrap();
+        let durable = TempDir::new().unwrap();
+        let identity = "a".repeat(64);
+        let source = transient.path().join(identity).join("000.secret");
+        let parsed = ParsedVolumeMount {
+            host_path: source.clone(),
+            guest_path: "/.a3s-box-secrets/missing/000.secret".into(),
+            read_only: true,
+        };
+
+        let error = VmManager::prepare_volume_mount(
+            &parsed,
+            0,
+            durable.path(),
+            Some(transient.path()),
+            "compose-box-id",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Secret source is missing"));
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn managed_secret_source_must_be_read_only() {
+        let transient = TempDir::new().unwrap();
+        let durable = TempDir::new().unwrap();
+        let identity = "a".repeat(64);
+        let secret_dir = transient.path().join(identity);
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        let source = secret_dir.join("000.secret");
+        std::fs::write(&source, b"TRANSIENT").unwrap();
+        let parsed = ParsedVolumeMount {
+            host_path: source,
+            guest_path: "/.a3s-box-secrets/managed/000.secret".into(),
+            read_only: false,
+        };
+
+        let error = VmManager::prepare_volume_mount(
+            &parsed,
+            0,
+            durable.path(),
+            Some(transient.path()),
+            "compose-box-id",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("read-only regular files"));
     }
 
     #[test]

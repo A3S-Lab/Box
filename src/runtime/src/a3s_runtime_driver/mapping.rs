@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::config::TeeConfig;
 use a3s_box_core::log::LogConfig;
-use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
+use a3s_box_core::secret::{
+    SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST, SECRET_GUEST_ROOT,
+};
 use a3s_box_core::tee::RUNTIME_ATTESTATION_BINDING_ENV;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionIsolation, ExecutionRecordPolicy,
@@ -25,8 +27,6 @@ use super::{BoxRuntimeSevSnpConfig, OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
 
 const CPU_PERIOD_US: u64 = 100_000;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
-const SECRET_GUEST_ROOT: &str = "/.a3s-box-secrets";
-
 pub(super) fn creation_request_for(
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,

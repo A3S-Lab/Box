@@ -1,5 +1,6 @@
 //! Transient Runtime Secret material owned by the Box provider boundary.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -12,8 +13,13 @@ use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 use zeroize::{Zeroize, Zeroizing};
 
+use a3s_box_core::secret::{
+    validate_environment_variable_name, SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST,
+    SECRET_GUEST_ROOT,
+};
+
 use crate::local_execution::{TransientRegistryAuthBroker, TransientRegistryAuthLease};
-use crate::{BoxRecord, ImagePuller, ImageReference, ImageStore, RegistryAuth};
+use crate::{BoxRecord, ImagePuller, ImageReference, ImageStore, RegistryAuth, VmManager};
 
 const MAX_SECRET_BYTES: usize = 1024 * 1024;
 const MAX_REGISTRY_USERNAME_BYTES: usize = 255;
@@ -121,6 +127,170 @@ pub enum BoxSecretMaterializationError {
     Unavailable(String),
 }
 
+/// Non-sensitive mount and guest-init metadata for one transient environment
+/// Secret set. Secret bytes are materialized separately under a private tmpfs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxSecretEnvironmentProjection {
+    pub volumes: Vec<String>,
+    pub manifest: String,
+}
+
+/// The sole Box-owned transient Secret filesystem boundary.
+///
+/// Callers may create private scopes below one pre-mounted Linux tmpfs, but
+/// Box never creates that backing mount or falls back to disk storage.
+#[derive(Debug, Clone)]
+pub struct BoxTransientSecretStore {
+    root: PathBuf,
+}
+
+impl BoxTransientSecretStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub async fn require_ready(&self) -> RuntimeResult<()> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || validate_secret_root(&root))
+            .await
+            .map_err(|error| {
+                RuntimeError::ProviderUnavailable(format!(
+                    "Box Secret-root validation task failed: {error}"
+                ))
+            })?
+    }
+
+    /// Create or reopen one private namespace inside the same validated tmpfs.
+    pub async fn private_scope(&self, scope: &str) -> RuntimeResult<Self> {
+        if scope.is_empty()
+            || scope.len() > 64
+            || !scope
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "Box Secret scope name is invalid".into(),
+            ));
+        }
+        self.require_ready().await?;
+        let scoped = Self::new(self.root.join(scope));
+        ensure_private_directory(scoped.root()).await?;
+        scoped.require_ready().await?;
+        Ok(scoped)
+    }
+
+    /// Materialize caller-provided environment values and return only the
+    /// non-sensitive mount/manifest projection used by BoxConfig.
+    pub async fn materialize_environment(
+        &self,
+        identity: &str,
+        bindings: Vec<(String, BoxSecretMaterial)>,
+    ) -> RuntimeResult<BoxSecretEnvironmentProjection> {
+        if bindings.is_empty() || bindings.len() > 128 {
+            return Err(RuntimeError::InvalidRequest(
+                "Box transient Secret environment requires between 1 and 128 bindings".into(),
+            ));
+        }
+        let component = digest_component(identity)?;
+        self.require_ready().await?;
+        let directory = self.root.join(component);
+        ensure_private_directory(&directory).await?;
+
+        let mut variables = BTreeSet::new();
+        let mut volumes = Vec::with_capacity(bindings.len());
+        let mut manifest = Vec::with_capacity(bindings.len());
+        for (index, (variable, material)) in bindings.into_iter().enumerate() {
+            if variable == SECRET_ENVIRONMENT_MANIFEST
+                || !variables.insert(variable.clone())
+                || validate_environment_variable_name(&variable).is_err()
+            {
+                self.cleanup_directory(&directory).await?;
+                return Err(RuntimeError::InvalidRequest(
+                    "Box transient Secret environment contains an invalid, duplicate, or reserved target"
+                        .into(),
+                ));
+            }
+            if let Err(error) = validate_environment_material(material.as_bytes()) {
+                self.cleanup_directory(&directory).await?;
+                return Err(error);
+            }
+            let host = directory.join(format!("{index:03}.secret"));
+            if let Err(error) = write_secret_atomically(&host, material.as_bytes(), 0o400).await {
+                self.cleanup_directory(&directory).await?;
+                return Err(error);
+            }
+            let host = match encode_bind_source(&host) {
+                Ok(host) => host,
+                Err(error) => {
+                    self.cleanup_directory(&directory).await?;
+                    return Err(error);
+                }
+            };
+            let guest = format!("{SECRET_GUEST_ROOT}/{component}/{index:03}.secret");
+            let binding = SecretEnvironmentBinding {
+                variable,
+                path: guest.clone(),
+            };
+            if let Err(error) = binding.validate() {
+                self.cleanup_directory(&directory).await?;
+                return Err(RuntimeError::Protocol(error));
+            }
+            volumes.push(format!("{host}:{guest}:ro"));
+            manifest.push(binding);
+        }
+
+        let manifest = match serde_json::to_string(&manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.cleanup_directory(&directory).await?;
+                return Err(RuntimeError::Protocol(format!(
+                    "Box could not encode the non-secret environment binding manifest: {error}"
+                )));
+            }
+        };
+        Ok(BoxSecretEnvironmentProjection { volumes, manifest })
+    }
+
+    /// Mark this already-validated tmpfs as the only source whose single-file
+    /// MicroVM mounts may be staged inside tmpfs rather than copied to disk.
+    pub fn configure_vm(&self, manager: &mut VmManager) -> RuntimeResult<()> {
+        validate_secret_root(&self.root)?;
+        manager.managed_secret_root = Some(self.root.clone());
+        Ok(())
+    }
+
+    pub async fn cleanup_identity(&self, identity: &str) -> RuntimeResult<()> {
+        let directory = self.root.join(digest_component(identity)?);
+        self.cleanup_directory(&directory).await
+    }
+
+    pub fn cleanup_identity_sync(&self, identity: &str) -> RuntimeResult<()> {
+        let directory = self.root.join(digest_component(identity)?);
+        match std::fs::symlink_metadata(&self.root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(secret_io_error(error)),
+            Ok(_) => validate_secret_root(&self.root)?,
+        }
+        remove_secret_directory(&self.root, &directory)
+    }
+
+    async fn cleanup_directory(&self, directory: &Path) -> RuntimeResult<()> {
+        let root = self.root.clone();
+        let directory = directory.to_path_buf();
+        tokio::task::spawn_blocking(move || remove_secret_directory(&root, &directory))
+            .await
+            .map_err(|error| {
+                RuntimeError::ProviderUnavailable(format!(
+                    "Box Secret cleanup task failed: {error}"
+                ))
+            })?
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SecretMaterializationOwner {
     root: PathBuf,
@@ -146,14 +316,9 @@ impl SecretMaterializationOwner {
     }
 
     pub(super) async fn require_ready(&self) -> RuntimeResult<()> {
-        let root = self.root.clone();
-        tokio::task::spawn_blocking(move || validate_secret_root(&root))
+        BoxTransientSecretStore::new(self.root.clone())
+            .require_ready()
             .await
-            .map_err(|error| {
-                RuntimeError::ProviderUnavailable(format!(
-                    "Box Secret-root validation task failed: {error}"
-                ))
-            })?
     }
 
     pub(super) async fn materialize_for_start(&self, spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
@@ -307,15 +472,9 @@ impl SecretMaterializationOwner {
     }
 
     async fn cleanup_directory(&self, directory: &Path) -> RuntimeResult<()> {
-        let root = self.root.clone();
-        let directory = directory.to_path_buf();
-        tokio::task::spawn_blocking(move || remove_secret_directory(&root, &directory))
+        BoxTransientSecretStore::new(self.root.clone())
+            .cleanup_directory(directory)
             .await
-            .map_err(|error| {
-                RuntimeError::ProviderUnavailable(format!(
-                    "Box Secret cleanup task failed: {error}"
-                ))
-            })?
     }
 }
 
@@ -357,14 +516,31 @@ fn secret_mode(target: &SecretTarget) -> u32 {
 }
 
 fn validate_material_for_target(bytes: &[u8], target: &SecretTarget) -> RuntimeResult<()> {
-    if matches!(target, SecretTarget::Environment { .. })
-        && (std::str::from_utf8(bytes).is_err() || bytes.contains(&0))
-    {
+    if matches!(target, SecretTarget::Environment { .. }) {
+        validate_environment_material(bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_environment_material(bytes: &[u8]) -> RuntimeResult<()> {
+    if std::str::from_utf8(bytes).is_err() || bytes.contains(&0) {
         return Err(RuntimeError::InvalidRequest(
             "Box Secret environment material must be non-empty UTF-8 without NUL bytes".into(),
         ));
     }
     Ok(())
+}
+
+fn encode_bind_source(path: &Path) -> RuntimeResult<&str> {
+    path.to_str()
+        .filter(|value| {
+            !value.contains([':', '\0']) && !value.bytes().any(|byte| byte.is_ascii_control())
+        })
+        .ok_or_else(|| {
+            RuntimeError::InvalidRequest(
+                "Box Secret root cannot be encoded as a bind-mount source".into(),
+            )
+        })
 }
 
 fn valid_registry_field(value: &str, maximum: usize) -> bool {
@@ -624,6 +800,44 @@ mod tests {
         ] {
             assert!(BoxRegistryCredential::new(username, password).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn transient_store_projects_metadata_without_persisting_plaintext() {
+        let mount = tempfile::tempdir_in("/dev/shm")
+            .expect("Linux Secret tests require the standard /dev/shm tmpfs");
+        let root = mount.path().join("runtime-secrets");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = BoxTransientSecretStore::new(root)
+            .private_scope("compose")
+            .await
+            .unwrap();
+        let identity = format!("sha256:{}", "a".repeat(64));
+        let plaintext = "box-compose-secret-fixture";
+
+        let projection = store
+            .materialize_environment(
+                &identity,
+                vec![(
+                    "DATABASE_URL".into(),
+                    BoxSecretMaterial::new(plaintext.as_bytes().to_vec()).unwrap(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert!(!format!("{projection:?}").contains(plaintext));
+        assert!(!projection.manifest.contains(plaintext));
+        let bindings: Vec<SecretEnvironmentBinding> =
+            serde_json::from_str(&projection.manifest).unwrap();
+        assert_eq!(bindings[0].variable, "DATABASE_URL");
+        let file = store.root().join("a".repeat(64)).join("000.secret");
+        assert_eq!(std::fs::read(&file).unwrap(), plaintext.as_bytes());
+        assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o400);
+
+        store.cleanup_identity(&identity).await.unwrap();
+        assert!(!file.exists());
     }
 
     #[cfg(unix)]

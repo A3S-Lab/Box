@@ -72,6 +72,13 @@ owns reference authorization and transport; Box owns only node-local
 materialization, deterministic isolation-specific read-only mounts, recovery
 validation, log redaction, and lifecycle cleanup.
 
+`BoxTransientSecretStore` exposes that same validated tmpfs owner to Box's
+local Compose adapter. Compose creates a private scope only after the parent
+tmpfs passes the provider checks; it supplies zeroizing values and receives
+only mount paths plus the guest manifest. For MicroVM single-file mounts, the
+virtio-fs directory staging copy stays inside that tmpfs scope. The ordinary
+disk-backed `.filemounts` fallback is never used for managed Secret sources.
+
 Environment, file, and registry credential targets are supported. Environment
 values use a non-sensitive `A3S_BOX_SECRET_ENV_V1` binding manifest that Guest
 Init validates and consumes immediately before process creation. File material

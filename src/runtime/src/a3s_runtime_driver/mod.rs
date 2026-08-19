@@ -40,7 +40,8 @@ use self::service_endpoints::ServiceEndpointOwner;
 
 pub use self::artifact::{BoxArtifactPort, BoxArtifactPortError};
 pub use self::secret::{
-    BoxRegistryCredential, BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer,
+    BoxRegistryCredential, BoxSecretEnvironmentProjection, BoxSecretMaterial,
+    BoxSecretMaterializationError, BoxSecretMaterializer, BoxTransientSecretStore,
 };
 
 pub(super) const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";

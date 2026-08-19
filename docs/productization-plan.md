@@ -223,6 +223,13 @@ Current notes:
   unsupported values. Runtime consumes the result through the stateless
   `ComposeRuntimePlan`; Box lifecycle records and Cloud desired state remain
   outside that translation boundary.
+- Compose `secret_environment` now keeps only target/source variable names in
+  normalized and persisted configuration. The CLI preflights caller process
+  environment sources and the existing private Linux tmpfs before mutation,
+  then reuses Runtime's atomic transient Secret materialization, read-only
+  guest manifest, and cleanup lifecycle. Secret-backed services refresh on
+  every `compose up`; MicroVM single-file Secret mounts stage only inside the
+  same tmpfs and never use the disk-backed per-box file-mount directory.
 - Boot failure cleanup now stops any shim that was spawned before readiness,
   stops bridge-network backends, unmounts rootfs providers before removing box
   directories, and removes only the anonymous OCI volumes created by that boot

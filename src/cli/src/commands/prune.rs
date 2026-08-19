@@ -25,21 +25,26 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let mut state = StateFile::load_default()?;
-    let to_remove: Vec<(String, String, std::path::PathBuf)> = state
+    let to_remove: Vec<crate::state::BoxRecord> = state
         .list(true)
         .iter()
         .filter(|r| is_prunable_box(r))
-        .map(|r| (r.id.clone(), r.name.clone(), r.box_dir.clone()))
+        .map(|record| (*record).clone())
         .collect();
 
     let mut removed: usize = 0;
-    for (box_id, name, box_dir) in &to_remove {
-        if box_dir.exists() {
-            let _ = std::fs::remove_dir_all(box_dir);
+    for record in &to_remove {
+        if let Err(error) = crate::cleanup::cleanup_removed_box(record) {
+            tracing::warn!(
+                box_id = %record.id,
+                error = %error,
+                "Failed to clean pruned Box resources; preserving its state"
+            );
+            continue;
         }
-        if state.remove(box_id).is_ok() {
+        if state.remove(&record.id).is_ok() {
             removed += 1;
-            println!("Removed box: {name}");
+            println!("Removed box: {}", record.name);
         }
     }
 

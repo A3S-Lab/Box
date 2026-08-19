@@ -37,6 +37,27 @@ content before invoking it. Relative `env_file` content remains a Runtime
 translation concern because it depends on the caller-provided project base
 directory.
 
+`secret_environment` is deliberately different from interpolation. It maps a
+guest variable to a caller process-environment variable name, and the
+normalizer retains only that name:
+
+```acl
+service "migrator" {
+  image = "ghcr.io/example/migrator:v1"
+  secret_environment = {
+    DATABASE_URL = "A3S_CLOUD_POSTGRES_MIGRATION_URL"
+  }
+}
+```
+
+Neither `${...}` nor `env(...)` is evaluated inside this map. Literal
+`environment`/`env_file` values cannot collide with a Secret target. At
+execution time the CLI reads each source only from its current process
+environment, passes zeroizing material to Box's existing transient Secret
+owner, and persists only read-only mount paths plus the non-sensitive guest
+binding manifest. Linux execution requires the pre-mounted private
+`<A3S_HOME>/runtime-secrets` tmpfs; other platforms fail before mutation.
+
 ## Deterministic Output
 
 The normalized model has one representation for ACL and YAML alternatives:
@@ -45,6 +66,7 @@ The normalized model has one representation for ACL and YAML alternatives:
 - the informational YAML `version` field is discarded;
 - dependency and network map traversal is sorted;
 - environment and label maps have stable key order;
+- transient Secret references have stable key order but never contain values;
 - TCP port suffixes normalize to the Runtime form;
 - default volume and network drivers become explicit;
 - network aliases are validated, sorted, and deduplicated.
@@ -80,3 +102,8 @@ lifecycle state, or Cloud desired state. The CLI owns local convergence and
 cleanup; Cloud can reuse normalized interpretation without importing those
 orchestration internals. Compose input is never Cloud's persisted desired-state
 model.
+
+Secret files use the same tmpfs validation, atomic materialization, guest
+manifest, and cleanup lifecycle as the A3S Runtime provider. Compose adds only
+reference projection and local convergence ownership; it does not introduce a
+second Secret store or transport.

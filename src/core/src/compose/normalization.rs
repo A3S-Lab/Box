@@ -289,6 +289,7 @@ fn normalize_service(
         command,
         environment,
         env_file,
+        secret_environment,
         ports,
         volumes,
         depends_on,
@@ -342,12 +343,17 @@ fn normalize_service(
         ));
     }
 
+    let environment = normalize_environment(environment, path, diagnostics);
+    let secret_environment =
+        normalize_secret_environment(secret_environment, &environment, path, diagnostics);
+
     NormalizedServiceConfig {
         image,
         entrypoint: entrypoint.map(|value| value.to_vec()),
         command: command.map(|value| value.to_vec()),
-        environment: normalize_environment(environment, path, diagnostics),
+        environment,
         env_file: env_file.to_vec(),
+        secret_environment,
         ports,
         volumes,
         depends_on: normalize_dependencies(depends_on, path, diagnostics),
@@ -366,6 +372,63 @@ fn normalize_service(
         hostname,
         extra_hosts: extra_hosts.to_vec(),
     }
+}
+
+fn normalize_secret_environment(
+    references: HashMap<String, String>,
+    literal_environment: &BTreeMap<String, String>,
+    service_path: &str,
+    diagnostics: &mut Vec<ComposeDiagnostic>,
+) -> BTreeMap<String, String> {
+    use crate::secret::{validate_environment_variable_name, SECRET_ENVIRONMENT_MANIFEST};
+
+    let mut normalized = BTreeMap::new();
+    for (target, source) in references {
+        let target_path = format!(
+            "{}/{}",
+            child_path(service_path, "secret_environment"),
+            pointer(&target)
+        );
+        if let Err(message) = validate_environment_variable_name(&target) {
+            diagnostics.push(ComposeDiagnostic::new(
+                ComposeDiagnosticCode::InvalidValue,
+                &target_path,
+                format!("invalid Secret target variable {target:?}: {message}"),
+            ));
+        }
+        if let Err(message) = validate_environment_variable_name(&source) {
+            diagnostics.push(ComposeDiagnostic::new(
+                ComposeDiagnosticCode::InvalidValue,
+                &target_path,
+                format!("invalid Secret source variable name: {message}"),
+            ));
+        }
+        if target == SECRET_ENVIRONMENT_MANIFEST {
+            diagnostics.push(ComposeDiagnostic::new(
+                ComposeDiagnosticCode::InvalidValue,
+                &target_path,
+                format!("Secret target uses reserved Box key {SECRET_ENVIRONMENT_MANIFEST:?}"),
+            ));
+        }
+        if literal_environment.contains_key(&target) {
+            diagnostics.push(ComposeDiagnostic::new(
+                ComposeDiagnosticCode::InvalidValue,
+                &target_path,
+                format!(
+                    "Secret target {target:?} conflicts with a literal service environment value"
+                ),
+            ));
+        }
+        normalized.insert(target, source);
+    }
+    if normalized.len() > 128 {
+        diagnostics.push(ComposeDiagnostic::new(
+            ComposeDiagnosticCode::InvalidValue,
+            child_path(service_path, "secret_environment"),
+            "Compose services support at most 128 transient environment bindings",
+        ));
+    }
+    normalized
 }
 
 fn normalize_environment(

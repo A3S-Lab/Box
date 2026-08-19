@@ -11,6 +11,11 @@ use a3s_box_core::compose::ComposeConfig;
 use a3s_box_core::config::{BoxConfig, ResourceConfig, DEFAULT_VCPUS};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::network::NetworkMode;
+use a3s_box_core::secret::{
+    validate_environment_variable_name, SECRET_ENVIRONMENT_MANIFEST, SECRET_GUEST_ROOT,
+};
+
+use crate::VmManager;
 
 /// Stateless plan for translating one Compose project into Runtime inputs.
 #[derive(Debug, Clone)]
@@ -64,6 +69,7 @@ impl ComposeRuntimePlan {
                 ))
             })?;
             validate_depends_on_conditions(svc_name, &svc.depends_on)?;
+            validate_secret_environment(svc_name, svc)?;
         }
 
         // Compute topological order
@@ -106,6 +112,21 @@ impl ComposeRuntimePlan {
 
         // Build environment: env_file first, environment overrides.
         let extra_env = self.service_env(svc)?;
+        for target in svc.secret_environment.keys() {
+            if extra_env.iter().any(|(name, _)| name == target) {
+                return Err(BoxError::ConfigError(format!(
+                    "Service {service_name:?} Secret target {target:?} conflicts with env_file or environment"
+                )));
+            }
+        }
+        if extra_env
+            .iter()
+            .any(|(name, _)| name == SECRET_ENVIRONMENT_MANIFEST)
+        {
+            return Err(BoxError::ConfigError(format!(
+                "Service {service_name:?} environment uses reserved Box key {SECRET_ENVIRONMENT_MANIFEST:?}"
+            )));
+        }
 
         // Determine network mode
         let network_mode = {
@@ -343,6 +364,68 @@ impl ComposeRuntimePlan {
                     )
             })
     }
+}
+
+fn validate_secret_environment(
+    service_name: &str,
+    service: &a3s_box_core::compose::ServiceConfig,
+) -> Result<()> {
+    if service.secret_environment.is_empty() {
+        return Ok(());
+    }
+    if service.secret_environment.len() > 128 {
+        return Err(BoxError::ConfigError(format!(
+            "Service {service_name:?} has more than 128 transient Secret environment bindings"
+        )));
+    }
+    let literal_environment = service.environment.to_pairs();
+    for (target, source) in &service.secret_environment {
+        validate_environment_variable_name(target).map_err(|message| {
+            BoxError::ConfigError(format!(
+                "Service {service_name:?} has an invalid Secret target {target:?}: {message}"
+            ))
+        })?;
+        validate_environment_variable_name(source).map_err(|message| {
+            BoxError::ConfigError(format!(
+                "Service {service_name:?} has an invalid Secret source variable name: {message}"
+            ))
+        })?;
+        if target == SECRET_ENVIRONMENT_MANIFEST {
+            return Err(BoxError::ConfigError(format!(
+                "Service {service_name:?} Secret target uses reserved Box key {SECRET_ENVIRONMENT_MANIFEST:?}"
+            )));
+        }
+        if literal_environment.iter().any(|(name, _)| name == target) {
+            return Err(BoxError::ConfigError(format!(
+                "Service {service_name:?} Secret target {target:?} conflicts with environment"
+            )));
+        }
+    }
+
+    let reserved = Path::new(SECRET_GUEST_ROOT);
+    for volume in &service.volumes {
+        let parsed = VmManager::parse_volume_spec(volume)?;
+        let target = Path::new(&parsed.guest_path);
+        if paths_overlap(target, reserved) {
+            return Err(BoxError::ConfigError(format!(
+                "Service {service_name:?} volume target {:?} overlaps the reserved transient Secret root",
+                parsed.guest_path
+            )));
+        }
+    }
+    for tmpfs in service.tmpfs.to_vec() {
+        let target = Path::new(tmpfs.split(':').next().unwrap_or_default());
+        if paths_overlap(target, reserved) {
+            return Err(BoxError::ConfigError(format!(
+                "Service {service_name:?} tmpfs target {target:?} overlaps the reserved transient Secret root"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Parsed health check specification (runtime-friendly).

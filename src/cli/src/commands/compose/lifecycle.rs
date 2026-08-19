@@ -29,6 +29,7 @@ pub(super) struct ServiceBox {
     pub(super) anonymous_volumes: Vec<String>,
     pub(super) stop_signal: Option<String>,
     pub(super) stop_timeout: Option<u64>,
+    pub(super) secret_identity: Option<String>,
 }
 
 impl ServiceBox {
@@ -50,6 +51,7 @@ impl ServiceBox {
             anonymous_volumes: record.anonymous_volumes.clone(),
             stop_signal: record.stop_signal.clone(),
             stop_timeout: record.stop_timeout,
+            secret_identity: record.labels.get(super::LABEL_SECRET_ID).cloned(),
         }
     }
 
@@ -202,6 +204,7 @@ async fn teardown_service_box_inner(
     };
 
     stop_service_process(&service).await;
+    crate::cleanup::cleanup_transient_secret_identity(service.secret_identity.as_deref())?;
     let removal = StateFile::remove_record(&discovered.box_id);
     if removal.is_ok() {
         state.forget(&discovered.box_id);

@@ -5,6 +5,24 @@ use serde::{Deserialize, Serialize};
 /// Runtime control key carrying only environment names and guest file paths.
 pub const SECRET_ENVIRONMENT_MANIFEST: &str = "A3S_BOX_SECRET_ENV_V1";
 
+/// Reserved in-guest root for transient Secret files.
+pub const SECRET_GUEST_ROOT: &str = "/.a3s-box-secrets";
+
+/// Validate one POSIX-style process environment variable name.
+pub fn validate_environment_variable_name(variable: &str) -> Result<(), String> {
+    let mut bytes = variable.bytes();
+    let Some(first) = bytes.next() else {
+        return Err("Secret environment variable name must not be empty".into());
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || variable.len() > 255
+    {
+        return Err("Secret environment variable name is invalid".into());
+    }
+    Ok(())
+}
+
 /// One non-sensitive environment binding consumed by guest-init immediately
 /// before it launches the workload process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,16 +34,7 @@ pub struct SecretEnvironmentBinding {
 
 impl SecretEnvironmentBinding {
     pub fn validate(&self) -> Result<(), String> {
-        let mut bytes = self.variable.bytes();
-        let Some(first) = bytes.next() else {
-            return Err("Secret environment variable name must not be empty".into());
-        };
-        if !(first.is_ascii_alphabetic() || first == b'_')
-            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || self.variable.len() > 255
-        {
-            return Err("Secret environment variable name is invalid".into());
-        }
+        validate_environment_variable_name(&self.variable)?;
         let normalized_path = self.path.strip_prefix('/').is_some_and(|relative| {
             !relative.is_empty()
                 && relative

@@ -116,6 +116,21 @@ pub fn cleanup_anonymous_volumes(anonymous_volumes: &[String]) {
     }
 }
 
+/// Remove a Compose-owned transient Secret set before its durable record is
+/// forgotten. The record stores only this non-sensitive identity.
+pub(crate) fn cleanup_transient_secret_identity(
+    identity: Option<&str>,
+) -> a3s_box_core::error::Result<()> {
+    let Some(identity) = identity else {
+        return Ok(());
+    };
+    crate::commands::compose::secrets::cleanup_persisted(identity).map_err(|error| {
+        a3s_box_core::error::BoxError::Other(format!(
+            "Failed to clean Compose transient Secret material: {error}"
+        ))
+    })
+}
+
 /// Remove the host-side socket directory when it lives outside the box dir.
 pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
     let Some(socket_dir) = exec_socket_path.parent() else {
@@ -154,6 +169,12 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
         }
     }
 
+    cleanup_transient_secret_identity(
+        record
+            .labels
+            .get(crate::commands::compose::LABEL_SECRET_ID)
+            .map(String::as_str),
+    )?;
     cleanup_record_resources(record);
     cleanup_anonymous_volumes(&record.anonymous_volumes);
     remove_host_cgroup(record);

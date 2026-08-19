@@ -86,6 +86,12 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub env_file: StringOrList,
 
+    /// Transient environment bindings keyed by guest variable name, with
+    /// values naming process-environment variables owned by the caller.
+    /// Secret bytes are never part of this configuration model.
+    #[serde(default)]
+    pub secret_environment: HashMap<String, String>,
+
     /// Port mappings ("host:container").
     #[serde(default)]
     pub ports: Vec<String>,

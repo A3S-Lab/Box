@@ -113,7 +113,12 @@ fn interpolate_block_values(
     block: &mut Block,
     environment: &HashMap<String, String>,
 ) -> Result<(), ComposeAclError> {
-    for value in block.attributes.values_mut() {
+    for (name, value) in &mut block.attributes {
+        // Secret references are names, not scalar values. Expanding them here
+        // could turn caller-owned Secret bytes into durable Compose data.
+        if block.name == "service" && name == "secret_environment" {
+            continue;
+        }
         interpolate_value(value, environment)?;
     }
     for nested in &mut block.blocks {
@@ -161,7 +166,12 @@ fn resolve_block_environment(
     block: &mut Block,
     environment: &HashMap<String, String>,
 ) -> Result<(), ComposeAclError> {
-    for value in block.attributes.values_mut() {
+    for (name, value) in &mut block.attributes {
+        // `env()` resolves a literal value. Secret references must remain
+        // non-sensitive names and are validated as plain strings later.
+        if block.name == "service" && name == "secret_environment" {
+            continue;
+        }
         resolve_value_environment(value, environment)?;
     }
     for nested in &mut block.blocks {
@@ -288,6 +298,7 @@ fn parse_service(block: &Block, name: &str) -> Result<ServiceConfig, ComposeAclE
         command: optional_string_or_list(block, "command", &path)?,
         environment: optional_env_vars(block, "environment", &path)?,
         env_file: optional_string_or_list(block, "env_file", &path)?.unwrap_or_default(),
+        secret_environment: optional_string_map(block, "secret_environment", &path)?,
         ports: optional_string_list(block, "ports", &path)?.unwrap_or_default(),
         volumes: optional_string_list(block, "volumes", &path)?.unwrap_or_default(),
         depends_on: optional_depends_on(block, "depends_on", &path)?,
@@ -603,6 +614,22 @@ fn optional_labels(block: &Block, field: &str, path: &str) -> Result<Labels, Com
             "{path}.{field} must be an object or a list of label strings"
         ))),
     }
+}
+
+fn optional_string_map(
+    block: &Block,
+    field: &str,
+    path: &str,
+) -> Result<HashMap<String, String>, ComposeAclError> {
+    let Some(value) = block.attributes.get(field) else {
+        return Ok(HashMap::new());
+    };
+    let Value::Object(entries) = value else {
+        return Err(ComposeAclError::invalid(format!(
+            "{path}.{field} must be an object of string references"
+        )));
+    };
+    string_map_value(entries, &format!("{path}.{field}"))
 }
 
 fn string_map_value(

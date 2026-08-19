@@ -8,6 +8,7 @@ pub(super) const SERVICE_FIELDS: &[&str] = &[
     "command",
     "environment",
     "env_file",
+    "secret_environment",
     "ports",
     "volumes",
     "depends_on",

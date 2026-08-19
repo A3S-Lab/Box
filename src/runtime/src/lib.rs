@@ -64,8 +64,9 @@ pub use audit::{read_audit_log, AuditLog, AuditQuery};
 #[cfg(all(feature = "vm", target_os = "linux"))]
 pub use a3s_runtime_driver::{
     BoxArtifactPort, BoxArtifactPortError, BoxRegistryCredential, BoxRuntimeDriver,
-    BoxRuntimeDriverConfig, BoxRuntimeSevSnpConfig, BoxSecretMaterial,
-    BoxSecretMaterializationError, BoxSecretMaterializer,
+    BoxRuntimeDriverConfig, BoxRuntimeSevSnpConfig, BoxSecretEnvironmentProjection,
+    BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer,
+    BoxTransientSecretStore,
 };
 
 // Canonical local execution metadata

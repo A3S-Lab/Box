@@ -358,6 +358,28 @@ a3s-box compose -f compose.acl config
 a3s-box compose -f compose.acl up -d
 ```
 
+Compose can project caller-owned process environment values without placing
+their bytes in ACL, `.env`, `BoxConfig`, labels, or state records:
+
+```acl
+service "api" {
+  image = "ghcr.io/example/api:v1"
+
+  secret_environment = {
+    DATABASE_URL = "A3S_CLOUD_POSTGRES_URL"
+  }
+}
+```
+
+`secret_environment` maps a guest variable to the name of a real process
+environment variable. On Linux, Box validates the existing private
+`<A3S_HOME>/runtime-secrets` tmpfs, materializes the value there, mounts it
+read-only, and removes it with the box. Box never creates or downgrades the
+backing tmpfs to disk; secret-backed Compose startup fails before resource
+mutation when the mount or source variable is unavailable. `.env` and
+`env_file` remain literal configuration inputs and are never Secret sources.
+Other hosts parse and normalize the references but reject their execution.
+
 ### Run the standalone Gateway scale authority
 
 `scale-api` turns a Gateway replica decision into durable Box executions. The

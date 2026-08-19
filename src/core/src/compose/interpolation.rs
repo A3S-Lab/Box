@@ -64,7 +64,13 @@ fn interpolate_value(
         }
         serde_yaml::Value::Mapping(mapping) => {
             // Compose interpolation applies to YAML values, not mapping keys.
-            for item in mapping.values_mut() {
+            for (key, item) in mapping {
+                // A3S transient Secret bindings contain environment variable
+                // names, never values. Do not expand a reference into Secret
+                // bytes before the typed parser can enforce that boundary.
+                if key.as_str() == Some("secret_environment") {
+                    continue;
+                }
                 interpolate_value(item, environment)?;
             }
         }
@@ -347,6 +353,30 @@ ports:
         assert!(value.get("expanded-key").is_none());
         assert_eq!(value["environment"]["VALUE"].as_str(), Some("shell"));
         assert_eq!(value["ports"][0].as_str(), Some("16379:6379"));
+    }
+
+    #[test]
+    fn leaves_transient_secret_references_unexpanded() {
+        let value = interpolated_value(
+            r#"
+services:
+  api:
+    environment:
+      LITERAL: ${VALUE}
+    secret_environment:
+      TOKEN: ${VALUE}
+"#,
+            &[("VALUE", "must-not-become-a-secret-reference")],
+        );
+
+        assert_eq!(
+            value["services"]["api"]["environment"]["LITERAL"].as_str(),
+            Some("must-not-become-a-secret-reference")
+        );
+        assert_eq!(
+            value["services"]["api"]["secret_environment"]["TOKEN"].as_str(),
+            Some("${VALUE}")
+        );
     }
 
     #[test]
