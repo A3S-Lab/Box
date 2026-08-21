@@ -43,6 +43,7 @@ const CONFIG_DIGEST: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const ATTACHMENTS_DIGEST: &str =
     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const RUNTIME_RECORD_PID_ENV: &str = "A3S_BOX_TEST_RUNTIME_RECORD_PID";
 
 #[cfg(any(unix, windows))]
 #[path = "oci_backend_tests/process_restart.rs"]
@@ -4941,8 +4942,31 @@ fn runtime_record(
     attachments_digest: Option<&str>,
 ) -> OciResult<ContainerRecord> {
     let pid = if isolation == IsolationClass::SharedHostKernel {
-        i32::try_from(std::process::id())
-            .map_err(|error| Error::new(ErrorCode::Internal, error.to_string()))?
+        match std::env::var_os(RUNTIME_RECORD_PID_ENV) {
+            Some(pid) => {
+                let pid = pid.into_string().map_err(|_| {
+                    Error::new(
+                        ErrorCode::Internal,
+                        "configured test runtime PID is not UTF-8",
+                    )
+                })?;
+                let pid = pid.parse::<i32>().map_err(|error| {
+                    Error::new(
+                        ErrorCode::Internal,
+                        format!("configured test runtime PID is invalid: {error}"),
+                    )
+                })?;
+                if pid <= 1 {
+                    return Err(Error::new(
+                        ErrorCode::Internal,
+                        "configured test runtime PID is unsafe",
+                    ));
+                }
+                pid
+            }
+            None => i32::try_from(std::process::id())
+                .map_err(|error| Error::new(ErrorCode::Internal, error.to_string()))?,
+        }
     } else {
         4242
     };

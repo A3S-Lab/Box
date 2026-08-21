@@ -559,6 +559,11 @@ impl RuntimeOwnerChild {
             .env(ENDPOINT_ENV, endpoint)
             .env(READY_ENV, ready_path)
             .env(CALL_LOG_ENV, call_log)
+            // The runtime owner is deliberately killed and replaced. Model the
+            // independently living Sandbox init with the parent test process so
+            // PID identity validation proves owner recovery instead of observing
+            // the expected death of the transport process itself.
+            .env(RUNTIME_RECORD_PID_ENV, std::process::id().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr)
