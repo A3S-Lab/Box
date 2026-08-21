@@ -30,7 +30,7 @@ use a3s_oci_sdk::{
     StartRequest, StateRequest, StatsRequest, TerminalSize, UpdateRequest, WaitProcessRequest,
     WaitRequest, WriteStdinRequest, PAUSED_STATE_ANNOTATION, RUNTIME_BUNDLE_HANDOFF_MOVE_V1,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use serde_json::json;
 
