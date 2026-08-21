@@ -652,6 +652,20 @@ fn unmap_host_id(mappings: &[IdMapping], id: u32, kind: &str, path: &Path) -> Re
                 });
         }
     }
+
+    // Layout preparation can refresh Box-owned guest files before an
+    // interrupted generation has published its terminal manifest. Those
+    // writes run as host root, so they legitimately carry raw ID zero rather
+    // than the previous generation's subordinate ID. Accept that identity
+    // only for the exact runtime-managed paths; every guest-controlled path
+    // remains fail-closed below.
+    if id == 0 {
+        let relative = safe_relative_path(path)?;
+        if runtime_managed_rootfs_mode(&relative).is_some() {
+            return Ok(0);
+        }
+    }
+
     Err(BoxError::ConfigError(format!(
         "Sandbox rootfs capture host {kind} {id} at {} is outside the OCI mappings",
         path.display()
@@ -1222,8 +1236,29 @@ mod tests {
             host_id: 100_000,
             size: 1,
         }];
-        let error = unmap_host_id(&mappings, 0, "UID", Path::new("etc/hostname")).unwrap_err();
-        assert!(error.to_string().contains("etc/hostname"));
+        let error = unmap_host_id(&mappings, 0, "UID", Path::new("etc/passwd")).unwrap_err();
+        assert!(error.to_string().contains("etc/passwd"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reverse_mapping_accepts_only_host_root_runtime_managed_writes() {
+        let mappings = vec![IdMapping {
+            container_id: 0,
+            host_id: 100_000,
+            size: 1,
+        }];
+
+        assert_eq!(
+            unmap_host_id(&mappings, 0, "UID", Path::new("./usr/sbin/init")).unwrap(),
+            0
+        );
+        assert_eq!(
+            unmap_host_id(&mappings, 0, "GID", Path::new("etc/hostname")).unwrap(),
+            0
+        );
+        assert!(unmap_host_id(&mappings, 1, "UID", Path::new("usr/sbin/init")).is_err());
+        assert!(unmap_host_id(&mappings, 0, "UID", Path::new("usr/bin/unmanaged")).is_err());
     }
 
     #[cfg(unix)]
