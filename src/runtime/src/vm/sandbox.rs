@@ -18,6 +18,8 @@ use crate::process_path::{
 use crate::sandbox::rootfs::{
     inspect_rootfs_identity_requirements_with_preference, prepare_rootfs_ownership_with_preference,
 };
+#[cfg(target_os = "linux")]
+use crate::sandbox::rootfs::{persist_rootfs_id_mappings, recover_interrupted_rootfs_metadata};
 use crate::sandbox::A3sOciController;
 use crate::sandbox::{
     compile_oci_spec, compile_runtime_owned_oci_spec, plan_id_mappings,
@@ -119,6 +121,16 @@ impl VmManager {
             a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
                 &layout.rootfs_path,
             )?;
+            #[cfg(target_os = "linux")]
+            if !layout.prefer_image_rootfs_metadata
+                && recover_interrupted_rootfs_metadata(&box_dir, &layout.rootfs_path)?
+            {
+                tracing::info!(
+                    box_id = %self.box_id,
+                    rootfs = %layout.rootfs_path.display(),
+                    "Recovered interrupted Sandbox rootfs metadata"
+                );
+            }
             let instance_prepare_start = std::time::Instant::now();
             let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
             crate::oci::rootfs::write_guest_file(
@@ -213,6 +225,8 @@ impl VmManager {
                 &bundle_spec.mounts,
                 &bundle_spec.id_mappings,
             )?;
+            #[cfg(target_os = "linux")]
+            persist_rootfs_id_mappings(&box_dir, &bundle_spec.id_mappings)?;
             a3s_box_core::lifecycle_profile::record_lifecycle_phase(
                 "sandbox.bundle",
                 bundle_start.elapsed(),
@@ -365,6 +379,16 @@ impl VmManager {
             a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
                 &layout.rootfs_path,
             )?;
+            #[cfg(target_os = "linux")]
+            if !layout.prefer_image_rootfs_metadata
+                && recover_interrupted_rootfs_metadata(&box_dir, &layout.rootfs_path)?
+            {
+                tracing::info!(
+                    box_id = %self.box_id,
+                    rootfs = %layout.rootfs_path.display(),
+                    "Recovered interrupted Sandbox rootfs metadata"
+                );
+            }
             let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
             crate::oci::rootfs::write_guest_file(
                 &layout.rootfs_path,
@@ -444,6 +468,8 @@ impl VmManager {
                 &bundle_spec.mounts,
                 &bundle_spec.id_mappings,
             )?;
+            #[cfg(target_os = "linux")]
+            persist_rootfs_id_mappings(&box_dir, &bundle_spec.id_mappings)?;
             self.create_diff_baseline(&layout);
 
             Ok(RuntimeOwnedSandboxBundle {

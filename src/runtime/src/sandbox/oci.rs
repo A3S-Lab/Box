@@ -23,7 +23,7 @@ use oci_spec::runtime::{
     Spec, SpecBuilder, UserBuilder,
 };
 
-use super::capability::{IdMapping, SandboxIdMappingPlan};
+use super::capability::{validate_id_mapping_plan, IdMapping, SandboxIdMappingPlan};
 
 /// OCI annotation schema for generated A3S Sandbox bundles.
 pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
@@ -1051,63 +1051,6 @@ fn certified_seccomp_architecture() -> Result<Arch> {
             "Sandbox seccomp is not certified for architecture {architecture}"
         ))),
     }
-}
-
-fn validate_id_mapping_plan(plan: &SandboxIdMappingPlan) -> Result<()> {
-    validate_mapping_set(&plan.uid_mappings, plan.maximum_container_uid, "UID")?;
-    validate_mapping_set(&plan.gid_mappings, plan.maximum_container_gid, "GID")?;
-    if plan
-        .uid_mappings
-        .iter()
-        .any(|mapping| mapping.container_id == 0 && mapping.host_id == 0)
-        || plan
-            .gid_mappings
-            .iter()
-            .any(|mapping| mapping.container_id == 0 && mapping.host_id == 0)
-    {
-        return Err(BoxError::ConfigError(
-            "Sandbox container root must not map to host root".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_mapping_set(mappings: &[IdMapping], maximum: u32, kind: &str) -> Result<()> {
-    if mappings.is_empty() || mappings[0].container_id != 0 {
-        return Err(BoxError::ConfigError(format!(
-            "Sandbox {kind} mappings must start at container ID 0"
-        )));
-    }
-    let mut next = 0u32;
-    let mut host_ranges = Vec::new();
-    for mapping in mappings {
-        if mapping.size == 0 || mapping.container_id != next {
-            return Err(BoxError::ConfigError(format!(
-                "Sandbox {kind} mappings must be contiguous and non-empty"
-            )));
-        }
-        next = next.checked_add(mapping.size).ok_or_else(|| {
-            BoxError::ConfigError(format!("Sandbox {kind} container mapping overflows"))
-        })?;
-        let host_end = mapping.host_id.checked_add(mapping.size).ok_or_else(|| {
-            BoxError::ConfigError(format!("Sandbox {kind} host mapping overflows"))
-        })?;
-        if host_ranges
-            .iter()
-            .any(|(start, end)| mapping.host_id < *end && *start < host_end)
-        {
-            return Err(BoxError::ConfigError(format!(
-                "Sandbox {kind} host mappings overlap"
-            )));
-        }
-        host_ranges.push((mapping.host_id, host_end));
-    }
-    if next <= maximum {
-        return Err(BoxError::ConfigError(format!(
-            "Sandbox {kind} mappings do not cover container ID {maximum}"
-        )));
-    }
-    Ok(())
 }
 
 fn validate_user_mount(mount: &SandboxMount) -> Result<()> {

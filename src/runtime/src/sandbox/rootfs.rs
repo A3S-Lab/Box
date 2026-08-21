@@ -21,13 +21,13 @@ use a3s_box_core::rootfs_metadata::{
 #[cfg(any(target_os = "linux", test))]
 use base64::Engine;
 
-use super::capability::{IdMapping, SandboxIdMappingPlan};
+use super::capability::{validate_id_mapping_plan, IdMapping, SandboxIdMappingPlan};
 
 const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]
-const SNAPSHOT_ID_MAPPING_FILE: &str = "sandbox/rootfs-id-mappings.json";
+const ROOTFS_ID_MAPPING_FILE: &str = "sandbox/rootfs-id-mappings.json";
 #[cfg(target_os = "linux")]
-const MAX_SNAPSHOT_ID_MAPPING_BYTES: u64 = 64 * 1024;
+const MAX_ROOTFS_ID_MAPPING_BYTES: u64 = 64 * 1024;
 
 /// Container IDs discovered in the authoritative rootfs metadata manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,23 +38,25 @@ pub struct RootfsIdentityRequirements {
 }
 
 /// Persist the exact user-namespace mapping needed to translate a stopped
-/// Sandbox rootfs back to container ownership during filesystem snapshots.
+/// Sandbox rootfs back to container ownership after an interruption or during
+/// a filesystem Snapshot.
 #[cfg(target_os = "linux")]
-pub(crate) fn persist_snapshot_id_mappings(
+pub(crate) fn persist_rootfs_id_mappings(
     box_dir: &Path,
     plan: &SandboxIdMappingPlan,
 ) -> Result<()> {
-    let destination = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+    validate_id_mapping_plan(plan)?;
+    let destination = box_dir.join(ROOTFS_ID_MAPPING_FILE);
     let parent = destination.parent().ok_or_else(|| {
         BoxError::ConfigError(format!(
-            "Sandbox snapshot mapping path has no parent: {}",
+            "Sandbox rootfs mapping path has no parent: {}",
             destination.display()
         ))
     })?;
     std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
     let mut encoded = serde_json::to_vec_pretty(plan).map_err(|error| {
         BoxError::SerializationError(format!(
-            "Failed to encode Sandbox snapshot ID mappings: {error}"
+            "Failed to encode Sandbox rootfs ID mappings: {error}"
         ))
     })?;
     encoded.push(b'\n');
@@ -70,41 +72,99 @@ pub(crate) fn persist_snapshot_id_mappings(
     Ok(())
 }
 
-/// Load a persisted snapshot mapping, rejecting links, oversized artifacts,
-/// and malformed JSON before it can influence host ownership translation.
+/// Load a persisted rootfs mapping, rejecting links, oversized artifacts,
+/// malformed JSON, and invalid ranges before it can influence host ownership
+/// translation.
 #[cfg(target_os = "linux")]
-pub(crate) fn load_snapshot_id_mappings(box_dir: &Path) -> Result<Option<SandboxIdMappingPlan>> {
-    let path = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+pub(crate) fn load_rootfs_id_mappings(box_dir: &Path) -> Result<Option<SandboxIdMappingPlan>> {
+    let path = box_dir.join(ROOTFS_ID_MAPPING_FILE);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(BoxError::IoError(error)),
     };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+    if !metadata.file_type().is_file() || metadata.len() > MAX_ROOTFS_ID_MAPPING_BYTES {
         return Err(BoxError::ConfigError(format!(
-            "Sandbox snapshot ID mapping artifact is not a bounded regular file: {}",
+            "Sandbox rootfs ID mapping artifact is not a bounded regular file: {}",
             path.display()
         )));
     }
     let mut encoded = Vec::with_capacity(metadata.len() as usize);
     std::fs::File::open(&path)
         .map_err(BoxError::IoError)?
-        .take(MAX_SNAPSHOT_ID_MAPPING_BYTES + 1)
+        .take(MAX_ROOTFS_ID_MAPPING_BYTES + 1)
         .read_to_end(&mut encoded)
         .map_err(BoxError::IoError)?;
-    if encoded.len() as u64 > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+    if encoded.len() as u64 > MAX_ROOTFS_ID_MAPPING_BYTES {
         return Err(BoxError::ConfigError(format!(
-            "Sandbox snapshot ID mapping artifact exceeds {} bytes: {}",
-            MAX_SNAPSHOT_ID_MAPPING_BYTES,
+            "Sandbox rootfs ID mapping artifact exceeds {} bytes: {}",
+            MAX_ROOTFS_ID_MAPPING_BYTES,
             path.display()
         )));
     }
-    serde_json::from_slice(&encoded).map(Some).map_err(|error| {
+    let plan: SandboxIdMappingPlan = serde_json::from_slice(&encoded).map_err(|error| {
         BoxError::SerializationError(format!(
-            "Failed to decode Sandbox snapshot ID mappings {}: {error}",
+            "Failed to decode Sandbox rootfs ID mappings {}: {error}",
             path.display()
         ))
-    })
+    })?;
+    validate_id_mapping_plan(&plan)?;
+    Ok(Some(plan))
+}
+
+/// Rebuild one replay manifest from a stopped Sandbox generation.
+///
+/// guest-init consumes the image or previous-generation manifest before it
+/// executes the workload. If the provider is then killed, no terminal manifest
+/// can be published. The persisted mapping remains outside the guest rootfs and
+/// lets Box reverse the stopped host IDs into their exact container identities,
+/// including files and ownership changes created during the interrupted run.
+#[cfg(target_os = "linux")]
+pub(crate) fn recover_interrupted_rootfs_metadata(box_dir: &Path, root: &Path) -> Result<bool> {
+    for path in [
+        root.join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+        root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+        root.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+    ] {
+        if load_manifest_if_present(&path)?.is_some() {
+            return Ok(false);
+        }
+    }
+
+    let Some(plan) = load_rootfs_id_mappings(box_dir)? else {
+        return Ok(false);
+    };
+    let manifest = capture_rootfs_metadata(root, &plan)?;
+    publish_replay_rootfs_metadata(root, &manifest)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_replay_rootfs_metadata(root: &Path, manifest: &RootfsMetadataManifest) -> Result<()> {
+    manifest.validate().map_err(BoxError::OciImageError)?;
+    let encoded = serde_json::to_vec(manifest).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to encode recovered Sandbox rootfs metadata: {error}"
+        ))
+    })?;
+    if encoded.len() as u64 > MAX_ROOTFS_METADATA_BYTES {
+        return Err(BoxError::OciImageError(format!(
+            "Recovered Sandbox rootfs metadata exceeds the {} byte limit",
+            MAX_ROOTFS_METADATA_BYTES
+        )));
+    }
+
+    let destination = root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let mut temporary = tempfile::NamedTempFile::new_in(root).map_err(BoxError::IoError)?;
+    temporary.write_all(&encoded).map_err(BoxError::IoError)?;
+    temporary.as_file().sync_all().map_err(BoxError::IoError)?;
+    temporary
+        .persist_noclobber(&destination)
+        .map_err(|error| BoxError::IoError(error.error))?;
+    std::fs::File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(BoxError::IoError)?;
+    Ok(())
 }
 
 /// Host IDs representing container root for one mapping plan.
@@ -477,14 +537,15 @@ pub(crate) fn prepare_rootfs_ownership_with_preference(
     Ok(())
 }
 
-/// Capture authoritative guest-visible metadata for a quiesced Sandbox rootfs.
+/// Capture authoritative guest-visible metadata for a stopped or quiesced
+/// Sandbox rootfs.
 ///
 /// The host sees user-namespace IDs, so every UID/GID is translated back
 /// through the exact OCI mappings before the manifest is stored in a
 /// filesystem Snapshot. The walk never follows symlinks and rejects special
 /// files, preventing a FIFO or device node from entering the copy path.
 #[cfg(target_os = "linux")]
-pub(crate) fn capture_snapshot_rootfs_metadata(
+pub(crate) fn capture_rootfs_metadata(
     root: &Path,
     plan: &SandboxIdMappingPlan,
 ) -> Result<RootfsMetadataManifest> {
@@ -1053,6 +1114,83 @@ mod tests {
                 link_target_base64: None,
             }],
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_generation_recovers_exact_replay_metadata_from_persisted_mappings() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let home = tempfile::tempdir().unwrap();
+        let box_dir = home.path().join("boxes/interrupted");
+        let root = box_dir.join("merged");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("state.txt");
+        std::fs::write(&state, "changed while running\n").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o620)).unwrap();
+
+        let effective_uid = unsafe { libc::geteuid() };
+        let effective_gid = unsafe { libc::getegid() };
+        let (host_uid, host_gid, mapping_size, state_container_id) = if effective_uid == 0
+            && effective_gid == 0
+        {
+            let host_uid = 100_000;
+            let host_gid = 100_000;
+            for (path, offset) in [(&root, 0), (&state, 7)] {
+                let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(
+                    unsafe { libc::lchown(path.as_ptr(), host_uid + offset, host_gid + offset) },
+                    0,
+                    "failed to prepare mapped rootfs ownership: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            (host_uid, host_gid, 8, 7)
+        } else {
+            (effective_uid, effective_gid, 1, 0)
+        };
+        let plan = SandboxIdMappingPlan {
+            uid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: host_uid,
+                size: mapping_size,
+            }],
+            gid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: host_gid,
+                size: mapping_size,
+            }],
+            maximum_container_uid: mapping_size - 1,
+            maximum_container_gid: mapping_size - 1,
+        };
+        persist_rootfs_id_mappings(&box_dir, &plan).unwrap();
+
+        assert!(recover_interrupted_rootfs_metadata(&box_dir, &root).unwrap());
+        let previous = root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        let recovered: RootfsMetadataManifest =
+            serde_json::from_slice(&std::fs::read(&previous).unwrap()).unwrap();
+        let state_entry = recovered
+            .entries
+            .iter()
+            .find(|entry| entry.kind == RootfsEntryKind::Regular)
+            .unwrap();
+        assert_eq!(state_entry.uid, u64::from(state_container_id));
+        assert_eq!(state_entry.gid, u64::from(state_container_id));
+        assert_eq!(state_entry.mode & 0o7777, 0o620);
+        assert_eq!(state_entry.size, 22);
+
+        let requirements = inspect_rootfs_identity_requirements(&root).unwrap();
+        assert_eq!(requirements.maximum_uid, state_container_id);
+        assert_eq!(requirements.maximum_gid, state_container_id);
+        assert_eq!(requirements.manifest_path, previous);
+        assert!(!recover_interrupted_rootfs_metadata(&box_dir, &root).unwrap());
+
+        prepare_rootfs_ownership(&root, &plan, 0, false).unwrap();
+        let state_metadata = std::fs::symlink_metadata(&state).unwrap();
+        assert_eq!(state_metadata.uid(), host_uid + state_container_id);
+        assert_eq!(state_metadata.gid(), host_gid + state_container_id);
+        assert_eq!(state_metadata.permissions().mode() & 0o7777, 0o620);
     }
 
     #[test]
