@@ -92,8 +92,20 @@ impl DriverFakeBackend {
             })?;
         }
         let pid = std::process::id();
+        let generation = record
+            .managed_execution
+            .as_ref()
+            .expect("fake managed execution metadata")
+            .generation
+            .get();
+        let generation_seconds = i64::try_from(generation).expect("fake execution generation");
+        let started_at = record.started_at.unwrap_or_else(|| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_784_031_000, 0)
+                .expect("fake start timestamp")
+                + chrono::Duration::seconds(generation_seconds)
+        });
         Ok(LocalExecutionHandle {
-            started_at: chrono::Utc::now(),
+            started_at,
             pid: Some(pid),
             pid_start_time: crate::process::pid_start_time(pid),
             exec_socket_path: record.box_dir.join("sockets/exec.sock"),

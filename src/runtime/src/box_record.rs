@@ -75,7 +75,9 @@ pub struct BoxRecord {
     pub console_log: PathBuf,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Start timestamp.
+    /// Start timestamp for the current runtime incarnation.
+    ///
+    /// A managed restart advances this value while preserving the Box ID.
     pub started_at: Option<DateTime<Utc>>,
     /// Whether the execution is removed automatically after it stops.
     pub auto_remove: bool,

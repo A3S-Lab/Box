@@ -644,6 +644,7 @@ async fn service_failure_restarts_the_same_durable_execution() {
     let spec = runtime_spec("service-restart", 1, RuntimeUnitClass::Service);
     let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
     let provider_id = running.provider_resource_id.clone().unwrap();
+    let first_started_at_ms = running.started_at_ms.unwrap();
     backend.finish(&provider_id, 9);
 
     let inspection = driver.inspect(&unit(spec.clone(), running)).await.unwrap();
@@ -654,6 +655,10 @@ async fn service_failure_restarts_the_same_durable_execution() {
     assert_eq!(
         observation.provider_resource_id.as_deref(),
         Some(provider_id.as_str())
+    );
+    assert!(
+        observation.started_at_ms.unwrap() > first_started_at_ms,
+        "a restarted Service must publish a new process-incarnation timestamp"
     );
     assert_eq!(backend.starts(), 2);
     assert_eq!(driver.manager.managed_records().await.unwrap().len(), 1);

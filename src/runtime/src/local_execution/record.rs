@@ -210,6 +210,14 @@ pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>)
     }
 }
 
+pub(crate) fn clear_live_runtime_for_restart(record: &mut BoxRecord) {
+    clear_live_runtime(record, None);
+    // `started_at` identifies the current runtime incarnation. Retaining the
+    // previous generation's timestamp makes a successful process replacement
+    // indistinguishable from a stale Running observation.
+    record.started_at = None;
+}
+
 pub(crate) fn clear_live_runtime_for_cold_pause(record: &mut BoxRecord) {
     record.pid = None;
     record.pid_start_time = None;
