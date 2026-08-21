@@ -608,8 +608,8 @@ fn collect_snapshot_rootfs_metadata(
             .encode(manifest_path.as_os_str().as_bytes()),
         kind,
         mode: metadata.mode(),
-        uid: unmap_host_id(&plan.uid_mappings, metadata.uid(), "UID")? as u64,
-        gid: unmap_host_id(&plan.gid_mappings, metadata.gid(), "GID")? as u64,
+        uid: unmap_host_id(&plan.uid_mappings, metadata.uid(), "UID", manifest_path)? as u64,
+        gid: unmap_host_id(&plan.gid_mappings, metadata.gid(), "GID", manifest_path)? as u64,
         mtime: metadata.mtime().max(0) as u64,
         size: metadata.size(),
         link_target_base64,
@@ -635,7 +635,7 @@ fn collect_snapshot_rootfs_metadata(
 }
 
 #[cfg(target_os = "linux")]
-fn unmap_host_id(mappings: &[IdMapping], id: u32, kind: &str) -> Result<u32> {
+fn unmap_host_id(mappings: &[IdMapping], id: u32, kind: &str, path: &Path) -> Result<u32> {
     for mapping in mappings {
         let Some(end) = mapping.host_id.checked_add(mapping.size) else {
             continue;
@@ -646,13 +646,15 @@ fn unmap_host_id(mappings: &[IdMapping], id: u32, kind: &str) -> Result<u32> {
                 .checked_add(id - mapping.host_id)
                 .ok_or_else(|| {
                     BoxError::ConfigError(format!(
-                        "Sandbox Snapshot {kind} reverse mapping overflows u32"
+                        "Sandbox rootfs capture {kind} reverse mapping overflows u32 at {}",
+                        path.display()
                     ))
                 });
         }
     }
     Err(BoxError::ConfigError(format!(
-        "Sandbox Snapshot host {kind} {id} is outside the OCI mappings"
+        "Sandbox rootfs capture host {kind} {id} at {} is outside the OCI mappings",
+        path.display()
     )))
 }
 
@@ -1210,6 +1212,18 @@ mod tests {
         assert_eq!(map_container_id(&mappings, 0, "UID").unwrap(), 100_000);
         assert_eq!(map_container_id(&mappings, 12, "UID").unwrap(), 200_002);
         assert!(map_container_id(&mappings, 16, "UID").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reverse_mapping_failure_names_the_exact_rootfs_path() {
+        let mappings = vec![IdMapping {
+            container_id: 0,
+            host_id: 100_000,
+            size: 1,
+        }];
+        let error = unmap_host_id(&mappings, 0, "UID", Path::new("etc/hostname")).unwrap_err();
+        assert!(error.to_string().contains("etc/hostname"));
     }
 
     #[cfg(unix)]
