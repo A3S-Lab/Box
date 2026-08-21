@@ -6,7 +6,7 @@ use a3s_box_core::{
 
 use super::record::{
     apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime,
-    clear_live_runtime_for_cold_pause, execution_id,
+    clear_live_runtime_for_cold_pause, clear_live_runtime_for_restart, execution_id,
 };
 use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
@@ -204,7 +204,7 @@ impl LocalExecutionManager {
                         });
                     }
                 }
-                RuntimeUpdate::RestartAdvance => clear_live_runtime(record, None),
+                RuntimeUpdate::RestartAdvance => clear_live_runtime_for_restart(record),
                 RuntimeUpdate::RestartHandle(handle) => apply_restart_handle(record, &handle),
                 RuntimeUpdate::RestartTerminal(exit_code) => clear_live_runtime(record, exit_code),
             })

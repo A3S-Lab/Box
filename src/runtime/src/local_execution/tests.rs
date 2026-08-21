@@ -2160,6 +2160,10 @@ async fn restart_recovers_after_generation_advance_before_backend_start() {
         )
         .await
         .unwrap();
+    assert!(
+        restarting.started_at.is_none(),
+        "a new runtime generation must not retain the previous incarnation timestamp"
+    );
     assert_eq!(
         restarting.managed_execution.as_ref().unwrap().generation,
         ExecutionGeneration::new(2).unwrap()

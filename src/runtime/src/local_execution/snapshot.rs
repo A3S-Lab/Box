@@ -537,12 +537,12 @@ fn capture_sandbox_rootfs_metadata(
 ) -> ExecutionManagerResult<a3s_box_core::rootfs_metadata::RootfsMetadataManifest> {
     let plan = if sandbox_bundle_config_present(record)? {
         let plan = sandbox_id_mapping_plan_from_bundle(record, Some(rootfs))?;
-        crate::sandbox::rootfs::persist_snapshot_id_mappings(&record.box_dir, &plan).map_err(
+        crate::sandbox::rootfs::persist_rootfs_id_mappings(&record.box_dir, &plan).map_err(
             |error| snapshot_error(record, "persist Sandbox snapshot ID mappings", error),
         )?;
         plan
     } else {
-        let plan = crate::sandbox::rootfs::load_snapshot_id_mappings(&record.box_dir)
+        let plan = crate::sandbox::rootfs::load_rootfs_id_mappings(&record.box_dir)
             .map_err(|error| snapshot_error(record, "load Sandbox snapshot ID mappings", error))?
             .ok_or_else(|| {
                 snapshot_error(
@@ -554,7 +554,7 @@ fn capture_sandbox_rootfs_metadata(
         validate_id_mapping_plan(record, &plan)?;
         plan
     };
-    crate::sandbox::rootfs::capture_snapshot_rootfs_metadata(rootfs, &plan)
+    crate::sandbox::rootfs::capture_rootfs_metadata(rootfs, &plan)
         .map_err(|error| snapshot_error(record, "capture Sandbox rootfs metadata", error))
 }
 
@@ -562,12 +562,11 @@ fn capture_sandbox_rootfs_metadata(
 pub(super) fn persist_sandbox_snapshot_mappings(record: &BoxRecord) -> ExecutionManagerResult<()> {
     if sandbox_bundle_config_present(record)? {
         let plan = sandbox_id_mapping_plan_from_bundle(record, None)?;
-        return crate::sandbox::rootfs::persist_snapshot_id_mappings(&record.box_dir, &plan)
-            .map_err(|error| {
-                snapshot_error(record, "persist Sandbox snapshot ID mappings", error)
-            });
+        return crate::sandbox::rootfs::persist_rootfs_id_mappings(&record.box_dir, &plan).map_err(
+            |error| snapshot_error(record, "persist Sandbox snapshot ID mappings", error),
+        );
     }
-    if let Some(plan) = crate::sandbox::rootfs::load_snapshot_id_mappings(&record.box_dir)
+    if let Some(plan) = crate::sandbox::rootfs::load_rootfs_id_mappings(&record.box_dir)
         .map_err(|error| snapshot_error(record, "load Sandbox snapshot ID mappings", error))?
     {
         return validate_id_mapping_plan(record, &plan);
