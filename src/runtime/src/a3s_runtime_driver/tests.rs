@@ -14,6 +14,7 @@ use a3s_runtime::RuntimeDriver;
 
 use super::mapping::{creation_request, creation_request_with_sev_snp, operation};
 use super::metadata::validate_record_for_spec;
+use super::test_support::DriverFakeBackend;
 use super::*;
 
 const TEST_EXECUTION_ISOLATION: ExecutionIsolation = ExecutionIsolation::Microvm;
@@ -108,6 +109,67 @@ fn driver_allows_explicit_shared_kernel_selection() {
     .unwrap();
 
     assert_eq!(driver.execution_isolation(), ExecutionIsolation::Sandbox);
+}
+
+#[tokio::test]
+async fn qualification_constructor_freezes_explicit_provider_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let home_dir = directory.path().join("home");
+    let backend = std::sync::Arc::new(DriverFakeBackend::default());
+    let connector = std::sync::Arc::new(LocalExecutionManager::new(
+        home_dir.join("connector-boxes.json"),
+        &home_dir,
+        backend.clone(),
+    ));
+    let driver = BoxRuntimeDriver::new_for_runtime_provider_qualification(
+        BoxRuntimeDriverConfig {
+            home_dir,
+            secret_root: directory.path().join("runtime-secrets"),
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        backend,
+        connector,
+        ExecutionIsolation::Sandbox,
+        "a3s-box/qualification real-process/v1",
+    )
+    .unwrap();
+
+    let capabilities = driver.capabilities().await.unwrap();
+    assert_eq!(
+        capabilities.provider_build,
+        "a3s-box/qualification real-process/v1"
+    );
+    assert_eq!(driver.execution_isolation(), ExecutionIsolation::Sandbox);
+}
+
+#[test]
+fn qualification_constructor_rejects_unbounded_provider_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let home_dir = directory.path().join("home");
+    let backend = std::sync::Arc::new(DriverFakeBackend::default());
+    let connector = std::sync::Arc::new(LocalExecutionManager::new(
+        home_dir.join("connector-boxes.json"),
+        &home_dir,
+        backend.clone(),
+    ));
+    let error = match BoxRuntimeDriver::new_for_runtime_provider_qualification(
+        BoxRuntimeDriverConfig {
+            home_dir,
+            secret_root: directory.path().join("runtime-secrets"),
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        backend,
+        connector,
+        ExecutionIsolation::Sandbox,
+        " qualification\n",
+    ) {
+        Ok(_) => panic!("invalid qualification provider build was accepted"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, RuntimeError::InvalidRequest(_)));
 }
 
 fn mutate_record(

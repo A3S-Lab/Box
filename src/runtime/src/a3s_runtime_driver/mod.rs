@@ -31,6 +31,8 @@ use tokio::sync::OnceCell;
 
 use crate::local_execution::TransientRegistryAuthBroker;
 use crate::tee::AttestationPolicy;
+#[cfg(any(test, feature = "runtime-provider-qualification"))]
+use crate::LocalExecutionBackend;
 use crate::{ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
 
 use self::artifact::ArtifactStorageOwner;
@@ -143,6 +145,51 @@ impl BoxRuntimeDriver {
             None,
             Some(broker),
         )
+    }
+
+    /// Construct the Box Runtime driver over a caller-owned qualification
+    /// backend and generation-fenced data-plane connector.
+    ///
+    /// This seam exists only for downstream product qualification. It lets a
+    /// host exercise the production Box Runtime mapping, durable lifecycle,
+    /// health, endpoint, stop, and removal code against real child processes
+    /// without requiring a nested hypervisor or privileged OCI runtime on a
+    /// general CI runner. Release builds do not expose this constructor unless
+    /// the explicit `runtime-provider-qualification` feature is enabled.
+    ///
+    /// The supplied provider build is immutable evidence for the complete
+    /// driver instance. Callers must not use this constructor as a production
+    /// capability-probe bypass.
+    #[cfg(any(test, feature = "runtime-provider-qualification"))]
+    pub fn new_for_runtime_provider_qualification(
+        config: BoxRuntimeDriverConfig,
+        backend: Arc<dyn LocalExecutionBackend>,
+        port_connector: Arc<dyn ExecutionPortConnector>,
+        execution_isolation: ExecutionIsolation,
+        provider_build: impl Into<String>,
+    ) -> RuntimeResult<Self> {
+        let provider_build = provider_build.into();
+        validate_qualification_provider_build(&provider_build)?;
+        let manager = LocalExecutionManager::new(
+            config.home_dir.join("boxes.json"),
+            &config.home_dir,
+            backend,
+        );
+        let driver = Self::with_manager_connector_and_materializer(
+            config,
+            manager,
+            port_connector,
+            execution_isolation,
+            None,
+            None,
+            Some(TransientRegistryAuthBroker::default()),
+        )?;
+        driver.provider_build.set(provider_build).map_err(|_| {
+            RuntimeError::Protocol(
+                "Box Runtime qualification provider build was initialized twice".into(),
+            )
+        })?;
+        Ok(driver)
     }
 
     /// Compose the shared Box driver with one caller-owned Secret resolver.
@@ -372,6 +419,21 @@ fn validate_config(config: &BoxRuntimeDriverConfig) -> RuntimeResult<()> {
     {
         return Err(RuntimeError::InvalidRequest(
             "Box Runtime Secret root must be an encodable absolute normalized non-root Linux path"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "runtime-provider-qualification"))]
+fn validate_qualification_provider_build(provider_build: &str) -> RuntimeResult<()> {
+    if provider_build.is_empty()
+        || provider_build.len() > 255
+        || provider_build.trim() != provider_build
+        || provider_build.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(RuntimeError::InvalidRequest(
+            "Box Runtime qualification provider build must be a trimmed non-empty string of at most 255 bytes"
                 .into(),
         ));
     }

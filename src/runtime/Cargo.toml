@@ -29,6 +29,9 @@ scale = ["dep:axum"]
 compose = ["vm"]
 operator = []
 build = ["dep:a3s-acl"]
+# Downstream product qualification may inject a real-process execution backend
+# and generation-fenced connector without enabling that seam in release builds.
+runtime-provider-qualification = ["vm"]
 
 [dependencies]
 a3s-box-core = { version = "3.2", path = "../core" }

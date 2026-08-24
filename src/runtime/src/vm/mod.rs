@@ -2241,6 +2241,10 @@ mod tests {
             true
         }
 
+        fn has_exited(&self) -> bool {
+            false
+        }
+
         fn pid(&self) -> u32 {
             42
         }

@@ -28,6 +28,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Downstream real-process Runtime provider qualification seam.** The Linux
+  Box Runtime driver can be compiled with the explicit
+  `runtime-provider-qualification` feature to accept a caller-owned execution
+  backend, generation-fenced port connector, and immutable provider-build
+  identity. This keeps downstream Use/Gateway lifecycle tests on Box's
+  production mapping, durable state, health, endpoint, stop, and removal paths
+  without exposing the injection constructor in default release builds.
 - **Durable standalone Gateway scaling and live replica endpoints.** The
   machine-facing `scale-api` now journals revision-bound idempotent operations,
   reconciles deterministic stateless service slots through the canonical local
