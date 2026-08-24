@@ -10,6 +10,9 @@
 //! - `compose` — Multi-container compose orchestration (enabled by default)
 //! - `operator` — Kubernetes CRD autoscaler controller (enabled by default)
 //! - `build` — Dockerfile/Containerfile build engine (enabled by default)
+//! - `runtime-provider-qualification` — Explicit downstream real-process
+//!   qualification seam for the Linux A3S Runtime provider (disabled by
+//!   default; never a production capability-probe fallback)
 
 #![allow(clippy::result_large_err)]
 
