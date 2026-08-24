@@ -293,8 +293,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-runtime"
-version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/Runtime.git?rev=061cde95e16eb4cbd9f58724e6cbb60de6ace77e#061cde95e16eb4cbd9f58724e6cbb60de6ace77e"
+version = "0.3.0"
+source = "git+https://github.com/A3S-Lab/Runtime.git?rev=6a5546145a74c9f380a0d86c2490a144a22883f8#6a5546145a74c9f380a0d86c2490a144a22883f8"
 dependencies = [
  "async-trait",
  "fs2",
@@ -2264,7 +2264,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3067,7 +3067,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
