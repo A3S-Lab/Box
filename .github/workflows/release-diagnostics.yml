@@ -1,0 +1,66 @@
+name: Release diagnostics
+
+on:
+  push:
+    branches:
+      - "codex/box-3.2.0-recovery-*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos-host:
+    name: Diagnose macOS host build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: Install dependencies
+        run: brew install lld llvm protobuf
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src -> target
+          key: release-macos-arm64
+      - name: Build host binaries and expose a bounded failure diagnostic
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/a3s-box-macos-host-build.log"
+          set +e
+          (
+            cd src
+            cargo build --locked --release \
+              -p a3s-box-cli -p a3s-box-shim \
+              --target aarch64-apple-darwin
+          ) 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          python3 - "$log" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(
+              encoding="utf-8", errors="replace"
+          ).splitlines()
+          tail = "\n".join(lines[-160:])
+          escaped = (
+              tail.replace("%", "%25")
+              .replace("\r", "%0D")
+              .replace("\n", "%0A")
+          )
+          print(
+              "::error file=.github/workflows/release-diagnostics.yml," 
+              f"line=1,title=macOS host build diagnostic::{escaped}"
+          )
+          PY
+          exit "$status"
