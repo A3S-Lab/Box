@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: box-3.2.0-macos-release-diagnostics
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -47,12 +51,14 @@ jobs:
           fi
           python3 - "$log" <<'PY'
           import pathlib
+          import re
           import sys
 
           lines = pathlib.Path(sys.argv[1]).read_text(
               encoding="utf-8", errors="replace"
           ).splitlines()
           tail = "\n".join(lines[-160:])
+          tail = re.sub(r"\x1b\[[0-9;]*m", "", tail)[-8_000:]
           escaped = (
               tail.replace("%", "%25")
               .replace("\r", "%0D")
