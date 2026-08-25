@@ -215,7 +215,7 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - **Registry-backed OCI SDK composition.** Box now pins the independently
-  published `a3s-oci-core` and `a3s-oci-sdk` 0.3.0 source contract. A bounded
+  published `a3s-oci-core` and `a3s-oci-sdk` 0.3.1 source contract. A bounded
   dependency publisher verifies the matching OCI source tag and exact commit
   before using Box's existing crates.io release channel, so downstream Box
   packages no longer depend on an unpublished Git-only SDK version.
@@ -336,7 +336,7 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - **A3S OCI Runtime is the sole Sandbox backend.** New shared-kernel Sandbox
-  executions use the published `a3s-oci-sdk` `0.3.0` contract; the public rollback
+  executions use the published `a3s-oci-sdk` `0.3.1` contract; the public rollback
   selector, external-runtime discovery and invocation, and differential lane
   are removed. Records outside the current A3S OCI schema are unsupported and
   must be drained before upgrade; no compatibility decoder or alternate path

@@ -93,6 +93,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.source.outputs.version }}
         run: |
           set -euo pipefail
+          python3 scripts/verify-sdk-package-vendor.py
           mapfile -t versions < <(
             cargo metadata --locked --no-deps --format-version 1 |
               jq -r '.packages[] | select(.name == "a3s-oci-core" or .name == "a3s-oci-sdk") | "\(.name)=\(.version)"' |
