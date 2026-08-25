@@ -1,0 +1,168 @@
+name: Publish OCI SDK dependency
+
+on:
+  push:
+    tags:
+      - "publish/oci-sdk/v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-oci-sdk-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish pinned a3s-oci-core and a3s-oci-sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve and validate the pinned source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix='publish/oci-sdk/v'
+          if [[ "$GITHUB_REF_NAME" != "$prefix"* ]]; then
+            echo "::error::Unexpected publication tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+          requested_version="${GITHUB_REF_NAME#$prefix}"
+          if [[ ! "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable SemVer version"
+            exit 1
+          fi
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          mapfile -t dependency < <(
+            python3 - <<'PY'
+          import tomllib
+
+          with open("src/Cargo.toml", "rb") as manifest:
+              value = tomllib.load(manifest)["workspace"]["dependencies"]["a3s-oci-sdk"]
+          print(value["version"].removeprefix("="))
+          print(value["rev"])
+          PY
+          )
+          version="${dependency[0]:-}"
+          revision="${dependency[1]:-}"
+          if [[ "$version" != "$requested_version" ]]; then
+            echo "::error::Tag version $requested_version does not match Box pin $version"
+            exit 1
+          fi
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Box must pin an exact 40-character OCI source revision"
+            exit 1
+          fi
+          remote_revision="$(
+            git ls-remote --tags https://github.com/A3S-Lab/OCI-Runtime.git \
+              "refs/tags/sdk/rust/v${version}^{}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_revision" != "$revision" ]]; then
+            echo "::error::OCI SDK source tag does not resolve to the Box pin"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: A3S-Lab/OCI-Runtime
+          ref: ${{ steps.source.outputs.revision }}
+          path: oci-runtime
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: oci-runtime
+          key: oci-sdk-${{ steps.source.outputs.version }}
+      - name: Verify SDK release source
+        working-directory: oci-runtime
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t versions < <(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "a3s-oci-core" or .name == "a3s-oci-sdk") | "\(.name)=\(.version)"' |
+              sort
+          )
+          expected=("a3s-oci-core=$RELEASE_VERSION" "a3s-oci-sdk=$RELEASE_VERSION")
+          if [[ "${versions[*]}" != "${expected[*]}" ]]; then
+            printf 'Expected: %s\nActual: %s\n' "${expected[*]}" "${versions[*]}" >&2
+            exit 1
+          fi
+          cargo fmt --all --check
+          cargo clippy --locked -p a3s-oci-core -p a3s-oci-sdk --all-targets -- -D warnings
+          cargo test --locked -p a3s-oci-core -p a3s-oci-sdk --all-targets
+          cargo doc --locked -p a3s-oci-core -p a3s-oci-sdk --no-deps
+          cargo package --locked -p a3s-oci-core
+      - name: Publish and verify crates
+        working-directory: oci-runtime
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not configured"
+            exit 1
+          fi
+          user_agent="A3S-Lab-Box-oci-sdk-publisher/$RELEASE_VERSION"
+
+          crate_status() {
+            curl --retry 5 --retry-all-errors --silent --show-error \
+              --location --user-agent "$user_agent" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$1/$RELEASE_VERSION"
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local attempt status
+            for attempt in $(seq 1 18); do
+              status="$(crate_status "$crate")"
+              if [[ "$status" == "200" ]] &&
+                 cargo info "$crate@$RELEASE_VERSION" --registry crates-io >/dev/null 2>&1; then
+                echo "Verified $crate@$RELEASE_VERSION in crates.io and its index"
+                return 0
+              fi
+              if [[ "$status" != "200" && "$status" != "404" ]]; then
+                echo "::error::crates.io returned HTTP $status for $crate@$RELEASE_VERSION"
+                return 1
+              fi
+              if [[ "$attempt" -lt 18 ]]; then sleep 10; fi
+            done
+            echo "::error::$crate@$RELEASE_VERSION did not become visible"
+            return 1
+          }
+
+          publish_one() {
+            local crate="$1"
+            local status
+            status="$(crate_status "$crate")"
+            case "$status" in
+              200) echo "$crate@$RELEASE_VERSION already exists; verifying it" ;;
+              404) cargo publish --locked -p "$crate" ;;
+              *)
+                echo "::error::crates.io returned HTTP $status for $crate@$RELEASE_VERSION"
+                return 1
+                ;;
+            esac
+            wait_for_crate "$crate"
+          }
+
+          publish_one a3s-oci-core
+          publish_one a3s-oci-sdk

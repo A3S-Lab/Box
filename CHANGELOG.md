@@ -2,7 +2,7 @@
 
 All notable changes to A3S Box will be documented in this file.
 
-## [Unreleased]
+## [3.2.0] — 2026-08-25
 
 ### Fixed
 
@@ -214,6 +214,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- **Registry-backed OCI SDK composition.** Box now pins the independently
+  published `a3s-oci-core` and `a3s-oci-sdk` 0.3.0 source contract. A bounded
+  dependency publisher verifies the matching OCI source tag and exact commit
+  before using Box's existing crates.io release channel, so downstream Box
+  packages no longer depend on an unpublished Git-only SDK version.
+
 - **Pinned OCI WHPX recovery and runtime-share contract.** The exact A3S OCI
   SDK revision now carries an optional exact init exit result through recorded-
   driver startup reconciliation. Its WHPX candidate accepts only authenticated
@@ -302,8 +308,6 @@ All notable changes to A3S Box will be documented in this file.
   host preparation and before guest entry, allowing Windows `diff` to report
   post-boot changes without depending on a guest archive channel.
 
-## [3.2.0] — 2026-07-28
-
 ### Added
 
 - **Cloud Runtime contract alignment.** The shared `BoxRuntimeDriver` now pins
@@ -332,7 +336,7 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - **A3S OCI Runtime is the sole Sandbox backend.** New shared-kernel Sandbox
-  executions use the pinned A3S OCI Runtime `v0.2.0`; the public rollback
+  executions use the published `a3s-oci-sdk` `0.3.0` contract; the public rollback
   selector, external-runtime discovery and invocation, and differential lane
   are removed. Records outside the current A3S OCI schema are unsupported and
   must be drained before upgrade; no compatibility decoder or alternate path

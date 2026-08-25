@@ -1,6 +1,9 @@
 name: Publish libkrun-sys
 
 on:
+  push:
+    tags:
+      - "publish/libkrun-sys/v*"
   workflow_dispatch:
     inputs:
       version:
@@ -15,7 +18,7 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: publish-libkrun-sys-${{ inputs.version }}
+  group: publish-libkrun-sys-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -49,13 +52,28 @@ jobs:
         working-directory: src
         shell: pwsh
         env:
-          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
 
           $semVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
           $version = $env:INPUT_VERSION
+          $tagPrefix = 'publish/libkrun-sys/v'
+          if ($env:GITHUB_EVENT_NAME -ceq 'push') {
+              if (-not $version.StartsWith($tagPrefix, [System.StringComparison]::Ordinal)) {
+                  throw "Unexpected publication tag '$version'."
+              }
+              $version = $version.Substring($tagPrefix.Length)
+              git fetch origin main
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Could not fetch origin/main for source ancestry validation."
+              }
+              git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Tag source $env:GITHUB_SHA is not reachable from origin/main."
+              }
+          }
           if ([string]::IsNullOrEmpty($version) -or $version -cnotmatch $semVerPattern) {
               throw "Version '$version' is not strict SemVer 2.0.0 without a leading v."
           }
