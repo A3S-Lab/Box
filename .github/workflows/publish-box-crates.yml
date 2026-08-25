@@ -1,0 +1,161 @@
+name: Publish Box crate dependencies
+
+on:
+  push:
+    tags:
+      - "publish/box-crates/v*"
+
+permissions:
+  contents: read
+
+env:
+  A3S_DEPS_STUB: "1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish Box crates from immutable release source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify immutable release source
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          operation_tag="${GITHUB_REF#refs/tags/}"
+          prefix='publish/box-crates/v'
+          if [[ "$operation_tag" != "$prefix"* ]]; then
+            echo "unexpected operation tag: $operation_tag" >&2
+            exit 1
+          fi
+          version="${operation_tag#${prefix}}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid release version: $version" >&2
+            exit 1
+          fi
+          release_tag="v$version"
+          git fetch --force origin \
+            "refs/tags/$release_tag:refs/tags/$release_tag"
+          release_commit="$(git rev-parse "refs/tags/$release_tag^{}")"
+          if ! git merge-base --is-ancestor "$release_commit" "$GITHUB_SHA"; then
+            echo "$operation_tag is not descended from immutable source $release_tag" >&2
+            exit 1
+          fi
+          git checkout --detach "$release_commit"
+          workspace_version="$(
+            cargo metadata --locked --no-deps --format-version 1 \
+              --manifest-path src/Cargo.toml |
+              jq -r '.packages[] | select(.name == "a3s-box-cli") | .version'
+          )"
+          if [ "$workspace_version" != "$version" ]; then
+            echo "$release_tag contains Box $workspace_version, expected $version" >&2
+            exit 1
+          fi
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "release source checkout is dirty" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
+          echo "Publishing immutable $release_tag source at $release_commit"
+
+      - name: Init release source submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Create stub libkrun for package verification
+        run: |
+          echo 'void krun_stub(void) {}' > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          user_agent="A3S-Lab-Box-crate-recovery/$RELEASE_VERSION (https://github.com/A3S-Lab/Box)"
+
+          crate_status() {
+            local crate="$1"
+            curl --retry 5 --retry-all-errors --silent --show-error \
+              --location --user-agent "$user_agent" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$crate/$RELEASE_VERSION"
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local attempt status
+            for attempt in $(seq 1 18); do
+              status="$(crate_status "$crate")"
+              if [ "$status" = "200" ]; then
+                if cargo info "$crate@$RELEASE_VERSION" \
+                     --registry crates-io >/dev/null 2>&1; then
+                  echo "Verified $crate@$RELEASE_VERSION in crates.io and its index"
+                  return 0
+                fi
+                echo "$crate@$RELEASE_VERSION is visible through the API; waiting for the index"
+              elif [ "$status" != "404" ]; then
+                echo "::error::crates.io returned HTTP $status while verifying $crate@$RELEASE_VERSION"
+                return 1
+              fi
+              if [ "$attempt" -lt 18 ]; then
+                sleep 10
+              fi
+            done
+            echo "::error::$crate@$RELEASE_VERSION did not become visible on crates.io"
+            return 1
+          }
+
+          libkrun_status="$(crate_status a3s-libkrun-sys)"
+          if [ "$libkrun_status" != "200" ]; then
+            echo "::error::a3s-libkrun-sys@$RELEASE_VERSION is not available (HTTP $libkrun_status)"
+            exit 1
+          fi
+
+          for crate in \
+            a3s-box-core \
+            a3s-box-netproxy \
+            a3s-box-runtime \
+            a3s-box-sdk; do
+            status="$(crate_status "$crate")"
+            case "$status" in
+              200)
+                echo "$crate@$RELEASE_VERSION already exists; skipping upload"
+                ;;
+              404)
+                echo "Publishing $crate@$RELEASE_VERSION..."
+                if ! cargo publish --locked -p "$crate" --allow-dirty; then
+                  status="$(crate_status "$crate")"
+                  if [ "$status" != "200" ]; then
+                    echo "::error::$crate@$RELEASE_VERSION publication failed"
+                    exit 1
+                  fi
+                  echo "$crate@$RELEASE_VERSION became visible after a concurrent publication"
+                fi
+                ;;
+              *)
+                echo "::error::crates.io returned HTTP $status for $crate@$RELEASE_VERSION"
+                exit 1
+                ;;
+            esac
+            wait_for_crate "$crate"
+          done
