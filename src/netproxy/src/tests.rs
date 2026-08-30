@@ -450,6 +450,12 @@ fn bridge_port_unicasts_frame_to_matching_peer_mac() {
     bridge_b.drain_frames(&mut received, 1);
 
     assert_eq!(received, vec![frame]);
+
+    let reply = ethernet_frame(mac_a, mac_b);
+    assert!(!bridge_b.forward_from_guest(&reply));
+    let mut replies = Vec::new();
+    bridge_a.drain_frames(&mut replies, 1);
+    assert_eq!(replies, vec![reply]);
 }
 
 #[test]

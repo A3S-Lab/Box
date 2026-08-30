@@ -48,6 +48,18 @@ pub fn is_process_exited(pid: u32) -> bool {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn is_process_exited(pid: u32) -> bool {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return true;
+    };
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(raw_pid, &mut status, libc::WNOHANG) };
+    if waited == raw_pid {
+        return true;
+    }
+
+    // `waitpid` returns ECHILD for processes owned by another parent. Fall
+    // back to the portable liveness probe for those and for a child that is
+    // still running. This also handles a PID that disappeared between probes.
     !is_process_alive(pid)
 }
 
@@ -228,6 +240,22 @@ mod tests {
         assert!(!is_process_exited(std::process::id()));
         // A PID with no process is treated as exited.
         assert!(is_process_exited(0x7fff_fffe));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_is_process_exited_reaps_completed_child_on_macos() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let exited = is_process_exited(pid);
+        let _ = child.wait();
+
+        assert!(exited, "an unreaped child zombie must count as exited");
     }
 
     #[cfg(unix)]

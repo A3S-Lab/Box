@@ -17,6 +17,7 @@ mod linux {
     use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
     use a3s_box_guest_init::{
         attest_server, exec_server, host_config, namespace, network, port_forward, pty_server,
+        volume,
     };
     use std::process;
     use std::sync::atomic::{AtomicI32, Ordering};
@@ -866,6 +867,7 @@ mod linux {
             // The MicroVM backend owns its in-guest filesystem setup. The OCI
             // backend has already installed all of these mounts before PID 1 runs.
             mount_essential_filesystems()?;
+            mount_default_shm()?;
             mount_virtio_fs_shares()?;
             mount_devpts()?;
             mount_tmpfs_volumes()?;
@@ -1343,6 +1345,46 @@ mod linux {
         Ok(())
     }
 
+    const DEFAULT_SHM_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+
+    fn default_shm_mount_options() -> String {
+        format!("mode=1777,size={DEFAULT_SHM_SIZE_BYTES}")
+    }
+
+    /// Mount the Docker-compatible default shared-memory filesystem.
+    ///
+    /// devtmpfs exposes `/dev/shm` only as a root-owned 0755 directory. A
+    /// container expects a 64 MiB tmpfs with sticky world-writable permissions,
+    /// even when no explicit `--shm-size` was supplied. Explicit volume and
+    /// tmpfs declarations are mounted afterward and can replace this default.
+    fn mount_default_shm() -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "linux")]
+        {
+            use nix::mount::{mount, MsFlags};
+
+            std::fs::create_dir_all("/dev/shm")?;
+            let options = default_shm_mount_options();
+            match mount(
+                None::<&str>,
+                "/dev/shm",
+                Some("tmpfs"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                Some(options.as_str()),
+            ) {
+                Ok(()) => info!("Mounted default shared memory at /dev/shm"),
+                Err(nix::errno::Errno::EBUSY) => {
+                    info!("/dev/shm already mounted, keeping existing mount")
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = default_shm_mount_options();
+        }
+        Ok(())
+    }
+
     /// Mount virtio-fs shares for workspace and user volumes.
     fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
         info!("Mounting virtio-fs shares");
@@ -1630,10 +1672,11 @@ mod linux {
 
                     let tag = parts[0];
                     let guest_path = parts[1];
-                    // Flags after the guest path may appear in any order: "ro", "file".
+                    // Flags after the guest path may appear in any order: "ro", "file", "copy".
                     // The host decides "file" (it can stat the source); the guest obeys.
                     let read_only = parts[2..].contains(&"ro");
                     let is_file = parts[2..].contains(&"file");
+                    let copy_up = parts[2..].contains(&"copy");
 
                     let flags = if read_only {
                         MsFlags::MS_RDONLY
@@ -1694,13 +1737,20 @@ mod linux {
                             "Mounted file volume (bind; parent directory preserved)"
                         );
                     } else {
-                        // Directory mount: mount the virtio-fs share directly at guest_path.
+                        // Managed volumes inherit the image directory's contents
+                        // and metadata. Bind mounts remain host-authoritative.
                         std::fs::create_dir_all(guest_path)?;
-                        mount_virtiofs(tag, guest_path, flags)?;
+                        let initialized = if copy_up {
+                            mount_copy_up_volume(tag, index, guest_path, flags)?
+                        } else {
+                            mount_virtiofs(tag, guest_path, flags)?;
+                            false
+                        };
                         info!(
                             tag = tag,
                             guest_path = guest_path,
                             read_only = read_only,
+                            initialized = initialized,
                             "Mounted user volume"
                         );
                     }
@@ -1716,6 +1766,63 @@ mod linux {
         }
 
         Ok(())
+    }
+
+    /// Mount a managed volume privately, seed it from the image directory when
+    /// empty, then expose it at the requested destination.
+    #[cfg(target_os = "linux")]
+    fn mount_copy_up_volume(
+        tag: &str,
+        index: usize,
+        guest_path: &str,
+        final_flags: nix::mount::MsFlags,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        use nix::mount::{umount2, MntFlags, MsFlags};
+
+        // Resolve image symlinks before selecting a private staging mount. The
+        // staging path must not be below the seed source or the copy would
+        // recursively archive the volume into itself (for example at `/run`).
+        let source = std::fs::canonicalize(guest_path)?;
+        let staging = volume_staging_path(index, &source)?;
+        std::fs::create_dir_all(&staging)?;
+        mount_virtiofs(
+            tag,
+            staging
+                .to_str()
+                .ok_or("volume staging path is not valid UTF-8")?,
+            MsFlags::empty(),
+        )?;
+
+        let initialized = volume::initialize_named_volume(&source, &staging);
+        let unmounted = umount2(&staging, MntFlags::MNT_DETACH);
+        let _ = std::fs::remove_dir(&staging);
+        if let Some(parent) = staging.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+
+        let initialized = initialized?;
+        unmounted?;
+        mount_virtiofs(tag, guest_path, final_flags)?;
+        Ok(initialized)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn volume_staging_path(
+        index: usize,
+        source: &std::path::Path,
+    ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        for root in ["/run", "/dev", "/tmp"] {
+            let root = std::fs::canonicalize(root)?;
+            let candidate = root.join(".a3s-volume-mounts").join(index.to_string());
+            if !candidate.starts_with(source) {
+                return Ok(candidate);
+            }
+        }
+        Err(format!(
+            "managed volume target {} contains every safe staging directory",
+            source.display()
+        )
+        .into())
     }
 
     /// Mount tmpfs volumes passed via BOX_TMPFS_* environment variables.
@@ -2255,6 +2362,13 @@ mod linux {
                 ("/ephemeral", None, false)
             );
             assert!(parse_tmpfs_mount("/scratch:ro,rw").is_err());
+        }
+
+        #[test]
+        fn default_shm_mount_is_container_compatible() {
+            let options = default_shm_mount_options();
+            assert!(options.split(',').any(|option| option == "mode=1777"));
+            assert!(options.split(',').any(|option| option == "size=67108864"));
         }
 
         fn set_sidecar_env(image: &str, vsock_port: u32, env: &[(&str, &str)]) {

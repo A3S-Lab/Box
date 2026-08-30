@@ -24,6 +24,8 @@ pub mod reaper;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod rootfs_archive;
 pub mod user;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub mod volume;
 
 pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};
 pub use network::configure_guest_network;

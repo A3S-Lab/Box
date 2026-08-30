@@ -161,6 +161,8 @@ fn extract_layer_with_cap(
     let entries = archive
         .entries()
         .map_err(|e| BoxError::OciImageError(format!("Failed to read layer entries: {e}")))?;
+    let mut parent_write_guards = LayerParentWriteGuards::default();
+    let mut layer_directory_modes = BTreeMap::new();
 
     for entry in entries {
         let mut entry = entry
@@ -187,6 +189,14 @@ fn extract_layer_with_cap(
                 "OCI layer contains reserved internal path {reserved}"
             )));
         }
+
+        // A lower OCI layer may leave a directory read-only (for example Go's
+        // module cache uses 0555) while an upper layer adds another child. On a
+        // rootless host, temporarily open the nearest existing parent through
+        // metadata finalization. The guard then restores the mode encoded by
+        // the newest layer entry (or the original mode when this layer did not
+        // modify the directory).
+        parent_write_guards.prepare(target_dir, &normalized)?;
 
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
@@ -258,6 +268,16 @@ fn extract_layer_with_cap(
         } else {
             None
         };
+        let directory_mode = if entry.header().entry_type().is_dir() {
+            Some(entry.header().mode().map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "Invalid directory mode at {}: {error}",
+                    path.display()
+                ))
+            })?)
+        } else {
+            None
+        };
         #[cfg(windows)]
         let entry_is_symlink = entry.header().entry_type().is_symlink();
         let unpacked = entry.unpack_in(target_dir).map_err(|e| {
@@ -285,9 +305,18 @@ fn extract_layer_with_cap(
                 target_dir.display(),
             ))
         })?;
+        if unpacked {
+            if let Some(mode) = directory_mode {
+                layer_directory_modes.insert(normalized.clone(), mode);
+            }
+        }
         if track_metadata && unpacked {
             if let Some(desired) = desired {
-                if desired.kind != RootfsEntryKind::Directory {
+                // Descendants can only remain when this layer replaces a
+                // lower-layer directory with a non-directory. Scanning the
+                // entire metadata map for every ordinary file turns large
+                // image extraction into quadratic work.
+                if metadata_descendant_cleanup_needed(&metadata, &normalized, desired.kind) {
                     remove_metadata_descendants(&mut metadata, &normalized, false);
                 }
                 metadata.insert(normalized, desired);
@@ -296,8 +325,25 @@ fn extract_layer_with_cap(
     }
 
     if track_metadata {
-        finalize_image_metadata(target_dir, &mut metadata)?;
+        // Metadata collection and activation must traverse every image
+        // directory and write the root manifest even when the newest layer
+        // leaves one of those directories non-traversable or read-only.
+        parent_write_guards.prepare_metadata_directories(target_dir, &metadata)?;
+        let mut mode_overrides = parent_write_guards.original_directory_modes();
+        mode_overrides.extend(
+            layer_directory_modes
+                .iter()
+                .map(|(path, mode)| (path.clone(), *mode)),
+        );
+        finalize_image_metadata_with_mode_overrides(target_dir, &mut metadata, &mode_overrides)?;
     }
+    let mut directory_modes: BTreeMap<_, _> = metadata
+        .iter()
+        .filter(|(_, entry)| entry.kind == RootfsEntryKind::Directory)
+        .map(|(path, entry)| (path.clone(), entry.mode))
+        .collect();
+    directory_modes.extend(layer_directory_modes);
+    parent_write_guards.restore(&directory_modes)?;
 
     tracing::debug!(
         layer = %layer_path.display(),
@@ -491,6 +537,27 @@ fn remove_metadata_descendants(
     });
 }
 
+fn metadata_descendant_cleanup_needed(
+    metadata: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+    path: &Path,
+    replacement: RootfsEntryKind,
+) -> bool {
+    if replacement == RootfsEntryKind::Directory {
+        return false;
+    }
+
+    metadata
+        .get(path)
+        .is_some_and(|existing| existing.kind == RootfsEntryKind::Directory)
+        || metadata
+            .range((
+                std::ops::Bound::Excluded(path.to_path_buf()),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|(candidate, _)| candidate.starts_with(path))
+}
+
 fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMetadataEntry>> {
     let path = crate::oci::rootfs::resolve_guest_file_path(
         target_dir,
@@ -532,7 +599,16 @@ fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMeta
 
 pub(crate) fn finalize_rootfs_metadata(target_dir: &Path) -> Result<()> {
     let mut metadata = load_image_metadata(target_dir)?;
-    finalize_image_metadata(target_dir, &mut metadata)?;
+    let mut directory_guards = LayerParentWriteGuards::default();
+    directory_guards.prepare_metadata_directories(target_dir, &metadata)?;
+    let mode_overrides = directory_guards.original_directory_modes();
+    finalize_image_metadata_with_mode_overrides(target_dir, &mut metadata, &mode_overrides)?;
+    let directory_modes = metadata
+        .iter()
+        .filter(|(_, entry)| entry.kind == RootfsEntryKind::Directory)
+        .map(|(path, entry)| (path.clone(), entry.mode))
+        .collect();
+    directory_guards.restore(&directory_modes)?;
     prepare_rootless_metadata_replay(target_dir, &metadata)
 }
 
@@ -548,11 +624,17 @@ fn prepare_rootless_metadata_replay(
             return Ok(());
         }
         // virtiofs stores synthetic uid/gid as filesystem metadata. A guest
-        // cannot update it on a 0444/0555 host-owned inode, so make only the
-        // owner's write bit temporarily available. Guest-init restores the
-        // exact manifest mode before launching any container process.
+        // cannot update a host-owned read-only inode; directories additionally
+        // need execute permission for traversal. Guest-init restores the exact
+        // manifest mode before launching any container process.
         for (relative, entry) in metadata {
-            if entry.kind == RootfsEntryKind::Symlink || entry.mode & 0o200 != 0 {
+            let required_mode = if entry.kind == RootfsEntryKind::Directory {
+                0o300
+            } else {
+                0o200
+            };
+            if entry.kind == RootfsEntryKind::Symlink || entry.mode & required_mode == required_mode
+            {
                 continue;
             }
             let relative_path = relative.to_str().ok_or_else(|| {
@@ -574,7 +656,14 @@ fn prepare_rootless_metadata_replay(
             })?;
             std::fs::set_permissions(
                 &target,
-                std::fs::Permissions::from_mode((current.mode() & 0o7777) | 0o200),
+                std::fs::Permissions::from_mode(
+                    (current.mode() & 0o7777)
+                        | if entry.kind == RootfsEntryKind::Directory {
+                            0o300
+                        } else {
+                            0o200
+                        },
+                ),
             )
             .map_err(|error| {
                 BoxError::OciImageError(format!(
@@ -591,9 +680,18 @@ fn prepare_rootless_metadata_replay(
     Ok(())
 }
 
+#[cfg(test)]
 fn finalize_image_metadata(
     target_dir: &Path,
     metadata: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
+) -> Result<()> {
+    finalize_image_metadata_with_mode_overrides(target_dir, metadata, &BTreeMap::new())
+}
+
+fn finalize_image_metadata_with_mode_overrides(
+    target_dir: &Path,
+    metadata: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
+    mode_overrides: &BTreeMap<PathBuf, u32>,
 ) -> Result<()> {
     let mut final_entries = BTreeMap::new();
     collect_final_metadata(
@@ -601,6 +699,7 @@ fn finalize_image_metadata(
         target_dir,
         Path::new(""),
         metadata,
+        mode_overrides,
         &mut final_entries,
     )?;
     let manifest = RootfsMetadataManifest::new(final_entries.into_values().collect());
@@ -646,6 +745,7 @@ fn collect_final_metadata(
     source: &Path,
     relative: &Path,
     desired: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+    mode_overrides: &BTreeMap<PathBuf, u32>,
     output: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
 ) -> Result<()> {
     if reserved_metadata_path(relative).is_some()
@@ -678,17 +778,21 @@ fn collect_final_metadata(
     } else {
         return Ok(());
     };
+    let previous_same_kind = previous.filter(|entry| entry.kind == kind);
     #[cfg(unix)]
     let (mode, mtime, size) = {
         use std::os::unix::fs::MetadataExt;
         (
-            filesystem.mode(),
+            mode_overrides
+                .get(relative)
+                .copied()
+                .unwrap_or_else(|| filesystem.mode()),
             filesystem.mtime().max(0) as u64,
             filesystem.size(),
         )
     };
     #[cfg(not(unix))]
-    let (mode, mtime, size) = previous
+    let (mode, mtime, size) = previous_same_kind
         .map(|entry| (entry.mode, entry.mtime, entry.size))
         .unwrap_or_else(|| {
             (
@@ -702,8 +806,8 @@ fn collect_final_metadata(
             .encode(archive_metadata_path_bytes(relative)),
         kind,
         mode,
-        uid: previous.map_or(0, |entry| entry.uid),
-        gid: previous.map_or(0, |entry| entry.gid),
+        uid: previous_same_kind.map_or(0, |entry| entry.uid),
+        gid: previous_same_kind.map_or(0, |entry| entry.gid),
         mtime,
         size,
         link_target_base64,
@@ -723,6 +827,7 @@ fn collect_final_metadata(
                 &child.path(),
                 &relative.join(child.file_name()),
                 desired,
+                mode_overrides,
                 output,
             )?;
         }
@@ -821,6 +926,181 @@ fn prepare_hardlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
             candidate.display()
         ))
     })
+}
+
+#[derive(Default)]
+struct LayerParentWriteGuards {
+    restore: BTreeMap<PathBuf, (PathBuf, std::fs::Permissions)>,
+}
+
+impl LayerParentWriteGuards {
+    fn prepare(&mut self, target_dir: &Path, path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if unsafe { libc::geteuid() } == 0 {
+                return Ok(());
+            }
+
+            let canonical_target = target_dir.canonicalize().map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "Failed to resolve layer extraction root {}: {error}",
+                    target_dir.display()
+                ))
+            })?;
+
+            // `unpack_in` creates missing intermediate directories itself. Walk
+            // up to the closest parent that already exists, resolving symlinks
+            // inside the rootfs and refusing to chmod anything outside it.
+            let requested_parent = path.parent().unwrap_or_else(|| Path::new(""));
+            'retry_after_opening_ancestor: loop {
+                let mut relative = requested_parent;
+                loop {
+                    if let Some(parent) = resolve_within_or_base(target_dir, relative) {
+                        let metadata = std::fs::symlink_metadata(&parent).map_err(|error| {
+                            BoxError::OciImageError(format!(
+                                "Failed to inspect layer parent {}: {error}",
+                                parent.display()
+                            ))
+                        })?;
+                        if !metadata.is_dir() || metadata.permissions().mode() & 0o300 == 0o300 {
+                            return Ok(());
+                        }
+
+                        let original = metadata.permissions();
+                        let physical_relative = parent
+                            .strip_prefix(&canonical_target)
+                            .map_err(|_| {
+                                BoxError::OciImageError(format!(
+                                    "Resolved layer parent {} escapes extraction root {}",
+                                    parent.display(),
+                                    canonical_target.display()
+                                ))
+                            })?
+                            .to_path_buf();
+                        self.restore
+                            .entry(parent.clone())
+                            .or_insert_with(|| (physical_relative, original.clone()));
+                        std::fs::set_permissions(
+                            &parent,
+                            std::fs::Permissions::from_mode((original.mode() & 0o7777) | 0o300),
+                        )
+                        .map_err(|error| {
+                            BoxError::OciImageError(format!(
+                                "Failed to prepare layer parent {} for extraction: {error}",
+                                parent.display()
+                            ))
+                        })?;
+
+                        // Opening an ancestor may make a deeper, existing
+                        // parent resolvable. Retry from the requested parent;
+                        // if the remainder is absent, the now-writable nearest
+                        // ancestor is sufficient for `unpack_in` to create it.
+                        if relative != requested_parent {
+                            continue 'retry_after_opening_ancestor;
+                        }
+                        return Ok(());
+                    }
+
+                    let Some(ancestor) = relative.parent() else {
+                        return Ok(());
+                    };
+                    relative = ancestor;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target_dir, path);
+            Ok(())
+        }
+    }
+
+    fn prepare_metadata_directories(
+        &mut self,
+        target_dir: &Path,
+        metadata: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+    ) -> Result<()> {
+        for (relative, entry) in metadata {
+            if entry.kind == RootfsEntryKind::Directory {
+                // `prepare` opens a path's parent. A synthetic child therefore
+                // asks it to open the directory represented by this manifest
+                // entry without ever touching or creating the child itself.
+                self.prepare(target_dir, &relative.join(".a3s-metadata-access"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn original_directory_modes(&self) -> BTreeMap<PathBuf, u32> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            self.restore
+                .values()
+                .map(|(relative, permissions)| (relative.clone(), permissions.mode() & 0o7777))
+                .collect()
+        }
+        #[cfg(not(unix))]
+        {
+            BTreeMap::new()
+        }
+    }
+
+    fn restore(&mut self, layer_directory_modes: &BTreeMap<PathBuf, u32>) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut entries = std::mem::take(&mut self.restore)
+                .into_iter()
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+            let mut first_error = None;
+            for (path, (relative, original)) in entries {
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !metadata.is_dir() {
+                    continue;
+                }
+                let permissions = layer_directory_modes
+                    .get(&relative)
+                    .map(|mode| std::fs::Permissions::from_mode(*mode))
+                    .unwrap_or(original);
+                if let Err(error) = std::fs::set_permissions(&path, permissions) {
+                    first_error.get_or_insert_with(|| {
+                        BoxError::OciImageError(format!(
+                        "Failed to restore directory permissions after layer extraction at {}: {error}",
+                        path.display()
+                        ))
+                    });
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = layer_directory_modes;
+        Ok(())
+    }
+}
+
+impl Drop for LayerParentWriteGuards {
+    fn drop(&mut self) {
+        if self.restore.is_empty() {
+            return;
+        }
+        if let Err(error) = self.restore(&BTreeMap::new()) {
+            tracing::warn!(
+                error = %error,
+                "Failed to restore directory permissions after aborted layer extraction"
+            );
+        }
+    }
 }
 
 /// Resolve `rel` beneath `target_dir`, following symlinks, returning the real
@@ -1027,6 +1307,170 @@ mod tests {
         assert!(target_dir.join("app.txt").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn tracked_extraction_writes_into_readonly_directory_from_lower_layer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let layer1 = temp_dir.path().join("readonly-parent.tar.gz");
+        let layer2 = temp_dir.path().join("readonly-child.tar.gz");
+        let layer3 = temp_dir.path().join("child-before-parent.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+
+        create_directory_entries_test_layer(
+            &layer1,
+            &[("go/pkg/mod", 0o444), ("go/pkg/mod/example", 0o444)],
+        );
+        create_test_layer(&layer2, &[("go/pkg/mod/example/child.txt", b"payload")]);
+        create_child_then_directory_test_layer(
+            &layer3,
+            "go/pkg/mod/example",
+            "go/pkg/mod/example/later.txt",
+            b"later",
+            0o555,
+        );
+
+        extract_layer_with_metadata(&layer1, &target).unwrap();
+        let locked_ancestor = target.join("go/pkg/mod");
+        assert_eq!(
+            fs::metadata(&locked_ancestor).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+
+        extract_layer_with_metadata(&layer2, &target).unwrap();
+        assert_eq!(
+            fs::metadata(&locked_ancestor).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "temporary access must restore every restrictive ancestor"
+        );
+
+        // A later layer may put a child before an explicit directory entry. The
+        // explicit entry is still the final source of truth for the directory.
+        extract_layer_with_metadata(&layer3, &target).unwrap();
+        let manifest = load_image_metadata(&target).unwrap();
+        assert_eq!(manifest[Path::new("go/pkg/mod")].mode & 0o777, 0o444);
+        assert_eq!(
+            manifest[Path::new("go/pkg/mod/example")].mode & 0o777,
+            0o555
+        );
+
+        // Open the ancestor only for host-side assertions and TempDir cleanup.
+        fs::set_permissions(&locked_ancestor, fs::Permissions::from_mode(0o755)).unwrap();
+        let parent = target.join("go/pkg/mod/example");
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        assert_eq!(fs::read(parent.join("child.txt")).unwrap(), b"payload");
+        assert_eq!(fs::read(parent.join("later.txt")).unwrap(), b"later");
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_parent_reached_through_symlink_keeps_physical_metadata_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let directory_layer = temp_dir.path().join("directory.tar.gz");
+        let symlink_layer = temp_dir.path().join("symlink.tar.gz");
+        let child_layer = temp_dir.path().join("child.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        create_directory_test_layer(&directory_layer, "physical", 0o444);
+        create_layer_with_symlink(&symlink_layer, "alias", Path::new("physical"), &[]);
+        create_test_layer(&child_layer, &[("alias/child.txt", b"payload")]);
+
+        extract_layer_with_metadata(&directory_layer, &target).unwrap();
+        extract_layer_with_metadata(&symlink_layer, &target).unwrap();
+        let alias_mode = load_image_metadata(&target).unwrap()[Path::new("alias")].mode;
+        extract_layer_with_metadata(&child_layer, &target).unwrap();
+
+        let manifest = load_image_metadata(&target).unwrap();
+        assert_eq!(manifest[Path::new("physical")].mode & 0o777, 0o444);
+        assert_eq!(manifest[Path::new("alias")].kind, RootfsEntryKind::Symlink);
+        assert_eq!(manifest[Path::new("alias")].mode, alias_mode);
+        let physical = target.join("physical");
+        assert_eq!(
+            fs::metadata(&physical).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        fs::set_permissions(&physical, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(physical.join("child.txt")).unwrap(), b"payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_metadata_replay_opens_nontraversable_directory_without_changing_manifest_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let layer = temp_dir.path().join("nontraversable.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        // Owner-write without owner-execute is still non-traversable.
+        create_directory_test_layer(&layer, "private", 0o644);
+        extract_layer_with_metadata(&layer, &target).unwrap();
+
+        finalize_rootfs_metadata(&target).unwrap();
+
+        let metadata = load_image_metadata(&target).unwrap();
+        assert_eq!(metadata[Path::new("private")].mode & 0o777, 0o644);
+        assert_eq!(
+            fs::metadata(target.join("private"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o744,
+            "host permissions must remain open only for guest metadata replay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_extraction_can_finalize_a_readonly_root_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let readonly_root = temp_dir.path().join("readonly-root.tar.gz");
+        let empty_upper = temp_dir.path().join("empty-upper.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        create_directory_test_layer(&readonly_root, ".", 0o555);
+        create_test_layer(&empty_upper, &[]);
+
+        extract_layer_with_metadata(&readonly_root, &target).unwrap();
+        // tar intentionally leaves the extraction root's host mode alone;
+        // model a lower layer/cache whose backing root is already restrictive.
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        extract_layer_with_metadata(&empty_upper, &target).unwrap();
+
+        let manifest = load_image_metadata(&target).unwrap();
+        assert_eq!(manifest[Path::new("")].mode & 0o777, 0o555);
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn test_extract_layer_overwrites_existing_files() {
         let temp_dir = TempDir::new().unwrap();
@@ -1168,6 +1612,67 @@ mod tests {
     }
 
     #[test]
+    fn metadata_descendants_are_scanned_only_when_replacing_a_directory() {
+        let path = PathBuf::from("usr/lib/example");
+        let mut metadata = BTreeMap::new();
+        let entry = |kind| RootfsMetadataEntry {
+            path_base64: String::new(),
+            kind,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            size: 0,
+            link_target_base64: None,
+        };
+
+        metadata.insert(path.clone(), entry(RootfsEntryKind::Regular));
+        assert!(!metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Regular
+        ));
+
+        metadata.insert(path.clone(), entry(RootfsEntryKind::Directory));
+        assert!(metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Regular
+        ));
+        assert!(!metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Directory
+        ));
+
+        metadata.clear();
+        metadata.insert(path.join("implicit-child"), entry(RootfsEntryKind::Regular));
+        assert!(metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Regular
+        ));
+
+        metadata.clear();
+        metadata.insert(
+            PathBuf::from("usr/lib/example-other"),
+            entry(RootfsEntryKind::Regular),
+        );
+        assert!(!metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Regular
+        ));
+
+        metadata.insert(path.join("implicit-child"), entry(RootfsEntryKind::Regular));
+        assert!(metadata_descendant_cleanup_needed(
+            &metadata,
+            &path,
+            RootfsEntryKind::Regular
+        ));
+    }
+
+    #[test]
     fn every_extraction_mode_rejects_reserved_internal_paths() {
         for (index, reserved) in [
             ".a3s_image_metadata_v1.json",
@@ -1255,6 +1760,58 @@ mod tests {
         assert_eq!(std::fs::read(&outside).unwrap(), b"host-secret");
         assert!(target.join(image_metadata_relative_path()).is_file());
         assert!(!target.join(".a3s_image_metadata_v1.json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_collection_uses_real_modes_for_runtime_replacements() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        std::fs::create_dir_all(&target).unwrap();
+        let replacement = target.join("replacement");
+        std::fs::write(&replacement, b"regular").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let rewritten = target.join("rewritten");
+        std::fs::write(&rewritten, b"rewritten").unwrap();
+        std::fs::set_permissions(&rewritten, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let path = PathBuf::from("replacement");
+        let rewritten_path = PathBuf::from("rewritten");
+        let desired_entry = |path: &Path, kind, mode| RootfsMetadataEntry {
+            path_base64: base64::engine::general_purpose::STANDARD
+                .encode(archive_metadata_path_bytes(path)),
+            kind,
+            mode,
+            uid: 123,
+            gid: 456,
+            mtime: 0,
+            size: 0,
+            link_target_base64: (kind == RootfsEntryKind::Symlink)
+                .then(|| base64::engine::general_purpose::STANDARD.encode(b"old-target")),
+        };
+        let mut desired = BTreeMap::from([
+            (
+                path.clone(),
+                desired_entry(&path, RootfsEntryKind::Symlink, 0o777),
+            ),
+            (
+                rewritten_path.clone(),
+                desired_entry(&rewritten_path, RootfsEntryKind::Regular, 0o600),
+            ),
+        ]);
+
+        finalize_image_metadata(&target, &mut desired).unwrap();
+
+        let replacement = &desired[&path];
+        assert_eq!(replacement.kind, RootfsEntryKind::Regular);
+        assert_eq!(replacement.mode & 0o7777, 0o640);
+        assert_eq!((replacement.uid, replacement.gid), (0, 0));
+        let rewritten = &desired[&rewritten_path];
+        assert_eq!(rewritten.kind, RootfsEntryKind::Regular);
+        assert_eq!(rewritten.mode & 0o7777, 0o644);
+        assert_eq!((rewritten.uid, rewritten.gid), (123, 456));
     }
 
     #[cfg(unix)]
@@ -1383,6 +1940,71 @@ mod tests {
         header.set_gid(gid);
         header.set_cksum();
         builder.append_data(&mut header, name, content).unwrap();
+        builder.finish().unwrap();
+    }
+
+    fn create_directory_test_layer(path: &Path, name: &str, mode: u32) {
+        create_directory_entries_test_layer(path, &[(name, mode)]);
+    }
+
+    fn create_directory_entries_test_layer(path: &Path, entries: &[(&str, u32)]) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        for (name, mode) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(*mode);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, std::io::empty())
+                .unwrap();
+        }
+        builder.finish().unwrap();
+    }
+
+    fn create_child_then_directory_test_layer(
+        path: &Path,
+        directory: &str,
+        child: &str,
+        content: &[u8],
+        directory_mode: u32,
+    ) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = Builder::new(encoder);
+
+        let mut child_header = tar::Header::new_gnu();
+        child_header.set_size(content.len() as u64);
+        child_header.set_mode(0o644);
+        child_header.set_uid(0);
+        child_header.set_gid(0);
+        child_header.set_cksum();
+        builder
+            .append_data(&mut child_header, child, content)
+            .unwrap();
+
+        let mut directory_header = tar::Header::new_gnu();
+        directory_header.set_entry_type(tar::EntryType::Directory);
+        directory_header.set_size(0);
+        directory_header.set_mode(directory_mode);
+        directory_header.set_uid(0);
+        directory_header.set_gid(0);
+        directory_header.set_cksum();
+        builder
+            .append_data(&mut directory_header, directory, std::io::empty())
+            .unwrap();
         builder.finish().unwrap();
     }
 

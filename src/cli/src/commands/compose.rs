@@ -994,8 +994,8 @@ fn validate_compose_up_platform_support() -> Result<(), Box<dyn std::error::Erro
 ///
 /// A dependency is "completed" once it is no longer active — preferring the
 /// record's terminal status (set by the monitor) and falling back to shim-PID
-/// liveness for the daemonless case. If an exit code was recorded and is
-/// non-zero, the dependency failed and the wait errors.
+/// liveness for the daemonless case. Completion is never inferred without an
+/// authoritative exit code; zero satisfies the dependency and non-zero fails it.
 async fn wait_for_completed(
     project_name: &str,
     service_names: &[String],
@@ -1037,14 +1037,23 @@ async fn wait_for_completed(
                 continue;
             }
 
-            if let Some(code) = record.exit_code {
-                if code != 0 {
-                    return Err(format!(
-                        "dependency service '{}' did not complete successfully (exit code {})",
-                        svc_name, code
-                    )
-                    .into());
-                }
+            // A just-reaped shim may not have been reconciled into the state
+            // file yet. guest-init persists the authoritative container code
+            // before halting the VM, so read it directly instead of treating an
+            // unknown code as success.
+            let exit_code = record
+                .exit_code
+                .or_else(|| a3s_box_runtime::rootfs::read_persisted_exit_code(&record.box_dir));
+            let Some(code) = exit_code else {
+                all_done = false;
+                continue;
+            };
+            if code != 0 {
+                return Err(format!(
+                    "dependency service '{}' did not complete successfully (exit code {})",
+                    svc_name, code
+                )
+                .into());
             }
         }
 

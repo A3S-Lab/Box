@@ -55,12 +55,28 @@ fn copy_runtime_dylibs(libkrun_dir: &str, _libkrunfw_dir: &str) {
         }
 
         let dst = bin_dir.join(file_name);
-        std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("failed to copy {}: {}", file_name, e));
-        println!(
-            "cargo:warning=copied {} -> {}",
-            src.display(),
-            dst.display()
-        );
+        use std::os::unix::fs::MetadataExt;
+        let same_file = src == dst
+            || std::fs::metadata(&dst).is_ok_and(|destination| {
+                std::fs::metadata(&src).is_ok_and(|source| {
+                    source.dev() == destination.dev() && source.ino() == destination.ino()
+                })
+            });
+        if same_file {
+            println!(
+                "cargo:warning={} is already staged at {}",
+                file_name,
+                dst.display()
+            );
+        } else {
+            std::fs::copy(&src, &dst)
+                .unwrap_or_else(|e| panic!("failed to copy {}: {}", file_name, e));
+            println!(
+                "cargo:warning=copied {} -> {}",
+                src.display(),
+                dst.display()
+            );
+        }
         println!("cargo:rerun-if-changed={}", src.display());
 
         // Also fix the install name to use @executable_path

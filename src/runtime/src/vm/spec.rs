@@ -27,6 +27,7 @@ pub(crate) struct ParsedVolumeMount {
     pub(crate) host_path: PathBuf,
     pub(crate) guest_path: String,
     pub(crate) read_only: bool,
+    pub(crate) copy_up: bool,
 }
 
 /// Read an environment variable, returning `None` if unset or empty.
@@ -90,11 +91,24 @@ impl VmManager {
             .join("boxes")
             .join(&self.box_id)
             .join(".filemounts");
+        let named_volume_paths: std::collections::HashSet<PathBuf> =
+            crate::volume::VolumeStore::new(
+                self.home_dir.join("volumes.json"),
+                self.home_dir.join("volumes"),
+            )
+            .load()?
+            .into_values()
+            .map(|volume| PathBuf::from(volume.mount_point))
+            .collect();
         let parsed_volumes = self
             .config
             .volumes
             .iter()
-            .map(|volume| Self::parse_volume_spec(volume))
+            .map(|volume| {
+                let mut parsed = Self::parse_volume_spec(volume)?;
+                parsed.copy_up = named_volume_paths.contains(&parsed.host_path);
+                Ok(parsed)
+            })
             .collect::<Result<Vec<_>>>()?;
         for (i, volume) in parsed_volumes.iter().enumerate() {
             let mount = Self::prepare_volume_mount(
@@ -323,9 +337,13 @@ impl VmManager {
                 } else {
                     ""
                 };
+                let copy_flag = if volume.copy_up { ":copy" } else { "" };
                 env.push((
                     format!("BOX_VOL_{}", i),
-                    format!("vol{}:{}{}{}", i, volume.guest_path, mode, file_flag),
+                    format!(
+                        "vol{}:{}{}{}{}",
+                        i, volume.guest_path, mode, file_flag, copy_flag
+                    ),
                 ));
             }
 
@@ -338,7 +356,7 @@ impl VmManager {
                     }
                     env.push((
                         format!("BOX_VOL_{}", anon_idx),
-                        format!("vol{}:{}", anon_idx, vol_path),
+                        format!("vol{}:{}:copy", anon_idx, vol_path),
                     ));
                     anon_idx += 1;
                 }
@@ -751,6 +769,7 @@ impl VmManager {
             host_path: PathBuf::from(host_path),
             guest_path: guest_path.to_string(),
             read_only,
+            copy_up: false,
         })
     }
 
@@ -1261,6 +1280,29 @@ mod tests {
     }
 
     #[test]
+    fn test_build_instance_spec_marks_named_volume_for_copy_up() {
+        let home = tempdir().unwrap();
+        let layout_dir = tempdir().unwrap();
+        let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+        let store = crate::volume::VolumeStore::new(
+            home.path().join("volumes.json"),
+            home.path().join("volumes"),
+        );
+        let volume = store
+            .create(a3s_box_core::volume::VolumeConfig::new("data", ""))
+            .unwrap();
+        let mut vm = test_vm_manager(BoxConfig {
+            volumes: vec![format!("{}:/data", volume.mount_point)],
+            ..Default::default()
+        });
+        vm.home_dir = home.path().to_path_buf();
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data:copy"));
+    }
+
+    #[test]
     fn test_parse_volume_spec_preserves_windows_drive_path() {
         for (volume, host) in [
             (r"C:\Users\Temp:/data:ro", r"C:\Users\Temp"),
@@ -1383,6 +1425,7 @@ mod tests {
             host_path: source.clone(),
             guest_path: "/.a3s-box-secrets/missing/000.secret".into(),
             read_only: true,
+            copy_up: false,
         };
 
         let error = VmManager::prepare_volume_mount(
@@ -1411,6 +1454,7 @@ mod tests {
             host_path: source,
             guest_path: "/.a3s-box-secrets/managed/000.secret".into(),
             read_only: false,
+            copy_up: false,
         };
 
         let error = VmManager::prepare_volume_mount(
