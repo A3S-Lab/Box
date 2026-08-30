@@ -492,7 +492,7 @@ operation returns a typed availability error before dispatch.
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route | Shared-kernel preview; VM-only controls are rejected |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
-| TEE | Runtime-bound RA-TLS artifacts, attestation-before-execution for confidential Tasks and Services, and an opt-in simulated KVM conformance profile; a separately armed SEV-SNP hardware gate pins the launch measurement | Simulation and an unexecuted hardware job are not hardware security evidence |
+| TEE | Runtime-bound RA-TLS artifacts, exact identity-attachment binding, attestation-before-execution for confidential Tasks and Services, and an opt-in simulated KVM conformance profile; a separately armed SEV-SNP hardware gate pins the launch measurement | Identity attachment is advertised only by an explicitly configured confidential provider; simulation and an unexecuted hardware job are not hardware security evidence |
 
 Real-host evidence is deliberately separate from unit, build-only, fixture, or
 simulation results. Review [Host Integration](docs/host-integration.md),

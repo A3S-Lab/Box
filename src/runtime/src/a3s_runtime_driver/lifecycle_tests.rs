@@ -7,7 +7,7 @@ use a3s_runtime::contract::{
     RestartPolicy, RuntimeFeature, RuntimeInspection, RuntimeUnitClass, RuntimeUnitState,
     SecretReference, SecretTarget,
 };
-use a3s_runtime::{RuntimeDriver, RuntimeError, RuntimeResult};
+use a3s_runtime::{RuntimeAttestationBinding, RuntimeDriver, RuntimeError, RuntimeResult};
 use async_trait::async_trait;
 
 use super::attestation::{attestation_path, BoxAttestedMainStarter};
@@ -388,8 +388,15 @@ async fn confidential_service_persists_replays_and_validates_attestation() {
     let (driver, backend, transport) = fake_confidential_driver(&directory);
     let mut spec = runtime_spec("confidential-replay", 1, RuntimeUnitClass::Service);
     spec.isolation = a3s_runtime::contract::IsolationLevel::Confidential;
+    spec.identity_attachment_digest = Some(format!("sha256:{}", "9".repeat(64)));
 
     let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    let identity_binding = RuntimeAttestationBinding::from_observation(&spec, &running)
+        .expect("Box identity attachment must bind the exact attestation");
+    assert_eq!(
+        identity_binding.identity_attachment_digest,
+        spec.identity_attachment_digest.clone().unwrap()
+    );
     let attestation = running
         .provider_attestation
         .as_ref()
@@ -428,6 +435,15 @@ async fn confidential_service_persists_replays_and_validates_attestation() {
     );
     let replayed = reopened.apply(&spec, &running).await.unwrap();
     assert_eq!(replayed.provider_attestation.as_ref(), Some(&attestation));
+    assert_eq!(
+        replayed
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.identity_attachment_digest.as_ref()),
+        spec.identity_attachment_digest.as_ref()
+    );
+    RuntimeAttestationBinding::from_observation(&spec, &replayed)
+        .expect("replayed Box evidence must retain the exact identity attachment");
     assert_eq!(transport.calls(), 2);
     assert_eq!(backend.starts(), 1);
 

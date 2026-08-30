@@ -215,11 +215,13 @@ fn attach_endpoints(
             provider_build: provider_build.clone(),
             spec_digest: observation.spec_digest.clone(),
             semantics_profile_digest: spec.semantics_profile_digest.clone(),
+            identity_attachment_digest: spec.identity_attachment_digest.clone(),
             claims: BTreeMap::new(),
         });
         if evidence.provider_build != provider_build
             || evidence.spec_digest != observation.spec_digest
             || evidence.semantics_profile_digest != spec.semantics_profile_digest
+            || evidence.identity_attachment_digest != spec.identity_attachment_digest
         {
             return Err(RuntimeError::Protocol(
                 "Runtime Service endpoint evidence does not match provider identity".into(),

@@ -61,6 +61,7 @@ fn spec(class: RuntimeUnitClass) -> RuntimeUnitSpec {
         },
         outputs: Vec::new(),
         semantics_profile_digest: None,
+        identity_attachment_digest: None,
     }
 }
 
@@ -272,6 +273,9 @@ async fn confidential_capabilities_require_explicit_sev_snp_configuration() {
         vec![IsolationLevel::Sandbox, IsolationLevel::Confidential]
     );
     assert!(capabilities.features.contains(&RuntimeFeature::Attestation));
+    assert!(capabilities
+        .features
+        .contains(&RuntimeFeature::IdentityAttachment));
 
     let standard = driver(&directory);
     standard
@@ -286,6 +290,9 @@ async fn confidential_capabilities_require_explicit_sev_snp_configuration() {
     assert!(!standard_capabilities
         .features
         .contains(&RuntimeFeature::Attestation));
+    assert!(!standard_capabilities
+        .features
+        .contains(&RuntimeFeature::IdentityAttachment));
 }
 
 #[test]

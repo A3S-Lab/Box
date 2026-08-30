@@ -744,6 +744,7 @@ impl BoxRuntimeDriver {
                 provider_build,
                 spec_digest: spec.digest().map_err(RuntimeError::Protocol)?,
                 semantics_profile_digest: spec.semantics_profile_digest.clone(),
+                identity_attachment_digest: spec.identity_attachment_digest.clone(),
                 claims,
             }),
             provider_attestation,

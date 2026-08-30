@@ -706,6 +706,7 @@ pub(super) fn runtime_spec(
         },
         outputs: Vec::new(),
         semantics_profile_digest: None,
+        identity_attachment_digest: None,
     }
 }
 

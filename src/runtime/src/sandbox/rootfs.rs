@@ -21,7 +21,9 @@ use a3s_box_core::rootfs_metadata::{
 #[cfg(any(target_os = "linux", test))]
 use base64::Engine;
 
-use super::capability::{validate_id_mapping_plan, IdMapping, SandboxIdMappingPlan};
+#[cfg(target_os = "linux")]
+use super::capability::validate_id_mapping_plan;
+use super::capability::{IdMapping, SandboxIdMappingPlan};
 
 const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "linux")]

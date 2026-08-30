@@ -491,6 +491,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
         }
         if self.sev_snp.is_some() {
             features.push(RuntimeFeature::Attestation);
+            features.push(RuntimeFeature::IdentityAttachment);
         }
         let mut mount_kinds = vec![MountKind::Volume, MountKind::Tmpfs];
         if self.artifact_storage.artifact_configured() {

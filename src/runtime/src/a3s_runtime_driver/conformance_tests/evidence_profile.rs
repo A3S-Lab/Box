@@ -21,6 +21,8 @@ use super::{require, Result};
 const ATTESTATION_SCHEMA: &str = "a3s.box.runtime.attestation.v1";
 const SEMANTICS_PROFILE_DIGEST: &str =
     "sha256:8d65d845f5e5523e34fe91ffbebc35315bc814a2c48b76da1f4e82f20e09f78d";
+const IDENTITY_ATTACHMENT_DIGEST: &str =
+    "sha256:8a29be89b1fa2103fe694ec9588705774bf279c4651bc0891977f84a7a3d05c1";
 const REPORT_DATA_OFFSET: usize = 0x50;
 const REPORT_DATA_SIZE: usize = 64;
 const RUNTIME_BINDING_OFFSET: usize = REPORT_DATA_OFFSET + 32;
@@ -56,6 +58,7 @@ pub(super) async fn run(
     );
     task_request.spec.isolation = IsolationLevel::Confidential;
     task_request.spec.semantics_profile_digest = Some(SEMANTICS_PROFILE_DIGEST.into());
+    task_request.spec.identity_attachment_digest = Some(IDENTITY_ATTACHMENT_DIGEST.into());
 
     let succeeded = client.apply(&task_request).await?;
     let task_attestation = verify_observation(
@@ -104,6 +107,7 @@ pub(super) async fn run(
     );
     request.spec.isolation = IsolationLevel::Confidential;
     request.spec.semantics_profile_digest = Some(SEMANTICS_PROFILE_DIGEST.into());
+    request.spec.identity_attachment_digest = Some(IDENTITY_ATTACHMENT_DIGEST.into());
 
     let running = client.apply(&request).await?;
     let first_attestation = verify_observation(
@@ -230,8 +234,9 @@ fn verify_observation(
     require(
         evidence.spec_digest == spec.digest().map_err(super::protocol)?
             && evidence.semantics_profile_digest == spec.semantics_profile_digest
+            && evidence.identity_attachment_digest == spec.identity_attachment_digest
             && observation.provider_build.as_ref() == Some(&evidence.provider_build),
-        "Runtime evidence did not bind the exact spec, semantics profile, and provider build",
+        "Runtime evidence did not bind the exact spec, semantics profile, identity attachment, and provider build",
     )?;
     require(
         evidence

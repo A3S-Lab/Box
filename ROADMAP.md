@@ -72,9 +72,10 @@ profile through Sandbox. The self-hosted KVM workflow is wired to run every
 ordinary advertised Runtime profile through real MicroVMs: Base, Recovery,
 Networking, Mounts, Health, Resources, Logs, Exec, Security, and Outputs. A
 second explicitly simulated SEV-SNP run adds the capability-triggered Evidence
-profile and checks the exact Runtime spec and semantics binding, live RA-TLS
-certificate/report, immutable artifact digest, same-generation continuity,
-driver reconstruction, tamper rejection, confidential Task completion, the
+profile and checks the exact Runtime spec, semantics profile, and identity
+attachment binding; live RA-TLS certificate/report; immutable artifact digest;
+same-generation continuity; driver reconstruction; tamper rejection;
+confidential Task completion; the
 attestation-before-execution gate, and cleanup. It also exercises an
 authenticated private-registry pull. The suite includes client/provider
 restart, external process loss, endpoint relay and cleanup, read-only and
