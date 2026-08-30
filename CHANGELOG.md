@@ -6,6 +6,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM and Compose startup now preserve container-runtime invariants across
+  arbitrary images: `--network none` disables networking, completed
+  dependencies require an authoritative zero exit status, empty managed
+  volumes are serialized while copying image contents and metadata and roll
+  back partial copies on failure,
+  process environments no longer inherit guest-init controls, effective users
+  receive their passwd `HOME`, and `/dev/shm` has the standard secure 64 MiB
+  default. Rootless OCI extraction now applies upper layers through restrictive
+  lower-layer directories without corrupting final modes, while Apple Silicon
+  builds and macOS runtime handoff/process detection handle their native path,
+  architecture, dynamic-library, and zombie-process semantics.
 - Scale reconciliation now resumes a retained active replica slot until it is
   ready instead of treating the mere presence of a still-starting execution as
   convergence. A retained paused lease is resumed through the canonical local

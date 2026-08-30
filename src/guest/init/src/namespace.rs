@@ -243,9 +243,7 @@ pub fn spawn_isolated(
     if stdin_null {
         child.stdin(std::process::Stdio::null());
     }
-    for (key, value) in env {
-        child.env(key, value);
-    }
+    configure_process_environment(&mut child, env, None, Path::new("/"));
 
     child
         .spawn()
@@ -351,17 +349,13 @@ fn child_process(
         cmd.stdin(std::process::Stdio::null());
     }
 
-    // Set environment variables
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-
     // Resolve the container user (image USER / --user) against the container
     // rootfs (already pivoted to "/"), the same way the exec server does:
     // names -> uid:gid via /etc/passwd, default the primary gid from passwd,
     // and gather image supplemental groups. Done here (pre-fork, allocating) so
     // the pre_exec hook only performs async-signal-safe syscalls.
     let (process_user, supplemental_groups) = resolve_user_and_groups(user)?;
+    configure_process_environment(&mut cmd, env, process_user, Path::new("/"));
 
     // Apply security restrictions + user before exec
     apply_security_before_exec(&mut cmd, process_user, supplemental_groups)?;
@@ -410,6 +404,43 @@ fn resolve_command_path(command: &str, env: &[(&str, &str)]) -> Option<PathBuf> 
         .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| dir.join(command))
         .find(|path| path.exists())
+}
+
+/// Derive Docker-compatible `HOME` for the effective container user.
+///
+/// OCI images commonly omit `HOME` and rely on the runtime to derive it from
+/// `/etc/passwd`. Preserve an explicit image or caller value; otherwise use the
+/// selected user's passwd entry, with root as the default container identity.
+fn default_home_for_process(
+    env: &[(&str, &str)],
+    process_user: Option<crate::user::ProcessUser>,
+    rootfs: &Path,
+) -> Option<String> {
+    if env
+        .iter()
+        .rev()
+        .find(|(key, _)| *key == "HOME")
+        .is_some_and(|(_, value)| !value.is_empty())
+    {
+        return None;
+    }
+
+    let uid = process_user.map_or(0, |user| user.uid);
+    crate::user::home_dir_for_uid(rootfs.to_str()?, uid)
+}
+
+/// Install exactly the container environment, never guest-init's control plane.
+fn configure_process_environment(
+    command: &mut Command,
+    env: &[(&str, &str)],
+    process_user: Option<crate::user::ProcessUser>,
+    rootfs: &Path,
+) {
+    command.env_clear();
+    command.envs(env.iter().copied());
+    if let Some(home) = default_home_for_process(env, process_user, rootfs) {
+        command.env("HOME", home);
+    }
 }
 
 /// Resolve a container user string (`uid`, `uid:gid`, `root`, or a name) to a
@@ -1194,10 +1225,7 @@ fn child_process(
     if stdin_null {
         cmd.stdin(std::process::Stdio::null());
     }
-
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
+    configure_process_environment(&mut cmd, env, None, Path::new("/"));
 
     if let Some(command_path) = &resolved_command {
         tracing::debug!(path = %command_path.display(), "Command file resolved");
@@ -1277,6 +1305,85 @@ mod tests {
     fn test_resolve_command_path_missing() {
         let path = resolve_command_path("definitely-not-an-a3s-command", &[("PATH", "/bin")]);
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_default_home_for_process_uses_image_passwd_and_preserves_override() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        std::fs::write(
+            rootfs.path().join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/sh\ndify:x:1000:1000::/home/dify:/bin/sh\n",
+        )
+        .unwrap();
+
+        let dify = crate::user::ProcessUser {
+            uid: 1000,
+            gid: Some(1000),
+        };
+        assert_eq!(
+            default_home_for_process(&[("PATH", "/usr/bin")], Some(dify), rootfs.path()),
+            Some("/home/dify".to_string())
+        );
+        assert_eq!(
+            default_home_for_process(&[], None, rootfs.path()),
+            Some("/root".to_string())
+        );
+        assert_eq!(
+            default_home_for_process(&[("HOME", "/custom")], Some(dify), rootfs.path()),
+            None
+        );
+        assert_eq!(
+            default_home_for_process(&[("HOME", "")], Some(dify), rootfs.path()),
+            Some("/home/dify".to_string())
+        );
+        assert_eq!(
+            default_home_for_process(
+                &[("HOME", "/stale"), ("HOME", "")],
+                Some(dify),
+                rootfs.path()
+            ),
+            Some("/home/dify".to_string())
+        );
+        assert_eq!(
+            default_home_for_process(
+                &[("HOME", ""), ("HOME", "/effective")],
+                Some(dify),
+                rootfs.path()
+            ),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_configure_process_environment_clears_runtime_control_values() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        std::fs::write(
+            rootfs.path().join("etc/passwd"),
+            "dify:x:1000:1000::/home/dify:/bin/sh\n",
+        )
+        .unwrap();
+        let user = crate::user::ProcessUser {
+            uid: 1000,
+            gid: Some(1000),
+        };
+        let mut command = Command::new("/usr/bin/env");
+        command.env("BOX_INTERNAL_SENTINEL", "must-not-leak");
+        configure_process_environment(
+            &mut command,
+            &[("VISIBLE", "yes")],
+            Some(user),
+            rootfs.path(),
+        );
+
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let environment = String::from_utf8(output.stdout).unwrap();
+        assert!(environment.lines().any(|line| line == "VISIBLE=yes"));
+        assert!(environment.lines().any(|line| line == "HOME=/home/dify"));
+        assert!(!environment.contains("BOX_INTERNAL_SENTINEL"));
     }
 
     #[test]

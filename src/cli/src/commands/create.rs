@@ -43,7 +43,8 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         .map_err(|e| e.replace("environment variable", "label"))?
         .into_iter()
         .collect();
-    if let Some(network) = args.common.network.as_deref() {
+    let network_mode = common::resolve_network(args.common.network.as_deref());
+    if let a3s_box_core::NetworkMode::Bridge { network } = &network_mode {
         ensure_network_exists(network)?;
     }
 
@@ -92,13 +93,6 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         .as_ref()
         .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
 
-    // Determine network mode
-    let network_mode = match &args.common.network {
-        Some(name) => a3s_box_core::NetworkMode::Bridge {
-            network: name.clone(),
-        },
-        None => a3s_box_core::NetworkMode::Tsi,
-    };
     let mut extra_env = env.into_iter().collect::<Vec<_>>();
     extra_env.sort_by(|left, right| left.0.cmp(&right.0));
 

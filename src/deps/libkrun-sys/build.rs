@@ -487,6 +487,13 @@ fn make_command(
         .env("PREFIX", install_dir)
         .current_dir(source_dir);
 
+    // Darwin reports Apple Silicon as `arm64`, while the Debian sysroot used
+    // to build libkrun's Linux guest init stores its CRT and libgcc files under
+    // the GNU `aarch64-linux-gnu` tuple. Override the vendored Makefile's
+    // uname-derived value so clang searches the populated sysroot directory.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    cmd.arg("ARCH=aarch64");
+
     for (key, value) in extra_env {
         cmd.env(key, value);
     }

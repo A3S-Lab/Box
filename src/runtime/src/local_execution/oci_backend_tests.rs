@@ -1832,6 +1832,29 @@ async fn bundle_handoff_uses_the_exact_context_sent_to_runtime_create() {
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_handoff_comparison_accepts_only_fixed_system_aliases() {
+    use std::path::Path;
+
+    assert!(exact_handoff_directory_matches(
+        Path::new("/private/var/runtime/bundle-handoffs/box-1/create-1/bundle"),
+        Path::new("/var/runtime/bundle-handoffs/box-1/create-1/bundle"),
+    ));
+    assert!(exact_handoff_directory_matches(
+        Path::new("/private/tmp/runtime/bundle-handoffs/box-1/create-1/bundle"),
+        Path::new("/tmp/runtime/bundle-handoffs/box-1/create-1/bundle"),
+    ));
+    assert!(!exact_handoff_directory_matches(
+        Path::new("/private/var/runtime/bundle-handoffs/box-1/create-2/bundle"),
+        Path::new("/var/runtime/bundle-handoffs/box-1/create-1/bundle"),
+    ));
+    assert!(!exact_handoff_directory_matches(
+        Path::new("/private/opt/runtime/bundle-handoffs/box-1/create-1/bundle"),
+        Path::new("/opt/runtime/bundle-handoffs/box-1/create-1/bundle"),
+    ));
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_handoff_comparison_accepts_only_the_verbatim_namespace_spelling() {

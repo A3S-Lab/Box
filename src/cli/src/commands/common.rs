@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use a3s_box_core::config::{
     validate_vcpu_count, ExecutionIsolation, ResourceLimits, DEFAULT_VCPUS,
 };
+use a3s_box_core::network::NetworkMode;
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
 use clap::{Args, ValueEnum};
 
@@ -49,6 +50,17 @@ pub(crate) fn resolve_isolation(value: Option<IsolationArg>) -> ExecutionIsolati
     match value {
         Some(IsolationArg::Sandbox) => ExecutionIsolation::Sandbox,
         None => ExecutionIsolation::Microvm,
+    }
+}
+
+/// Resolve the optional Docker-compatible CLI network selector.
+pub(crate) fn resolve_network(value: Option<&str>) -> NetworkMode {
+    match value {
+        Some("none") => NetworkMode::None,
+        Some(network) => NetworkMode::Bridge {
+            network: network.to_string(),
+        },
+        None => NetworkMode::Tsi,
     }
 }
 
@@ -122,7 +134,7 @@ pub struct CommonBoxArgs {
     #[arg(long = "virtiofs-cache", value_enum)]
     pub virtiofs_cache: Option<VirtiofsCacheMode>,
 
-    /// Connect to a network (e.g., "mynet")
+    /// Connect to a named bridge network, or use "none" to disable networking
     #[arg(long)]
     pub network: Option<String>,
 
@@ -468,12 +480,7 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
     a3s_box_core::dns::parse_add_host_entries(&common.add_host)
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
 
-    let network = match common.network.as_ref() {
-        Some(network) => a3s_box_core::NetworkMode::Bridge {
-            network: network.clone(),
-        },
-        None => a3s_box_core::NetworkMode::Tsi,
-    };
+    let network = resolve_network(common.network.as_deref());
     let compatibility_config = a3s_box_core::BoxConfig {
         isolation: execution_isolation(common),
         port_map: common.publish.clone(),
@@ -971,6 +978,16 @@ mod tests {
             oom_score_adj: None,
             persistent: false,
         }
+    }
+
+    #[test]
+    fn test_resolve_network_supports_disabled_and_named_modes() {
+        assert!(matches!(resolve_network(None), NetworkMode::Tsi));
+        assert!(matches!(resolve_network(Some("none")), NetworkMode::None));
+        assert!(matches!(
+            resolve_network(Some("backend")),
+            NetworkMode::Bridge { ref network } if network == "backend"
+        ));
     }
 
     #[test]

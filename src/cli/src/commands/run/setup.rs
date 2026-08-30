@@ -66,12 +66,7 @@ pub(super) async fn setup_and_boot(
         }
         None => None,
     };
-    let network_mode = match &args.common.network {
-        Some(name) => a3s_box_core::NetworkMode::Bridge {
-            network: name.clone(),
-        },
-        None => a3s_box_core::NetworkMode::Tsi,
-    };
+    let network_mode = common::resolve_network(args.common.network.as_deref());
 
     // Default (TSI) networking proxies guest sockets to the host, so a container
     // cannot reach its own services over the guest loopback. A health check that

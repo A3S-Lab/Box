@@ -427,9 +427,48 @@ impl OciPreparedExecution {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn exact_handoff_directory_matches(directory: &Path, expected: &Path) -> bool {
     directory == expected
+}
+
+#[cfg(target_os = "macos")]
+fn exact_handoff_directory_matches(directory: &Path, expected: &Path) -> bool {
+    if directory == expected {
+        return true;
+    }
+
+    // `OciBundle::load` canonicalizes an existing directory. macOS exposes
+    // `/var`, `/tmp`, and `/etc` as fixed system aliases below `/private`, so
+    // an operation path constructed before the directory exists can have the
+    // public spelling while the loaded bundle has the canonical spelling.
+    // Match only these platform-owned aliases; resolving arbitrary links here
+    // would weaken the exact container/operation ownership boundary.
+    const SYSTEM_ALIASES: [(&str, &str); 3] = [
+        ("/private/var", "/var"),
+        ("/private/tmp", "/tmp"),
+        ("/private/etc", "/etc"),
+    ];
+    SYSTEM_ALIASES.iter().any(|(canonical, public)| {
+        paths_match_below_alias(directory, canonical, expected, public)
+            || paths_match_below_alias(expected, canonical, directory, public)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn paths_match_below_alias(
+    canonical_path: &Path,
+    canonical_root: &str,
+    public_path: &Path,
+    public_root: &str,
+) -> bool {
+    match (
+        canonical_path.strip_prefix(canonical_root),
+        public_path.strip_prefix(public_root),
+    ) {
+        (Ok(canonical_suffix), Ok(public_suffix)) => canonical_suffix == public_suffix,
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
