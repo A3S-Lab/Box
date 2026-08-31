@@ -455,10 +455,9 @@ Current notes:
 - Large workspace verification now has a first-class run profile: use
   `--package-cache pnpm` (or `--package-cache npm` for npm-only jobs),
   `--tmpfs <workspace>/node_modules`, and per-run `--virtiofs-cache=always`
-  when the host checkout is stable during release verification. macOS/APFS
-  rootfs copies prefer recursive `copyfile(3)` cloning before falling back to
-  byte copies, reducing cached-image startup cost on short-lived build
-  containers.
+  when the host checkout is stable during release verification. macOS rootfs
+  artifacts prefer native clone-on-write operations before falling back to byte
+  copies, reducing cached-image startup cost on short-lived build containers.
 - CLI build smoke coverage now includes a pure `FROM scratch` build that verifies
   `COPY`, image metadata, history, save/exported layer contents, and local image
   removal without registry or VM access. Ignored host smoke coverage now also
@@ -689,11 +688,13 @@ Current notes:
   container rootfs snapshot and surfaced through `ContainerStatus`, while
   writable, SELinux relabel, non-private propagation, and device mounts fail
   explicitly until real runtime mount plumbing is added.
-- macOS box root filesystems now live on per-box case-sensitive APFS sparse
-  images before OCI layers are extracted. The provider remounts persistent
-  generations on restart and detaches/removes ephemeral images during teardown;
-  a real HVF regression verifies `/bin/sh` and `/BIN/SH` are distinct and that
-  writable `Foo`/`foo` files retain distinct contents and inodes across restart.
+- macOS non-snapshot MicroVM root filesystems now default to private raw ext4
+  disks assembled directly from verified OCI layers. Persistent generations
+  restart from the same guest-written disk, while snapshot-backed and explicitly
+  requested legacy generations use the case-sensitive APFS compatibility
+  provider. Real HVF regressions verify case-sensitive names, clean restart,
+  forced-crash journal recovery, stopped maintenance operations, APFS migration,
+  and zero `A3SRootfs` attachments for the default path.
 - CI rejects the removed external VM backend identifiers, CLI flags,
   environment variables, and source module so another build engine cannot be
   reintroduced as a compatibility fallback.

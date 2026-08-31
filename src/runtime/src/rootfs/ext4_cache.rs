@@ -96,7 +96,7 @@ impl Ext4CacheIdentity {
     }
 }
 
-/// Bounded immutable cache used by the experimental guest-native provider.
+/// Bounded immutable cache used by the guest-native provider.
 pub struct Ext4ArtifactCache {
     root: PathBuf,
     max_entries: usize,
@@ -116,7 +116,7 @@ impl Ext4ArtifactCache {
     ///
     /// The cache lock covers lookup, first publication, cloning, and pruning.
     /// This intentionally favors a simple crash-safe protocol over parallel
-    /// cache mutation while the provider remains experimental.
+    /// cache mutation.
     pub fn materialize(
         &self,
         source: &Path,

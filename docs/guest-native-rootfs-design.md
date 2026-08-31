@@ -9,18 +9,18 @@ libkrun virtio-blk and mounted as `/dev/vda` by libkrun's root-disk remount path
 The per-box case-sensitive APFS sparse image remains a compatibility transport
 during migration. It is not the target storage model.
 
-An experimental macOS provider now implements mount-free construction, the
-running ownership handoff, the read-only stopped archive path, and stopped
-legacy migration. New OCI generations are assembled directly into a validated
-raw ext4 artifact; APFS DiskImages are attached only while converting an
-existing legacy writable generation and are synchronously detached before the
-VMM starts. Persistent boxes restart directly from that guest-written disk;
-clean stopped boxes use a restricted maintenance MicroVM. This remains an
-opt-in path, not yet the default.
+The macOS provider implements mount-free construction, the running ownership
+handoff, the read-only stopped archive path, and stopped legacy migration. New
+non-snapshot OCI generations default to a validated raw ext4 artifact. APFS
+DiskImages are attached only for snapshot compatibility, an explicit legacy
+override, or while converting an existing legacy writable generation, and are
+synchronously detached before an ext4-backed VMM starts. Persistent boxes
+restart directly from that guest-written disk; clean stopped boxes use a
+restricted maintenance MicroVM.
 
 ## Problem
 
-The current default macOS compatibility provider keeps one case-sensitive APFS
+The former default macOS compatibility provider keeps one case-sensitive APFS
 sparse image attached for every running box and exports its directory through
 virtio-fs. This solves
 Linux case-sensitivity on a case-insensitive host, but it also makes a guest
@@ -151,8 +151,8 @@ migration paths. The ext4 variant has these fixed semantics:
 new guest-native generations. Directory providers decline it and retain their
 existing staging flow. `RootfsProvider::finalize_for_boot` remains the boundary
 for directory providers and legacy migration: it runs after all permitted
-host-side mutations and before the VMM starts. The experimental macOS block
-provider returns `Ext4Disk` from either boundary.
+host-side mutations and before the VMM starts. The macOS block provider returns
+`Ext4Disk` from either boundary.
 
 For stopped inspection, `InstanceSpec::block_devices` carries typed auxiliary
 raw disks. The maintenance spec has a tiny trusted directory root containing
@@ -269,7 +269,7 @@ The implementation can be an audited in-process writer or a helper shipped in
 the release archive. Tool discovery from the user's shell is acceptable only
 for development diagnostics, never as the default production path.
 
-The current experimental writer pins `mkext4` exactly at `0.0.3` and compiles
+The release-owned writer pins `mkext4` exactly at `0.0.3` and compiles
 it into the runtime. The source is vendored from upstream commit
 `645ba8f39e0a935511e233874f7217bcb6e0e4d8`; the A3S patch changes only
 directory-entry and symlink-target inputs from UTF-8 strings to byte slices.
@@ -306,10 +306,21 @@ The byte-capable adapter uses builder identity
 Already-published v1 and v2 per-box disks remain valid resumable generations
 because their ext4 bytes no longer depend on a host staging namespace.
 
-## Experimental Handoff
+## Default macOS Handoff
 
-On macOS, set `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` to select the
-experimental provider. Its current lifecycle is:
+Provider selection follows durable state and boot requirements in this order:
+
+1. an existing `rootfs-ext4-v1` generation or migration transaction always
+   selects guest-native ext4 and fails closed if the requested lifecycle is
+   incompatible;
+2. a new snapshot-backed box selects the case-sensitive APFS compatibility
+   provider because disk and memory snapshot identity are not yet coupled for
+   raw ext4;
+3. `A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` explicitly selects APFS for a new
+   non-snapshot compatibility generation;
+4. every other macOS MicroVM selects guest-native ext4.
+
+The guest-native lifecycle is:
 
 1. resolve verified OCI layers into a bounded raw-byte logical namespace,
    applying lower-layer-only whiteouts without creating a guest-named host tree;
@@ -344,12 +355,12 @@ provider is the explicit legacy migration window.
 
 The provider supports persistent clean-stop restart and intentionally rejects
 snapshot-backed boxes. A retained `rootfs-ext4-v1` generation selects the same
-provider on later starts even when the experimental creation switch is absent;
-falling back to an old APFS staging tree would lose guest data. Clean stopped
-diff, export, and commit now run through the maintenance guest. Snapshot and
-arbitrary file-access operations remain disabled for this provider. The
-compatibility provider remains the default for new boxes and continues to serve
-snapshots.
+provider on every later start, even when a snapshot or legacy compatibility
+setting is supplied; falling back to an old APFS staging tree would lose guest
+data. Clean stopped diff, export, and commit run through the maintenance guest.
+Snapshot and arbitrary file-access operations remain disabled for this
+provider. Fresh snapshot-backed boxes automatically select the compatibility
+provider.
 
 An unclean host or shim exit is a different valid state, not automatic
 corruption. If the mutable disk carries exactly the builder's feature set plus
@@ -448,9 +459,9 @@ Migration is per box and only while stopped:
 Migration must be resumable. Presence of a temporary file is not evidence of a
 completed generation.
 
-The current opt-in implementation persists
-`rootfs-migration-v1.json` before attaching an existing legacy image. Its
-states are `building`, `artifact_ready`, and `clean_stop_verified`.
+The migration implementation persists `rootfs-migration-v1.json` before
+attaching an existing legacy image. Its states are `building`,
+`artifact_ready`, and `clean_stop_verified`.
 An atomically published ext4 directory or the migration manifest selects the
 guest-native provider on every later process invocation, independent of the
 environment variable. A process failure before publication leaves the APFS
@@ -491,13 +502,13 @@ window implicitly.
 
 ### Phase 1: Immutable block cache
 
-- [x] Select and exactly pin the in-process ext4 writer for the experimental path.
+- [x] Select and exactly pin the in-process ext4 writer.
 - [x] Add deterministic tree adaptation, sparse output, structural validation, and atomic generation publication.
 - [x] Add raw-byte filename and symlink-target support or replace the writer.
 - [x] Assemble OCI layers directly into ext4 without an APFS staging namespace.
 - [x] Build and reuse a deterministic immutable ext4 base cache from OCI content.
 - [ ] Validate metadata fidelity and filesystem integrity on Linux CI.
-- [x] Add atomic publication and cache-version tests for the experimental artifact.
+- [x] Add atomic publication and cache-version tests for the ext4 artifact.
 
 ### Phase 2: Ephemeral MicroVM path
 
@@ -509,7 +520,7 @@ window implicitly.
 - [x] Clone an immutable base image into one per-box raw disk.
 - [x] Run real macOS success and nonzero-exit smoke tests with zero `A3SRootfs` runtime mounts.
 - [x] Add clean restart and forced-crash recovery to the physical macOS/HVF integration gate.
-- [x] Keep an explicit compatibility switch during rollout.
+- [x] Keep a narrowly scoped explicit APFS compatibility switch during rollout.
 
 ### Phase 3: Persistent and maintenance path
 
@@ -526,12 +537,12 @@ window implicitly.
 
 - [x] Implement resumable APFS-to-ext4 migration.
 - [ ] Migrate cache and snapshot formats with versioned manifests.
-- [ ] Make guest-native ext4 the macOS default.
+- [x] Make guest-native ext4 the macOS default for non-snapshot MicroVMs.
 - [ ] Remove legacy sparse images only after verified rollback windows.
 
 ## Release Gates
 
-The default must not switch until CI and host integration prove:
+The default path remains qualified by CI and host integration proving:
 
 - no macOS DiskImages attachment remains while an ext4-backed box is running;
 - ext4 images pass a pinned independent filesystem check;
@@ -543,3 +554,9 @@ The default must not switch until CI and host integration prove:
 - concurrent boxes never share a writable rootfs generation;
 - legacy boxes either migrate successfully or continue on the compatibility
   path without data loss.
+
+On 2026-09-01, the physical Apple Silicon/HVF gate passed the default-path
+persistent restart, forced-crash journal recovery, stopped maintenance, and
+legacy APFS migration scenarios without an experimental selector or a shell
+library-path override. Both scenarios completed with zero live `A3SRootfs`
+attachments for ext4-backed execution.

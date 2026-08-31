@@ -81,9 +81,10 @@ pub(super) fn cleanup_partial_service_box(
 ) {
     crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name);
     crate::cleanup::cleanup_anonymous_volumes(anonymous_volumes);
-    // Release every rootfs provider before deleting the box dir. Linux uses an
-    // overlay mount, while macOS mounts a case-sensitive APFS image at rootfs.
-    // cleanup_box_resources above only detaches volumes and networking.
+    // Release every directory-rootfs compatibility provider before deleting
+    // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
+    // use APFS; guest-native ext4 has no host mount. Resource cleanup above
+    // only detaches volumes and networking.
     a3s_box_runtime::rootfs::unmount_box_overlay(&box_dir.join("merged"));
     a3s_box_runtime::rootfs::unmount_box_rootfs(&box_dir.join("rootfs"));
     let _ = std::fs::remove_dir_all(box_dir);

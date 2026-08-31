@@ -295,19 +295,23 @@ async fn test_boot_cleanup_collects_windows_guest_completed_before_readiness() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_wait_for_exec_ready_returns_when_handler_already_exited() {
+async fn test_wait_for_exec_ready_rejects_provider_exit_without_guest_status() {
     let mut vm = VmManager::with_box_id(
         BoxConfig::default(),
         EventEmitter::new(16),
         "box-exec-exited".to_string(),
     );
-    *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: true }));
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 1 }));
     let tmp = tempfile::tempdir().unwrap();
+    vm.home_dir = tmp.path().to_path_buf();
 
-    vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock"))
+    let error = vm
+        .wait_for_exec_ready(&tmp.path().join("missing-exec.sock"))
         .await
-        .unwrap();
+        .unwrap_err()
+        .to_string();
 
+    assert!(error.contains("exited with code 1"), "{error}");
     assert!(vm.exec_client.is_none());
 }
 

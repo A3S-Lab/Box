@@ -383,7 +383,7 @@ pub struct VmManager {
     #[cfg(unix)]
     pub(crate) tee: Option<Box<dyn TeeExtension>>,
 
-    /// Rootfs provider (overlay or copy)
+    /// Rootfs preparation and transport provider.
     pub(crate) rootfs_provider: Box<dyn crate::rootfs::RootfsProvider>,
 
     /// Path to the exec Unix socket (set after boot)
@@ -426,6 +426,8 @@ impl VmManager {
     pub fn new(config: BoxConfig, event_emitter: EventEmitter) -> Self {
         let box_id = uuid::Uuid::new_v4().to_string();
         let home_dir = a3s_box_core::dirs_home();
+        let rootfs_provider =
+            crate::rootfs::default_provider_for_boot(rootfs_snapshot_requested(&config));
 
         Self {
             config,
@@ -447,7 +449,7 @@ impl VmManager {
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
-            rootfs_provider: crate::rootfs::default_provider(),
+            rootfs_provider,
             exec_socket_path: None,
             pty_socket_path: None,
             port_forward_socket_path: None,
@@ -464,8 +466,10 @@ impl VmManager {
     /// Create a new VM manager with a specific box ID.
     pub fn with_box_id(config: BoxConfig, event_emitter: EventEmitter, box_id: String) -> Self {
         let home_dir = a3s_box_core::dirs_home();
-        let rootfs_provider =
-            crate::rootfs::default_provider_for_box(&home_dir.join("boxes").join(&box_id));
+        let rootfs_provider = crate::rootfs::default_provider_for_box_boot(
+            &home_dir.join("boxes").join(&box_id),
+            rootfs_snapshot_requested(&config),
+        );
 
         Self {
             config,
@@ -717,6 +721,8 @@ impl VmManager {
     ) -> Self {
         let box_id = uuid::Uuid::new_v4().to_string();
         let home_dir = a3s_box_core::dirs_home();
+        let rootfs_provider =
+            crate::rootfs::default_provider_for_boot(rootfs_snapshot_requested(&config));
         Self {
             config,
             box_id,
@@ -737,7 +743,7 @@ impl VmManager {
             preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
-            rootfs_provider: crate::rootfs::default_provider(),
+            rootfs_provider,
             exec_socket_path: None,
             pty_socket_path: None,
             port_forward_socket_path: None,
@@ -759,6 +765,30 @@ impl VmManager {
     /// Get current state.
     pub async fn state(&self) -> BoxState {
         *self.state.read().await
+    }
+}
+
+/// Whether this launch couples the rootfs to a VMM memory snapshot.
+///
+/// The provider must be selected before layout preparation, so keep every
+/// snapshot entry point in one predicate. `KRUN_RESTORE_FROM` remains the
+/// compatibility input for the single-VM restore path.
+fn rootfs_snapshot_requested(config: &BoxConfig) -> bool {
+    if config.snapshot_mem_file.is_some()
+        || config.snapshot_sock.is_some()
+        || config.restore_from.is_some()
+    {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        std::env::var_os("KRUN_RESTORE_FROM").is_some_and(|value| !value.as_os_str().is_empty())
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 

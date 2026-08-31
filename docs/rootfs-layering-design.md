@@ -226,10 +226,12 @@ When a box stops, `VmManager::stop()` calls `rootfs_provider.cleanup(box_dir)` t
 
 ## macOS Support
 
-macOS does not have overlayfs. The directory-transport compatibility provider
-uses a case-sensitive APFS staging filesystem. The guest-native path described
-in the newer design assembles new OCI layers directly into raw ext4 and clones
-that file with `clonefile(2)` without creating an APFS DiskImages mount.
+macOS does not have overlayfs. Non-snapshot MicroVMs now default to the
+guest-native path described in the newer design: new OCI layers are assembled
+directly into raw ext4 and cloned with `clonefile(2)` without creating an APFS
+DiskImage mount. The directory-transport compatibility provider uses a
+case-sensitive APFS staging filesystem only for snapshots and explicit legacy
+operation.
 Persistent restarts reuse that raw file and do not return to a mounted directory
 transport. Clean stopped diff, export,
 and commit operations attach it read-only to a restricted maintenance MicroVM,

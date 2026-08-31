@@ -132,6 +132,37 @@ impl LogicalRootfs {
         )
     }
 
+    pub(super) fn validate_boot_contract(&mut self) -> Result<()> {
+        let init_path = guest_path("sbin/init")?;
+        let resolved = self
+            .resolve_path(&init_path, true, false)?
+            .ok_or_else(|| build_error("Direct ext4 rootfs has no /sbin/init"))?;
+        let entry = self
+            .entries
+            .get(&resolved)
+            .ok_or_else(|| build_error("Direct ext4 rootfs init path is unresolved"))?;
+        let node = self
+            .nodes
+            .get(&entry.node)
+            .ok_or_else(|| build_error("Direct ext4 rootfs init inode is missing"))?;
+        let NodeKind::Regular { size, .. } = &node.kind else {
+            return Err(build_error(
+                "Direct ext4 rootfs /sbin/init is not a regular file",
+            ));
+        };
+        if *size == 0
+            || node.meta.mode != 0o755
+            || node.meta.uid != 0
+            || node.meta.gid != 0
+            || node.meta.mtime != (0, 0)
+        {
+            return Err(build_error(
+                "Direct ext4 rootfs /sbin/init violates the canonical boot contract",
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_account_entries(&mut self, path: &str, required: &[(&str, &str)]) -> Result<()> {
         let existing = self.read_runtime_text(path)?.unwrap_or_default();
         let mut content = existing.clone();

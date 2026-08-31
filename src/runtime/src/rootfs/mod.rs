@@ -6,7 +6,7 @@
 //! Rootfs staging providers are selected by host capability:
 //! - `CopyProvider` — full recursive copy (works everywhere)
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant CoW)
-//! - a case-sensitive APFS provider on macOS (compatibility path)
+//! - guest-native ext4 on macOS, with case-sensitive APFS for compatibility
 //!
 //! A provider finalizes the staging tree into the directory or guest-native
 //! block source handed to the VMM.
@@ -52,6 +52,7 @@ pub use provider::{
     RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsOciPrepareOptions, RootfsProvider,
     RootfsResumeOptions,
 };
+pub(crate) use provider::{default_provider_for_boot, default_provider_for_box_boot};
 pub(crate) use staging_path::{
     ensure_directory_transport_is_lossless, host_staging_path, logical_path_for_staged_child,
     staging_path_map,

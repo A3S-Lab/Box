@@ -436,3 +436,25 @@ fn rejects_guest_init_that_disagrees_with_its_cache_identity() {
     assert!(error.contains("cache identity"), "{error}");
     assert!(!destination.exists());
 }
+
+#[test]
+fn rejects_an_empty_guest_init_before_artifact_publication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let guest_init = temporary.path().join("guest-init");
+    std::fs::write(&guest_init, b"").unwrap();
+    let image = image_from_layers(&temporary.path().join("image"), &[]);
+    let destination = temporary.path().join("artifact");
+
+    let error = publish_oci_layers_ext4(
+        &image,
+        &guest_init,
+        &sha256(b""),
+        &destination,
+        Ext4ArtifactOptions::from_disk_mib(16, [0x37; 16]).unwrap(),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("boot contract"), "{error}");
+    assert!(!destination.exists());
+}

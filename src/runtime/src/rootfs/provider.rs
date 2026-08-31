@@ -1,12 +1,12 @@
 //! Rootfs provider — stages a rootfs and finalizes its VMM transport.
 //!
 //! Portable providers:
-//! - `CopyProvider` — full recursive copy (works everywhere, current default)
+//! - `CopyProvider` — full recursive copy (portable fallback)
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant, CoW)
 //!
-//! macOS also has a case-sensitive APFS compatibility provider. The finalizer
-//! boundary allows that mounted staging model to be replaced by a guest-native
-//! block artifact without teaching OCI preparation about VMM transports.
+//! macOS defaults to a guest-native block artifact and keeps a case-sensitive
+//! APFS provider for snapshot and migration compatibility. The finalizer
+//! boundary keeps OCI preparation independent of the selected VMM transport.
 
 use std::path::{Path, PathBuf};
 
@@ -352,42 +352,26 @@ impl RootfsProvider for OverlayProvider {
     }
 }
 
-/// Auto-detect the best available rootfs provider for the current platform.
-pub fn default_provider() -> Box<dyn RootfsProvider> {
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var("A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-        {
-            tracing::warn!(
-                "Using experimental guest-native ext4 rootfs provider; snapshot-backed boxes remain disabled"
-            );
-            return Box::new(GuestNativeExt4Provider);
-        }
-        tracing::info!("Using case-sensitive APFS rootfs provider");
-        Box::new(CaseSensitiveApfsProvider)
-    }
+#[cfg(target_os = "macos")]
+const LEGACY_APFS_ROOTFS_ENV: &str = "A3S_BOX_MACOS_LEGACY_APFS_ROOTFS";
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        if super::overlay::is_overlay_supported() {
-            tracing::info!("Using overlayfs rootfs provider");
-            return Box::new(OverlayProvider);
-        }
-
-        tracing::info!("Overlayfs not available, using copy provider");
-        Box::new(CopyProvider)
-    }
+#[cfg(target_os = "macos")]
+fn environment_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
-/// Select the provider for an existing box generation.
-///
-/// A raw disk is durable box state, so its provider identity must not depend on
-/// whether the experimental opt-in environment variable is still present on a
-/// later `start` invocation.
-pub fn default_provider_for_box(box_dir: &Path) -> Box<dyn RootfsProvider> {
-    #[cfg(target_os = "macos")]
-    {
+#[cfg(target_os = "macos")]
+fn macos_provider(
+    box_dir: Option<&Path>,
+    snapshot_requested: bool,
+    legacy_apfs_requested: bool,
+) -> Box<dyn RootfsProvider> {
+    if let Some(box_dir) = box_dir {
         for (path, state) in [
             (
                 GuestNativeExt4Provider::artifact_directory(box_dir),
@@ -421,8 +405,78 @@ pub fn default_provider_for_box(box_dir: &Path) -> Box<dyn RootfsProvider> {
         }
     }
 
-    let _ = box_dir;
-    default_provider()
+    if snapshot_requested {
+        tracing::info!("Using case-sensitive APFS compatibility provider for snapshot-backed box");
+        return Box::new(CaseSensitiveApfsProvider);
+    }
+    if legacy_apfs_requested {
+        tracing::warn!(
+            environment = LEGACY_APFS_ROOTFS_ENV,
+            "Using explicitly requested legacy APFS rootfs compatibility provider"
+        );
+        return Box::new(CaseSensitiveApfsProvider);
+    }
+
+    tracing::info!("Using guest-native ext4 rootfs provider");
+    Box::new(GuestNativeExt4Provider)
+}
+
+/// Auto-detect the best available rootfs provider for a non-snapshot boot.
+pub fn default_provider() -> Box<dyn RootfsProvider> {
+    default_provider_for_boot(false)
+}
+
+/// Select a provider for a new boot with explicit snapshot requirements.
+pub(crate) fn default_provider_for_boot(snapshot_requested: bool) -> Box<dyn RootfsProvider> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_provider(
+            None,
+            snapshot_requested,
+            environment_flag(LEGACY_APFS_ROOTFS_ENV),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = snapshot_requested;
+        if super::overlay::is_overlay_supported() {
+            tracing::info!("Using overlayfs rootfs provider");
+            return Box::new(OverlayProvider);
+        }
+
+        tracing::info!("Overlayfs not available, using copy provider");
+        Box::new(CopyProvider)
+    }
+}
+
+/// Select the provider for an existing box generation.
+///
+/// A raw disk is durable box state, so its provider identity must not depend on
+/// compatibility settings supplied to a later `start` invocation.
+pub fn default_provider_for_box(box_dir: &Path) -> Box<dyn RootfsProvider> {
+    default_provider_for_box_boot(box_dir, false)
+}
+
+/// Select a provider for an existing box with explicit snapshot requirements.
+pub(crate) fn default_provider_for_box_boot(
+    box_dir: &Path,
+    snapshot_requested: bool,
+) -> Box<dyn RootfsProvider> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_provider(
+            Some(box_dir),
+            snapshot_requested,
+            environment_flag(LEGACY_APFS_ROOTFS_ENV),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = box_dir;
+        default_provider_for_boot(snapshot_requested)
+    }
 }
 
 #[cfg(test)]
@@ -526,7 +580,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot be exposed losslessly"));
-        assert!(error.contains("A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1"));
+        assert!(error.contains("default guest-native rootfs"));
     }
 
     #[test]
@@ -683,6 +737,45 @@ mod tests {
         let provider = default_provider();
         // On any platform, we should get a provider
         assert!(!provider.name().is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_non_snapshot_default_is_guest_native() {
+        assert_eq!(
+            macos_provider(None, false, false).name(),
+            "guest-native-ext4"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_snapshot_uses_apfs_compatibility() {
+        assert_eq!(
+            macos_provider(None, true, false).name(),
+            "case-sensitive-apfs"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_explicit_legacy_request_uses_apfs_compatibility() {
+        assert_eq!(
+            macos_provider(None, false, true).name(),
+            "case-sensitive-apfs"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_durable_raw_state_cannot_be_downgraded() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("rootfs-ext4-v1")).unwrap();
+
+        assert_eq!(
+            macos_provider(Some(tmp.path()), true, true).name(),
+            "guest-native-ext4"
+        );
     }
 
     #[cfg(target_os = "macos")]

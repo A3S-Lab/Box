@@ -119,7 +119,6 @@ impl VmManager {
         #[cfg(windows)]
         let guest_control_ready_path =
             exec_socket_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
-        #[cfg(windows)]
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         tracing::debug!(
@@ -135,14 +134,38 @@ impl VmManager {
             // Return at once if the VM has already exited (zombie-aware: has_exited
             // treats a zombie shim as exited, unlike is_running's kill(pid,0)). A
             // fast-exiting container never stalls here.
+            #[cfg(unix)]
+            if let Some(exit_code) = self.try_wait_exit().await? {
+                if crate::rootfs::read_persisted_exit_code(&box_dir).is_some() {
+                    tracing::debug!(exit_code, "Guest completed before exec server became ready");
+                    return Ok(());
+                }
+                return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
+            }
+            #[cfg(not(unix))]
             if self.try_wait_exit().await?.is_some() {
                 tracing::debug!("VM exited before exec server became ready");
                 return Ok(());
             }
             if let Some(ref handler) = *self.handler.read().await {
                 if handler.has_exited() {
-                    tracing::debug!("VM exited before exec server became ready");
-                    return Ok(());
+                    #[cfg(unix)]
+                    {
+                        if let Some(exit_code) = crate::rootfs::read_persisted_exit_code(&box_dir) {
+                            self.shim_exit_code = Some(exit_code);
+                            tracing::debug!(
+                                exit_code,
+                                "Guest completed before exec server became ready"
+                            );
+                            return Ok(());
+                        }
+                        return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tracing::debug!("VM exited before exec server became ready");
+                        return Ok(());
+                    }
                 }
             }
 
@@ -249,6 +272,25 @@ impl VmManager {
         tracing::debug!(
             "restore: exec server did not answer an immediate heartbeat; exec/attach will connect on demand"
         );
+    }
+}
+
+#[cfg(unix)]
+fn vm_exited_before_exec_ready(box_dir: &std::path::Path, exit_code: Option<i32>) -> BoxError {
+    let message = match exit_code {
+        Some(exit_code) => format!(
+            "VM process exited with code {exit_code} before the guest exec server became ready"
+        ),
+        None => "VM process exited before the guest exec server became ready".to_string(),
+    };
+    let logs = box_dir.join("logs");
+    BoxError::BoxBootError {
+        message,
+        hint: Some(format!(
+            "Inspect {} and {} for the primary startup failure",
+            logs.join("shim.stderr.log").display(),
+            logs.join("console.err.log").display()
+        )),
     }
 }
 

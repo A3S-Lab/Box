@@ -227,9 +227,7 @@ impl VmManager {
                 crate::rootfs::RootfsFinalizeOptions {
                     disk_mib: self.config.resources.disk_mb,
                     persistent: self.config.persistent,
-                    snapshot: self.config.snapshot_mem_file.is_some()
-                        || self.config.snapshot_sock.is_some()
-                        || self.config.restore_from.is_some(),
+                    snapshot: super::rootfs_snapshot_requested(&self.config),
                     artifact_cache,
                 },
             ) {

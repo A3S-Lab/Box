@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use a3s_box_core::guest_exec::{GuestTerminalStatus, GUEST_TERMINAL_STATUS_FILE_NAME};
 
-const EXPERIMENTAL_ROOTFS_ENV: &str = "A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS";
+// Set A3S_BOX_KEEP_SMOKE_HOME to retain the isolated A3S_HOME after a failure.
+const LEGACY_APFS_ROOTFS_ENV: &str = "A3S_BOX_MACOS_LEGACY_APFS_ROOTFS";
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:3.20";
 const RECOVER_FEATURE: u32 = 0x4;
 
@@ -22,15 +23,23 @@ struct GuestNativeSmoke {
     home: tempfile::TempDir,
     name: String,
     removed: bool,
+    preserve_on_drop: bool,
 }
 
 impl GuestNativeSmoke {
     fn new() -> Self {
+        let preserve_on_drop = std::env::var_os("A3S_BOX_KEEP_SMOKE_HOME").is_some();
+        let mut home = tempfile::tempdir().expect("temporary A3S_HOME");
+        home.disable_cleanup(preserve_on_drop);
+        if preserve_on_drop {
+            eprintln!("    preserving A3S_HOME at {}", home.path().display());
+        }
         Self {
             binary: find_binary(),
-            home: tempfile::tempdir().expect("temporary A3S_HOME"),
+            home,
             name: format!("guest-native-{}", std::process::id()),
             removed: false,
+            preserve_on_drop,
         }
     }
 
@@ -39,7 +48,7 @@ impl GuestNativeSmoke {
         command
             .args(args)
             .env("A3S_HOME", self.home.path())
-            .env_remove(EXPERIMENTAL_ROOTFS_ENV);
+            .env_remove(LEGACY_APFS_ROOTFS_ENV);
         command
     }
 
@@ -143,21 +152,24 @@ fn legacy_apfs_migration_retains_verified_rollback_generation() {
     let image = std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
     let name = smoke.name.clone();
 
-    // Create and stop one compatibility generation first. The helper removes
-    // the opt-in variable by default so a developer's shell cannot
-    // accidentally skip the migration source setup.
-    smoke.ok(&[
-        "run",
-        "--detach",
-        "--persistent",
-        "--name",
-        &name,
-        &image,
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf legacy-generation >/legacy-generation; sync; exec sleep 3600",
-    ]);
+    // Create and stop one compatibility generation first. The explicit legacy
+    // switch is scoped to this command so a developer's shell cannot
+    // accidentally bypass the default migration path.
+    smoke.ok_with_env(
+        &[
+            "run",
+            "--detach",
+            "--persistent",
+            "--name",
+            &name,
+            &image,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf legacy-generation >/legacy-generation; sync; exec sleep 3600",
+        ],
+        &[(LEGACY_APFS_ROOTFS_ENV, "1")],
+    );
     smoke.ok(&[
         "exec",
         &name,
@@ -182,10 +194,10 @@ fn legacy_apfs_migration_retains_verified_rollback_generation() {
         "legacy box unexpectedly has migration state"
     );
 
-    // Opting in on a stopped legacy box starts a durable two-phase migration.
-    // The original sparse image remains as rollback evidence but is detached
-    // before the ext4-backed workload starts.
-    smoke.ok_with_env(&["start", &name], &[(EXPERIMENTAL_ROOTFS_ENV, "1")]);
+    // Starting a stopped legacy box on the default provider begins a durable
+    // two-phase migration. The original sparse image remains as rollback
+    // evidence but is detached before the ext4-backed workload starts.
+    smoke.ok(&["start", &name]);
     smoke.ok(&[
         "exec",
         &name,
@@ -228,7 +240,7 @@ fn legacy_apfs_migration_retains_verified_rollback_generation() {
 
 impl Drop for GuestNativeSmoke {
     fn drop(&mut self) {
-        if !self.removed {
+        if !self.removed && !self.preserve_on_drop {
             let _ = self.command(&["rm", "--force", &self.name]).output();
         }
     }
@@ -241,21 +253,18 @@ fn guest_native_persistent_restart_and_crash_recovery() {
     let image = std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
     let name = smoke.name.clone();
 
-    smoke.ok_with_env(
-        &[
-            "run",
-            "--detach",
-            "--persistent",
-            "--name",
-            &name,
-            &image,
-            "--",
-            "/bin/sh",
-            "-c",
-            "printf generation-one >/generation-one; exec sleep 3600",
-        ],
-        &[(EXPERIMENTAL_ROOTFS_ENV, "1")],
-    );
+    smoke.ok(&[
+        "run",
+        "--detach",
+        "--persistent",
+        "--name",
+        &name,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf generation-one >/generation-one; exec sleep 3600",
+    ]);
     smoke.ok(&[
         "exec",
         &name,
@@ -271,8 +280,8 @@ fn guest_native_persistent_restart_and_crash_recovery() {
     assert_eq!(clean_status.exit_code, 143);
     assert!(clean_status.rootfs_quiesced);
 
-    // The retained raw generation selects its provider without the experimental
-    // creation switch. Generation two writes state that must survive a crash.
+    // The retained raw generation remains authoritative on every later start.
+    // Generation two writes state that must survive a crash.
     smoke.ok(&["start", &name]);
     smoke.ok(&[
         "exec",

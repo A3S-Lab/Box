@@ -146,7 +146,7 @@ impl VmManager {
         self.provider = Some(provider);
     }
 
-    /// Override the rootfs provider (overlay or copy).
+    /// Override the rootfs preparation and transport provider.
     ///
     /// By default, `default_provider()` auto-detects the best available provider.
     /// Call this before `boot()` to force a specific provider.

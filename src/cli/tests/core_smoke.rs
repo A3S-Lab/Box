@@ -2986,7 +2986,7 @@ fi"#;
         std::fs::read_dir(&boxes_dir)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true),
-        "removed box left its APFS rootfs directory behind"
+        "removed box left its guest-native rootfs directory behind"
     );
 
     let cached = smoke.ok(&[
@@ -3007,10 +3007,14 @@ fi"#;
     assert!(
         smoke
             .home_path()
-            .join("cache/rootfs-apfs-v2")
+            .join("cache/rootfs-ext4-v1")
             .read_dir()
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false),
-        "macOS run did not persist a case-sensitive APFS rootfs cache image"
+        "macOS run did not persist a guest-native ext4 rootfs cache artifact"
+    );
+    assert!(
+        !smoke.home_path().join("cache/rootfs-apfs-v2").exists(),
+        "default macOS run unexpectedly created an APFS rootfs cache"
     );
 }

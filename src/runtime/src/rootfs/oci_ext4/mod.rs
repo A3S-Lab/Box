@@ -38,6 +38,7 @@ pub(super) fn publish_oci_layers_ext4(
     }
     rootfs.install_guest_init(guest_init, guest_init_sha256)?;
     rootfs.create_essential_files()?;
+    rootfs.validate_boot_contract()?;
     let (builder, fills) = rootfs.declare(options)?;
     publish_ext4_build_plan(destination, options, builder, fills)
 }

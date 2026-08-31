@@ -153,7 +153,7 @@ pub(crate) fn ensure_directory_transport_is_lossless(root: &Path) -> Result<()> 
             let logical = validate_relative(Path::new(&logical))?;
             if host_staging_path(&logical)? != logical {
                 return Err(BoxError::BuildError(format!(
-                    "Guest path {} cannot be exposed losslessly through the macOS directory rootfs provider; enable A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1",
+                    "Guest path {} cannot be exposed losslessly through the macOS directory compatibility transport; use a non-snapshot MicroVM with the default guest-native rootfs or choose representable image paths",
                     logical.display()
                 )));
             }

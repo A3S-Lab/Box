@@ -69,9 +69,7 @@ impl VmManager {
                 hint: None,
             })?;
 
-        let snapshot_requested = self.config.snapshot_mem_file.is_some()
-            || self.config.snapshot_sock.is_some()
-            || self.config.restore_from.is_some();
+        let snapshot_requested = super::rootfs_snapshot_requested(&self.config);
         if !self.config.isolation.is_sandbox() {
             let resume = self.rootfs_provider.resume_for_boot(
                 &box_dir,

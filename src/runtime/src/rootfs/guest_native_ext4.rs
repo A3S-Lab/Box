@@ -1,4 +1,4 @@
-//! Experimental macOS provider for a guest-owned ext4 root filesystem.
+//! Default macOS provider for a guest-owned ext4 root filesystem.
 
 use std::path::{Path, PathBuf};
 

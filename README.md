@@ -338,8 +338,7 @@ runtime mutation instead of being stored and silently weakened.
 | Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
-On macOS, `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` enables the in-progress
-guest-native storage path for new MicroVMs and stopped legacy APFS boxes. It
+On macOS, non-snapshot MicroVMs use a guest-native ext4 rootfs by default. Box
 assembles verified OCI layers directly into a pinned, validated ext4 base and
 publishes a private raw disk for each box, using a copy-on-write clone when the
 immutable artifact cache is enabled. New generations do not create a
@@ -355,20 +354,24 @@ handoffs rather than host access to the active root disk. The first pristine
 workload launch and atomically published by the host; later boots do not rescan
 the rootfs. Persistent boxes reuse the exact guest-written raw disk after PID 1
 has flushed it, remounted it read-only, and acknowledged the handoff. A retained
-raw generation selects this provider on restart even without the experimental
-creation switch. After an unclean host or shim exit, the runtime validates the
-fixed ext4 recovery envelope and lets the guest kernel replay its journal; it
-does not mount or parse unreplayed guest metadata on macOS. Clean stopped boxes
-serve `diff`, `export`, and `commit` through a one-shot, networkless maintenance
-MicroVM. Its current trusted guest-init boots from an ephemeral directory root,
+raw generation remains authoritative on every restart and cannot be silently
+downgraded to a directory transport. After an unclean host or shim exit, the
+runtime validates the fixed ext4 recovery envelope and lets the guest kernel
+replay its journal; it does not mount or parse unreplayed guest metadata on
+macOS. Clean stopped boxes serve `diff`, `export`, and `commit` through a
+one-shot, networkless maintenance MicroVM. Its current trusted guest-init boots
+from an ephemeral directory root,
 attaches the user disk read-only, mounts it as `ro,noload`, exposes only archive,
 heartbeat, and shutdown control, and tears down before releasing the lifecycle
 lock. Journal-dirty disks are rejected until a normal writable boot and clean
 stop completes recovery. A legacy conversion is recorded as a durable
 `building → artifact_ready → clean_stop_verified` transaction. The old sparse
 image remains detached as rollback evidence after verification; Box does not
-silently delete it. Snapshot-backed boxes still require the compatibility path
-described in [Guest-Native Rootfs Design](docs/guest-native-rootfs-design.md).
+silently delete it. Snapshot-backed boxes automatically use the APFS
+compatibility transport. `A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` is a narrowly
+scoped compatibility override for creating or retaining a new non-snapshot APFS
+generation during rollout; it never overrides an existing raw generation. See
+[Guest-Native Rootfs Design](docs/guest-native-rootfs-design.md).
 
 A few end-to-end workflows:
 
@@ -520,7 +523,7 @@ operation returns a typed availability error before dispatch.
 | Path | Current evidence | Boundary that remains visible |
 | --- | --- | --- |
 | Linux MicroVM | Primary local path through KVM/libkrun; Runtime 0.5 readiness/liveness and bounded graceful-stop cases are wired into the advertised provider profiles alongside self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | The current revision still requires an enrolled KVM run of all capability-triggered lifecycle cases plus the longer `G2`/`R24` profiles |
-| macOS MicroVM | Apple Silicon/HVF build and packaging path plus an opt-in real-HVF published-port regression gate | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
+| macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical rootfs-lifecycle and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route; Runtime 0.5 lifecycle cases are part of the advertised-profile gate | Shared-kernel preview; the current revision still needs retained lifecycle-gate evidence, and VM-only controls are rejected |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
