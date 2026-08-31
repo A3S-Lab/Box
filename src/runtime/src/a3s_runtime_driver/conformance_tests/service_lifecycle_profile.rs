@@ -15,6 +15,7 @@ const SEPARATED_HTTP_SERVICE: &str = concat!(
     "cat > /tmp/r17-lifecycle-http-handler <<'R17_LIFECYCLE_HANDLER'\n",
     "#!/bin/sh\n",
     "IFS= read -r request_line || exit 1\n",
+    "request_line=${request_line%$(printf '\\r')}\n",
     "while IFS= read -r header; do\n",
     "  [ \"$header\" = \"$(printf '\\r')\" ] && break\n",
     "done\n",
