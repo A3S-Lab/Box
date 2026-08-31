@@ -114,6 +114,7 @@ impl VmManager {
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
                     oci_config,
+                    #[cfg(target_os = "macos")]
                     oci_manifest_digest: None,
                     prefer_image_rootfs_metadata: false,
                     tee_instance_config,
@@ -170,6 +171,7 @@ impl VmManager {
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
                     oci_config,
+                    #[cfg(target_os = "macos")]
                     oci_manifest_digest: None,
                     prefer_image_rootfs_metadata: false,
                     tee_instance_config,
@@ -231,6 +233,7 @@ impl VmManager {
                 workspace_path,
                 console_output: Some(logs_dir.join("console.log")),
                 oci_config,
+                #[cfg(target_os = "macos")]
                 oci_manifest_digest: None,
                 prefer_image_rootfs_metadata: false,
                 tee_instance_config,
@@ -271,6 +274,7 @@ impl VmManager {
                 workspace_path,
                 console_output: Some(logs_dir.join("console.log")),
                 oci_config: None,
+                #[cfg(target_os = "macos")]
                 oci_manifest_digest: None,
                 prefer_image_rootfs_metadata: !has_persistent_rootfs_generation,
                 tee_instance_config,
@@ -412,6 +416,7 @@ impl VmManager {
             workspace_path,
             console_output: Some(logs_dir.join("console.log")),
             oci_config,
+            #[cfg(target_os = "macos")]
             oci_manifest_digest: Some(manifest_digest),
             prefer_image_rootfs_metadata,
             tee_instance_config,

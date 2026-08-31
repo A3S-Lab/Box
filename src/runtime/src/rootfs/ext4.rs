@@ -7,7 +7,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
+#[cfg(any(target_os = "macos", all(unix, test)))]
+use std::io::{Seek, SeekFrom};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -41,6 +43,7 @@ const MAX_CAPACITY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_IMAGE_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Validation result for a mutable guest-owned generation selected for boot.
+#[cfg(any(target_os = "macos", all(unix, test)))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Ext4ResumeValidation {
     /// The filesystem was cleanly unmounted and passed full structural checks.
@@ -757,6 +760,7 @@ pub(super) fn validate_ext4_image(path: &Path, expected_length: u64) -> Result<(
 /// journal, so a host-side tree reader is the wrong recovery mechanism. We
 /// instead validate the exact A3S superblock envelope and let the isolated
 /// guest kernel replay its own journal on the next read-write mount.
+#[cfg(any(target_os = "macos", all(unix, test)))]
 pub(super) fn validate_ext4_image_for_resume(
     path: &Path,
     expected_length: u64,
@@ -800,6 +804,7 @@ pub(super) fn validate_ext4_image_for_resume(
     Ok(Ext4ResumeValidation::JournalRecoveryRequired)
 }
 
+#[cfg(any(target_os = "macos", all(unix, test)))]
 fn validate_recovery_superblock(
     superblock: &mkext4::spec::Superblock,
     bytes: &[u8; mkext4::spec::Superblock::LEN],

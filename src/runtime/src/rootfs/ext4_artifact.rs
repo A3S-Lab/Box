@@ -29,6 +29,7 @@ pub(super) fn open_ext4_artifact(directory: &Path) -> Result<Ext4Artifact> {
 /// mounted by a host crash is accepted only when its primary superblock still
 /// matches the exact A3S artifact contract; the guest kernel then owns journal
 /// replay inside the VM.
+#[cfg(target_os = "macos")]
 pub(super) fn open_ext4_artifact_for_resume(
     directory: &Path,
 ) -> Result<(Ext4Artifact, Ext4ResumeValidation)> {

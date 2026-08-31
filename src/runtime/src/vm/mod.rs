@@ -97,6 +97,7 @@ pub(crate) struct BoxLayout {
     /// Exact resolved OCI manifest behind a fresh image-derived generation.
     /// Snapshot and externally prebuilt roots intentionally have no reusable
     /// base identity until their own generation protocol is implemented.
+    #[cfg(target_os = "macos")]
     pub(crate) oci_manifest_digest: Option<String>,
     /// Fresh image/cache rootfs generations must ignore any terminal manifest
     /// baked into an older malicious image. Persistent and Snapshot generations

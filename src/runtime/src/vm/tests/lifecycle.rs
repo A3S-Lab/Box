@@ -58,10 +58,10 @@ async fn destroy_uses_guest_stop_and_verifies_raw_rootfs_handoff() {
     vm.exec_socket_path = Some(exec_socket);
 
     let exited = Arc::new(AtomicBool::new(false));
-    let host_stop_called = Arc::new(AtomicBool::new(false));
+    let backend_finalized = Arc::new(AtomicBool::new(false));
     *vm.handler.write().await = Some(Box::new(GuestStopHandler {
         exited: Arc::clone(&exited),
-        host_stop_called: Arc::clone(&host_stop_called),
+        backend_finalized: Arc::clone(&backend_finalized),
     }));
 
     let server_exited = Arc::clone(&exited);
@@ -83,7 +83,7 @@ async fn destroy_uses_guest_stop_and_verifies_raw_rootfs_handoff() {
     vm.destroy_with_options(libc::SIGTERM, 1_000).await.unwrap();
     server.await.unwrap();
 
-    assert!(!host_stop_called.load(Ordering::SeqCst));
+    assert!(backend_finalized.load(Ordering::SeqCst));
     assert_eq!(vm.exit_code(), Some(143));
     assert!(box_dir.exists());
 }

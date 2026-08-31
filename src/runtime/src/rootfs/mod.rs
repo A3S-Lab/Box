@@ -17,9 +17,9 @@ mod baseline;
 mod builder;
 #[cfg(unix)]
 mod ext4;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", all(unix, test)))]
 mod ext4_artifact;
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", all(unix, test)))]
 mod ext4_cache;
 #[cfg(target_os = "macos")]
 mod guest_native_ext4;
@@ -40,7 +40,7 @@ pub use ext4::{
     publish_ext4_artifact, Ext4Artifact, Ext4ArtifactManifest, Ext4ArtifactOptions,
     EXT4_ARTIFACT_SCHEMA, EXT4_BUILDER_ID,
 };
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub(crate) use ext4_cache::{Ext4ArtifactCache, Ext4CacheIdentity};
 #[cfg(target_os = "macos")]
 pub use guest_native_ext4::GuestNativeExt4Provider;
