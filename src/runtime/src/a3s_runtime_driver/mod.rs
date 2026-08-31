@@ -33,7 +33,7 @@ use crate::local_execution::TransientRegistryAuthBroker;
 use crate::tee::AttestationPolicy;
 #[cfg(any(test, feature = "runtime-provider-qualification"))]
 use crate::LocalExecutionBackend;
-use crate::{ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
+use crate::{BoxRecord, ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
 
 use self::artifact::ArtifactStorageOwner;
 use self::attestation::AttestationArtifactOwner;
@@ -314,6 +314,58 @@ impl BoxRuntimeDriver {
                 ))
             })?
     }
+
+    /// Reserves the complete caller-declared graceful shutdown interval plus
+    /// the ordinary provider-control budget. A provider-local timeout must not
+    /// truncate a valid Runtime lifecycle policy; an outer request deadline
+    /// may still bound the complete public operation.
+    pub(super) async fn bounded_lifecycle<T, F>(
+        &self,
+        spec: &RuntimeUnitSpec,
+        operation: &'static str,
+        future: F,
+    ) -> RuntimeResult<T>
+    where
+        F: Future<Output = RuntimeResult<T>>,
+    {
+        let timeout = self.lifecycle_control_timeout(spec);
+        tokio::time::timeout(timeout, future).await.map_err(|_| {
+            RuntimeError::ProviderUnavailable(format!(
+                "Box {operation} exceeded the lifecycle-aware control timeout"
+            ))
+        })?
+    }
+
+    fn lifecycle_control_timeout(&self, spec: &RuntimeUnitSpec) -> Duration {
+        let graceful_shutdown_seconds = spec
+            .service_lifecycle
+            .as_ref()
+            .map_or(0, |lifecycle| u64::from(lifecycle.shutdown_grace_seconds));
+        self.control_timeout_with_grace(graceful_shutdown_seconds)
+    }
+
+    pub(super) async fn bounded_record_lifecycle<T, F>(
+        &self,
+        record: &BoxRecord,
+        operation: &'static str,
+        future: F,
+    ) -> RuntimeResult<T>
+    where
+        F: Future<Output = RuntimeResult<T>>,
+    {
+        let timeout = self.control_timeout_with_grace(record.stop_timeout.unwrap_or(0));
+        tokio::time::timeout(timeout, future).await.map_err(|_| {
+            RuntimeError::ProviderUnavailable(format!(
+                "Box {operation} exceeded the lifecycle-aware control timeout"
+            ))
+        })?
+    }
+
+    fn control_timeout_with_grace(&self, graceful_shutdown_seconds: u64) -> Duration {
+        self.config
+            .control_timeout
+            .saturating_add(Duration::from_secs(graceful_shutdown_seconds))
+    }
 }
 
 fn production_manager(
@@ -482,6 +534,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             RuntimeFeature::ServiceTcp,
             RuntimeFeature::Logs,
             RuntimeFeature::Exec,
+            RuntimeFeature::ServiceLifecycle,
         ];
         if self.secret_materialization.configured() {
             features.push(RuntimeFeature::SecretReferences);
@@ -507,7 +560,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             provider_build: self.provider_build().await?,
             unit_classes: vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service],
             artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()],
-            // Runtime 0.2 uses `Sandbox` as the provider-neutral isolation
+            // Runtime uses `Sandbox` as the provider-neutral isolation
             // class. `execution_isolation` selects Box's concrete backend.
             isolation_levels,
             network_modes: vec![NetworkMode::None, NetworkMode::Service],
@@ -538,7 +591,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
     }
 
     async fn inspect(&self, unit: &RuntimeUnitRecord) -> RuntimeResult<RuntimeInspection> {
-        self.bounded("inspection", self.inspect_unit(unit)).await
+        self.bounded_lifecycle(&unit.spec, "inspection", self.inspect_unit(unit))
+            .await
     }
 
     async fn stop(
@@ -546,7 +600,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
         unit: &RuntimeUnitRecord,
         request: &RuntimeActionRequest,
     ) -> RuntimeResult<RuntimeObservation> {
-        self.bounded("stop", self.stop_unit(unit, request)).await
+        self.bounded_lifecycle(&unit.spec, "stop", self.stop_unit(unit, request))
+            .await
     }
 
     async fn remove(
@@ -554,7 +609,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
         unit: &RuntimeUnitRecord,
         request: &RuntimeActionRequest,
     ) -> RuntimeResult<RuntimeRemoval> {
-        self.bounded("remove", self.remove_unit(unit, request))
+        self.bounded_lifecycle(&unit.spec, "remove", self.remove_unit(unit, request))
             .await
     }
 
@@ -586,6 +641,8 @@ mod exec_integration_tests;
 mod lifecycle_tests;
 #[cfg(test)]
 mod service_endpoint_tests;
+#[cfg(all(test, unix))]
+mod service_lifecycle_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

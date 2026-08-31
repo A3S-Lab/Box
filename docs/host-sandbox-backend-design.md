@@ -226,23 +226,33 @@ ownership, and cleanup in the runtime layer before Box considers exposing a
 broader network contract. It is capability evidence, not an advertised Box
 feature.
 
-## Runtime health intent
+## Runtime Service lifecycle intent
 
-The A3S Runtime provider supports HTTP, TCP, and command health probes for
-Services without creating another monitor or persisted health registry. HTTP
-and TCP probes reach only declared TCP ports through the existing
+The A3S Runtime provider supports independent readiness and liveness policies
+using HTTP, TCP, or command probes without creating another monitor or
+persisted health registry. Readiness controls traffic admission. Liveness is a
+recovery signal and applies the declared `Never`, `Always`, or bounded
+`OnFailure` restart policy against the durable Box execution generation. One
+public Runtime operation performs at most one liveness-driven restart, so an
+always-failing probe cannot create an unbounded provider loop.
+
+HTTP and TCP probes reach only declared TCP ports through the existing
 generation-fenced `ExecutionPortConnector`; command probes cross the existing
-generation-fenced exec session boundary. Apply owns bounded start-period and
-threshold convergence. Inspect and exec return one current sample, then re-read
-the canonical execution lifecycle so a Service exit always takes precedence
-over a stale in-flight result.
+generation-fenced exec session boundary. Readiness and liveness keep separate
+start periods and consecutive success/failure counters. Apply, inspect, and
+exec settle both configured thresholds and re-read the canonical execution
+lifecycle after every in-flight probe, so a terminal Service always takes
+precedence over stale readiness or liveness evidence.
 
-Runtime health policy is not projected into the CLI
-`ExecutionRecordPolicy.health_check`. Consequently a Runtime-owned Service has
-one health owner and does not spawn the CLI's detached health worker. Probe
-stdout, stderr, transport details, and provider errors are not published in the
-Runtime observation; messages are single-line and bounded by the Runtime
-contract.
+The optional lifecycle policy also persists `SIGTERM` and the exact declared
+shutdown grace in the canonical execution record. Stop and liveness restart
+reserve the full grace plus the provider control budget; a cooperative Service
+may exit during that interval, while a non-cooperative Service is forced at the
+deadline. Runtime policy is not projected into
+`ExecutionRecordPolicy.health_check`, so a Runtime-owned Service has one health
+owner and never spawns the CLI's detached health worker. Probe stdout, stderr,
+transport details, and provider errors are not published in the Runtime
+observation; messages remain single-line and contract-bounded.
 
 ## Storage and initialization
 

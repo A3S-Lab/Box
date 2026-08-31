@@ -149,6 +149,14 @@ pub(super) fn creation_request_for(
             healthcheck_disabled: true,
             log_config: LogConfig::default(),
             init: true,
+            stop_signal: spec
+                .service_lifecycle
+                .as_ref()
+                .map(|_| "SIGTERM".to_string()),
+            stop_timeout: spec
+                .service_lifecycle
+                .as_ref()
+                .map(|lifecycle| u64::from(lifecycle.shutdown_grace_seconds)),
             managed_secret_root: spec
                 .secrets
                 .iter()

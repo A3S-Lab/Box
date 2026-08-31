@@ -43,6 +43,26 @@ instead of creating a second Box lifecycle path. The driver owns provider
 identity, generation fencing, recovery, Service endpoints, health observations,
 logs, exec, resource controls, and cleanup.
 
+The provider pins `a3s-runtime` 0.5.0 at
+`4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd` and advertises its atomic
+`ServiceLifecycle` feature. `RuntimeUnitSpec::health` remains readiness for
+traffic admission. `RuntimeServiceLifecycle::liveness` independently drives
+recovery according to the declared restart policy, while
+`shutdown_grace_seconds` is persisted as an exact `SIGTERM` grace interval
+before Box forces termination. Apply, inspect, and exec use independent
+threshold trackers for the two probes, refresh the canonical execution after
+every in-flight probe, and apply at most one liveness restart per public
+operation. The durable Box execution generation remains the sole restart
+counter and lifecycle authority.
+
+The lifecycle-aware provider timeout reserves the complete declared grace plus
+the normal control-plane budget. Source-level coverage proves threshold reset,
+one-restart generation advancement, exact policy mapping, and timeout
+reservation. Advertising the feature also activates the real-provider
+readiness/liveness separation, liveness transition, graceful stop, and forced
+deadline cases; those ignored-by-default cases require the dedicated Linux
+Sandbox or KVM certification environment.
+
 Both Linux isolation paths implement the same advertised Runtime profile set.
 `NetworkMode::None` and `NetworkMode::Service` remain loopback-only and do not
 grant workload egress. A MicroVM retains explicit vsock IPC without libkrun TSI

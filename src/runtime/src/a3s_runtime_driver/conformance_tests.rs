@@ -20,6 +20,7 @@ mod recovery_profile;
 mod resources_profile;
 mod security_evidence;
 mod security_profile;
+mod service_lifecycle_profile;
 
 use std::fmt::Display;
 

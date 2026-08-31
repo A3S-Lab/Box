@@ -699,6 +699,7 @@ pub(super) fn runtime_spec(
         },
         isolation: IsolationLevel::Sandbox,
         health: None,
+        service_lifecycle: None,
         restart: if class == RuntimeUnitClass::Service {
             RestartPolicy::Always
         } else {
@@ -724,6 +725,7 @@ pub(super) fn accepted(spec: &RuntimeUnitSpec) -> RuntimeObservation {
         started_at_ms: None,
         finished_at_ms: None,
         health: None,
+        liveness: None,
         outputs: Vec::new(),
         usage: None,
         evidence: None,

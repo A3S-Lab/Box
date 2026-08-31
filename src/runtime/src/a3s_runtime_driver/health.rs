@@ -8,8 +8,8 @@ use a3s_box_core::{
     ExecRequest, ExecutionManagerError, ExecutionPortStream, ExecutionSessionManager,
 };
 use a3s_runtime::contract::{
-    HealthProbe, RuntimeHealthObservation, RuntimeHealthState, RuntimeObservation, RuntimeUnitSpec,
-    RuntimeUnitState, TransportProtocol,
+    HealthProbe, RuntimeHealthCheck, RuntimeHealthObservation, RuntimeHealthState,
+    RuntimeObservation, RuntimeUnitSpec, TransportProtocol,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,108 +22,208 @@ use super::BoxRuntimeDriver;
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 const MAX_HTTP_RESPONSE_HEAD_BYTES: usize = 8 * 1024;
 
+struct ProbeTracker<'a> {
+    policy: &'a RuntimeHealthCheck,
+    next_probe_at: tokio::time::Instant,
+    successes: u32,
+    failures: u32,
+    settled: Option<RuntimeHealthObservation>,
+}
+
+impl<'a> ProbeTracker<'a> {
+    fn new(policy: &'a RuntimeHealthCheck, record: &BoxRecord) -> RuntimeResult<Self> {
+        Ok(Self {
+            policy,
+            next_probe_at: tokio::time::Instant::now()
+                + remaining_start_period(record, policy.start_period_ms)?,
+            successes: 0,
+            failures: 0,
+            settled: None,
+        })
+    }
+
+    fn is_settled(&self) -> bool {
+        self.settled.is_some()
+    }
+
+    fn is_due(&self, now: tokio::time::Instant) -> bool {
+        !self.is_settled() && now >= self.next_probe_at
+    }
+
+    fn record(&mut self, observation: RuntimeHealthObservation) {
+        match observation.state {
+            RuntimeHealthState::Healthy => {
+                self.successes = self.successes.saturating_add(1);
+                self.failures = 0;
+            }
+            RuntimeHealthState::Unhealthy => {
+                self.failures = self.failures.saturating_add(1);
+                self.successes = 0;
+            }
+            RuntimeHealthState::Unknown | RuntimeHealthState::Starting => {
+                self.successes = 0;
+                self.failures = 0;
+            }
+        }
+        if self.successes >= self.policy.success_threshold
+            || self.failures >= self.policy.failure_threshold
+        {
+            self.settled = Some(observation);
+        } else {
+            self.next_probe_at =
+                tokio::time::Instant::now() + Duration::from_millis(self.policy.interval_ms);
+        }
+    }
+}
+
 impl BoxRuntimeDriver {
-    /// Applies the Runtime threshold policy during Service startup. The state
-    /// is derived from live, generation-fenced probes and is not copied into a
-    /// second health registry or lifecycle store. The Runtime apply deadline
-    /// bounds complete convergence; each Box control operation remains bounded
-    /// independently by the driver configuration.
+    /// Applies the independent readiness and liveness threshold policies. The
+    /// state is derived from live, generation-fenced probes and is not copied
+    /// into a second health registry or lifecycle store. The Runtime operation
+    /// deadline bounds complete convergence; each Box control operation remains
+    /// bounded independently by the driver configuration.
     pub(super) async fn wait_for_service_health(
         &self,
         spec: &RuntimeUnitSpec,
-        mut record: BoxRecord,
+        record: BoxRecord,
     ) -> RuntimeResult<RuntimeObservation> {
-        let policy = spec.health.as_ref().ok_or_else(|| {
-            RuntimeError::Protocol("health convergence requires a Runtime health policy".into())
-        })?;
-        if local_identity(&record)?.2 != ManagedExecutionState::Running {
-            return self.observation(spec, &record, None, None).await;
-        }
-
-        let start_period = remaining_start_period(&record, policy.start_period_ms)?;
-        if !start_period.is_zero() {
-            tokio::time::sleep(start_period).await;
-            record = self.refresh_record(spec, record).await?;
-            if local_identity(&record)?.2 != ManagedExecutionState::Running {
-                return self.observation(spec, &record, None, None).await;
-            }
-        }
-
-        let mut successes = 0_u32;
-        let mut failures = 0_u32;
-        loop {
-            let health = self.probe_health(spec, &record).await;
-            // A Service can terminate while a bounded probe is in flight. Read
-            // lifecycle state again before publishing health so a stale probe
-            // can never make a stopped execution look ready.
-            record = self.refresh_record(spec, record).await?;
-            let observation = self.observation(spec, &record, None, None).await?;
-            if observation.state != RuntimeUnitState::Running {
-                return Ok(observation);
-            }
-            let health = health?;
-            match health.state {
-                RuntimeHealthState::Healthy => {
-                    successes = successes.saturating_add(1);
-                    failures = 0;
-                }
-                RuntimeHealthState::Unhealthy => {
-                    failures = failures.saturating_add(1);
-                    successes = 0;
-                }
-                RuntimeHealthState::Unknown | RuntimeHealthState::Starting => {
-                    successes = 0;
-                    failures = 0;
-                }
-            }
-            if successes >= policy.success_threshold || failures >= policy.failure_threshold {
-                return attach_health(spec, observation, health);
-            }
-
-            tokio::time::sleep(Duration::from_millis(policy.interval_ms)).await;
-        }
+        self.settle_service_health(spec, record).await
     }
 
-    /// Produces a current health sample for inspection and exec observations.
-    /// Startup convergence owns thresholds; subsequent observations remain
-    /// bounded to one live probe, matching Runtime's read-only inspect model.
+    /// Produces threshold-settled readiness and liveness evidence for inspect
+    /// and exec observations without creating a parallel durable registry.
     pub(super) async fn observe_service_health(
         &self,
         spec: &RuntimeUnitSpec,
         record: &BoxRecord,
     ) -> RuntimeResult<RuntimeObservation> {
-        let observation = self.observation(spec, record, None, None).await?;
-        let Some(policy) = &spec.health else {
-            return Ok(observation);
-        };
-        if observation.state != RuntimeUnitState::Running {
-            return Ok(observation);
+        self.settle_service_health(spec, record.clone()).await
+    }
+
+    async fn settle_service_health(
+        &self,
+        spec: &RuntimeUnitSpec,
+        mut record: BoxRecord,
+    ) -> RuntimeResult<RuntimeObservation> {
+        if spec.health.is_none() && spec.service_lifecycle.is_none() {
+            return self.observation(spec, &record, None, None).await;
         }
-        let health = if remaining_start_period(record, policy.start_period_ms)?.is_zero() {
-            self.probe_health(spec, record).await
-        } else {
-            Ok(RuntimeHealthObservation {
-                state: RuntimeHealthState::Starting,
-                checked_at_ms: now_ms(),
-                message: None,
-            })
-        };
-        let record = self.refresh_record(spec, record.clone()).await?;
-        let observation = self.observation(spec, &record, None, None).await?;
-        if observation.state != RuntimeUnitState::Running {
-            return Ok(observation);
+        if local_identity(&record)?.2 != ManagedExecutionState::Running {
+            return self.observation(spec, &record, None, None).await;
         }
-        attach_health(spec, observation, health?)
+
+        let mut readiness = spec
+            .health
+            .as_ref()
+            .map(|policy| ProbeTracker::new(policy, &record))
+            .transpose()?;
+        let mut liveness = spec
+            .service_lifecycle
+            .as_ref()
+            .map(|lifecycle| ProbeTracker::new(&lifecycle.liveness, &record))
+            .transpose()?;
+
+        loop {
+            record = self.refresh_record(spec, record).await?;
+            if local_identity(&record)?.2 != ManagedExecutionState::Running {
+                return self.observation(spec, &record, None, None).await;
+            }
+            if trackers_settled(&readiness, &liveness) {
+                return self
+                    .service_health_observation(spec, &record, readiness, liveness)
+                    .await;
+            }
+
+            let now = tokio::time::Instant::now();
+            let readiness_policy = readiness
+                .as_ref()
+                .filter(|tracker| tracker.is_due(now))
+                .map(|tracker| tracker.policy);
+            let liveness_policy = liveness
+                .as_ref()
+                .filter(|tracker| tracker.is_due(now))
+                .map(|tracker| tracker.policy);
+
+            if readiness_policy.is_none() && liveness_policy.is_none() {
+                let wait = next_probe_wait(now, &readiness, &liveness)
+                    .unwrap_or(self.config.task_poll_interval)
+                    .min(self.config.task_poll_interval);
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+
+            let (readiness_sample, liveness_sample) = match (readiness_policy, liveness_policy) {
+                (Some(readiness_policy), Some(liveness_policy)) => {
+                    let (readiness, liveness) = tokio::join!(
+                        self.probe_health(spec, &record, readiness_policy),
+                        self.probe_health(spec, &record, liveness_policy),
+                    );
+                    (Some(readiness?), Some(liveness?))
+                }
+                (Some(readiness_policy), None) => (
+                    Some(self.probe_health(spec, &record, readiness_policy).await?),
+                    None,
+                ),
+                (None, Some(liveness_policy)) => (
+                    None,
+                    Some(self.probe_health(spec, &record, liveness_policy).await?),
+                ),
+                (None, None) => {
+                    return Err(RuntimeError::Protocol(
+                        "Box health scheduler selected no due probe".into(),
+                    ));
+                }
+            };
+
+            // A Service can terminate while one or both bounded probes are in
+            // flight. Refresh before publishing either result so stale health
+            // can never make a stopped execution look ready or live.
+            record = self.refresh_record(spec, record).await?;
+            if local_identity(&record)?.2 != ManagedExecutionState::Running {
+                return self.observation(spec, &record, None, None).await;
+            }
+            if let Some(sample) = readiness_sample {
+                readiness
+                    .as_mut()
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "Box produced readiness without a readiness tracker".into(),
+                        )
+                    })?
+                    .record(sample);
+            }
+            if let Some(sample) = liveness_sample {
+                liveness
+                    .as_mut()
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "Box produced liveness without a liveness tracker".into(),
+                        )
+                    })?
+                    .record(sample);
+            }
+        }
+    }
+
+    async fn service_health_observation(
+        &self,
+        spec: &RuntimeUnitSpec,
+        record: &BoxRecord,
+        readiness: Option<ProbeTracker<'_>>,
+        liveness: Option<ProbeTracker<'_>>,
+    ) -> RuntimeResult<RuntimeObservation> {
+        let mut observation = self.build_observation(spec, record, None, None).await?;
+        observation.health = readiness.and_then(|tracker| tracker.settled);
+        observation.liveness = liveness.and_then(|tracker| tracker.settled);
+        self.finish_observation(spec, record, observation).await
     }
 
     async fn probe_health(
         &self,
         spec: &RuntimeUnitSpec,
         record: &BoxRecord,
+        policy: &RuntimeHealthCheck,
     ) -> RuntimeResult<RuntimeHealthObservation> {
-        let policy = spec.health.as_ref().ok_or_else(|| {
-            RuntimeError::Protocol("health probe requires a Runtime health policy".into())
-        })?;
         let timeout = Duration::from_millis(policy.timeout_ms);
         let (state, message) = match &policy.probe {
             HealthProbe::Http {
@@ -384,16 +484,25 @@ fn parse_http_status(response: &[u8]) -> Result<u16, String> {
         .ok_or_else(|| "HTTP health response status is out of range".into())
 }
 
-fn attach_health(
-    spec: &RuntimeUnitSpec,
-    mut observation: RuntimeObservation,
-    health: RuntimeHealthObservation,
-) -> RuntimeResult<RuntimeObservation> {
-    observation.health = Some(health);
-    observation
-        .validate_against(spec)
-        .map_err(RuntimeError::Protocol)?;
-    Ok(observation)
+fn trackers_settled(
+    readiness: &Option<ProbeTracker<'_>>,
+    liveness: &Option<ProbeTracker<'_>>,
+) -> bool {
+    readiness.as_ref().is_none_or(ProbeTracker::is_settled)
+        && liveness.as_ref().is_none_or(ProbeTracker::is_settled)
+}
+
+fn next_probe_wait(
+    now: tokio::time::Instant,
+    readiness: &Option<ProbeTracker<'_>>,
+    liveness: &Option<ProbeTracker<'_>>,
+) -> Option<Duration> {
+    readiness
+        .iter()
+        .chain(liveness.iter())
+        .filter(|tracker| !tracker.is_settled())
+        .map(|tracker| tracker.next_probe_at.saturating_duration_since(now))
+        .min()
 }
 
 fn remaining_start_period(record: &BoxRecord, start_period_ms: u64) -> RuntimeResult<Duration> {
@@ -430,6 +539,71 @@ fn probe_message(message: impl AsRef<str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn command_policy(success_threshold: u32, failure_threshold: u32) -> RuntimeHealthCheck {
+        RuntimeHealthCheck {
+            probe: HealthProbe::Command {
+                command: vec!["/bin/true".into()],
+            },
+            interval_ms: 100,
+            timeout_ms: 50,
+            start_period_ms: 0,
+            success_threshold,
+            failure_threshold,
+        }
+    }
+
+    fn sample(state: RuntimeHealthState) -> RuntimeHealthObservation {
+        RuntimeHealthObservation {
+            state,
+            checked_at_ms: 1,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn probe_tracker_requires_consecutive_successes_and_resets_on_failure() {
+        let policy = command_policy(2, 2);
+        let mut tracker = ProbeTracker {
+            policy: &policy,
+            next_probe_at: tokio::time::Instant::now(),
+            successes: 0,
+            failures: 0,
+            settled: None,
+        };
+
+        tracker.record(sample(RuntimeHealthState::Healthy));
+        tracker.record(sample(RuntimeHealthState::Unhealthy));
+        tracker.record(sample(RuntimeHealthState::Healthy));
+        assert!(!tracker.is_settled());
+        tracker.record(sample(RuntimeHealthState::Healthy));
+
+        assert_eq!(
+            tracker.settled.as_ref().map(|health| health.state),
+            Some(RuntimeHealthState::Healthy)
+        );
+    }
+
+    #[test]
+    fn probe_tracker_settles_only_after_the_failure_threshold() {
+        let policy = command_policy(2, 2);
+        let mut tracker = ProbeTracker {
+            policy: &policy,
+            next_probe_at: tokio::time::Instant::now(),
+            successes: 0,
+            failures: 0,
+            settled: None,
+        };
+
+        tracker.record(sample(RuntimeHealthState::Unhealthy));
+        assert!(!tracker.is_settled());
+        tracker.record(sample(RuntimeHealthState::Unhealthy));
+
+        assert_eq!(
+            tracker.settled.as_ref().map(|health| health.state),
+            Some(RuntimeHealthState::Unhealthy)
+        );
+    }
 
     #[test]
     fn parses_only_bounded_http_status_lines() {

@@ -135,6 +135,9 @@ impl BoxRuntimeDriver {
             &self.config.secret_root,
         )?;
         let observation = self.observe_service_health(&unit.spec, &record).await?;
+        let observation = self
+            .recover_unhealthy_liveness(&unit.spec, observation)
+            .await?;
         super::attestation::validate_continuity(&unit.observation, &observation)?;
         let result = RuntimeExecResult {
             schema: RuntimeExecResult::SCHEMA.into(),

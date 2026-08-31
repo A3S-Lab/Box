@@ -124,7 +124,7 @@ ring = "0.17"
 # Shared types (transport protocol, privacy, tools)
 a3s-acl = { version = "0.3.0", git = "https://github.com/A3S-Lab/ACL.git", rev = "5317e166222495585909d81f2caffdca90273c99" }
 a3s-transport = { version = "0.1.1", package = "a3s-common" }
-a3s-runtime = { version = "=0.4.0", git = "https://github.com/A3S-Lab/Runtime.git", rev = "3b62bb3bae036636fee48c2725446e9ffc2a0c6c" }
+a3s-runtime = { version = "=0.5.0", git = "https://github.com/A3S-Lab/Runtime.git", rev = "4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd" }
 a3s-oci-sdk = { version = "=0.3.1", git = "https://github.com/A3S-Lab/OCI-Runtime.git", rev = "82cbc663f0ab7a0a888defe71a5a7d257ae1f9de" }
 
 # Metrics
