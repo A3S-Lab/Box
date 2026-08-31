@@ -317,33 +317,46 @@ async fn wait_for_private_socket(owner: &mut Child, socket_path: &Path) -> Resul
                 hint: None,
             });
         }
-        match std::fs::symlink_metadata(socket_path) {
-            Ok(metadata)
-                if metadata.file_type().is_socket()
-                    && metadata.permissions().mode() & 0o777 == 0o600
-                    && metadata.uid() == unsafe { libc::geteuid() } =>
-            {
-                return Ok(())
-            }
-            Ok(_) => {
-                return Err(BoxError::BoxBootError {
-                    message: format!(
-                        "A3S OCI runtime endpoint failed its socket, owner, or mode contract: {}",
-                        socket_path.display()
-                    ),
-                    hint: None,
-                })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(BoxError::IoError(error)),
+        if private_socket_ready(socket_path)? {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(BoxError::BoxBootError {
-                message: "Timed out waiting for the A3S OCI runtime endpoint".to_string(),
+                message: format!(
+                    "Timed out waiting for the A3S OCI runtime endpoint to become a private 0600 Unix socket: {}",
+                    socket_path.display()
+                ),
                 hint: None,
             });
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn private_socket_ready(socket_path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if !metadata.file_type().is_socket() => {
+            Err(private_socket_contract_error(socket_path))
+        }
+        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => {
+            Err(private_socket_contract_error(socket_path))
+        }
+        // bind(2) publishes the same-owner socket before the Runtime owner can
+        // chmod it. Keep polling without connecting until the exact private
+        // mode is visible; a wrong type or owner still fails immediately.
+        Ok(metadata) => Ok(metadata.permissions().mode() & 0o777 == 0o600),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(BoxError::IoError(error)),
+    }
+}
+
+fn private_socket_contract_error(socket_path: &Path) -> BoxError {
+    BoxError::BoxBootError {
+        message: format!(
+            "A3S OCI runtime endpoint failed its socket, owner, or mode contract: {}",
+            socket_path.display()
+        ),
+        hint: None,
     }
 }
 
@@ -464,6 +477,32 @@ fn sdk_boot_error(error: a3s_oci_sdk::Error) -> BoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_socket_waits_for_the_owner_to_finish_tightening_its_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("runtime.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!private_socket_ready(&socket_path).unwrap());
+
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(private_socket_ready(&socket_path).unwrap());
+    }
+
+    #[test]
+    fn private_socket_rejects_a_non_socket_endpoint_without_waiting() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("runtime.sock");
+        std::fs::write(&socket_path, b"not a socket").unwrap();
+
+        let error = private_socket_ready(&socket_path).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed its socket, owner, or mode contract"));
+    }
 
     #[test]
     fn stopped_start_retains_the_created_generation_pid() {
