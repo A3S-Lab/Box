@@ -87,6 +87,7 @@ fn test_layout(
         workspace_path: base.join("workspace"),
         console_output: None,
         oci_config,
+        #[cfg(target_os = "macos")]
         oci_manifest_digest: None,
         prefer_image_rootfs_metadata: false,
         tee_instance_config: None,

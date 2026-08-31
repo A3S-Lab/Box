@@ -187,6 +187,12 @@ fn walk_tar_archive(
 ) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
     use std::os::unix::ffi::OsStrExt;
 
+    // POSIX/ustar file type bits are part of the archive mode contract and do
+    // not depend on the host's `libc::mode_t` width.
+    const DIRECTORY_MODE: u32 = 0o040000;
+    const REGULAR_FILE_MODE: u32 = 0o100000;
+    const SYMBOLIC_LINK_MODE: u32 = 0o120000;
+
     let mut archive = tar::Archive::new(std::fs::File::open(archive_path)?);
     let mut entries = HashMap::new();
     let mut hard_links = Vec::new();
@@ -213,19 +219,15 @@ fn walk_tar_archive(
             continue;
         }
         let (size, mode, is_dir) = if entry_type.is_dir() {
-            (0, u32::from(libc::S_IFDIR) | permissions, true)
+            (0, DIRECTORY_MODE | permissions, true)
         } else if entry_type.is_symlink() {
             let size = item
                 .link_name()?
                 .map(|target| target.as_os_str().as_bytes().len() as u64)
                 .unwrap_or(0);
-            (size, u32::from(libc::S_IFLNK) | permissions, false)
+            (size, SYMBOLIC_LINK_MODE | permissions, false)
         } else if entry_type.is_file() {
-            (
-                header.size()?,
-                u32::from(libc::S_IFREG) | permissions,
-                false,
-            )
+            (header.size()?, REGULAR_FILE_MODE | permissions, false)
         } else {
             continue;
         };
