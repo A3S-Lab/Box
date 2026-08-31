@@ -1,5 +1,9 @@
 # Rootfs Layering Design — Overlay-based CoW Boot
 
+> This document describes the directory-layering milestone. The current VMM
+> contract uses a typed `RootfsSource`, and the macOS target is a guest-native
+> raw ext4 block artifact. See [Guest-Native Rootfs Design](guest-native-rootfs-design.md).
+
 ## Problem
 
 Every box boot does a full `copy_dir_recursive` of the rootfs (~500MB for Alpine+Python), even on cache hit. This is the #1 cold-start bottleneck.
@@ -19,7 +23,7 @@ Target:  Cache Hit → overlayfs mount (<1ms)     → box_dir/merged/ → VM boo
 ~/.a3s/cache/rootfs/<key>/   ← lower (read-only, shared across boxes)
 ~/.a3s/boxes/<id>/upper/     ← upper (per-box writes, CoW)
 ~/.a3s/boxes/<id>/work/      ← overlayfs workdir
-~/.a3s/boxes/<id>/merged/    ← merged view → InstanceSpec.rootfs_path
+~/.a3s/boxes/<id>/merged/    ← merged view → RootfsSource::Directory
 ```
 
 ### Extension Point (1 trait)
@@ -28,11 +32,19 @@ Target:  Cache Hit → overlayfs mount (<1ms)     → box_dir/merged/ → VM boo
 
 ```rust
 pub trait RootfsProvider: Send + Sync {
-    /// Prepare a rootfs directory for a box. Returns the path to use as rootfs_path.
+    /// Prepare the host-side staging directory for a box.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
+    /// Choose the directory or block transport after host-side preparation.
+    fn finalize_for_boot(
+        &self,
+        box_dir: &Path,
+        staged_rootfs: &Path,
+        options: RootfsFinalizeOptions,
+    ) -> Result<RootfsSource>;
+
     /// Cleanup after box stops (unmount overlay, remove upper/work).
-    fn cleanup(&self, box_dir: &Path) -> Result<()>;
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()>;
 }
 ```
 
@@ -44,8 +56,8 @@ Default implementations:
 
 - `CacheBackend` trait — unchanged
 - `RootfsCache` — still caches the fully-built rootfs as the read-only lower layer
-- `InstanceSpec.rootfs_path` — still a `PathBuf`, now points to `merged/` instead of `rootfs/`
-- `VmmProvider` / guest-init — completely unaware of overlay
+- `RootfsSource::Directory` points to `merged/` instead of `rootfs/` on Linux
+- guest-init remains unaware of the host directory-layering implementation
 - CLI commands — transparent
 
 ## Detailed Design
@@ -72,11 +84,18 @@ use a3s_box_core::error::Result;
 /// Abstracts how a rootfs directory is prepared for a box.
 pub trait RootfsProvider: Send + Sync {
     /// Prepare a rootfs at box_dir from the cached lower layer at cache_dir.
-    /// Returns the path to use as InstanceSpec.rootfs_path.
+    /// Returns the host-side staging directory.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
+    fn finalize_for_boot(
+        &self,
+        box_dir: &Path,
+        staged_rootfs: &Path,
+        options: RootfsFinalizeOptions,
+    ) -> Result<RootfsSource>;
+
     /// Cleanup after box stops.
-    fn cleanup(&self, box_dir: &Path) -> Result<()>;
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()>;
 
     /// Whether this provider supports the current platform.
     fn is_available(&self) -> bool;
@@ -207,12 +226,16 @@ When a box stops, `VmManager::stop()` calls `rootfs_provider.cleanup(box_dir)` t
 
 ## macOS Support
 
-macOS doesn't have overlayfs. Options:
-1. **CopyProvider fallback** — current behavior, always works
-2. **APFS clonefile(2)** — CoW file clone, near-instant for APFS volumes
-3. Future: investigate `mount_nullfs` or FUSE-based overlay
-
-For Phase 1, macOS uses `CopyProvider`. APFS clonefile can be a future `CloneProvider`.
+macOS does not have overlayfs. The directory-transport compatibility provider
+uses a case-sensitive APFS staging filesystem. The guest-native path described
+in the newer design clones a raw ext4 file with `clonefile(2)` and detaches the
+staging filesystem before runtime; persistent restarts reuse that raw file and
+do not return to a mounted directory transport. Clean stopped diff, export,
+and commit operations attach it read-only to a restricted maintenance MicroVM,
+so those workflows also avoid a macOS filesystem mount. Stopped legacy APFS
+boxes can enter a versioned, resumable conversion transaction; the sparse image
+is detached and retained as rollback evidence until a later explicit
+garbage-collection policy.
 
 ## Performance Target
 

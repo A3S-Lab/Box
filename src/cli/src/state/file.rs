@@ -214,10 +214,9 @@ impl StateFile {
 
             let has_live_pid = is_record_pid_live(record);
             if !has_live_pid {
-                // guest-init writes the container exit code into the writable
-                // rootfs (`/.a3s_exit_code`) on exit. Resolve the provider-specific
-                // host path so overlay, copy fallback, and APFS-backed rootfses all
-                // report the real code; liveness polling alone would yield exit 0.
+                // Resolve guest-init's exact terminal result. New MicroVMs use
+                // the private status sidecar; legacy providers retain their
+                // host-visible rootfs marker. Liveness alone can yield exit 0.
                 #[cfg(target_os = "windows")]
                 {
                     let persisted =
@@ -244,9 +243,11 @@ impl StateFile {
                     }
                 }
                 #[cfg(not(target_os = "windows"))]
-                if record.exit_code.is_none() {
-                    record.exit_code =
-                        a3s_box_runtime::rootfs::read_persisted_exit_code(&record.box_dir);
+                {
+                    record.exit_code = a3s_box_runtime::rootfs::resolve_workload_exit_code(
+                        &record.box_dir,
+                        record.exit_code,
+                    );
                 }
                 record.status = "dead".to_string();
                 record.pid = None;

@@ -13,6 +13,8 @@
 pub mod attest_server;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub mod diff_baseline;
 pub mod exec_server;
 pub mod host_config;
 mod listener;
@@ -21,8 +23,10 @@ pub mod network;
 pub mod port_forward;
 pub mod pty_server;
 pub mod reaper;
+pub mod root_transport;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod rootfs_archive;
+pub mod terminal_status;
 pub mod user;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod volume;

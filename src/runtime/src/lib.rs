@@ -143,11 +143,11 @@ pub use tee::{AttestationReport, AttestationRequest, PlatformInfo};
 
 // VM
 #[cfg(feature = "vm")]
-pub use vm::{BoxState, PullProgressFn, VmManager};
+pub use vm::{archive_stopped_guest_native_rootfs, BoxState, PullProgressFn, VmManager};
 #[cfg(feature = "vm")]
 pub use vmm::{
-    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig,
-    VmController, VmHandler, VmMetrics, VmmProvider,
+    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, RawBlockDevice, ShimHandler,
+    TeeInstanceConfig, VmController, VmHandler, VmMetrics, VmmProvider,
 };
 
 // Resize

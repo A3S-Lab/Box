@@ -21,6 +21,7 @@ pub mod operator;
 pub mod platform;
 pub mod port;
 pub mod pty;
+pub mod rootfs_baseline;
 pub mod rootfs_metadata;
 pub mod scale;
 pub mod secret;
@@ -86,8 +87,8 @@ pub use traits::{
     SnapshotStoreBackend, StoredImage, VolumeStoreBackend, MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
 pub use vmm::{
-    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,
-    VmMetrics, VmmProvider, DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, RawBlockDevice, TeeInstanceConfig,
+    VmHandler, VmMetrics, VmmProvider, DEFAULT_SHUTDOWN_TIMEOUT_MS,
 };
 pub use volume::VolumeConfig;
 

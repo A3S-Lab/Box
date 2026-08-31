@@ -36,24 +36,33 @@ const MAX_TERMINAL_ROOTFS_METADATA_ENTRIES: usize = 1_000_000;
 /// Return whether a relative rootfs path belongs to runtime bookkeeping rather
 /// than the container filesystem captured by commit or Snapshot.
 pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
-    let mut name = None;
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(component) if name.is_none() => name = Some(component),
-            _ => return false,
-        }
-    }
-    let Some(name) = name.and_then(|name| name.to_str()) else {
+    use std::path::Component;
+
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    let Some(Component::Normal(name)) = components.next() else {
         return false;
     };
-    let exec_config_name = RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/');
-    #[cfg(windows)]
-    if name.eq_ignore_ascii_case(exec_config_name) {
-        return true;
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+
+    match components.next() {
+        Some(Component::Normal(runtime_dir))
+            if runtime_path_name_matches(name, "run")
+                && runtime_dir
+                    .to_str()
+                    .is_some_and(|name| runtime_path_name_matches(name, "a3s-box")) =>
+        {
+            return components.all(|component| matches!(component, Component::Normal(_)));
+        }
+        Some(_) => return false,
+        None => {}
     }
-    #[cfg(not(windows))]
-    if name == exec_config_name {
+
+    let exec_config_name = RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/');
+    if runtime_path_name_matches(name, exec_config_name) {
         return true;
     }
     const INTERNAL: &[&str] = &[
@@ -74,12 +83,19 @@ pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
         "guest-init.stdout.log",
         "guest-init.stderr.log",
     ];
-    #[cfg(windows)]
-    return INTERNAL
+    INTERNAL
         .iter()
-        .any(|internal| name.eq_ignore_ascii_case(internal));
-    #[cfg(not(windows))]
-    INTERNAL.contains(&name)
+        .any(|internal| runtime_path_name_matches(name, internal))
+}
+
+#[cfg(windows)]
+fn runtime_path_name_matches(name: &str, expected: &str) -> bool {
+    name.eq_ignore_ascii_case(expected)
+}
+
+#[cfg(not(windows))]
+fn runtime_path_name_matches(name: &str, expected: &str) -> bool {
+    name == expected
 }
 
 /// Atomically invalidate the last terminal generation before boot.
@@ -433,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_internal_rootfs_paths_are_single_root_entries() {
+    fn runtime_internal_rootfs_paths_include_reserved_runtime_state() {
         for path in [
             ".a3s_rootfs_metadata_v1.json",
             ".a3s_rootfs_metadata_v1.json.tmp",
@@ -453,6 +469,11 @@ mod tests {
         assert!(!is_runtime_internal_rootfs_path(Path::new(
             "/init-rust.log"
         )));
+        assert!(is_runtime_internal_rootfs_path(Path::new("run/a3s-box")));
+        assert!(is_runtime_internal_rootfs_path(Path::new(
+            "run/a3s-box/terminal/status.json"
+        )));
+        assert!(!is_runtime_internal_rootfs_path(Path::new("run/a3s-code")));
 
         #[cfg(windows)]
         assert!(is_runtime_internal_rootfs_path(Path::new("INIT-RUST.LOG")));

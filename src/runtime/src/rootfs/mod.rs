@@ -3,31 +3,152 @@
 //! This module handles preparation and management of guest rootfs for MicroVM instances.
 //! The rootfs contains the minimal filesystem required to boot the guest agent.
 //!
-//! Two rootfs providers are available:
+//! Rootfs staging providers are selected by host capability:
 //! - `CopyProvider` — full recursive copy (works everywhere)
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant CoW)
+//! - a case-sensitive APFS provider on macOS (compatibility path)
+//!
+//! A provider finalizes the staging tree into the directory or guest-native
+//! block source handed to the VMM.
 
+#[cfg(target_os = "macos")]
+mod apfs;
 mod baseline;
 mod builder;
+#[cfg(unix)]
+mod ext4;
+#[cfg(unix)]
+mod ext4_artifact;
+#[cfg(unix)]
+mod ext4_cache;
+#[cfg(target_os = "macos")]
+mod guest_native_ext4;
+#[cfg(target_os = "macos")]
+mod guest_native_migration;
 mod layout;
 pub(crate) mod overlay;
 mod provider;
 
 pub use baseline::{
-    create_diff_baseline_if_absent, walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
+    create_diff_baseline_if_absent, guest_diff_baseline_required, publish_guest_diff_baseline,
+    walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
 };
 pub use builder::RootfsBuilder;
+#[cfg(unix)]
+pub use ext4::{
+    publish_ext4_artifact, Ext4Artifact, Ext4ArtifactManifest, Ext4ArtifactOptions,
+    EXT4_ARTIFACT_SCHEMA, EXT4_BUILDER_ID,
+};
+#[cfg(unix)]
+pub(crate) use ext4_cache::{Ext4ArtifactCache, Ext4CacheIdentity};
+#[cfg(target_os = "macos")]
+pub use guest_native_ext4::GuestNativeExt4Provider;
 pub use layout::{GuestLayout, GUEST_WORKDIR};
-pub use provider::{default_provider, CopyProvider, OverlayProvider, RootfsProvider};
+pub use provider::{
+    default_provider, default_provider_for_box, CopyProvider, OverlayProvider, ResumedRootfs,
+    RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsProvider, RootfsResumeOptions,
+};
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// Read the exit code persisted by guest-init from the active writable rootfs.
+use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::guest_exec::{
+    GuestTerminalStatus, GUEST_TERMINAL_STATUS_FILE_NAME, MAX_GUEST_TERMINAL_STATUS_BYTES,
+};
+
+enum TerminalStatusRead {
+    Absent,
+    PendingOrInvalid,
+    Complete(GuestTerminalStatus),
+}
+
+fn read_guest_terminal_status(box_dir: &Path) -> TerminalStatusRead {
+    let path = box_dir
+        .join("runtime-control")
+        .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return TerminalStatusRead::Absent;
+        }
+        Err(_) => return TerminalStatusRead::PendingOrInvalid,
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_GUEST_TERMINAL_STATUS_BYTES as u64
+    {
+        return TerminalStatusRead::PendingOrInvalid;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let Ok(file) = options.open(&path) else {
+        return TerminalStatusRead::PendingOrInvalid;
+    };
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file
+        .take(MAX_GUEST_TERMINAL_STATUS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.is_empty()
+        || bytes.len() > MAX_GUEST_TERMINAL_STATUS_BYTES
+    {
+        return TerminalStatusRead::PendingOrInvalid;
+    }
+    let Ok(status) = serde_json::from_slice::<GuestTerminalStatus>(&bytes) else {
+        return TerminalStatusRead::PendingOrInvalid;
+    };
+    if status.validate().is_err() {
+        return TerminalStatusRead::PendingOrInvalid;
+    }
+    TerminalStatusRead::Complete(status)
+}
+
+/// Return whether the current guest generation completed a clean block-root
+/// handoff after publishing its terminal workload status.
+pub(crate) fn guest_rootfs_handoff_complete(box_dir: &Path) -> bool {
+    matches!(
+        read_guest_terminal_status(box_dir),
+        TerminalStatusRead::Complete(GuestTerminalStatus {
+            rootfs_quiesced: true,
+            ..
+        })
+    )
+}
+
+/// Read the exit code persisted by guest-init.
 ///
-/// Rootfs providers expose `/.a3s_exit_code` at different host paths: the
-/// overlay upper directory on Linux, the copied rootfs fallback, or the private
-/// data directory inside the case-sensitive APFS mount on macOS.
+/// New MicroVMs publish through the private terminal-control sidecar. Legacy
+/// providers expose `/.a3s_exit_code` at the overlay upper directory, copied
+/// rootfs, or case-sensitive APFS data directory.
 pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
+    resolve_workload_exit_code(box_dir, None)
+}
+
+/// Resolve a workload exit code without treating a clean provider shutdown as
+/// proof that the guest workload succeeded.
+///
+/// Once the private terminal channel is staged, an empty or invalid status
+/// means the guest never published a result. A nonzero provider status remains
+/// useful crash evidence, but a provider zero is not substituted for missing
+/// guest state.
+pub fn resolve_workload_exit_code(box_dir: &Path, provider_exit_code: Option<i32>) -> Option<i32> {
+    match read_guest_terminal_status(box_dir) {
+        TerminalStatusRead::Complete(status) => return Some(status.exit_code),
+        // A staged-but-empty terminal file belongs to the current generation.
+        // Never fall back to a stale rootfs marker or a successful shim status.
+        TerminalStatusRead::PendingOrInvalid => {
+            return provider_exit_code.filter(|exit_code| *exit_code != 0);
+        }
+        TerminalStatusRead::Absent => {}
+    }
+
     let candidates = [
         box_dir
             .join("upper")
@@ -41,11 +162,14 @@ pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
             .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/')),
     ];
 
-    candidates.into_iter().find_map(|path| {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|contents| contents.trim().parse::<i32>().ok())
-    })
+    candidates
+        .into_iter()
+        .find_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| contents.trim().parse::<i32>().ok())
+        })
+        .or(provider_exit_code)
 }
 
 /// A temporarily attached persistent rootfs.
@@ -55,6 +179,42 @@ pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
 pub struct AttachedRootfs {
     path: std::path::PathBuf,
     detach_on_drop: bool,
+}
+
+/// Return whether a box has a retained guest-native raw rootfs generation.
+///
+/// Any directory entry at the versioned artifact path counts. Validation is
+/// performed by the provider before boot; detection must still fail closed for
+/// malformed generations instead of falling back to a host directory.
+pub fn guest_native_ext4_generation_exists(box_dir: &Path) -> Result<bool> {
+    let path = box_dir.join("rootfs-ext4-v1");
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(BoxError::BuildError(format!(
+            "Failed to inspect guest-native rootfs generation {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Resolve a clean guest-native generation for the trusted read-only
+/// maintenance VM.
+///
+/// A crashed filesystem is intentionally rejected here. The observation path
+/// attaches its disk read-only and mounts ext4 with `noload`, so journal replay
+/// belongs to a normal writable boot followed by a verified clean stop.
+#[cfg(target_os = "macos")]
+pub(crate) fn guest_native_ext4_maintenance_disk(box_dir: &Path) -> Result<PathBuf> {
+    let directory = GuestNativeExt4Provider::artifact_directory(box_dir);
+    let (artifact, validation) = ext4_artifact::open_ext4_artifact_for_resume(&directory)?;
+    if validation == ext4::Ext4ResumeValidation::JournalRecoveryRequired {
+        return Err(BoxError::StateError(format!(
+            "Guest-native rootfs at {} needs ext4 journal recovery; start the box and stop it cleanly before offline diff, export, or commit",
+            artifact.disk.display()
+        )));
+    }
+    Ok(artifact.disk)
 }
 
 impl AttachedRootfs {
@@ -79,6 +239,13 @@ impl Drop for AttachedRootfs {
 pub fn attach_persistent_rootfs(
     box_dir: &Path,
 ) -> a3s_box_core::error::Result<Option<AttachedRootfs>> {
+    if guest_native_ext4_generation_exists(box_dir)? {
+        return Err(BoxError::StateError(
+            "Guest-native rootfs generations have no host directory attachment; use the trusted maintenance archive path for stopped access"
+                .to_string(),
+        ));
+    }
+
     #[cfg(target_os = "macos")]
     {
         let image = box_dir.join("rootfs-apfs-v2.sparseimage");
@@ -109,6 +276,11 @@ pub fn attach_persistent_rootfs(
 /// existing replay marker is retained so a boot that failed before guest replay
 /// can be retried safely.
 pub fn stage_box_terminal_rootfs_metadata(box_dir: &Path) -> a3s_box_core::error::Result<()> {
+    if guest_native_ext4_generation_exists(box_dir)? {
+        // The raw disk is not host-mounted. Guest-init invalidates and consumes
+        // the prior terminal generation before it starts any workload process.
+        return Ok(());
+    }
     let attached = attach_persistent_rootfs(box_dir)?;
     let mut roots = Vec::<PathBuf>::new();
     if let Some(rootfs) = attached.as_ref() {
@@ -235,6 +407,43 @@ pub fn unmount_box_rootfs(rootfs: &Path) {
     let _ = rootfs;
 }
 
+/// Synchronously detach a macOS staging filesystem before a block artifact is
+/// handed to the guest. Unlike teardown cleanup, ownership handoff is not
+/// best-effort: a remaining host mount violates the guest-native invariant and
+/// aborts the boot.
+#[cfg(target_os = "macos")]
+pub(crate) fn unmount_box_rootfs_for_handoff(rootfs: &Path) -> a3s_box_core::error::Result<()> {
+    let mountpoint = if rootfs.file_name().is_some_and(|name| name == ".a3s-rootfs") {
+        rootfs.parent().unwrap_or(rootfs)
+    } else {
+        rootfs
+    };
+    if !is_mountpoint(mountpoint) {
+        return Err(a3s_box_core::error::BoxError::BuildError(format!(
+            "Expected a mounted rootfs staging filesystem at {}",
+            mountpoint.display()
+        )));
+    }
+    let status = std::process::Command::new("hdiutil")
+        .arg("detach")
+        .arg("-quiet")
+        .arg(mountpoint)
+        .status()
+        .map_err(|error| {
+            a3s_box_core::error::BoxError::BuildError(format!(
+                "Failed to run hdiutil detach for {}: {error}",
+                mountpoint.display()
+            ))
+        })?;
+    if !status.success() || is_mountpoint(mountpoint) {
+        return Err(a3s_box_core::error::BoxError::BuildError(format!(
+            "Rootfs staging filesystem remained attached at {} after handoff",
+            mountpoint.display()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +473,68 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "not-an-exit-code").unwrap();
         assert_eq!(read_persisted_exit_code(temp.path()), None);
+    }
+
+    #[test]
+    fn terminal_status_is_preferred_over_legacy_rootfs_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let terminal = temp
+            .path()
+            .join("runtime-control")
+            .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(
+            &terminal,
+            serde_json::to_vec(&GuestTerminalStatus::new(31)).unwrap(),
+        )
+        .unwrap();
+        let legacy = temp.path().join("rootfs/.a3s_exit_code");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(legacy, "7").unwrap();
+
+        assert_eq!(read_persisted_exit_code(temp.path()), Some(31));
+    }
+
+    #[test]
+    fn rootfs_handoff_requires_an_explicit_guest_quiescence_ack() {
+        let temp = tempfile::tempdir().unwrap();
+        let terminal = temp
+            .path()
+            .join("runtime-control")
+            .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+
+        std::fs::write(
+            &terminal,
+            serde_json::to_vec(&GuestTerminalStatus::new(0)).unwrap(),
+        )
+        .unwrap();
+        assert!(!guest_rootfs_handoff_complete(temp.path()));
+
+        std::fs::write(
+            &terminal,
+            serde_json::to_vec(&GuestTerminalStatus::new(0).with_rootfs_quiesced()).unwrap(),
+        )
+        .unwrap();
+        assert!(guest_rootfs_handoff_complete(temp.path()));
+    }
+
+    #[test]
+    fn pending_terminal_status_blocks_stale_rootfs_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let terminal = temp
+            .path()
+            .join("runtime-control")
+            .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(terminal, []).unwrap();
+        let legacy = temp.path().join("rootfs/.a3s_exit_code");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(legacy, "0").unwrap();
+
+        assert_eq!(read_persisted_exit_code(temp.path()), None);
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(0)), None);
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(9)), Some(9));
     }
 
     #[test]
@@ -348,5 +619,23 @@ mod tests {
                 .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/'))
                 .exists());
         }
+    }
+
+    #[test]
+    fn raw_generation_keeps_terminal_fencing_inside_guest() {
+        let directory = tempfile::tempdir().unwrap();
+        let box_dir = directory.path().join("box");
+        let artifact = box_dir.join("rootfs-ext4-v1");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let terminal = rootfs
+            .join(a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        std::fs::write(&terminal, b"guest-owned").unwrap();
+
+        assert!(guest_native_ext4_generation_exists(&box_dir).unwrap());
+        stage_box_terminal_rootfs_metadata(&box_dir).unwrap();
+        assert_eq!(std::fs::read(&terminal).unwrap(), b"guest-owned");
+        assert!(attach_persistent_rootfs(&box_dir).is_err());
     }
 }

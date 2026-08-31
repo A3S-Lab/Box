@@ -45,6 +45,7 @@ mod rename;
 mod restart;
 mod rm;
 mod rmi;
+mod rootfs_capture;
 mod run;
 mod save;
 mod scale_api;

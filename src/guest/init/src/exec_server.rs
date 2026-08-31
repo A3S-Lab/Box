@@ -30,6 +30,12 @@ use tracing::{info, warn};
 
 use crate::user::{parse_process_user, ProcessUser};
 
+mod rootfs_maintenance;
+
+#[cfg(target_os = "linux")]
+pub use rootfs_maintenance::begin_rootfs_maintenance_idle_shutdown;
+pub use rootfs_maintenance::serve_rootfs_maintenance_server;
+
 /// PID of the main container process (the entrypoint spawned by guest init).
 /// Set by `main` after spawn so the exec server can deliver a graceful stop
 /// signal to it on a host shutdown request. -1 until known.
@@ -77,7 +83,6 @@ const EXEC_CONTROL_ARCHIVE_ROOTFS: &[u8] = b"archive-rootfs-v1";
 const EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE: &[u8] = b"archive-rootfs-v1:pause";
 #[cfg(target_os = "linux")]
 const EXEC_ARCHIVE_ROOTFS_DONE: &[u8] = b"archive-rootfs-v1-done";
-
 /// Deliver `sig` to the main container process (best-effort).
 #[cfg(target_os = "linux")]
 fn signal_main_process(sig: i32) {
@@ -1524,10 +1529,19 @@ fn stream_rootfs_archive(
     stream: &mut impl Write,
     pause: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    stream_rootfs_archive_from(stream, Path::new("/"), pause)
+}
+
+#[cfg(target_os = "linux")]
+fn stream_rootfs_archive_from(
+    stream: &mut impl Write,
+    root: &Path,
+    pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _pause_guard = pause.then(PausedContainerTree::pause);
     {
         let mut writer = ArchiveFrameWriter::new(&mut *stream);
-        crate::rootfs_archive::write_rootfs_archive(Path::new("/"), &mut writer)?;
+        crate::rootfs_archive::write_rootfs_archive(root, &mut writer)?;
         writer.finish()?;
     }
     write_frame(stream, FrameType::Control as u8, EXEC_ARCHIVE_ROOTFS_DONE)?;

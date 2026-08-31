@@ -167,6 +167,9 @@ pub struct RaTlsAttestationClient {
 #[derive(Debug, Clone)]
 pub(crate) struct RaTlsAttestationEvidence {
     pub(crate) report: AttestationReport,
+    // The Linux Runtime provider persists this exact peer identity. Other
+    // hosts still share the RA-TLS evidence type but do not consume the bytes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) certificate_der: Vec<u8>,
 }
 

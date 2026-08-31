@@ -2,12 +2,39 @@
 
 use a3s_box_core::dns::HostEntry;
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::guest_exec::GuestHostConfig;
 
 use crate::vmm::NetworkInstanceConfig;
 
 use super::VmManager;
 
 impl VmManager {
+    /// Render the host-controlled files that guest-init materializes during a
+    /// MicroVM boot. No rootfs path is touched here.
+    pub(crate) fn guest_host_config(
+        &self,
+        network_name: Option<&str>,
+        network_dns: Option<&[std::net::Ipv4Addr]>,
+    ) -> Result<GuestHostConfig> {
+        let resolv_dns =
+            network_dns.map(|servers| servers.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let resolv_conf = match resolv_dns.as_deref() {
+            Some(servers) => a3s_box_core::dns::generate_resolv_conf(servers),
+            None => a3s_box_core::dns::generate_resolv_conf(&self.config.dns),
+        };
+        let hosts = match network_name {
+            Some(network_name) => Some(self.render_network_hosts_file(network_name)?),
+            None => self.render_standalone_hosts_file()?,
+        };
+        let config = GuestHostConfig {
+            hostname: self.config.hostname.clone(),
+            resolv_conf: Some(resolv_conf),
+            hosts,
+        };
+        config.validate().map_err(BoxError::ConfigError)?;
+        Ok(config)
+    }
+
     /// Configure an isolated virtio-net backend for a default-network box that
     /// publishes host ports on macOS.
     ///
@@ -65,13 +92,27 @@ impl VmManager {
 
     /// Write `/etc/hosts` for boxes without bridge network peer discovery.
     pub(crate) fn write_standalone_hosts_file(&self, layout: &super::BoxLayout) -> Result<()> {
+        let Some(hosts_content) = self.render_standalone_hosts_file()? else {
+            return self.ensure_standalone_hosts_readable(layout);
+        };
+
+        crate::oci::rootfs::write_guest_file(&layout.rootfs_path, "etc/hosts", &hosts_content)?;
+        Ok(())
+    }
+
+    fn render_standalone_hosts_file(&self) -> Result<Option<String>> {
         let add_hosts = self.parse_add_hosts()?;
         let aliases = self.hostname_aliases(None);
         if aliases.is_empty() && add_hosts.is_empty() {
-            return self.ensure_standalone_hosts_readable(layout);
+            return Ok(None);
         }
 
-        self.write_hosts_content(layout, None, &aliases, &[], &add_hosts)
+        Ok(Some(a3s_box_core::dns::generate_hosts_file_with_entries(
+            None,
+            &aliases,
+            &[],
+            &add_hosts,
+        )))
     }
 
     fn ensure_standalone_hosts_readable(&self, layout: &super::BoxLayout) -> Result<()> {
@@ -225,6 +266,13 @@ impl VmManager {
         layout: &super::BoxLayout,
         network_name: &str,
     ) -> Result<()> {
+        let hosts_content = self.render_network_hosts_file(network_name)?;
+        crate::oci::rootfs::write_guest_file(&layout.rootfs_path, "etc/hosts", &hosts_content)?;
+        tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
+        Ok(())
+    }
+
+    fn render_network_hosts_file(&self, network_name: &str) -> Result<String> {
         use crate::network::NetworkStore;
 
         let store = NetworkStore::default_path()?;
@@ -244,9 +292,12 @@ impl VmManager {
         let peers = net_config.peer_endpoints(&self.box_id);
         let add_hosts = self.parse_add_hosts()?;
 
-        self.write_hosts_content(layout, Some(&own_ip), &own_names, &peers, &add_hosts)?;
-
-        Ok(())
+        Ok(a3s_box_core::dns::generate_hosts_file_with_entries(
+            Some(&own_ip),
+            &own_names,
+            &peers,
+            &add_hosts,
+        ))
     }
 
     fn parse_add_hosts(&self) -> Result<Vec<HostEntry>> {
@@ -329,6 +380,7 @@ mod tests {
     fn test_layout(rootfs_path: std::path::PathBuf) -> super::super::BoxLayout {
         super::super::BoxLayout {
             rootfs_path,
+            resumed_rootfs: None,
             exec_socket_path: std::path::PathBuf::new(),
             pty_socket_path: std::path::PathBuf::new(),
             attest_socket_path: std::path::PathBuf::new(),
@@ -336,6 +388,7 @@ mod tests {
             workspace_path: std::path::PathBuf::new(),
             console_output: None,
             oci_config: None,
+            oci_manifest_digest: None,
             prefer_image_rootfs_metadata: false,
             tee_instance_config: None,
         }
@@ -389,6 +442,28 @@ mod tests {
             vm.hostname_aliases(Some("box-name")),
             vec!["box-name", "web"]
         );
+    }
+
+    #[test]
+    fn test_guest_host_config_renders_without_touching_rootfs() {
+        let vm = VmManager::with_box_id(
+            a3s_box_core::config::BoxConfig {
+                hostname: Some("web".to_string()),
+                dns: vec!["1.1.1.1".to_string()],
+                add_hosts: vec!["db.local:10.88.0.10".to_string()],
+                ..Default::default()
+            },
+            a3s_box_core::event::EventEmitter::new(16),
+            "box-id".to_string(),
+        );
+
+        let config = vm.guest_host_config(None, None).unwrap();
+
+        assert_eq!(config.hostname.as_deref(), Some("web"));
+        assert_eq!(config.resolv_conf.as_deref(), Some("nameserver 1.1.1.1\n"));
+        let hosts = config.hosts.unwrap();
+        assert!(hosts.contains("127.0.1.1 web"));
+        assert!(hosts.contains("10.88.0.10 db.local"));
     }
 
     #[test]

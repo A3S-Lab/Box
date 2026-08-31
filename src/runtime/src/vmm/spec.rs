@@ -4,5 +4,6 @@
 //! so existing callers using `crate::vmm::InstanceSpec` continue to work.
 
 pub use a3s_box_core::vmm::{
-    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig,
+    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, RawBlockDevice, RootfsSource,
+    TeeInstanceConfig,
 };

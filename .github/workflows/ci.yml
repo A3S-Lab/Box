@@ -952,6 +952,15 @@ jobs:
             real_core_foreground_auto_remove_handles_sigterm_and_archives_status \
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$evidence/foreground-interruption.log"
+      - name: Qualify guest-native persistence, recovery, and stopped maintenance
+        run: |
+          unset A3S_DEPS_STUB
+          evidence="$RUNNER_TEMP/a3s-box-hvf-published-port-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cd src
+          cargo test --locked --release -p a3s-box-cli \
+            --test guest_native_rootfs_integration \
+            -- --ignored --nocapture --test-threads=1 \
+            2>&1 | tee "$evidence/guest-native-rootfs.log"
       - name: Qualify cold Corepack and bounded pnpm networking
         run: |
           unset A3S_DEPS_STUB

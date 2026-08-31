@@ -6,16 +6,19 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use std::{ffi::CString, ptr};
+use std::{ffi::CString, path::Path, ptr};
 
 use super::check_status;
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::vmm::{RawBlockDevice, RootfsSource};
 #[cfg(target_os = "macos")]
 use libkrun_sys::krun_add_net_unixgram;
 #[cfg(not(target_os = "windows"))]
-use libkrun_sys::krun_add_vsock_port2;
-#[cfg(not(target_os = "windows"))]
 use libkrun_sys::krun_set_port_map;
+#[cfg(not(target_os = "windows"))]
+use libkrun_sys::{
+    krun_add_disk2, krun_add_vsock_port2, krun_set_root_disk_remount, KRUN_DISK_FORMAT_RAW,
+};
 #[cfg(target_os = "windows")]
 use libkrun_sys::{krun_add_net_tcp, krun_add_vsock_port_windows, krun_set_kernel};
 #[cfg(target_os = "linux")]
@@ -28,6 +31,21 @@ use libkrun_sys::{
     krun_set_root, krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid,
     krun_start_enter,
 };
+
+fn value_to_cstring(value: &str, description: &str) -> Result<CString> {
+    CString::new(value).map_err(|error| BoxError::BoxBootError {
+        message: format!("invalid {description}: {error}"),
+        hint: None,
+    })
+}
+
+fn path_to_cstring(path: &Path, description: &str) -> Result<CString> {
+    let value = path.to_str().ok_or_else(|| BoxError::BoxBootError {
+        message: format!("invalid {description} path: {}", path.display()),
+        hint: None,
+    })?;
+    value_to_cstring(value, description)
+}
 
 /// Thin wrapper that owns a libkrun context.
 pub struct KrunContext {
@@ -103,17 +121,99 @@ impl KrunContext {
         )
     }
 
-    /// Set the root filesystem path for the VM.
-    pub unsafe fn set_root(&self, rootfs: &str) -> Result<()> {
-        tracing::trace!(rootfs, "Setting rootfs");
-        let rootfs_c = CString::new(rootfs).map_err(|e| BoxError::BoxBootError {
-            message: format!("invalid rootfs path: {}", e),
-            hint: None,
-        })?;
+    /// Configure either a virtio-fs directory root or a guest-native ext4 disk.
+    pub unsafe fn set_root(&self, rootfs: &RootfsSource) -> Result<()> {
+        tracing::debug!(rootfs = %rootfs, "Setting root filesystem source");
+        match rootfs {
+            RootfsSource::Directory { path } => {
+                let rootfs_c = path_to_cstring(path, "rootfs directory")?;
+                check_status(
+                    "krun_set_root",
+                    krun_set_root(self.ctx_id, rootfs_c.as_ptr()),
+                )
+            }
+            RootfsSource::Ext4Disk { path, read_only } => self.set_ext4_root_disk(path, *read_only),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    unsafe fn set_ext4_root_disk(&self, path: &Path, read_only: bool) -> Result<()> {
+        // A3S-created root images are always raw ext4 files with no partition
+        // table. They are deliberately never probed after guest access: an
+        // untrusted guest could rewrite the bytes as a linked image format.
+        const ROOT_DISK_ID: &str = "rootfs";
+        const ROOT_FILESYSTEM: &str = "ext4";
+
+        let block_id = value_to_cstring(ROOT_DISK_ID, "root disk id")?;
+        let disk_path = path_to_cstring(path, "ext4 root disk")?;
         check_status(
-            "krun_set_root",
-            krun_set_root(self.ctx_id, rootfs_c.as_ptr()),
+            "krun_add_disk2(rootfs)",
+            krun_add_disk2(
+                self.ctx_id,
+                block_id.as_ptr(),
+                disk_path.as_ptr(),
+                KRUN_DISK_FORMAT_RAW,
+                read_only,
+            ),
+        )?;
+
+        let device = value_to_cstring(a3s_box_core::vmm::GUEST_EXT4_ROOT_DEVICE, "root device")?;
+        let filesystem = value_to_cstring(ROOT_FILESYSTEM, "root filesystem")?;
+        let mount_options = read_only
+            .then(|| value_to_cstring("ro", "root mount options"))
+            .transpose()?;
+        check_status(
+            "krun_set_root_disk_remount",
+            krun_set_root_disk_remount(
+                self.ctx_id,
+                device.as_ptr(),
+                filesystem.as_ptr(),
+                mount_options
+                    .as_ref()
+                    .map_or(ptr::null(), |value| value.as_ptr()),
+            ),
         )
+    }
+
+    /// Attach a typed raw auxiliary disk without probing its guest-controlled
+    /// contents. Root disks are configured first, so list order maps
+    /// deterministically onto the remaining `/dev/vd*` device names.
+    #[cfg(not(target_os = "windows"))]
+    pub unsafe fn add_raw_block_device(&self, disk: &RawBlockDevice) -> Result<()> {
+        let block_id = value_to_cstring(&disk.id, "raw block device id")?;
+        let disk_path = path_to_cstring(&disk.path, "raw block device")?;
+        check_status(
+            "krun_add_disk2(auxiliary)",
+            krun_add_disk2(
+                self.ctx_id,
+                block_id.as_ptr(),
+                disk_path.as_ptr(),
+                KRUN_DISK_FORMAT_RAW,
+                disk.read_only,
+            ),
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub unsafe fn add_raw_block_device(&self, disk: &RawBlockDevice) -> Result<()> {
+        Err(BoxError::BoxBootError {
+            message: format!(
+                "Raw auxiliary block devices are not supported by the Windows libkrun backend: {}",
+                disk.path.display()
+            ),
+            hint: None,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn set_ext4_root_disk(&self, path: &Path, _read_only: bool) -> Result<()> {
+        Err(BoxError::BoxBootError {
+            message: format!(
+                "guest-native ext4 root disks are not supported by the Windows libkrun backend: {}",
+                path.display()
+            ),
+            hint: Some("Use a directory rootfs on Windows".to_string()),
+        })
     }
 
     /// Set the executable to run inside the VM.

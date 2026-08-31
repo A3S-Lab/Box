@@ -37,14 +37,14 @@ pub struct DiffArgs {
 }
 
 pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let initial_state = StateFile::load_default()?;
+    let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
+    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.name)?;
-
-    let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+    let record = state.find_by_id(&box_id).ok_or_else(|| {
         format!(
-            "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/)",
-            args.name,
-            record.box_dir.display()
+            "Box '{}' was removed while waiting for its lifecycle lock",
+            args.name
         )
     })?;
 
@@ -61,8 +61,11 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     let baseline: HashMap<String, RootfsFileInfo> = serde_json::from_str(&snapshot_data)
         .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
 
-    // Walk current rootfs
-    let current = walk_dir(&rootfs_dir)?;
+    // A guest-native block root has no host directory after ownership handoff.
+    // Running boxes therefore stream one coherent, guest-metadata archive over
+    // the exec channel. Directory-backed and stopped compatibility roots keep
+    // the local walk path.
+    let current = current_rootfs(record, &args.name).await?;
 
     // Compute diff
     let mut changes = Vec::new();
@@ -72,7 +75,10 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
         match baseline.get(path) {
             None => changes.push((ChangeKind::Added, path.clone())),
             Some(base_info) => {
-                if info.size != base_info.size || info.mode != base_info.mode {
+                if info.is_dir != base_info.is_dir
+                    || info.mode != base_info.mode
+                    || (!info.is_dir && info.size != base_info.size)
+                {
                     changes.push((ChangeKind::Changed, path.clone()));
                 }
             }
@@ -97,6 +103,160 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn current_rootfs(
+    record: &crate::state::BoxRecord,
+    display_name: &str,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    if record.status == "running" {
+        let live_pid = record.pid.is_some_and(|pid| {
+            crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
+        });
+        if !live_pid {
+            return Err(format!(
+                "Cannot diff running box '{}' because its host process is not live",
+                record.name
+            )
+            .into());
+        }
+        #[cfg(unix)]
+        {
+            if !record.exec_socket_path.exists() {
+                return Err(format!(
+                    "Cannot diff running box '{}' because its guest archive endpoint is unavailable",
+                    record.name
+                )
+                .into());
+            }
+            let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
+            let temporary = tempfile::tempdir()?;
+            let archive_path = temporary.path().join("rootfs.tar");
+            let mut output = tokio::fs::File::create(&archive_path).await?;
+            let written = client.archive_rootfs(&mut output, true).await?;
+            if written == 0 {
+                return Err("Guest rootfs archive was empty".into());
+            }
+            output.sync_all().await?;
+            drop(output);
+            return walk_tar_archive(&archive_path);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(format!(
+                "Live filesystem diff is unavailable for box '{}' on this platform",
+                record.name
+            )
+            .into());
+        }
+    }
+
+    if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
+        #[cfg(unix)]
+        {
+            let temporary = tempfile::tempdir()?;
+            let archive_path = temporary.path().join("rootfs.tar");
+            let mut output = tokio::fs::File::create(&archive_path).await?;
+            super::rootfs_capture::archive_stopped_guest_native_rootfs(record, &mut output).await?;
+            output.sync_all().await?;
+            drop(output);
+            return walk_tar_archive(&archive_path);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(format!(
+                "Stopped guest-native rootfs diff is unavailable for box '{}' on this platform",
+                record.name
+            )
+            .into());
+        }
+    }
+    let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+        format!(
+            "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/)",
+            display_name,
+            record.box_dir.display()
+        )
+    })?;
+    walk_dir(&rootfs_dir)
+}
+
+#[cfg(unix)]
+fn walk_tar_archive(
+    archive_path: &Path,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut archive = tar::Archive::new(std::fs::File::open(archive_path)?);
+    let mut entries = HashMap::new();
+    let mut hard_links = Vec::new();
+    for item in archive.entries()? {
+        let item = item?;
+        let path = item.path()?.into_owned();
+        let Some(key) = archive_rootfs_key(&path)? else {
+            continue;
+        };
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
+            continue;
+        }
+        let header = item.header();
+        let entry_type = header.entry_type();
+        let permissions = header.mode()? & 0o7777;
+        if entry_type.is_hard_link() {
+            let target = item
+                .link_name()?
+                .map(|target| archive_rootfs_key(&target))
+                .transpose()?
+                .flatten()
+                .ok_or_else(|| format!("hard-link target is missing for {key}"))?;
+            hard_links.push((key, target));
+            continue;
+        }
+        let (size, mode, is_dir) = if entry_type.is_dir() {
+            (0, u32::from(libc::S_IFDIR) | permissions, true)
+        } else if entry_type.is_symlink() {
+            let size = item
+                .link_name()?
+                .map(|target| target.as_os_str().as_bytes().len() as u64)
+                .unwrap_or(0);
+            (size, u32::from(libc::S_IFLNK) | permissions, false)
+        } else if entry_type.is_file() {
+            (
+                header.size()?,
+                u32::from(libc::S_IFREG) | permissions,
+                false,
+            )
+        } else {
+            continue;
+        };
+        entries.insert(key, RootfsFileInfo { size, mode, is_dir });
+    }
+    for (path, target) in hard_links {
+        let target = entries
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("hard-link target {target} was not archived before {path}"))?;
+        entries.insert(path, target);
+    }
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn archive_rootfs_key(path: &Path) -> Result<Option<String>, String> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => segments.push(segment.to_string_lossy()),
+            _ => {
+                return Err(format!(
+                    "guest rootfs archive contains an unsafe path: {}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok((!segments.is_empty()).then(|| format!("/{}", segments.join("/"))))
 }
 
 /// Create the per-box baseline snapshot used by `a3s-box diff`.
@@ -159,6 +319,31 @@ mod tests {
         assert_eq!(map["/hello.txt"].size, 5);
         assert!(!map["/hello.txt"].is_dir);
         assert!(map["/subdir"].is_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_tar_walk_matches_regular_symlink_and_hardlink_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let rootfs = directory.path().join("rootfs");
+        std::fs::create_dir_all(rootfs.join("subdir")).unwrap();
+        std::fs::write(rootfs.join("subdir/file"), b"payload").unwrap();
+        std::os::unix::fs::symlink("file", rootfs.join("subdir/link")).unwrap();
+        std::fs::hard_link(rootfs.join("subdir/file"), rootfs.join("subdir/hardlink")).unwrap();
+        let expected = walk_dir(&rootfs).unwrap();
+
+        let archive_path = directory.path().join("rootfs.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&archive_path).unwrap());
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", &rootfs).unwrap();
+        builder.finish().unwrap();
+        let actual = walk_tar_archive(&archive_path).unwrap();
+
+        for path in ["/subdir/file", "/subdir/link", "/subdir/hardlink"] {
+            assert_eq!(actual.get(path), expected.get(path), "metadata for {path}");
+        }
+        assert_eq!(actual["/subdir"].mode, expected["/subdir"].mode);
+        assert!(actual["/subdir"].is_dir);
     }
 
     #[test]

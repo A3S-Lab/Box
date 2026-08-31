@@ -12,30 +12,21 @@
 mod linux {
 
     use a3s_box_core::guest_exec::{
-        GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
+        GuestBootConfig, GuestBootMode, GuestExecConfig, GuestHostConfig, GUEST_BOOT_CONFIG_ENV,
+        GUEST_BOOT_CONFIG_PATH, GUEST_BOOT_CONTROL_MOUNT_PATH, GUEST_BOOT_CONTROL_TAG,
+        GUEST_ROOTFS_MAINTENANCE_ENV, GUEST_TERMINAL_CONTROL_MOUNT_PATH,
+        GUEST_TERMINAL_CONTROL_TAG, GUEST_TERMINAL_STATUS_PATH, MAX_GUEST_BOOT_CONFIG_BYTES,
+        MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
     };
+    use a3s_box_core::rootfs_baseline::GUEST_DIFF_BASELINE_PATH;
     use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
     use a3s_box_guest_init::{
-        attest_server, exec_server, host_config, namespace, network, port_forward, pty_server,
-        volume,
+        attest_server, diff_baseline, exec_server, host_config, namespace, network, port_forward,
+        pty_server, root_transport, terminal_status, volume,
     };
     use std::process;
-    use std::sync::atomic::{AtomicI32, Ordering};
     use tracing::{error, info, warn};
     use zeroize::{Zeroize, Zeroizing};
-
-    /// Signal forwarded to the container process group during graceful shutdown.
-    /// Zero means no shutdown has been requested.
-    static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-    fn request_shutdown(signal: i32) {
-        let signal = if (1..=64).contains(&signal) {
-            signal
-        } else {
-            libc::SIGTERM
-        };
-        let _ = SHUTDOWN_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
-    }
 
     /// Bootstrap environment selected by the host execution backend.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,626 +53,14 @@ mod linux {
         }
     }
 
-    /// Relay threads forwarding the main process's stdout/stderr pipes to the console.
-    /// Drained at container exit so the tail of the output reaches the console (and
-    /// thus `logs` / the foreground terminal) before the VM halts.
-    static STDIO_RELAYS: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> =
-        std::sync::OnceLock::new();
+    mod stdio;
+    use stdio::*;
 
-    /// Interpose a re-openable pipe between the main container process's stdout/stderr
-    /// and the virtio-console.
-    ///
-    /// The container would otherwise inherit guest-init's virtio-console ports as fd
-    /// 1/2, which are single-open: a process that re-opens `/proc/self/fd/{1,2}` or
-    /// `/dev/stdout`/`/dev/stderr` (Apache httpd, nginx-to-stdout, and many real apps)
-    /// gets `EBUSY`. We hand it pipe write-ends instead (installed onto fd 1/2 in the
-    /// child by `spawn_isolated`) and relay the read-ends back to the console here, so
-    /// re-opening works while `logs` and the split stdout/stderr streams are preserved.
-    ///
-    /// File descriptors for the main-process stdio relay (set up before the fork,
-    /// with the relay threads started only *after* the fork — see `start_stdio_relays`).
-    #[cfg(target_os = "linux")]
-    struct StdioRelayFds {
-        /// Pipe write-ends handed to the child as fd 1/2.
-        out_w: std::os::unix::io::RawFd,
-        err_w: std::os::unix::io::RawFd,
-        /// Pipe read-ends the relay threads drain.
-        out_r: std::os::unix::io::RawFd,
-        err_r: std::os::unix::io::RawFd,
-        /// Console targets (dups of guest-init fd 1/2) the relays write to.
-        console_out: std::os::unix::io::RawFd,
-        console_err: std::os::unix::io::RawFd,
-    }
+    mod exec_config;
+    use exec_config::*;
 
-    /// Create the relay pipes + console dups (NO threads yet — threads must start after
-    /// the container fork to stay fork-safe). Returns `None` (keep console fds, the
-    /// pre-fix behavior) if any fd op fails.
-    #[cfg(target_os = "linux")]
-    fn setup_main_stdio_pipes() -> Option<StdioRelayFds> {
-        use std::os::unix::io::RawFd;
-
-        // Relay targets: dup guest-init's current stdout (fd 1 -> console.log) and
-        // stderr (fd 2 -> console.err.log) so the split-stream routing is preserved.
-        let console_out = unsafe { libc::dup(1) };
-        let console_err = unsafe { libc::dup(2) };
-        if console_out < 0 || console_err < 0 {
-            unsafe {
-                if console_out >= 0 {
-                    libc::close(console_out);
-                }
-                if console_err >= 0 {
-                    libc::close(console_err);
-                }
-            }
-            return None;
-        }
-
-        // O_CLOEXEC so the raw pipe fds don't leak into the exec'd container; the
-        // child's dup2 onto fd 1/2 clears CLOEXEC there so only those survive exec.
-        let mut out_fds = [0 as RawFd; 2];
-        let mut err_fds = [0 as RawFd; 2];
-        if unsafe { libc::pipe2(out_fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-            unsafe {
-                libc::close(console_out);
-                libc::close(console_err);
-            }
-            return None;
-        }
-        if unsafe { libc::pipe2(err_fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-            // The out-pipe succeeded; close it too so a failed err-pipe (e.g. EMFILE)
-            // doesn't leak the two out-pipe fds.
-            unsafe {
-                libc::close(console_out);
-                libc::close(console_err);
-                libc::close(out_fds[0]);
-                libc::close(out_fds[1]);
-            }
-            return None;
-        }
-        Some(StdioRelayFds {
-            out_w: out_fds[1],
-            err_w: err_fds[1],
-            out_r: out_fds[0],
-            err_r: err_fds[0],
-            console_out,
-            console_err,
-        })
-    }
-
-    /// Start the two relay threads (read pipe -> write console). Called *after* the
-    /// container fork so guest-init is single-threaded across `fork()` (fork-safety:
-    /// the codebase keeps the post-fork child free of locks held by other threads).
-    /// Consumes the read-ends + console dups; the write-ends are closed by the caller.
-    ///
-    /// NOTE: a hand-rolled `read`/`write` loop — NOT `std::io::copy`. On Linux,
-    /// `io::copy` takes a `splice(2)` fast path for a pipe source, which on a
-    /// pipe → virtio-console pair returns a spurious `Ok(0)` (premature EOF). That
-    /// dropped the read-end immediately, so the container's first write hit a
-    /// reader-less pipe and died with SIGPIPE. The explicit loop avoids splice.
-    #[cfg(target_os = "linux")]
-    fn start_stdio_relays(out_r: i32, console_out: i32, err_r: i32, console_err: i32) {
-        let mut handles = Vec::with_capacity(2);
-        for (read_fd, console_fd) in [(out_r, console_out), (err_r, console_err)] {
-            handles.push(std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let n = unsafe {
-                        libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                    };
-                    if n < 0 {
-                        // EINTR: a signal (e.g. the SIGTERM handler, installed without
-                        // SA_RESTART) interrupted the blocking read — retry, don't
-                        // mistake it for EOF and truncate the container's final output.
-                        // Any other error means the pipe is gone, so stop.
-                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        break;
-                    }
-                    // EOF — the container closed its pipe write-end (it exited), so the
-                    // relay is finished.
-                    if n == 0 {
-                        break;
-                    }
-                    let mut off = 0usize;
-                    while off < n as usize {
-                        let w = unsafe {
-                            libc::write(
-                                console_fd,
-                                buf.as_ptr().add(off) as *const libc::c_void,
-                                n as usize - off,
-                            )
-                        };
-                        if w < 0 {
-                            // Same EINTR handling for the write side: retry the same
-                            // offset rather than dropping the rest of the chunk.
-                            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                                continue;
-                            }
-                            break;
-                        }
-                        if w == 0 {
-                            break;
-                        }
-                        off += w as usize;
-                    }
-                }
-                unsafe {
-                    libc::close(read_fd);
-                    libc::close(console_fd);
-                }
-            }));
-        }
-        if let Ok(mut g) = STDIO_RELAYS
-            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-            .lock()
-        {
-            g.extend(handles);
-        }
-    }
-
-    /// Create the standard `/dev/std{in,out,err}` + `/dev/fd` symlinks into the
-    /// process's own fds, the way container runtimes do.
-    ///
-    /// The main container's `/dev` is a devtmpfs (real `null`/`urandom`/... nodes but
-    /// no std* symlinks). Apps that log to `/dev/stdout` or `/dev/stderr` (official
-    /// nginx, and many others) need these to resolve to their own stdio — which is
-    /// re-openable now that the main process's stdout/stderr are pipes (see
-    /// `setup_main_stdio_pipes`). Created once before the container fork so the
-    /// container inherits them; best-effort and idempotent.
-    #[cfg(target_os = "linux")]
-    fn ensure_dev_std_symlinks() {
-        for (link, target) in [
-            ("/dev/stdin", "/proc/self/fd/0"),
-            ("/dev/stdout", "/proc/self/fd/1"),
-            ("/dev/stderr", "/proc/self/fd/2"),
-            ("/dev/fd", "/proc/self/fd"),
-        ] {
-            // symlink_metadata does not follow the link, so an existing symlink whose
-            // target is not yet resolvable still counts as present (idempotent).
-            if std::fs::symlink_metadata(link).is_ok() {
-                continue;
-            }
-            if let Err(e) = std::os::unix::fs::symlink(target, link) {
-                warn!("Failed to symlink {link} -> {target}: {e}");
-            }
-        }
-    }
-
-    /// Drain the stdout/stderr relay threads so the container's final output reaches
-    /// the console before the VM halts. Idempotent; safe from any exit path.
-    fn flush_stdio_relays() {
-        if let Some(lock) = STDIO_RELAYS.get() {
-            let handles: Vec<_> = lock
-                .lock()
-                .map(|mut g| std::mem::take(&mut *g))
-                .unwrap_or_default();
-            for h in handles {
-                let _ = h.join();
-            }
-        }
-    }
-
-    /// Container entrypoint configuration parsed from environment variables.
-    struct ExecConfig {
-        /// Container executable path
-        executable: String,
-        /// Container arguments
-        args: Vec<String>,
-        /// Container environment variables
-        env: Vec<(String, String)>,
-        /// Working directory
-        workdir: String,
-        /// Container user (`uid`, `uid:gid`, `root`, or a name resolved via the
-        /// image `/etc/passwd`). Applied to the main process before exec.
-        user: Option<String>,
-        /// Whether stdin should be connected to `/dev/null`.
-        stdin_null: bool,
-    }
-
-    impl Drop for ExecConfig {
-        fn drop(&mut self) {
-            for (_, value) in &mut self.env {
-                value.zeroize();
-            }
-        }
-    }
-
-    impl ExecConfig {
-        /// Parse container entrypoint configuration from environment variables.
-        ///
-        /// Expected environment variables:
-        /// - BOX_EXEC_CONFIG_FILE: fixed runtime-owned JSON process configuration
-        /// - BOX_EXEC_ENV_*: container environment variables
-        ///
-        /// Legacy runtimes may instead pass BOX_EXEC_EXEC, BOX_EXEC_ARGC,
-        /// BOX_EXEC_ARG_<n>, BOX_EXEC_WORKDIR, BOX_EXEC_USER, and BOX_EXEC_STDIN.
-        fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::from_env_with_staged_file_consumption(true)
-        }
-
-        fn from_env_without_consuming_staged_file() -> Result<Self, Box<dyn std::error::Error>> {
-            Self::from_env_with_staged_file_consumption(false)
-        }
-
-        fn from_env_with_staged_file_consumption(
-            consume_staged_file: bool,
-        ) -> Result<Self, Box<dyn std::error::Error>> {
-            // Legacy BOX_EXEC_* values are base64-encoded (URL-safe, no pad) by
-            // the runtime when BOX_EXEC_B64=1. Some libkrun init builds import
-            // those values from /proc/cmdline but miss the marker; infer the old
-            // encoded form from BOX_EXEC_EXEC so old runtimes still boot.
-            let b64 = should_decode_box_exec_values();
-            let decode = |s: String| decode_box_exec_value(s, b64);
-
-            let (executable, args, workdir, user, stdin_null) =
-                match std::env::var("BOX_EXEC_CONFIG_FILE") {
-                    Ok(path) => {
-                        let staged = read_staged_exec_config(&path, consume_staged_file)?;
-                        (
-                            staged.executable,
-                            staged.args,
-                            staged.workdir,
-                            staged.user,
-                            staged.stdin_null,
-                        )
-                    }
-                    Err(std::env::VarError::NotPresent) => {
-                        let executable = std::env::var("BOX_EXEC_EXEC")
-                            .map(&decode)
-                            .unwrap_or_else(|_| "/bin/sh".to_string());
-                        let args = match std::env::var("BOX_EXEC_ARGC")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                        {
-                            Some(argc) => (0..argc)
-                                .filter_map(|index| {
-                                    std::env::var(format!("BOX_EXEC_ARG_{index}"))
-                                        .ok()
-                                        .map(&decode)
-                                })
-                                .collect(),
-                            None => vec![],
-                        };
-                        let workdir = std::env::var("BOX_EXEC_WORKDIR")
-                            .map(&decode)
-                            .unwrap_or_else(|_| "/".to_string());
-                        let user = std::env::var("BOX_EXEC_USER")
-                            .ok()
-                            .map(&decode)
-                            .filter(|value| !value.is_empty());
-                        let stdin_null = std::env::var("BOX_EXEC_STDIN")
-                            .map(|value| value.eq_ignore_ascii_case("null"))
-                            .unwrap_or(false);
-                        (executable, args, workdir, user, stdin_null)
-                    }
-                    Err(error) => {
-                        return Err(format!("BOX_EXEC_CONFIG_FILE is invalid: {error}").into());
-                    }
-                };
-
-            // Collect BOX_EXEC_ENV_* variables (values decoded as above). Skip
-            // BOX_EXEC_ENV_FILE — it's the pointer to the staged env file, not a
-            // container variable. Kept for backward compatibility with a runtime that
-            // still passes container env inline.
-            let mut env: Vec<(String, String)> = std::env::vars()
-                .filter_map(|(key, value)| {
-                    key.strip_prefix("BOX_EXEC_ENV_")
-                        .filter(|stripped| *stripped != "FILE")
-                        .map(|stripped| (stripped.to_string(), decode(value)))
-                })
-                .collect();
-
-            // Bulk container env is staged in a file (runtime/src/vm/spec.rs): K8s
-            // injects ~150 service env vars, which overflow the guest kernel cmdline
-            // if passed inline, so the runtime writes them to a file and points here.
-            // Each line is `KEY=base64(value)`; the key may itself contain `=`-free
-            // bytes only (env names are a safe charset), so split on the first `=`.
-            if let Ok(path) = std::env::var("BOX_EXEC_ENV_FILE") {
-                match std::fs::read_to_string(&path) {
-                    Ok(contents) => {
-                        for line in contents.lines() {
-                            if let Some((k, v)) = line.split_once('=') {
-                                env.push((k.to_string(), decode(v.to_string())));
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("init.krun: failed to read BOX_EXEC_ENV_FILE {path}: {e}"),
-                }
-            }
-
-            Ok(Self {
-                executable,
-                args,
-                env,
-                workdir,
-                user,
-                stdin_null,
-            })
-        }
-
-        /// Replace the non-sensitive Runtime binding manifest with exact
-        /// values read from read-only files that Box mounted from node tmpfs.
-        /// The manifest itself never reaches the workload environment.
-        fn materialize_secret_environment(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.materialize_secret_environment_from(std::path::Path::new("/.a3s-box-secrets"))
-        }
-
-        fn materialize_secret_environment_from(
-            &mut self,
-            internal_root: &std::path::Path,
-        ) -> Result<(), Box<dyn std::error::Error>> {
-            let manifests = self
-                .env
-                .iter()
-                .enumerate()
-                .filter(|(_, (key, _))| key == SECRET_ENVIRONMENT_MANIFEST)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            if manifests.is_empty() {
-                return Ok(());
-            }
-            if manifests.len() != 1 {
-                return Err("duplicate Box Secret environment manifests".into());
-            }
-            let (_, encoded) = self.env.remove(manifests[0]);
-            let encoded = Zeroizing::new(encoded);
-            let bindings: Vec<SecretEnvironmentBinding> = serde_json::from_str(&encoded)
-                .map_err(|_| "Box Secret environment manifest is not valid version-1 JSON")?;
-            if bindings.is_empty() || bindings.len() > 128 {
-                return Err("Box Secret environment manifest has an invalid binding count".into());
-            }
-
-            let mut variables = std::collections::BTreeSet::new();
-            let mut paths = std::collections::BTreeSet::new();
-            for binding in bindings {
-                binding.validate()?;
-                if !variables.insert(binding.variable.clone())
-                    || !paths.insert(binding.path.clone())
-                {
-                    return Err(
-                        "Box Secret environment manifest contains duplicate bindings".into(),
-                    );
-                }
-                let path = std::path::Path::new(&binding.path);
-                let relative = path.strip_prefix(internal_root).map_err(|_| {
-                    "Box Secret environment file escaped the reserved guest directory"
-                })?;
-                let components = relative
-                    .components()
-                    .filter_map(|component| match component {
-                        std::path::Component::Normal(value) => value.to_str(),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if components.len() != 2
-                    || components[0].len() != 64
-                    || !components[0].bytes().all(|byte| byte.is_ascii_hexdigit())
-                    || components[1].len() != 10
-                    || !components[1].as_bytes()[..3]
-                        .iter()
-                        .all(|byte| byte.is_ascii_digit())
-                    || &components[1].as_bytes()[3..] != b".secret"
-                    || components[1][..3]
-                        .parse::<usize>()
-                        .ok()
-                        .is_none_or(|index| index >= 128)
-                {
-                    return Err(
-                        "Box Secret environment file has an invalid reserved identity".into(),
-                    );
-                }
-                let metadata = std::fs::symlink_metadata(path)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-                    if !metadata.file_type().is_file()
-                        || metadata.file_type().is_symlink()
-                        || metadata.nlink() != 1
-                        || metadata.len() == 0
-                        || metadata.len() > 1024 * 1024
-                        || metadata.permissions().mode() & 0o777 != 0o400
-                    {
-                        return Err("Box Secret environment file violates its regular-file, size, or mode contract".into());
-                    }
-                }
-                let bytes = Zeroizing::new(std::fs::read(path)?);
-                if bytes.is_empty() || bytes.len() > 1024 * 1024 {
-                    return Err("Box Secret environment value has an invalid size".into());
-                }
-                let mut value = std::str::from_utf8(bytes.as_slice())
-                    .map_err(|_| "Box Secret environment value is not UTF-8")?
-                    .to_owned();
-                if value.contains('\0') {
-                    value.zeroize();
-                    return Err("Box Secret environment value contains a NUL byte".into());
-                }
-                if self.env.iter().any(|(key, _)| key == &binding.variable) {
-                    value.zeroize();
-                    return Err(
-                        "Box Secret environment binding conflicts with an existing value".into(),
-                    );
-                }
-                self.env.push((binding.variable, value));
-            }
-            Ok(())
-        }
-    }
-
-    fn read_staged_exec_config(
-        path: &str,
-        consume: bool,
-    ) -> Result<GuestExecConfig, Box<dyn std::error::Error>> {
-        if path != RUNTIME_EXEC_CONFIG_PATH {
-            return Err(format!("unsupported BOX_EXEC_CONFIG_FILE path {path:?}").into());
-        }
-        let path = std::path::Path::new(path);
-        let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.file_type().is_file() {
-            return Err(format!(
-                "guest exec config is not a regular file: {}",
-                path.display()
-            )
-            .into());
-        }
-        if metadata.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES as u64 {
-            return Err(format!(
-                "guest exec config is {} bytes; limit is {} bytes",
-                metadata.len(),
-                MAX_RUNTIME_EXEC_CONFIG_BYTES
-            )
-            .into());
-        }
-        let bytes = std::fs::read(path)?;
-        if bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
-            return Err(format!(
-                "guest exec config grew to {} bytes; limit is {} bytes",
-                bytes.len(),
-                MAX_RUNTIME_EXEC_CONFIG_BYTES
-            )
-            .into());
-        }
-        let config = parse_staged_exec_config(&bytes)?;
-        if consume {
-            std::fs::remove_file(path)?;
-        }
-        Ok(config)
-    }
-
-    fn parse_staged_exec_config(
-        bytes: &[u8],
-    ) -> Result<GuestExecConfig, Box<dyn std::error::Error>> {
-        if bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
-            return Err(format!(
-                "guest exec config is {} bytes; limit is {} bytes",
-                bytes.len(),
-                MAX_RUNTIME_EXEC_CONFIG_BYTES
-            )
-            .into());
-        }
-        let config: GuestExecConfig = serde_json::from_slice(bytes)?;
-        config
-            .validate()
-            .map_err(|message| format!("invalid guest exec config: {message}"))?;
-        Ok(config)
-    }
-
-    fn should_decode_box_exec_values() -> bool {
-        if std::env::var("BOX_EXEC_B64")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            return true;
-        }
-
-        std::env::var("BOX_EXEC_EXEC")
-            .ok()
-            .and_then(|raw| decode_box_exec_value_if_valid(&raw))
-            .as_deref()
-            .is_some_and(is_plausible_exec)
-    }
-
-    fn decode_box_exec_value(value: String, decode: bool) -> String {
-        if decode {
-            decode_box_exec_value_if_valid(&value).unwrap_or(value)
-        } else {
-            value
-        }
-    }
-
-    fn decode_box_exec_value_if_valid(value: &str) -> Option<String> {
-        use base64::Engine;
-
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(value.as_bytes())
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .filter(|decoded| !decoded.is_empty() && !decoded.contains('\0'))
-    }
-
-    fn is_plausible_exec(value: &str) -> bool {
-        !value.is_empty()
-            && (value.starts_with('/')
-                || value.starts_with("./")
-                || value.starts_with("../")
-                || value
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | ':')))
-    }
-
-    /// Sidecar process configuration parsed from environment variables.
-    struct SidecarConfig {
-        /// Sidecar image name (informational only inside the VM — binary is already in rootfs)
-        image: String,
-        /// Vsock port the sidecar listens on
-        vsock_port: u32,
-        /// Environment variables for the sidecar
-        env: Vec<(String, String)>,
-    }
-
-    impl SidecarConfig {
-        /// Parse sidecar configuration from environment variables.
-        ///
-        /// Returns `None` if `BOX_SIDECAR_IMAGE` is not set.
-        fn from_env() -> Option<Self> {
-            let image = std::env::var("BOX_SIDECAR_IMAGE").ok()?;
-            if image.is_empty() {
-                return None;
-            }
-
-            let vsock_port = std::env::var("BOX_SIDECAR_VSOCK_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4092u32);
-
-            let env_count: usize = std::env::var("BOX_SIDECAR_ENV_COUNT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-
-            let env: Vec<(String, String)> = (0..env_count)
-                .filter_map(|i| {
-                    let raw = std::env::var(format!("BOX_SIDECAR_ENV_{}", i)).ok()?;
-                    let (key, value) = raw.split_once('=')?;
-                    Some((key.to_string(), value.to_string()))
-                })
-                .collect();
-
-            Some(Self {
-                image,
-                vsock_port,
-                env,
-            })
-        }
-    }
-
-    /// Register a SIGTERM handler that sets the shutdown flag.
-    ///
-    /// As PID 1 inside the VM, we must explicitly handle SIGTERM — the kernel
-    /// does not deliver unhandled signals to init. When the host kills the shim
-    /// process, libkrun triggers a guest shutdown and the kernel sends SIGTERM
-    /// to PID 1.
-    #[cfg(target_os = "linux")]
-    fn register_sigterm_handler() -> Result<(), Box<dyn std::error::Error>> {
-        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
-
-        let handler = SigHandler::Handler(sigterm_handler);
-        let action = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
-        unsafe { sigaction(Signal::SIGTERM, &action)? };
-        info!("Registered SIGTERM handler");
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    extern "C" fn sigterm_handler(signal: libc::c_int) {
-        request_shutdown(signal);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn register_sigterm_handler() -> Result<(), Box<dyn std::error::Error>> {
-        info!("Skipping SIGTERM handler on non-Linux platform (development mode)");
-        Ok(())
-    }
+    mod shutdown;
+    use shutdown::*;
 
     /// Check if this VM is running in a TEE environment.
     ///
@@ -823,6 +202,8 @@ mod linux {
         // Run init process
         if let Err(e) = run_init() {
             error!("Init process failed: {}", e);
+            persist_exit_code(1);
+            quiesce_rootfs_for_handoff();
             eprintln!("a3s-box guest init failed: {e}");
             process::exit(1);
         }
@@ -832,12 +213,18 @@ mod linux {
 
     fn run_init() -> Result<(), Box<dyn std::error::Error>> {
         let bootstrap_mode = BootstrapMode::from_env()?;
+        let rootfs_maintenance = rootfs_maintenance_requested()?;
+        if bootstrap_mode.is_host_sandbox() && rootfs_maintenance {
+            return Err("rootfs maintenance is supported only by the MicroVM bootstrap".into());
+        }
         info!(?bootstrap_mode, "Selected guest-init bootstrap mode");
 
         // Restore Linux uid/gid/mode before mounting procfs, workspace, or user
         // volumes so metadata replay can never mutate an attached host path.
         #[cfg(target_os = "linux")]
-        if bootstrap_mode.is_host_sandbox() {
+        if rootfs_maintenance {
+            info!("Skipping workload metadata replay for the trusted maintenance root");
+        } else if bootstrap_mode.is_host_sandbox() {
             a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata_around_mounts(
                 std::path::Path::new("/"),
             )?;
@@ -845,16 +232,64 @@ mod linux {
             a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata(std::path::Path::new("/"))?;
         }
 
-        // Load runtime-owned process and environment files before any user mount
-        // can cover their fixed paths. MicroVM roots are writable here, so consume
-        // the process file before a later read-only remount. An OCI runtime may
-        // mount a Sandbox root read-only before PID 1 starts, so retain that copy;
-        // runtime-internal paths are excluded from snapshots and commits.
-        let mut exec_config = if bootstrap_mode.is_host_sandbox() {
-            ExecConfig::from_env_without_consuming_staged_file()?
+        let (mut exec_config, boot_host_config, boot_mode): (
+            ExecConfig,
+            Option<GuestHostConfig>,
+            GuestBootMode,
+        ) = if bootstrap_mode.is_host_sandbox() {
+            // An OCI runtime may mount a Sandbox root read-only before PID 1
+            // starts, so retain the staged process file there.
+            (
+                ExecConfig::from_env_without_consuming_staged_file()?,
+                None,
+                GuestBootMode::Workload,
+            )
+        } else if std::env::var_os(GUEST_BOOT_CONFIG_ENV).is_some() {
+            // The MicroVM boot bundle lives on a private virtio-fs share, so
+            // mount backend-owned shares before reading it. User mount targets
+            // cannot overlap /run/a3s-box.
+            mount_essential_filesystems()
+                .map_err(|error| format!("failed to mount essential filesystems: {error}"))?;
+            mount_default_shm()
+                .map_err(|error| format!("failed to mount default shared memory: {error}"))?;
+            mount_virtio_fs_shares()
+                .map_err(|error| format!("failed to mount private boot transport: {error}"))?;
+            let boot = read_guest_boot_config_from_env()?
+                .ok_or_else(|| format!("{GUEST_BOOT_CONFIG_ENV} disappeared during boot"))?;
+            unmount_guest_boot_control()
+                .map_err(|error| format!("failed to unmount private boot transport: {error}"))?;
+            let GuestBootConfig {
+                mode,
+                exec,
+                environment,
+                host,
+                ..
+            } = boot;
+            (
+                ExecConfig::from_guest_boot_config(exec, environment),
+                Some(host),
+                mode,
+            )
         } else {
-            ExecConfig::from_env()?
+            // Legacy MicroVM runtimes stage fixed files in the rootfs. Read
+            // them before user mounts can cover their paths.
+            let exec = ExecConfig::from_env()?;
+            mount_essential_filesystems()?;
+            mount_default_shm()?;
+            mount_virtio_fs_shares()?;
+            (exec, None, GuestBootMode::Workload)
         };
+
+        if rootfs_maintenance != boot_mode.is_rootfs_maintenance() {
+            return Err(format!(
+                "rootfs maintenance selector disagrees with typed boot mode {boot_mode:?}"
+            )
+            .into());
+        }
+        if rootfs_maintenance {
+            return run_rootfs_maintenance();
+        }
+
         info!(
             executable = %exec_config.executable,
             args = ?exec_config.args,
@@ -863,24 +298,11 @@ mod linux {
             "Container entrypoint configuration loaded"
         );
 
-        if !bootstrap_mode.is_host_sandbox() {
-            // The MicroVM backend owns its in-guest filesystem setup. The OCI
-            // backend has already installed all of these mounts before PID 1 runs.
-            mount_essential_filesystems()?;
-            mount_default_shm()?;
-            mount_virtio_fs_shares()?;
-            mount_devpts()?;
-            mount_tmpfs_volumes()?;
-
-            // Make the unified hierarchy visible for nested runtimes in a VM.
-            #[cfg(target_os = "linux")]
-            let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
-        }
-
         // Host Sandbox mounts are already installed by the OCI runtime before
-        // PID 1 starts. Resolve Secret environment values only now, after all
-        // backend-owned mount setup and immediately before process creation.
-        exec_config.materialize_secret_environment()?;
+        // PID 1 starts, so its Secret bindings can be resolved immediately.
+        if bootstrap_mode.is_host_sandbox() {
+            exec_config.materialize_secret_environment()?;
+        }
 
         // Step 2.6: Bind the exec (vsock 4089) and PTY (vsock 4090) listening sockets
         // NOW, before the slower network bring-up and container spawn below. These are
@@ -909,21 +331,45 @@ mod linux {
         };
 
         // Step 3: Configure guest network (if passt mode is active).
-        // Network setup may write /etc/resolv.conf — must run before read-only remount.
         if bootstrap_mode.is_host_sandbox() {
             network::configure_sandbox_loopback()?;
         } else {
             network::configure_guest_network()?;
         }
 
-        // Step 3.25: Apply hostname while the rootfs is still writable.
+        // Step 3.25: Materialize host-owned files while the rootfs is writable.
         if !bootstrap_mode.is_host_sandbox() {
-            host_config::apply_from_env()?;
+            match boot_host_config.as_ref() {
+                Some(config) => host_config::apply_from_boot_config(config)?,
+                None => host_config::apply_from_env()?,
+            }
+
+            // Only now expose host workspace and user volumes. This prevents an
+            // image symlink such as `/etc -> /workspace` from redirecting the
+            // runtime-owned hostname/DNS writes into a host share.
+            mount_workload_virtio_fs_shares()?;
+            mount_devpts()?;
+            mount_tmpfs_volumes()?;
+
+            // Make the unified hierarchy visible for nested runtimes in a VM.
+            #[cfg(target_os = "linux")]
+            let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
+
+            // Secret files are user-volume mounts and therefore resolve only
+            // after the workload shares are present.
+            exec_config.materialize_secret_environment()?;
+
+            // A guest-native block provider has no host-visible tree after
+            // ownership handoff. Capture its pristine diff baseline now, after
+            // host files and mounts are finalized but before any workload or
+            // sidecar process can mutate the root disk.
+            if diff_baseline::persist(std::path::Path::new("/"))? {
+                info!("Published guest-owned pristine rootfs diff baseline");
+            }
         }
 
         // Step 3.5: Remount rootfs read-only if BOX_READONLY=1.
-        // All writes to / (mount point creation, resolv.conf, staged config
-        // removal) must complete first.
+        // All writes to / must complete first.
         if !bootstrap_mode.is_host_sandbox() {
             remount_rootfs_readonly()?;
         }
@@ -1163,8 +609,20 @@ mod linux {
         // Drain the stdio relays on the graceful-shutdown / no-children return paths
         // (the container-exit path flushes before its own process::exit).
         flush_stdio_relays();
+        quiesce_rootfs_for_handoff();
 
         Ok(())
+    }
+
+    fn rootfs_maintenance_requested() -> Result<bool, Box<dyn std::error::Error>> {
+        match std::env::var(GUEST_ROOTFS_MAINTENANCE_ENV) {
+            Err(std::env::VarError::NotPresent) => Ok(false),
+            Ok(value) if value == "1" => Ok(true),
+            Ok(value) => {
+                Err(format!("unsupported {GUEST_ROOTFS_MAINTENANCE_ENV} value {value:?}").into())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn inherited_listener_fd(name: &str) -> Result<std::os::fd::RawFd, Box<dyn std::error::Error>> {
@@ -1246,741 +704,8 @@ mod linux {
         }
     }
 
-    /// Mount essential filesystems (/proc, /sys, /dev).
-    fn mount_essential_filesystems() -> Result<(), Box<dyn std::error::Error>> {
-        info!("Mounting essential filesystems");
-
-        // Note: mount() signature differs between Linux and macOS in nix crate
-        // On Linux: mount(source, target, fstype, flags, data)
-        // On macOS: mount(source, target, flags, data)
-        // This code is meant to run on Linux inside the VM
-
-        #[cfg(target_os = "linux")]
-        {
-            use nix::mount::{mount, MsFlags};
-
-            // Mount /proc (ignore EBUSY — kernel may have already mounted it)
-            match mount(
-                Some("proc"),
-                "/proc",
-                Some("proc"),
-                MsFlags::empty(),
-                None::<&str>,
-            ) {
-                Ok(()) => {}
-                Err(nix::errno::Errno::EBUSY) => {
-                    info!("/proc already mounted, skipping");
-                }
-                Err(e) => return Err(e.into()),
-            }
-
-            // Mount /sys (ignore EBUSY)
-            match mount(
-                Some("sysfs"),
-                "/sys",
-                Some("sysfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            ) {
-                Ok(()) => {}
-                Err(nix::errno::Errno::EBUSY) => {
-                    info!("/sys already mounted, skipping");
-                }
-                Err(e) => return Err(e.into()),
-            }
-
-            // Mount /dev (devtmpfs, ignore EBUSY)
-            match mount(
-                Some("devtmpfs"),
-                "/dev",
-                Some("devtmpfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            ) {
-                Ok(()) => {}
-                Err(nix::errno::Errno::EBUSY) => {
-                    info!("/dev already mounted, skipping");
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // On non-Linux platforms (e.g., macOS for development),
-            // skip mounting as this code won't actually run
-            info!("Skipping mount on non-Linux platform (development mode)");
-        }
-
-        Ok(())
-    }
-
-    /// Mount devpts for guest-side PTY allocation.
-    #[cfg(target_os = "linux")]
-    fn mount_devpts() -> Result<(), Box<dyn std::error::Error>> {
-        use nix::mount::{mount, MsFlags};
-
-        std::fs::create_dir_all("/dev/pts")?;
-        match mount(
-            Some("devpts"),
-            "/dev/pts",
-            Some("devpts"),
-            MsFlags::empty(),
-            Some("mode=0620,ptmxmode=0666"),
-        ) {
-            Ok(()) => {
-                info!("Mounted devpts at /dev/pts");
-                Ok(())
-            }
-            Err(nix::errno::Errno::EBUSY) => {
-                info!("/dev/pts already mounted, skipping");
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn mount_devpts() -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
-    }
-
-    const DEFAULT_SHM_SIZE_BYTES: u64 = 64 * 1024 * 1024;
-
-    fn default_shm_mount_options() -> String {
-        format!("mode=1777,size={DEFAULT_SHM_SIZE_BYTES}")
-    }
-
-    /// Mount the Docker-compatible default shared-memory filesystem.
-    ///
-    /// devtmpfs exposes `/dev/shm` only as a root-owned 0755 directory. A
-    /// container expects a 64 MiB tmpfs with sticky world-writable permissions,
-    /// even when no explicit `--shm-size` was supplied. Explicit volume and
-    /// tmpfs declarations are mounted afterward and can replace this default.
-    fn mount_default_shm() -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(target_os = "linux")]
-        {
-            use nix::mount::{mount, MsFlags};
-
-            std::fs::create_dir_all("/dev/shm")?;
-            let options = default_shm_mount_options();
-            match mount(
-                None::<&str>,
-                "/dev/shm",
-                Some("tmpfs"),
-                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-                Some(options.as_str()),
-            ) {
-                Ok(()) => info!("Mounted default shared memory at /dev/shm"),
-                Err(nix::errno::Errno::EBUSY) => {
-                    info!("/dev/shm already mounted, keeping existing mount")
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = default_shm_mount_options();
-        }
-        Ok(())
-    }
-
-    /// Mount virtio-fs shares for workspace and user volumes.
-    fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
-        info!("Mounting virtio-fs shares");
-
-        #[cfg(target_os = "linux")]
-        {
-            use nix::mount::{mount, MsFlags};
-
-            // CRITICAL: Mount the root filesystem first
-            // libkrun's krun_set_root() adds a virtiofs device with tag "/dev/root"
-            // We need to check if this device exists and mount it
-            info!("Checking for root filesystem virtiofs device");
-
-            // Check if /dev/root virtiofs is available by trying to mount it to a temp location
-            std::fs::create_dir_all("/mnt/newroot").ok();
-
-            match mount(
-                Some("/dev/root"),
-                "/mnt/newroot",
-                Some("virtiofs"),
-                MsFlags::empty(),
-                None::<&str>,
-            ) {
-                Ok(_) => {
-                    info!("Successfully mounted /dev/root to /mnt/newroot");
-
-                    // Now we need to pivot to the new root
-                    // First, move essential mounts to the new root
-                    std::fs::create_dir_all("/mnt/newroot/proc").ok();
-                    std::fs::create_dir_all("/mnt/newroot/sys").ok();
-                    std::fs::create_dir_all("/mnt/newroot/dev").ok();
-
-                    // Move mounts: MS_PRIVATE first to allow MS_MOVE on shared mounts (sysfs).
-                    let mut proc_moved = false;
-                    let mut sys_moved = false;
-                    let mut dev_moved = false;
-
-                    // Make mounts private so MS_MOVE works
-                    let _ = mount(
-                        Some(""),
-                        "/proc",
-                        None::<&str>,
-                        MsFlags::MS_PRIVATE,
-                        None::<&str>,
-                    );
-                    let _ = mount(
-                        Some(""),
-                        "/sys",
-                        None::<&str>,
-                        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
-                        None::<&str>,
-                    );
-                    let _ = mount(
-                        Some(""),
-                        "/dev",
-                        None::<&str>,
-                        MsFlags::MS_PRIVATE,
-                        None::<&str>,
-                    );
-
-                    if let Err(e) = mount(
-                        Some("/proc"),
-                        "/mnt/newroot/proc",
-                        None::<&str>,
-                        MsFlags::MS_MOVE,
-                        None::<&str>,
-                    ) {
-                        warn!("Failed to move /proc: {}", e);
-                    } else {
-                        proc_moved = true;
-                    }
-
-                    if let Err(e) = mount(
-                        Some("/sys"),
-                        "/mnt/newroot/sys",
-                        None::<&str>,
-                        MsFlags::MS_MOVE,
-                        None::<&str>,
-                    ) {
-                        warn!("Failed to move /sys: {}", e);
-                    } else {
-                        sys_moved = true;
-                    }
-
-                    if let Err(e) = mount(
-                        Some("/dev"),
-                        "/mnt/newroot/dev",
-                        None::<&str>,
-                        MsFlags::MS_MOVE,
-                        None::<&str>,
-                    ) {
-                        warn!("Failed to move /dev: {}", e);
-                    } else {
-                        dev_moved = true;
-                    }
-
-                    if let Err(e) = pivot_to_rootfs("/mnt/newroot") {
-                        warn!(
-                            error = %e,
-                            "Failed to pivot to root filesystem; falling back to chroot"
-                        );
-                        use nix::unistd::{chdir, chroot};
-                        chroot("/mnt/newroot")?;
-                        chdir("/")?;
-                    }
-
-                    // Re-mount any filesystems that couldn't be moved (MS_MOVE failed).
-                    // This ensures /proc, /sys, /dev are available in the new rootfs.
-                    if !proc_moved {
-                        if let Err(e) = mount(
-                            Some("proc"),
-                            "/proc",
-                            Some("proc"),
-                            MsFlags::empty(),
-                            None::<&str>,
-                        ) {
-                            warn!("Failed to remount /proc after chroot: {}", e);
-                        }
-                    }
-                    if !sys_moved {
-                        if let Err(e) = mount(
-                            Some("sysfs"),
-                            "/sys",
-                            Some("sysfs"),
-                            MsFlags::empty(),
-                            None::<&str>,
-                        ) {
-                            warn!("Failed to remount /sys after chroot: {}", e);
-                        } else {
-                            info!("Remounted /sys after chroot (MS_MOVE failed)");
-                        }
-                    }
-                    if !dev_moved {
-                        if let Err(e) = mount(
-                            Some("devtmpfs"),
-                            "/dev",
-                            Some("devtmpfs"),
-                            MsFlags::empty(),
-                            None::<&str>,
-                        ) {
-                            warn!("Failed to remount /dev after chroot: {}", e);
-                        }
-                    }
-
-                    info!("Successfully pivoted to new root filesystem");
-                }
-                Err(e) => {
-                    warn!("No /dev/root virtiofs device found or failed to mount: {}. Using existing root.", e);
-                    // This is OK - it means we're already on the correct root or root wasn't set via virtiofs
-                }
-            }
-
-            // Ensure workspace mount point exists
-            std::fs::create_dir_all("/workspace").ok();
-
-            // Mount workspace share
-            mount_virtiofs("workspace", "/workspace", MsFlags::empty())?;
-
-            // Mount user-defined volumes from environment variables.
-            // Format: BOX_VOL_<index>=<tag>:<guest_path>[:ro]
-            mount_user_volumes()?;
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            info!("Skipping virtio-fs mount on non-Linux platform (development mode)");
-        }
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    fn pivot_to_rootfs(new_root: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use nix::mount::{mount, umount2, MntFlags, MsFlags};
-        use nix::unistd::chdir;
-        use std::ffi::CString;
-
-        let put_old = format!("{new_root}/.a3s-old-root");
-        std::fs::create_dir_all(&put_old)?;
-
-        // Nested runtimes such as runc require a real pivot_root-capable mount
-        // namespace. Make the current tree private so the pivot and later unmount do
-        // not propagate back to shared mounts created by the host kernel.
-        mount(
-            Some(""),
-            "/",
-            None::<&str>,
-            MsFlags::MS_PRIVATE | MsFlags::MS_REC,
-            None::<&str>,
-        )?;
-
-        let new_root_c = CString::new(new_root)?;
-        let put_old_c = CString::new(put_old.as_str())?;
-        // SAFETY: `new_root_c` and `put_old_c` are valid NUL-terminated paths for
-        // the duration of the syscall; pivot_root has no Rust wrapper in nix 0.29.
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_pivot_root,
-                new_root_c.as_ptr(),
-                put_old_c.as_ptr(),
-            )
-        };
-        if rc != 0 {
-            let error = std::io::Error::last_os_error();
-            let _ = std::fs::remove_dir(&put_old);
-            return Err(error.into());
-        }
-
-        chdir("/")?;
-        match umount2("/.a3s-old-root", MntFlags::MNT_DETACH) {
-            Ok(()) => {}
-            Err(error) => warn!(error = %error, "Failed to detach old root after pivot_root"),
-        }
-        if let Err(error) = std::fs::remove_dir("/.a3s-old-root") {
-            warn!(error = %error, "Failed to remove old root mount point after pivot_root");
-        }
-
-        Ok(())
-    }
-
-    fn virtiofs_mount_options_from_env_value(value: Option<&str>) -> Option<String> {
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            Some("default") => None,
-            Some(mode) => Some(format!("cache={mode}")),
-            None => Some("cache=none".to_string()),
-        }
-    }
-
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn virtiofs_mount_options() -> Option<String> {
-        virtiofs_mount_options_from_env_value(std::env::var("A3S_VIRTIOFS_CACHE").ok().as_deref())
-    }
-
-    #[cfg(target_os = "linux")]
-    fn mount_virtiofs(
-        tag: &str,
-        target: &str,
-        flags: nix::mount::MsFlags,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use nix::mount::mount;
-
-        if let Some(options) = virtiofs_mount_options() {
-            match mount(
-                Some(tag),
-                target,
-                Some("virtiofs"),
-                flags,
-                Some(options.as_str()),
-            ) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    warn!(
-                        tag = tag,
-                        target = target,
-                        options = options,
-                        error = %error,
-                        "virtio-fs mount with explicit cache mode failed; retrying with the kernel default"
-                    );
-                }
-            }
-        }
-
-        mount(Some(tag), target, Some("virtiofs"), flags, None::<&str>)?;
-        Ok(())
-    }
-
-    /// Mount user-defined volumes passed via BOX_VOL_* environment variables.
-    ///
-    /// Each variable has the format: `<tag>:<guest_path>[:ro]`
-    #[cfg(target_os = "linux")]
-    fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
-        use nix::mount::{mount, MsFlags};
-
-        let mut index = 0;
-        loop {
-            let env_key = format!("BOX_VOL_{}", index);
-            match std::env::var(&env_key) {
-                Ok(value) => {
-                    let parts: Vec<&str> = value.split(':').collect();
-                    if parts.len() < 2 {
-                        error!("Invalid volume spec in {}: {}", env_key, value);
-                        index += 1;
-                        continue;
-                    }
-
-                    let tag = parts[0];
-                    let guest_path = parts[1];
-                    // Flags after the guest path may appear in any order: "ro", "file", "copy".
-                    // The host decides "file" (it can stat the source); the guest obeys.
-                    let read_only = parts[2..].contains(&"ro");
-                    let is_file = parts[2..].contains(&"file");
-                    let copy_up = parts[2..].contains(&"copy");
-
-                    let flags = if read_only {
-                        MsFlags::MS_RDONLY
-                    } else {
-                        MsFlags::empty()
-                    };
-
-                    if is_file {
-                        // Single-file bind mount. The shim shares a temp DIRECTORY
-                        // containing the file (virtio-fs cannot share a bare file), so
-                        // mount that share at a private location and bind just the file
-                        // onto guest_path. This preserves the target's parent directory
-                        // (e.g. /etc) instead of clobbering it with the share.
-                        let file_name = guest_path.rsplit('/').next().unwrap_or(guest_path);
-                        let private_mp = format!("/run/.a3s-filemounts/{}", index);
-                        std::fs::create_dir_all(&private_mp)?;
-                        mount_virtiofs(tag, private_mp.as_str(), MsFlags::empty())?;
-
-                        let src = format!("{}/{}", private_mp, file_name);
-                        if !std::path::Path::new(&src).exists() {
-                            warn!("File mount source {} missing in share {}", src, tag);
-                        }
-
-                        // Ensure the target parent and an (empty) target file exist so
-                        // the bind has somewhere to land.
-                        if let Some(last_slash) = guest_path.rfind('/') {
-                            let parent = &guest_path[..last_slash];
-                            if !parent.is_empty() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                        }
-                        if !std::path::Path::new(guest_path).exists() {
-                            std::fs::File::create(guest_path)?;
-                        }
-
-                        // Bind the file, then remount read-only if requested (a bind
-                        // mount needs a separate MS_REMOUNT pass to apply MS_RDONLY).
-                        mount(
-                            Some(src.as_str()),
-                            guest_path,
-                            None::<&str>,
-                            MsFlags::MS_BIND,
-                            None::<&str>,
-                        )?;
-                        if read_only {
-                            mount(
-                                None::<&str>,
-                                guest_path,
-                                None::<&str>,
-                                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
-                                None::<&str>,
-                            )?;
-                        }
-                        info!(
-                            tag = tag,
-                            guest_path = guest_path,
-                            read_only = read_only,
-                            "Mounted file volume (bind; parent directory preserved)"
-                        );
-                    } else {
-                        // Managed volumes inherit the image directory's contents
-                        // and metadata. Bind mounts remain host-authoritative.
-                        std::fs::create_dir_all(guest_path)?;
-                        let initialized = if copy_up {
-                            mount_copy_up_volume(tag, index, guest_path, flags)?
-                        } else {
-                            mount_virtiofs(tag, guest_path, flags)?;
-                            false
-                        };
-                        info!(
-                            tag = tag,
-                            guest_path = guest_path,
-                            read_only = read_only,
-                            initialized = initialized,
-                            "Mounted user volume"
-                        );
-                    }
-
-                    index += 1;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if index > 0 {
-            info!("Mounted {} user volume(s)", index);
-        }
-
-        Ok(())
-    }
-
-    /// Mount a managed volume privately, seed it from the image directory when
-    /// empty, then expose it at the requested destination.
-    #[cfg(target_os = "linux")]
-    fn mount_copy_up_volume(
-        tag: &str,
-        index: usize,
-        guest_path: &str,
-        final_flags: nix::mount::MsFlags,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
-        use nix::mount::{umount2, MntFlags, MsFlags};
-
-        // Resolve image symlinks before selecting a private staging mount. The
-        // staging path must not be below the seed source or the copy would
-        // recursively archive the volume into itself (for example at `/run`).
-        let source = std::fs::canonicalize(guest_path)?;
-        let staging = volume_staging_path(index, &source)?;
-        std::fs::create_dir_all(&staging)?;
-        mount_virtiofs(
-            tag,
-            staging
-                .to_str()
-                .ok_or("volume staging path is not valid UTF-8")?,
-            MsFlags::empty(),
-        )?;
-
-        let initialized = volume::initialize_named_volume(&source, &staging);
-        let unmounted = umount2(&staging, MntFlags::MNT_DETACH);
-        let _ = std::fs::remove_dir(&staging);
-        if let Some(parent) = staging.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
-
-        let initialized = initialized?;
-        unmounted?;
-        mount_virtiofs(tag, guest_path, final_flags)?;
-        Ok(initialized)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn volume_staging_path(
-        index: usize,
-        source: &std::path::Path,
-    ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-        for root in ["/run", "/dev", "/tmp"] {
-            let root = std::fs::canonicalize(root)?;
-            let candidate = root.join(".a3s-volume-mounts").join(index.to_string());
-            if !candidate.starts_with(source) {
-                return Ok(candidate);
-            }
-        }
-        Err(format!(
-            "managed volume target {} contains every safe staging directory",
-            source.display()
-        )
-        .into())
-    }
-
-    /// Mount tmpfs volumes passed via BOX_TMPFS_* environment variables.
-    ///
-    /// Each variable has the format: `<path>[:<options>]`
-    /// Data options are passed directly to mount (e.g., "size=100m"); `ro` and
-    /// `rw` select the mount access mode.
-    fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
-        #[cfg(target_os = "linux")]
-        {
-            use nix::mount::{mount, MsFlags};
-
-            let mut index = 0;
-            loop {
-                let env_key = format!("BOX_TMPFS_{}", index);
-                match std::env::var(&env_key) {
-                    Ok(value) => {
-                        let (path, options, read_only) = parse_tmpfs_mount(&value)?;
-
-                        info!(
-                            path = path,
-                            options = ?options,
-                            read_only = read_only,
-                            "Mounting tmpfs"
-                        );
-
-                        // Ensure mount point exists
-                        std::fs::create_dir_all(path)?;
-
-                        mount(
-                            None::<&str>,
-                            path,
-                            Some("tmpfs"),
-                            if read_only {
-                                MsFlags::MS_RDONLY
-                            } else {
-                                MsFlags::empty()
-                            },
-                            options.as_deref(),
-                        )?;
-
-                        index += 1;
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            if index > 0 {
-                info!("Mounted {} tmpfs volume(s)", index);
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            info!("Skipping tmpfs mount on non-Linux platform (development mode)");
-        }
-
-        Ok(())
-    }
-
-    fn parse_tmpfs_mount(value: &str) -> std::io::Result<(&str, Option<String>, bool)> {
-        let (path, options) = value
-            .split_once(':')
-            .map_or((value, None), |(path, options)| (path, Some(options)));
-        if path.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "tmpfs mount path cannot be empty",
-            ));
-        }
-
-        let mut data = Vec::new();
-        let mut read_only = None;
-        for option in options
-            .into_iter()
-            .flat_map(|options| options.split(','))
-            .filter(|option| !option.is_empty())
-        {
-            match option {
-                "ro" | "rw" => {
-                    let requested = option == "ro";
-                    if read_only.replace(requested).is_some() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!(
-                                "tmpfs mount has duplicate or conflicting access modes: {value:?}"
-                            ),
-                        ));
-                    }
-                }
-                _ => data.push(option),
-            }
-        }
-
-        Ok((
-            path,
-            (!data.is_empty()).then(|| data.join(",")),
-            read_only.unwrap_or(false),
-        ))
-    }
-
-    /// Remount the container rootfs as read-only if `BOX_READONLY=1` is set.
-    ///
-    /// Called after all filesystem setup (mounts, network config) so that no
-    /// further writes to `/` are needed before the container process launches.
-    /// Virtiofs and tmpfs shares are separate mountpoints and remain writable.
-    #[cfg(target_os = "linux")]
-    fn remount_rootfs_readonly() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var("BOX_READONLY").as_deref() != Ok("1") {
-            return Ok(());
-        }
-
-        use nix::mount::{mount, MsFlags};
-
-        info!("Remounting rootfs as read-only (--read-only)");
-
-        // A direct `MS_REMOUNT|MS_RDONLY` of the virtio-fs root often fails with
-        // EBUSY. Fall back to the bind-remount trick (bind / onto itself, then
-        // remount that bind read-only), which succeeds where a direct remount
-        // cannot. If both fail, log and continue WRITABLE — a non-enforced
-        // --read-only is far less harmful than killing the container outright.
-        let direct = mount(
-            None::<&str>,
-            "/",
-            None::<&str>,
-            MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
-            None::<&str>,
-        );
-        if direct.is_ok() {
-            info!("Rootfs remounted read-only");
-            return Ok(());
-        }
-
-        let bind =
-            mount(Some("/"), "/", None::<&str>, MsFlags::MS_BIND, None::<&str>).and_then(|_| {
-                mount(
-                    None::<&str>,
-                    "/",
-                    None::<&str>,
-                    MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
-                    None::<&str>,
-                )
-            });
-        match bind {
-            Ok(()) => info!("Rootfs remounted read-only (via bind)"),
-            Err(error) => warn!(
-                %error,
-                direct_error = ?direct.err(),
-                "Could not remount rootfs read-only; container runs writable"
-            ),
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn remount_rootfs_readonly() -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
-    }
+    mod mounts;
+    use mounts::*;
 
     /// Supervise children as PID 1: propagate the container's exit, and reap orphans.
     ///
@@ -2009,7 +734,7 @@ mod linux {
         );
 
         loop {
-            let shutdown_signal = SHUTDOWN_SIGNAL.load(Ordering::SeqCst);
+            let shutdown_signal = shutdown_signal();
             if shutdown_signal != 0 {
                 info!(
                     shutdown_signal,
@@ -2063,6 +788,7 @@ mod linux {
                     // Flush the stdout/stderr relays so the container's last output
                     // reaches the console before this process::exit halts the VM.
                     flush_stdio_relays();
+                    quiesce_rootfs_for_handoff();
                     // MicroVM logging still needs a bounded handoff before PID 1
                     // halts the VMM. Host Sandbox logging has a generation-owned
                     // worker that waits for the runtime owner to close both writers and drains
@@ -2121,7 +847,7 @@ mod linux {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
         loop {
-            if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
+            if shutdown_signal() != 0 {
                 return Ok(());
             }
             match waitpid(container_pid, Some(WaitPidFlag::WNOHANG)) {
@@ -2143,17 +869,37 @@ mod linux {
         Ok(())
     }
 
-    /// Persist the container's exit code to the writable rootfs so the host can read
-    /// it after the VM halts. libkrun's `start_enter` takes over and `exit()`s the
-    /// shim process, so the host cannot rely on its process status for a detached
-    /// `run -d`; the runtime resolves this file through the active overlay, copy, or
-    /// APFS-backed rootfs layout. Best-effort, with `sync_all` so the write reaches
-    /// the host before PID 1 exits and the VM halts.
+    /// Publish the exact container exit code before PID 1 halts the VM.
+    ///
+    /// New MicroVMs use the private pre-opened terminal channel. The rootfs
+    /// marker remains as a compatibility fallback for Sandbox and directory-root
+    /// providers whose writable tree is safely host-visible.
     fn persist_exit_code(code: i32) {
         use std::io::Write;
+        if let Err(error) = terminal_status::persist(code) {
+            warn!(%error, "Failed to persist guest terminal status");
+        }
         if let Ok(mut file) = std::fs::File::create(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH) {
             let _ = write!(file, "{code}");
             let _ = file.sync_all();
+        }
+    }
+
+    fn quiesce_rootfs_for_handoff() {
+        match root_transport::quiesce_for_handoff() {
+            Ok(true) => match terminal_status::mark_rootfs_quiesced() {
+                Ok(true) => info!("Published guest-owned rootfs handoff acknowledgement"),
+                Ok(false) => error!(
+                    "Guest-owned block root has no terminal channel for its handoff acknowledgement"
+                ),
+                Err(error) => {
+                    error!(%error, "Failed to publish guest-owned rootfs handoff acknowledgement")
+                }
+            },
+            Ok(false) => {}
+            Err(error) => {
+                error!(%error, "Failed to quiesce guest-owned rootfs before VM exit")
+            }
         }
     }
 
@@ -2233,278 +979,7 @@ mod linux {
     }
 
     #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn test_exec_config(env: Vec<(String, String)>) -> ExecConfig {
-            ExecConfig {
-                executable: "/bin/sh".into(),
-                args: Vec::new(),
-                env,
-                workdir: "/".into(),
-                user: None,
-                stdin_null: true,
-            }
-        }
-
-        #[test]
-        fn bootstrap_mode_is_explicit_and_fail_closed() {
-            assert_eq!(
-                BootstrapMode::from_value(None).unwrap(),
-                BootstrapMode::Microvm
-            );
-            assert_eq!(
-                BootstrapMode::from_value(Some("host-sandbox")).unwrap(),
-                BootstrapMode::HostSandbox
-            );
-            assert!(BootstrapMode::from_value(Some("sandbox-ish")).is_err());
-        }
-
-        #[test]
-        fn host_sandbox_uses_owned_log_drain_instead_of_legacy_handoff() {
-            assert_eq!(
-                console_handoff_delay(BootstrapMode::HostSandbox),
-                std::time::Duration::ZERO
-            );
-            assert_eq!(
-                console_handoff_delay(BootstrapMode::Microvm),
-                std::time::Duration::from_millis(250)
-            );
-        }
-
-        #[test]
-        fn secret_environment_manifest_is_validated_consumed_and_injected() {
-            use std::os::unix::fs::PermissionsExt;
-
-            let directory = tempfile::tempdir().unwrap();
-            let internal_root = directory.path().join(".a3s-box-secrets");
-            let digest = "a".repeat(64);
-            let secret_directory = internal_root.join(&digest);
-            std::fs::create_dir_all(&secret_directory).unwrap();
-            let secret_path = secret_directory.join("000.secret");
-            std::fs::write(&secret_path, b"guest-secret-value").unwrap();
-            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o400)).unwrap();
-            let manifest = serde_json::to_string(&vec![SecretEnvironmentBinding {
-                variable: "A3S_PROVIDER_TOKEN".into(),
-                path: secret_path.to_string_lossy().into_owned(),
-            }])
-            .unwrap();
-            let mut config = test_exec_config(vec![
-                ("LANG".into(), "C.UTF-8".into()),
-                (SECRET_ENVIRONMENT_MANIFEST.into(), manifest),
-            ]);
-
-            config
-                .materialize_secret_environment_from(&internal_root)
-                .unwrap();
-
-            assert_eq!(
-                config
-                    .env
-                    .iter()
-                    .find(|(key, _)| key == "A3S_PROVIDER_TOKEN")
-                    .map(|(_, value)| value.as_str()),
-                Some("guest-secret-value")
-            );
-            assert!(config
-                .env
-                .iter()
-                .all(|(key, _)| key != SECRET_ENVIRONMENT_MANIFEST));
-            assert!(config.env.contains(&("LANG".into(), "C.UTF-8".into())));
-        }
-
-        #[test]
-        fn secret_environment_manifest_fails_closed_on_tamper() {
-            let directory = tempfile::tempdir().unwrap();
-            let internal_root = directory.path().join(".a3s-box-secrets");
-            std::fs::create_dir_all(&internal_root).unwrap();
-
-            let mut invalid_json = test_exec_config(vec![(
-                SECRET_ENVIRONMENT_MANIFEST.into(),
-                "not-json".into(),
-            )]);
-            assert!(invalid_json
-                .materialize_secret_environment_from(&internal_root)
-                .unwrap_err()
-                .to_string()
-                .contains("version-1 JSON"));
-            assert!(invalid_json
-                .env
-                .iter()
-                .all(|(key, _)| key != SECRET_ENVIRONMENT_MANIFEST));
-
-            let escaped = serde_json::to_string(&vec![SecretEnvironmentBinding {
-                variable: "A3S_PROVIDER_TOKEN".into(),
-                path: "/etc/passwd".into(),
-            }])
-            .unwrap();
-            let mut escaped_path =
-                test_exec_config(vec![(SECRET_ENVIRONMENT_MANIFEST.into(), escaped)]);
-            assert!(escaped_path
-                .materialize_secret_environment_from(&internal_root)
-                .unwrap_err()
-                .to_string()
-                .contains("escaped"));
-        }
-
-        #[test]
-        fn tmpfs_mount_parser_separates_access_mode_from_mount_data() {
-            assert_eq!(
-                parse_tmpfs_mount("/scratch:size=1048576,rw").unwrap(),
-                ("/scratch", Some("size=1048576".into()), false)
-            );
-            assert_eq!(
-                parse_tmpfs_mount("/sealed:size=4096,ro").unwrap(),
-                ("/sealed", Some("size=4096".into()), true)
-            );
-            assert_eq!(
-                parse_tmpfs_mount("/ephemeral").unwrap(),
-                ("/ephemeral", None, false)
-            );
-            assert!(parse_tmpfs_mount("/scratch:ro,rw").is_err());
-        }
-
-        #[test]
-        fn default_shm_mount_is_container_compatible() {
-            let options = default_shm_mount_options();
-            assert!(options.split(',').any(|option| option == "mode=1777"));
-            assert!(options.split(',').any(|option| option == "size=67108864"));
-        }
-
-        fn set_sidecar_env(image: &str, vsock_port: u32, env: &[(&str, &str)]) {
-            std::env::set_var("BOX_SIDECAR_IMAGE", image);
-            std::env::set_var("BOX_SIDECAR_VSOCK_PORT", vsock_port.to_string());
-            std::env::set_var("BOX_SIDECAR_ENV_COUNT", env.len().to_string());
-            for (i, (k, v)) in env.iter().enumerate() {
-                std::env::set_var(format!("BOX_SIDECAR_ENV_{}", i), format!("{}={}", k, v));
-            }
-        }
-
-        fn clear_sidecar_env() {
-            std::env::remove_var("BOX_SIDECAR_IMAGE");
-            std::env::remove_var("BOX_SIDECAR_VSOCK_PORT");
-            std::env::remove_var("BOX_SIDECAR_ENV_COUNT");
-            for i in 0..10 {
-                std::env::remove_var(format!("BOX_SIDECAR_ENV_{}", i));
-            }
-        }
-
-        #[test]
-        fn test_virtiofs_mount_options_default_to_stable_cache_mode() {
-            assert_eq!(
-                virtiofs_mount_options_from_env_value(None).as_deref(),
-                Some("cache=none")
-            );
-            assert_eq!(
-                virtiofs_mount_options_from_env_value(Some("")).as_deref(),
-                Some("cache=none")
-            );
-            assert_eq!(
-                virtiofs_mount_options_from_env_value(Some("auto")).as_deref(),
-                Some("cache=auto")
-            );
-            assert_eq!(virtiofs_mount_options_from_env_value(Some("default")), None);
-        }
-
-        #[test]
-        fn test_box_exec_auto_decode_accepts_runtime_encoded_exec() {
-            assert!(is_plausible_exec(
-                &decode_box_exec_value_if_valid("L2Jpbi9zaA").unwrap()
-            ));
-            assert_eq!(
-                decode_box_exec_value("cnVudGltZS1oZWxwZXIuc2g".to_string(), true),
-                "runtime-helper.sh"
-            );
-        }
-
-        #[test]
-        fn test_box_exec_auto_decode_preserves_raw_legacy_values() {
-            assert_eq!(
-                decode_box_exec_value("/bin/sh".to_string(), false),
-                "/bin/sh"
-            );
-            assert!(decode_box_exec_value_if_valid("/bin/sh").is_none());
-            assert!(!is_plausible_exec(""));
-        }
-
-        #[test]
-        fn staged_exec_config_accepts_long_arguments_and_rejects_invalid_input() {
-            let config = GuestExecConfig::new(
-                "/bin/echo".to_string(),
-                vec!["x".repeat(4096)],
-                "/workspace".to_string(),
-                Some("1000:1000".to_string()),
-                true,
-            );
-            let bytes = serde_json::to_vec(&config).unwrap();
-            assert_eq!(parse_staged_exec_config(&bytes).unwrap(), config);
-
-            let mut wrong_schema = config;
-            wrong_schema.schema = "a3s.box.guest-exec.v2".to_string();
-            let error = parse_staged_exec_config(&serde_json::to_vec(&wrong_schema).unwrap())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("unsupported guest exec schema"), "{error}");
-
-            let oversized = vec![b' '; MAX_RUNTIME_EXEC_CONFIG_BYTES + 1];
-            let error = parse_staged_exec_config(&oversized)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("limit"), "{error}");
-        }
-
-        /// All sidecar env tests run sequentially in a single test to avoid
-        /// env var race conditions (env vars are process-global).
-        #[test]
-        fn test_sidecar_config_from_env() {
-            // Subtest 1: no env vars → None
-            clear_sidecar_env();
-            assert!(SidecarConfig::from_env().is_none());
-
-            // Subtest 2: empty image → None
-            std::env::set_var("BOX_SIDECAR_IMAGE", "");
-            assert!(SidecarConfig::from_env().is_none());
-            std::env::remove_var("BOX_SIDECAR_IMAGE");
-
-            // Subtest 3: basic config
-            set_sidecar_env("safeclaw:latest", 4092, &[]);
-            let config = SidecarConfig::from_env().unwrap();
-            assert_eq!(config.image, "safeclaw:latest");
-            assert_eq!(config.vsock_port, 4092);
-            assert!(config.env.is_empty());
-            clear_sidecar_env();
-
-            // Subtest 4: with env vars
-            set_sidecar_env(
-                "ghcr.io/a3s-lab/safeclaw:latest",
-                4092,
-                &[("LOG_LEVEL", "debug"), ("MODE", "proxy")],
-            );
-            let config = SidecarConfig::from_env().unwrap();
-            assert_eq!(config.image, "ghcr.io/a3s-lab/safeclaw:latest");
-            assert_eq!(config.env.len(), 2);
-            assert_eq!(
-                config.env[0],
-                ("LOG_LEVEL".to_string(), "debug".to_string())
-            );
-            assert_eq!(config.env[1], ("MODE".to_string(), "proxy".to_string()));
-            clear_sidecar_env();
-
-            // Subtest 5: default vsock port
-            std::env::set_var("BOX_SIDECAR_IMAGE", "safeclaw:latest");
-            std::env::remove_var("BOX_SIDECAR_VSOCK_PORT");
-            std::env::remove_var("BOX_SIDECAR_ENV_COUNT");
-            let config = SidecarConfig::from_env().unwrap();
-            assert_eq!(config.vsock_port, 4092);
-            clear_sidecar_env();
-
-            // Subtest 6: custom vsock port
-            set_sidecar_env("safeclaw:latest", 5000, &[]);
-            let config = SidecarConfig::from_env().unwrap();
-            assert_eq!(config.vsock_port, 5000);
-            clear_sidecar_env();
-        }
-    }
+    mod tests;
 }
 
 #[cfg(target_os = "linux")]
