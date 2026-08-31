@@ -346,6 +346,7 @@ pub struct OciImage {
 /// manifest. Consumers must still verify the bytes opened from `path` because
 /// the local OCI layout can change after [`OciImage`] is loaded.
 #[derive(Debug, Clone, Copy)]
+#[cfg(any(target_os = "macos", all(unix, test)))]
 pub(crate) struct OciLayerBlob<'a> {
     pub(crate) path: &'a Path,
     pub(crate) digest: &'a str,
@@ -492,6 +493,7 @@ impl OciImage {
     }
 
     /// Pair each local layer path with its authenticated manifest descriptor.
+    #[cfg(any(target_os = "macos", all(unix, test)))]
     pub(crate) fn layer_blobs(&self) -> impl ExactSizeIterator<Item = OciLayerBlob<'_>> + '_ {
         self.layer_paths
             .iter()

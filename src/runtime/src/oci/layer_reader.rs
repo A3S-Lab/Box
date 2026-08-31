@@ -1,16 +1,19 @@
 //! Shared no-follow compression boundary for OCI filesystem layers.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(any(target_os = "macos", all(unix, test)))]
+use std::io::Write;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use a3s_box_core::error::{BoxError, Result};
 use flate2::read::GzDecoder;
+#[cfg(any(target_os = "macos", all(unix, test)))]
 use sha2::{Digest, Sha256};
 
-use super::image::{
-    canonical_sha256_digest_hex, open_regular_file_no_follow, MAX_OCI_LAYER_BLOB_BYTES,
-};
+use super::image::open_regular_file_no_follow;
+#[cfg(any(target_os = "macos", all(unix, test)))]
+use super::image::{canonical_sha256_digest_hex, MAX_OCI_LAYER_BLOB_BYTES};
 
 pub(crate) fn open(path: &Path) -> Result<Box<dyn Read>> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
@@ -54,6 +57,7 @@ pub(crate) fn open(path: &Path) -> Result<Box<dyn Read>> {
 /// time-of-check/time-of-use gap. The anonymous spool is therefore the exact
 /// byte sequence whose descriptor was verified and the only source decoded by
 /// direct ext4 assembly.
+#[cfg(any(target_os = "macos", all(unix, test)))]
 pub(crate) fn open_verified(
     path: &Path,
     digest: &str,
