@@ -19,7 +19,7 @@ use a3s_box_core::vmm::{
 /// the archive implementation come from the current A3S installation, not from
 /// the mutable filesystem being inspected.
 pub async fn archive_stopped_guest_native_rootfs<W>(
-    mut config: BoxConfig,
+    config: BoxConfig,
     box_id: String,
     output: &mut W,
 ) -> Result<u64>
@@ -29,13 +29,14 @@ where
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (config, box_id, output);
-        return Err(BoxError::StateError(
+        Err(BoxError::StateError(
             "Guest-native rootfs maintenance is currently available only on macOS".to_string(),
-        ));
+        ))
     }
 
     #[cfg(target_os = "macos")]
     {
+        let mut config = config;
         sanitize_maintenance_config(&mut config);
         let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id);
         let maintenance_dir = vm.socket_dir().join("rootfs-maintenance");

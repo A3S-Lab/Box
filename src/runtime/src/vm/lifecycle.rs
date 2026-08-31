@@ -95,6 +95,7 @@ impl VmManager {
         // best-effort and would otherwise leak on every wedged stop. Capture the
         // error and surface it after teardown instead of returning early.
         let mut stop_error = None;
+        #[cfg(unix)]
         let requires_guest_rootfs_handoff =
             if preserve_rootfs && self.boot_mode != VmBootMode::RootfsMaintenance {
                 match crate::rootfs::guest_native_ext4_generation_exists(&box_dir) {
@@ -186,7 +187,7 @@ impl VmManager {
                 self.deliver_guest_stop_signal(signal).await
             };
             #[cfg(unix)]
-            let provider_exited = if guest_stop_delivered {
+            let _provider_exited = if guest_stop_delivered {
                 let graceful_wait = if signal == libc::SIGKILL {
                     std::time::Duration::ZERO
                 } else {
@@ -239,8 +240,6 @@ impl VmManager {
                 false
             };
 
-            #[cfg(windows)]
-            let provider_exited = false;
             #[cfg(unix)]
             let handler_signal = if guest_stop_delivered {
                 libc::SIGKILL
@@ -252,18 +251,20 @@ impl VmManager {
             #[cfg(unix)]
             let handler_timeout_ms = if guest_stop_delivered { 0 } else { timeout_ms };
 
-            let _handler_stopped = if provider_exited {
-                true
-            } else {
-                match handler.stop(handler_signal, handler_timeout_ms) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(box_id = %self.box_id, error = %e, "Failed to stop VM handler; continuing teardown");
-                        if stop_error.is_none() {
-                            stop_error = Some(e);
-                        }
-                        false
+            // Observing provider exit proves that the workload stopped, but it
+            // does not finalize the backend. In particular, A3S OCI owns its
+            // terminal generation and private endpoint until `stop` performs
+            // the authoritative delete. Every handler implementation treats an
+            // already-exited process idempotently, so always run this finalizer;
+            // the zero timeout prevents a second graceful-wait interval.
+            let _handler_stopped = match handler.stop(handler_signal, handler_timeout_ms) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(box_id = %self.box_id, error = %e, "Failed to stop VM handler; continuing teardown");
+                    if stop_error.is_none() {
+                        stop_error = Some(e);
                     }
+                    false
                 }
             };
             #[cfg(not(windows))]

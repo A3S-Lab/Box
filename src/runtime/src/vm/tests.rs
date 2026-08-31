@@ -35,13 +35,13 @@ impl VmHandler for RecordingHandler {
 #[cfg(unix)]
 struct GuestStopHandler {
     exited: Arc<AtomicBool>,
-    host_stop_called: Arc<AtomicBool>,
+    backend_finalized: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
 impl VmHandler for GuestStopHandler {
     fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
-        self.host_stop_called.store(true, Ordering::SeqCst);
+        self.backend_finalized.store(true, Ordering::SeqCst);
         Ok(())
     }
 

@@ -388,6 +388,7 @@ mod tests {
             workspace_path: std::path::PathBuf::new(),
             console_output: None,
             oci_config: None,
+            #[cfg(target_os = "macos")]
             oci_manifest_digest: None,
             prefer_image_rootfs_metadata: false,
             tee_instance_config: None,
