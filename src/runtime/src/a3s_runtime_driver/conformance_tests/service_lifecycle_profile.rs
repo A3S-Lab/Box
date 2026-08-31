@@ -15,6 +15,7 @@ const SEPARATED_HTTP_SERVICE: &str = concat!(
     "cat > /tmp/r17-lifecycle-http-handler <<'R17_LIFECYCLE_HANDLER'\n",
     "#!/bin/sh\n",
     "IFS= read -r request_line || exit 1\n",
+    "request_line=${request_line%$(printf '\\r')}\n",
     "while IFS= read -r header; do\n",
     "  [ \"$header\" = \"$(printf '\\r')\" ] && break\n",
     "done\n",
@@ -164,9 +165,12 @@ async fn unhealthy_liveness_drives_restart_policy(
     request.spec.restart = RestartPolicy::Always;
     request.spec.health = Some(health_check(command_probe("exit 0")));
     request.spec.service_lifecycle = Some(RuntimeServiceLifecycle {
+        // The root filesystem is recreated by a real Sandbox restart. Keep the
+        // one-shot probe marker in Box's per-execution workspace so the test
+        // verifies recovery instead of depending on ephemeral rootfs state.
         liveness: health_check(command_probe(concat!(
-            "if [ -f /tmp/r17-liveness-restart-seen ]; then exit 0; fi; ",
-            "touch /tmp/r17-liveness-restart-seen; exit 1",
+            "if [ -f /workspace/r17-liveness-restart-seen ]; then exit 0; fi; ",
+            "touch /workspace/r17-liveness-restart-seen; exit 1",
         ))),
         shutdown_grace_seconds: 3,
     });
