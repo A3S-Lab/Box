@@ -264,6 +264,8 @@ The current experimental writer pins `mkext4` exactly at `0.0.3` and compiles
 it into the runtime. The source is vendored from upstream commit
 `645ba8f39e0a935511e233874f7217bcb6e0e4d8`; the A3S patch changes only
 directory-entry and symlink-target inputs from UTF-8 strings to byte slices.
+Runtime uses a direct versioned path dependency, rather than a workspace-only
+Cargo patch, so Git consumers compile this same audited implementation.
 The writer's validation, hashing, layout, and streaming algorithms remain
 upstream. Its independent reader verifies that arbitrary Linux filename and
 symlink-target bytes round-trip exactly.

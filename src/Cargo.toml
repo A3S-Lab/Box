@@ -21,11 +21,6 @@ resolver = "2"
 # grpc/grpc#38142 closed wontfix). The vendored copy drops an unparseable
 # UDS-style authority instead of resetting. See third_party/h2/src/server.rs.
 h2 = { path = "third_party/h2" }
-# Pinned from cortexapps/mkext4 0.0.3 at commit
-# 645ba8f39e0a935511e233874f7217bcb6e0e4d8. The A3S patch widens only
-# directory-entry and symlink-target inputs from UTF-8 strings to raw bytes;
-# see third_party/mkext4/A3S_PATCHES.md.
-mkext4 = { path = "third_party/mkext4" }
 
 [workspace.package]
 version = "3.2.0"

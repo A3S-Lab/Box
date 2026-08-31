@@ -15,5 +15,11 @@ the macOS staging adapter restore OCI path bytes without lossy UTF-8 conversion.
 The integration test in `tests/writer.rs` verifies raw names and link targets
 through mkext4's independent reader.
 
+`a3s-box-runtime` selects this checkout with a direct, versioned path
+dependency. A workspace-root `[patch]` is deliberately not used because Cargo
+does not propagate it when Runtime is consumed from the Box Git repository.
+The direct dependency keeps Box binaries and downstream Git consumers on this
+same audited source.
+
 Existing test call sites drop obsolete borrows introduced by the generic byte
 input. Those mechanical changes do not alter test coverage or writer behavior.

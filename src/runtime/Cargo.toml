@@ -117,10 +117,11 @@ a3s-box-netproxy = { version = "3.2", path = "../netproxy" }
 filetime = "0.2"
 xattr = "1.6"
 
-# Guest-native rootfs artifact writer. Keep this exact: mkext4 guarantees
-# byte stability only within one crate version, so a bump is a cache-schema
-# migration rather than a routine dependency update.
-mkext4 = "=0.0.3"
+# Guest-native rootfs artifact writer. The direct path is intentional: Cargo
+# does not propagate workspace-root patches to Git consumers. Keep the exact
+# version because a writer bump is a cache-schema migration rather than a
+# routine dependency update. See third_party/mkext4/A3S_PATCHES.md.
+mkext4 = { version = "=0.0.3", path = "../third_party/mkext4" }
 
 # TEE attestation verification
 p384 = { workspace = true }
