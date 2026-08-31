@@ -9,6 +9,7 @@
 //! - `A3S_NET_GATEWAY`: Gateway IPv4 address (e.g., "10.88.0.1")
 //! - `A3S_NET_DNS`: Comma-separated DNS servers (e.g., "8.8.8.8,8.8.4.4")
 
+use a3s_box_core::guest_exec::GUEST_BOOT_CONFIG_ENV;
 use std::fmt;
 use tracing::info;
 
@@ -72,7 +73,7 @@ impl GuestNetConfig {
 ///    a. Assigns IP to eth0
 ///    b. Brings up eth0
 ///    c. Adds default route via gateway
-///    d. Writes /etc/resolv.conf
+///    d. Writes /etc/resolv.conf for legacy boot transports
 pub fn configure_guest_network() -> Result<(), Box<dyn std::error::Error>> {
     // Always bring up loopback — needed for listen() on 0.0.0.0 even in TSI mode
     #[cfg(target_os = "linux")]
@@ -193,9 +194,12 @@ fn configure_interfaces(config: &GuestNetConfig) -> Result<(), Box<dyn std::erro
         add_default_route(&config.gateway)?;
     }
 
-    // Step 6: Write /etc/resolv.conf
-    info!(dns = ?config.dns_servers, "Writing /etc/resolv.conf");
-    write_resolv_conf(&config.dns_servers)?;
+    // Step 6: Legacy runtimes carry DNS only in A3S_NET_DNS. New runtimes
+    // materialize the exact file later from their versioned boot bundle.
+    if std::env::var_os(GUEST_BOOT_CONFIG_ENV).is_none() {
+        info!(dns = ?config.dns_servers, "Writing /etc/resolv.conf");
+        write_resolv_conf(&config.dns_servers)?;
+    }
 
     info!("Guest network configuration complete");
     Ok(())

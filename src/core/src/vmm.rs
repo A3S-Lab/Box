@@ -9,10 +9,11 @@
 //! - [`VmmProvider`] — start VMs from an [`InstanceSpec`]
 //! - [`VmHandler`] — lifecycle operations on a running VM
 
+use std::fmt;
 use std::net::Ipv4Addr;
 #[cfg(unix)]
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,138 @@ pub struct NetworkInstanceConfig {
     pub dns_servers: Vec<Ipv4Addr>,
 }
 
+/// Stable guest device path used for an A3S-managed ext4 root disk.
+pub const GUEST_EXT4_ROOT_DEVICE: &str = "/dev/vda";
+
+/// An explicitly raw auxiliary block device attached to a MicroVM.
+///
+/// The format is part of the type contract, so the shim never probes a path
+/// after guest access. Device order is stable: root block disks are attached
+/// first, followed by this list in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBlockDevice {
+    pub id: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl RawBlockDevice {
+    pub fn new(id: impl Into<String>, path: impl Into<PathBuf>, read_only: bool) -> Self {
+        Self {
+            id: id.into(),
+            path: path.into(),
+            read_only,
+        }
+    }
+}
+
+/// Root filesystem presented to a MicroVM.
+///
+/// Directory roots use libkrun's virtio-fs root transport. `Ext4Disk` is the
+/// guest-native path: an explicitly raw ext4 image is attached as the first
+/// virtio-blk device and becomes `/dev/vda` inside the guest. Keeping the disk
+/// format fixed in this typed variant prevents unsafe image-format probing
+/// after an untrusted guest has written to the image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RootfsSource {
+    /// Host directory exported to the guest through virtio-fs.
+    Directory { path: PathBuf },
+    /// Raw ext4 filesystem image opened directly by libkrun as virtio-blk.
+    Ext4Disk {
+        path: PathBuf,
+        #[serde(default)]
+        read_only: bool,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TaggedRootfsSource {
+    Directory {
+        path: PathBuf,
+    },
+    Ext4Disk {
+        path: PathBuf,
+        #[serde(default)]
+        read_only: bool,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RootfsSourceRepresentation {
+    LegacyDirectory(PathBuf),
+    Tagged(TaggedRootfsSource),
+}
+
+impl<'de> Deserialize<'de> for RootfsSource {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            match RootfsSourceRepresentation::deserialize(deserializer)? {
+                RootfsSourceRepresentation::LegacyDirectory(path) => Self::Directory { path },
+                RootfsSourceRepresentation::Tagged(TaggedRootfsSource::Directory { path }) => {
+                    Self::Directory { path }
+                }
+                RootfsSourceRepresentation::Tagged(TaggedRootfsSource::Ext4Disk {
+                    path,
+                    read_only,
+                }) => Self::Ext4Disk { path, read_only },
+            },
+        )
+    }
+}
+
+impl RootfsSource {
+    /// Construct a host-directory root exported through virtio-fs.
+    pub fn directory(path: impl Into<PathBuf>) -> Self {
+        Self::Directory { path: path.into() }
+    }
+
+    /// Construct an explicitly raw ext4 root disk.
+    pub fn ext4_disk(path: impl Into<PathBuf>, read_only: bool) -> Self {
+        Self::Ext4Disk {
+            path: path.into(),
+            read_only,
+        }
+    }
+
+    /// Host path backing this root filesystem.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Directory { path } | Self::Ext4Disk { path, .. } => path,
+        }
+    }
+
+    /// Return the host directory for operations that require direct file access.
+    pub fn directory_path(&self) -> Option<&Path> {
+        match self {
+            Self::Directory { path } => Some(path),
+            Self::Ext4Disk { .. } => None,
+        }
+    }
+}
+
+impl Default for RootfsSource {
+    fn default() -> Self {
+        Self::directory(PathBuf::new())
+    }
+}
+
+impl fmt::Display for RootfsSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Directory { path } => write!(formatter, "directory:{}", path.display()),
+            Self::Ext4Disk { path, .. } => write!(formatter, "ext4-disk:{}", path.display()),
+        }
+    }
+}
+
 /// Complete configuration for a VM instance.
 ///
 /// Serialized and passed to the shim subprocess, which uses it to configure
@@ -110,8 +243,13 @@ pub struct InstanceSpec {
     /// Memory in MiB (default: 512)
     pub memory_mib: u32,
 
-    /// Path to the root filesystem
-    pub rootfs_path: PathBuf,
+    /// Root filesystem transport and backing path.
+    #[serde(alias = "rootfs_path")]
+    pub rootfs: RootfsSource,
+
+    /// Additional raw block devices, attached after any block-backed root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_devices: Vec<RawBlockDevice>,
 
     /// Path to the Unix socket for exec communication
     pub exec_socket_path: PathBuf,
@@ -201,7 +339,8 @@ impl Default for InstanceSpec {
             box_id: String::new(),
             vcpus: DEFAULT_VCPUS as u8,
             memory_mib: 512,
-            rootfs_path: PathBuf::new(),
+            rootfs: RootfsSource::default(),
+            block_devices: Vec::new(),
             exec_socket_path: PathBuf::new(),
             pty_socket_path: PathBuf::new(),
             attest_socket_path: PathBuf::new(),
@@ -449,6 +588,45 @@ mod tests {
     }
 
     #[test]
+    fn test_ext4_disk_rootfs_serde_roundtrip() {
+        let rootfs = RootfsSource::Ext4Disk {
+            path: PathBuf::from("/tmp/rootfs.ext4"),
+            read_only: true,
+        };
+
+        let json = serde_json::to_value(&rootfs).unwrap();
+        assert_eq!(json["kind"], "ext4_disk");
+        assert_eq!(json["path"], "/tmp/rootfs.ext4");
+        assert_eq!(json["read_only"], true);
+
+        let decoded: RootfsSource = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, rootfs);
+    }
+
+    #[test]
+    fn test_instance_spec_accepts_legacy_rootfs_path() {
+        let json = r#"{
+            "box_id": "legacy",
+            "vcpus": 1,
+            "memory_mib": 256,
+            "rootfs_path": "/legacy/rootfs",
+            "exec_socket_path": "/exec.sock",
+            "fs_mounts": [],
+            "entrypoint": {"executable": "/bin/sh", "args": [], "env": []},
+            "console_output": null,
+            "workdir": "/"
+        }"#;
+
+        let spec: InstanceSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            spec.rootfs,
+            RootfsSource::Directory {
+                path: PathBuf::from("/legacy/rootfs")
+            }
+        );
+    }
+
+    #[test]
     fn test_instance_spec_serde_roundtrip() {
         let spec = InstanceSpec {
             box_id: "test-box-123".to_string(),
@@ -458,7 +636,8 @@ mod tests {
             restore_from: None,
             vcpus: 4,
             memory_mib: 2048,
-            rootfs_path: PathBuf::from("/tmp/rootfs"),
+            rootfs: RootfsSource::directory("/tmp/rootfs"),
+            block_devices: vec![RawBlockDevice::new("data", "/tmp/data.ext4", true)],
             exec_socket_path: PathBuf::from("/tmp/exec.sock"),
             pty_socket_path: PathBuf::from("/tmp/pty.sock"),
             attest_socket_path: PathBuf::from("/tmp/attest.sock"),
@@ -490,6 +669,8 @@ mod tests {
         assert_eq!(deserialized.box_id, "test-box-123");
         assert_eq!(deserialized.vcpus, 4);
         assert_eq!(deserialized.memory_mib, 2048);
+        assert_eq!(deserialized.rootfs, RootfsSource::directory("/tmp/rootfs"));
+        assert_eq!(deserialized.block_devices, spec.block_devices);
         assert_eq!(deserialized.workdir, "/app");
         assert_eq!(deserialized.fs_mounts.len(), 1);
         assert_eq!(deserialized.fs_mounts[0].tag, "workspace");
@@ -504,6 +685,15 @@ mod tests {
         assert_eq!(deserialized.port_map, vec!["8080:80"]);
         assert_eq!(deserialized.user, Some("1000:1000".to_string()));
         assert!(deserialized.disable_tsi);
+    }
+
+    #[test]
+    fn instance_spec_omits_empty_auxiliary_block_device_list() {
+        let value = serde_json::to_value(InstanceSpec::default()).unwrap();
+        assert!(value.get("block_devices").is_none());
+
+        let decoded: InstanceSpec = serde_json::from_value(value).unwrap();
+        assert!(decoded.block_devices.is_empty());
     }
 
     #[test]

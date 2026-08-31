@@ -3,10 +3,11 @@
 //! Tar headers must be generated from guest-visible Linux metadata. Reading the
 //! virtio-fs backing directory on macOS can expose different uid/gid/mode values.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use a3s_box_core::rootfs_baseline::{GuestDiffBaseline, RootfsFileInfo};
 #[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
 use a3s_box_core::rootfs_metadata::{
@@ -15,6 +16,22 @@ use a3s_box_core::rootfs_metadata::{
     RootfsMetadataManifest, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
 };
 use base64::Engine;
+
+/// Capture the pristine guest-visible tree used by `a3s-box diff`.
+///
+/// This uses the same nested-mount and runtime-control exclusions as live
+/// rootfs archives, so procfs, tmpfs, workspace, and user volumes never become
+/// part of either side of the comparison.
+pub(crate) fn snapshot_diff_baseline(
+    root: &Path,
+) -> Result<GuestDiffBaseline, Box<dyn std::error::Error>> {
+    let excluded_mounts = nested_mount_points(root)?;
+    let mut entries = BTreeMap::new();
+    collect_diff_entries(root, root, &excluded_mounts, &mut entries)?;
+    let baseline = GuestDiffBaseline::new(entries);
+    baseline.validate()?;
+    Ok(baseline)
+}
 
 /// Write a tar stream for `root`, excluding nested mount points such as procfs,
 /// sysfs, tmpfs, and user volumes.
@@ -394,6 +411,53 @@ fn collect_metadata(
     Ok(())
 }
 
+fn collect_diff_entries(
+    root: &Path,
+    source: &Path,
+    excluded_mounts: &HashSet<PathBuf>,
+    entries: &mut BTreeMap<String, RootfsFileInfo>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip(root, source, excluded_mounts) {
+        return Ok(());
+    }
+
+    let metadata = std::fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if source != root {
+        if !file_type.is_dir() && !file_type.is_file() && !file_type.is_symlink() {
+            return Ok(());
+        }
+        let relative = source.strip_prefix(root)?;
+        let path = relative
+            .to_str()
+            .ok_or("rootfs baseline path is not UTF-8")?;
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.mode()
+        };
+        #[cfg(not(unix))]
+        let mode = 0;
+        entries.insert(
+            format!("/{}", path.trim_start_matches('/')),
+            RootfsFileInfo {
+                size: metadata.len(),
+                mode,
+                is_dir: file_type.is_dir(),
+            },
+        );
+    }
+
+    if file_type.is_dir() {
+        let mut children: Vec<_> = std::fs::read_dir(source)?.collect::<Result<_, _>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            collect_diff_entries(root, &child.path(), excluded_mounts, entries)?;
+        }
+    }
+    Ok(())
+}
+
 fn should_skip(root: &Path, source: &Path, excluded_mounts: &HashSet<PathBuf>) -> bool {
     if source != root && excluded_mounts.contains(source) {
         return true;
@@ -557,6 +621,33 @@ mod tests {
         }
         assert!(saw_executable);
         assert!(saw_link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diff_baseline_captures_guest_tree_and_excludes_runtime_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let tools = directory.path().join("usr/bin");
+        std::fs::create_dir_all(&tools).unwrap();
+        let executable = tools.join("tool");
+        std::fs::write(&executable, b"payload").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o751)).unwrap();
+        std::os::unix::fs::symlink("tool", tools.join("tool-link")).unwrap();
+        std::fs::write(directory.path().join(".a3s-box-exec.json"), b"runtime").unwrap();
+
+        let baseline = snapshot_diff_baseline(directory.path()).unwrap();
+
+        baseline.validate().unwrap();
+        assert!(baseline.entries.get("/usr").unwrap().is_dir);
+        assert!(baseline.entries.get("/usr/bin").unwrap().is_dir);
+        let tool = baseline.entries.get("/usr/bin/tool").unwrap();
+        assert_eq!(tool.size, 7);
+        assert_eq!(tool.mode & 0o7777, 0o751);
+        assert!(!tool.is_dir);
+        assert!(baseline.entries.contains_key("/usr/bin/tool-link"));
+        assert!(!baseline.entries.contains_key("/.a3s-box-exec.json"));
     }
 
     #[test]

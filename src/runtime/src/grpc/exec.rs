@@ -23,6 +23,9 @@ const EXEC_CONTROL_ARCHIVE_ROOTFS: &[u8] = b"archive-rootfs-v1";
 const EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE: &[u8] = b"archive-rootfs-v1:pause";
 /// Guest→host marker after every archive data frame has been sent.
 const EXEC_ARCHIVE_ROOTFS_DONE: &[u8] = b"archive-rootfs-v1-done";
+/// Host→trusted-maintenance-PID1 request to unmount its rootfs disk and exit.
+const EXEC_CONTROL_SHUTDOWN_MAINTENANCE: &[u8] = b"shutdown-rootfs-maintenance-v1";
+const EXEC_SHUTDOWN_MAINTENANCE_ACK: &[u8] = b"shutdown-rootfs-maintenance-v1-ack";
 /// Guest→host marker (carried in a Control frame) acknowledging a flush. Kept
 /// distinct from an `ExecExit` JSON payload so `next_event` can tell them apart.
 /// Must match the guest's `EXEC_FLUSH_ACK` in `guest/init/src/exec_server.rs`.
@@ -497,6 +500,37 @@ impl ExecClient {
             }
             _ => Ok(false),
         }
+    }
+
+    /// Ask the restricted rootfs maintenance guest to unmount its read-only
+    /// auxiliary disk and let PID 1 return. Returns false on any transport or
+    /// protocol failure so teardown can use its bounded shim fallback.
+    pub async fn shutdown_rootfs_maintenance(&self) -> Result<bool> {
+        let mut stream = match connect_exec_stream(&self.socket_path).await {
+            Ok(stream) => stream,
+            Err(_) => return Ok(false),
+        };
+        let frame = a3s_transport::Frame::control(EXEC_CONTROL_SHUTDOWN_MAINTENANCE.to_vec());
+        let encoded = frame.encode().map_err(|error| {
+            BoxError::ExecError(format!("maintenance shutdown frame encode failed: {error}"))
+        })?;
+        if stream.write_all(&encoded).await.is_err() {
+            return Ok(false);
+        }
+
+        let (read, _write) = tokio::io::split(stream);
+        let mut reader = a3s_transport::FrameReader::new(read);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(SIGNAL_MAIN_ACK_TIMEOUT_SECS),
+            reader.read_frame(),
+        )
+        .await;
+        Ok(matches!(
+            response,
+            Ok(Ok(Some(frame)))
+                if frame.frame_type == a3s_transport::FrameType::Control
+                    && frame.payload == EXEC_SHUTDOWN_MAINTENANCE_ACK
+        ))
     }
 
     /// Ask a guest that booted IDLE (`BOX_DEFERRED_MAIN=1`) to spawn its container
@@ -1102,6 +1136,34 @@ mod tests {
         // SIGINT = 2 (image STOPSIGNAL example)
         let acked = client.signal_main(2).await.unwrap();
         assert!(acked);
+    }
+
+    #[tokio::test]
+    async fn test_rootfs_maintenance_shutdown_round_trip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("maintenance-shutdown.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, write) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(read);
+            let mut writer = a3s_transport::FrameWriter::new(write);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(frame.payload, EXEC_CONTROL_SHUTDOWN_MAINTENANCE);
+            writer
+                .write_control(EXEC_SHUTDOWN_MAINTENANCE_ACK)
+                .await
+                .unwrap();
+        });
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        assert!(client.shutdown_rootfs_maintenance().await.unwrap());
     }
 
     #[tokio::test]

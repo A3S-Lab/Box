@@ -338,6 +338,32 @@ runtime mutation instead of being stored and silently weakened.
 | Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
+On macOS, `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` enables the in-progress
+guest-native storage path for new MicroVMs and stopped legacy APFS boxes. It
+builds or reuses a pinned, validated ext4 base, gives each box a private APFS
+copy-on-write raw disk, and detaches the temporary case-sensitive construction
+image before the VMM starts.
+Boot configuration and exact workload exit status use private guest-control
+handoffs rather than host access to the active root disk. The first pristine
+`diff` baseline is likewise captured from guest-visible Linux metadata before
+workload launch and atomically published by the host; later boots do not rescan
+the rootfs. Persistent boxes reuse the exact guest-written raw disk after PID 1
+has flushed it, remounted it read-only, and acknowledged the handoff. A retained
+raw generation selects this provider on restart even without the experimental
+creation switch. After an unclean host or shim exit, the runtime validates the
+fixed ext4 recovery envelope and lets the guest kernel replay its journal; it
+does not mount or parse unreplayed guest metadata on macOS. Clean stopped boxes
+serve `diff`, `export`, and `commit` through a one-shot, networkless maintenance
+MicroVM. Its current trusted guest-init boots from an ephemeral directory root,
+attaches the user disk read-only, mounts it as `ro,noload`, exposes only archive,
+heartbeat, and shutdown control, and tears down before releasing the lifecycle
+lock. Journal-dirty disks are rejected until a normal writable boot and clean
+stop completes recovery. A legacy conversion is recorded as a durable
+`building → artifact_ready → clean_stop_verified` transaction. The old sparse
+image remains detached as rollback evidence after verification; Box does not
+silently delete it. Snapshot-backed boxes still require the compatibility path
+described in [Guest-Native Rootfs Design](docs/guest-native-rootfs-design.md).
+
 A few end-to-end workflows:
 
 ```bash

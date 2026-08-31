@@ -1,17 +1,80 @@
-//! Rootfs provider — abstracts how a rootfs directory is prepared for a box.
+//! Rootfs provider — stages a rootfs and finalizes its VMM transport.
 //!
-//! Two built-in providers:
+//! Portable providers:
 //! - `CopyProvider` — full recursive copy (works everywhere, current default)
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant, CoW)
+//!
+//! macOS also has a case-sensitive APFS compatibility provider. The finalizer
+//! boundary allows that mounted staging model to be replaced by a guest-native
+//! block artifact without teaching OCI preparation about VMM transports.
 
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::vmm::RootfsSource;
+
+#[cfg(target_os = "macos")]
+pub(crate) use super::apfs::CaseSensitiveApfsProvider;
+#[cfg(target_os = "macos")]
+use super::guest_native_ext4::GuestNativeExt4Provider;
+
+/// Lifecycle constraints that a provider must honor before handing the
+/// rootfs to the VMM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootfsFinalizeOptions {
+    pub disk_mib: u32,
+    pub persistent: bool,
+    pub snapshot: bool,
+    pub artifact_cache: Option<RootfsArtifactCacheOptions>,
+}
+
+/// Constraints for reopening an already guest-owned rootfs generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootfsResumeOptions {
+    pub disk_mib: u32,
+    pub persistent: bool,
+    pub snapshot: bool,
+}
+
+/// A validated rootfs generation that no longer has a host directory view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedRootfs {
+    pub source: RootfsSource,
+    pub guest_init_exec: String,
+}
+
+/// Exact identity and resource bounds for an immutable provider artifact.
+///
+/// This deliberately excludes the mutable image reference: the resolved OCI
+/// manifest digest is the content authority. The guest-init digest is separate
+/// because A3S installs that runtime binary after OCI extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootfsArtifactCacheOptions {
+    pub directory: PathBuf,
+    pub oci_manifest_digest: String,
+    pub platform: String,
+    pub guest_init_sha256: String,
+    pub max_entries: usize,
+    pub max_allocated_bytes: u64,
+}
 
 /// Abstracts how a rootfs directory is prepared for a box from a cached lower layer.
 pub trait RootfsProvider: Send + Sync {
+    /// Reopen a durable guest-owned generation without reconstructing a host
+    /// staging tree. Directory providers return `None`.
+    fn resume_for_boot(
+        &self,
+        box_dir: &Path,
+        options: RootfsResumeOptions,
+    ) -> Result<Option<ResumedRootfs>> {
+        let _ = (box_dir, options);
+        Ok(None)
+    }
+
     /// Prepare a rootfs at `box_dir` from the cached read-only layer at `cache_dir`.
-    /// Returns the path to use as `InstanceSpec.rootfs_path`.
+    ///
+    /// The returned directory is the host-side staging view. Runtime code may
+    /// still inspect and update it until [`Self::finalize_for_boot`] is called.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
     /// Prepare an empty writable rootfs for an OCI cache miss.
@@ -26,6 +89,26 @@ pub trait RootfsProvider: Send + Sync {
         Ok(rootfs)
     }
 
+    /// Finalize the staged tree and choose the root filesystem transport.
+    ///
+    /// This is called exactly after the last host-side rootfs mutation and
+    /// before the VMM starts. Directory providers keep the existing virtio-fs
+    /// behavior. A guest-native provider can atomically publish a raw ext4
+    /// artifact here, detach any temporary host staging mount, and return an
+    /// [`RootfsSource::Ext4Disk`].
+    ///
+    /// `disk_mib` is the configured logical capacity, not a request to eagerly
+    /// allocate every byte on the host.
+    fn finalize_for_boot(
+        &self,
+        box_dir: &Path,
+        staged_rootfs: &Path,
+        options: RootfsFinalizeOptions,
+    ) -> Result<RootfsSource> {
+        let _ = (box_dir, options);
+        Ok(RootfsSource::directory(staged_rootfs))
+    }
+
     /// Cleanup after box stops.
     ///
     /// When `persistent` is true, the writable layer (overlay upper dir or copy
@@ -33,8 +116,45 @@ pub trait RootfsProvider: Send + Sync {
     /// When false, the writable layer is wiped for a clean slate.
     fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()>;
 
+    /// Whether a failed boot must retain the provider's rootfs generations.
+    ///
+    /// Most providers can discard a partially prepared first boot. A provider
+    /// performing an in-place migration must keep both the rollback source and
+    /// the atomically published target until the migration is verified.
+    fn preserve_on_boot_failure(&self, box_dir: &Path) -> bool {
+        let _ = box_dir;
+        false
+    }
+
+    /// Record that a guest-owned rootfs completed a verified clean stop.
+    ///
+    /// The default is a no-op. Migration providers use this hook to advance a
+    /// durable transaction only after the runtime has observed the guest's
+    /// read-only handoff acknowledgement.
+    fn record_clean_stop(&self, box_dir: &Path) -> Result<()> {
+        let _ = box_dir;
+        Ok(())
+    }
+
     /// Human-readable name for logging.
     fn name(&self) -> &'static str;
+
+    /// Whether this provider can consume the immutable artifact cache contract.
+    fn supports_artifact_cache(&self) -> bool {
+        false
+    }
+
+    /// Whether guest-init, rather than the host staging view, owns terminal
+    /// metadata invalidation for this provider's supported lifecycle modes.
+    fn guest_owns_terminal_fencing(&self) -> bool {
+        false
+    }
+
+    /// Whether guest-init must capture the pristine diff baseline because the
+    /// finalized rootfs has no host-visible directory.
+    fn guest_owns_diff_baseline(&self) -> bool {
+        false
+    }
 }
 
 /// Full recursive copy provider — works on all platforms.
@@ -78,185 +198,6 @@ impl RootfsProvider for CopyProvider {
     }
 }
 
-/// A copy provider backed by a case-sensitive APFS sparse image.
-///
-/// macOS commonly stores `~/.a3s` on case-insensitive APFS. Passing a normal
-/// host directory to libkrun as the guest root would then make Linux paths such
-/// as `/bin` and `/BIN` aliases. Each box therefore owns a sparse, dynamically
-/// allocated case-sensitive APFS image and exposes its mountpoint via virtiofs.
-#[cfg(target_os = "macos")]
-pub struct CaseSensitiveApfsProvider;
-
-#[cfg(target_os = "macos")]
-impl CaseSensitiveApfsProvider {
-    // v2 stores the Linux tree below a private directory inside the volume.
-    // APFS creates volume-management entries such as `.fseventsd` at the
-    // volume root; exposing that root to the guest both leaks host artifacts
-    // and can make recursive rootfs walks fail with EACCES.
-    const IMAGE_STEM: &'static str = "rootfs-apfs-v2";
-    const IMAGE_NAME: &'static str = "rootfs-apfs-v2.sparseimage";
-    const DATA_DIR: &'static str = ".a3s-rootfs";
-
-    fn clone_image(source: &Path, destination: &Path) -> Result<()> {
-        let output = std::process::Command::new("cp")
-            .arg("-c")
-            .arg(source)
-            .arg(destination)
-            .output()
-            .map_err(|error| {
-                BoxError::BuildError(format!("Failed to start APFS clone: {error}"))
-            })?;
-        if !output.status.success() {
-            return Err(BoxError::BuildError(format!(
-                "Failed to clone cached APFS rootfs {}: {}",
-                source.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Ok(())
-    }
-
-    fn mount(&self, box_dir: &Path) -> Result<PathBuf> {
-        use std::process::Command;
-
-        std::fs::create_dir_all(box_dir).map_err(|error| {
-            BoxError::BuildError(format!(
-                "Failed to create box directory {}: {error}",
-                box_dir.display()
-            ))
-        })?;
-        let rootfs = box_dir.join("rootfs");
-        std::fs::create_dir_all(&rootfs).map_err(|error| {
-            BoxError::BuildError(format!(
-                "Failed to create APFS mountpoint {}: {error}",
-                rootfs.display()
-            ))
-        })?;
-        if super::is_mountpoint(&rootfs) {
-            return Self::data_dir(&rootfs);
-        }
-
-        let image = box_dir.join(Self::IMAGE_NAME);
-        if !image.exists() {
-            let stem = box_dir.join(Self::IMAGE_STEM);
-            let output = Command::new("hdiutil")
-                .args([
-                    "create",
-                    "-quiet",
-                    "-size",
-                    "64g",
-                    "-type",
-                    "SPARSE",
-                    "-fs",
-                    "Case-sensitive APFS",
-                    "-volname",
-                    "A3SRootfs",
-                ])
-                .arg(&stem)
-                .output()
-                .map_err(|error| {
-                    BoxError::BuildError(format!("Failed to start hdiutil create: {error}"))
-                })?;
-            if !output.status.success() {
-                return Err(BoxError::BuildError(format!(
-                    "Failed to create case-sensitive APFS rootfs image: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-        }
-
-        let output = Command::new("hdiutil")
-            .args([
-                "attach",
-                "-quiet",
-                "-nobrowse",
-                "-owners",
-                "on",
-                "-mountpoint",
-            ])
-            .arg(&rootfs)
-            .arg(&image)
-            .output()
-            .map_err(|error| {
-                BoxError::BuildError(format!("Failed to start hdiutil attach: {error}"))
-            })?;
-        if !output.status.success() {
-            return Err(BoxError::BuildError(format!(
-                "Failed to mount case-sensitive APFS rootfs image {}: {}",
-                image.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        if !super::is_mountpoint(&rootfs) {
-            return Err(BoxError::BuildError(format!(
-                "hdiutil did not mount the rootfs image at {}",
-                rootfs.display()
-            )));
-        }
-        Self::data_dir(&rootfs)
-    }
-
-    fn data_dir(mountpoint: &Path) -> Result<PathBuf> {
-        let data = mountpoint.join(Self::DATA_DIR);
-        std::fs::create_dir_all(&data).map_err(|error| {
-            BoxError::BuildError(format!(
-                "Failed to create APFS rootfs data directory {}: {error}",
-                data.display()
-            ))
-        })?;
-        Ok(data)
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl RootfsProvider for CaseSensitiveApfsProvider {
-    fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
-        let image = box_dir.join(Self::IMAGE_NAME);
-        if cache_dir.is_file() && !image.exists() {
-            std::fs::create_dir_all(box_dir).map_err(BoxError::IoError)?;
-            Self::clone_image(cache_dir, &image)?;
-        }
-        let rootfs = self.mount(box_dir)?;
-        if cache_dir.is_file() {
-            return Ok(rootfs);
-        }
-        if std::fs::read_dir(&rootfs)
-            .map_err(|error| BoxError::BuildError(error.to_string()))?
-            .next()
-            .is_none()
-        {
-            crate::cache::layer_cache::copy_dir_recursive(cache_dir, &rootfs)?;
-        } else {
-            tracing::info!(path = %rootfs.display(), "Reusing persistent APFS rootfs");
-        }
-        Ok(rootfs)
-    }
-
-    fn prepare_empty(&self, box_dir: &Path) -> Result<PathBuf> {
-        self.mount(box_dir)
-    }
-
-    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
-        super::unmount_box_rootfs(&box_dir.join("rootfs"));
-        if !persistent {
-            let image = box_dir.join(Self::IMAGE_NAME);
-            if image.exists() {
-                std::fs::remove_file(&image).map_err(|error| {
-                    BoxError::BuildError(format!(
-                        "Failed to remove rootfs image {}: {error}",
-                        image.display()
-                    ))
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "case-sensitive-apfs"
-    }
-}
-
 /// Overlayfs provider — near-instant CoW mounts (Linux only).
 ///
 /// Layout:
@@ -264,7 +205,7 @@ impl RootfsProvider for CaseSensitiveApfsProvider {
 /// cache_dir/           ← lower (read-only, shared across boxes)
 /// box_dir/upper/       ← upper (per-box writes)
 /// box_dir/work/        ← overlayfs workdir
-/// box_dir/merged/      ← merged view → InstanceSpec.rootfs_path
+/// box_dir/merged/      ← merged view → RootfsSource::Directory
 /// ```
 pub struct OverlayProvider;
 
@@ -383,6 +324,14 @@ impl RootfsProvider for OverlayProvider {
 pub fn default_provider() -> Box<dyn RootfsProvider> {
     #[cfg(target_os = "macos")]
     {
+        if std::env::var("A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        {
+            tracing::warn!(
+                "Using experimental guest-native ext4 rootfs provider; snapshot-backed boxes remain disabled"
+            );
+            return Box::new(GuestNativeExt4Provider);
+        }
         tracing::info!("Using case-sensitive APFS rootfs provider");
         Box::new(CaseSensitiveApfsProvider)
     }
@@ -397,6 +346,51 @@ pub fn default_provider() -> Box<dyn RootfsProvider> {
         tracing::info!("Overlayfs not available, using copy provider");
         Box::new(CopyProvider)
     }
+}
+
+/// Select the provider for an existing box generation.
+///
+/// A raw disk is durable box state, so its provider identity must not depend on
+/// whether the experimental opt-in environment variable is still present on a
+/// later `start` invocation.
+pub fn default_provider_for_box(box_dir: &Path) -> Box<dyn RootfsProvider> {
+    #[cfg(target_os = "macos")]
+    {
+        for (path, state) in [
+            (
+                GuestNativeExt4Provider::artifact_directory(box_dir),
+                "retained raw rootfs",
+            ),
+            (
+                GuestNativeExt4Provider::migration_path(box_dir),
+                "rootfs migration transaction",
+            ),
+        ] {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        %state,
+                        "Selecting guest-native provider for durable rootfs state"
+                    );
+                    return Box::new(GuestNativeExt4Provider);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        %state,
+                        "Cannot inspect durable rootfs state; selecting its provider to fail closed"
+                    );
+                    return Box::new(GuestNativeExt4Provider);
+                }
+            }
+        }
+    }
+
+    let _ = box_dir;
+    default_provider()
 }
 
 #[cfg(test)]
@@ -430,6 +424,28 @@ mod tests {
             "testbox"
         );
         assert!(rootfs.join("bin/hello").exists());
+    }
+
+    #[test]
+    fn copy_provider_finalizes_to_directory_transport() {
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+
+        let source = CopyProvider
+            .finalize_for_boot(
+                &box_dir,
+                &rootfs,
+                RootfsFinalizeOptions {
+                    disk_mib: 4096,
+                    persistent: false,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(source, RootfsSource::directory(rootfs));
     }
 
     #[test]
@@ -615,6 +631,205 @@ mod tests {
 
         provider.cleanup(&box_dir, false).unwrap();
         assert!(!box_dir.join(CaseSensitiveApfsProvider::IMAGE_NAME).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_native_ext4_handoff_detaches_apfs_before_boot() {
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let provider = GuestNativeExt4Provider;
+        let staged = provider.prepare_empty(&box_dir).unwrap();
+        std::fs::create_dir_all(staged.join("etc")).unwrap();
+        std::fs::write(staged.join("etc/hostname"), "guest-native").unwrap();
+        let mountpoint = staged.parent().unwrap().to_path_buf();
+        assert!(super::super::is_mountpoint(&mountpoint));
+
+        let source = provider
+            .finalize_for_boot(
+                &box_dir,
+                &staged,
+                RootfsFinalizeOptions {
+                    disk_mib: 32,
+                    persistent: false,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap();
+        let RootfsSource::Ext4Disk { path, read_only } = source else {
+            panic!("guest-native provider returned a directory rootfs")
+        };
+        assert!(path.is_file());
+        assert!(!read_only);
+        assert!(
+            !super::super::is_mountpoint(&mountpoint),
+            "APFS staging mount must be gone before VMM handoff"
+        );
+
+        provider.cleanup(&box_dir, false).unwrap();
+        assert!(!box_dir.join(CaseSensitiveApfsProvider::IMAGE_NAME).exists());
+        assert!(!GuestNativeExt4Provider::artifact_directory(&box_dir).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_native_ext4_cache_never_shares_its_writable_disk() {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        fn digest(path: &Path) -> Vec<u8> {
+            let mut file = std::fs::File::open(path).unwrap();
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                let read = file.read(&mut buffer).unwrap();
+                if read == 0 {
+                    return hasher.finalize().to_vec();
+                }
+                hasher.update(&buffer[..read]);
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let cache_dir = tmp.path().join("cache");
+        let provider = GuestNativeExt4Provider;
+        let staged = provider.prepare_empty(&box_dir).unwrap();
+        std::fs::create_dir_all(staged.join("etc")).unwrap();
+        std::fs::write(staged.join("etc/hostname"), "cached-base").unwrap();
+
+        let source = provider
+            .finalize_for_boot(
+                &box_dir,
+                &staged,
+                RootfsFinalizeOptions {
+                    disk_mib: 16,
+                    persistent: false,
+                    snapshot: false,
+                    artifact_cache: Some(RootfsArtifactCacheOptions {
+                        directory: cache_dir.clone(),
+                        oci_manifest_digest: format!("sha256:{}", "11".repeat(32)),
+                        platform: "linux/arm64".to_string(),
+                        guest_init_sha256: format!("sha256:{}", "22".repeat(32)),
+                        max_entries: 2,
+                        max_allocated_bytes: u64::MAX,
+                    }),
+                },
+            )
+            .unwrap();
+        let RootfsSource::Ext4Disk { path, .. } = source else {
+            panic!("guest-native provider returned a directory rootfs")
+        };
+        assert!(path.starts_with(&box_dir));
+
+        let cache_entry = std::fs::read_dir(&cache_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .unwrap();
+        let cached_disk = cache_entry.path().join("artifact/rootfs.ext4");
+        let cached_before = digest(&cached_disk);
+        let mut private = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        private.seek(SeekFrom::Start(4 * 1024 * 1024)).unwrap();
+        private.write_all(b"private-generation").unwrap();
+        private.sync_all().unwrap();
+        assert_eq!(digest(&cached_disk), cached_before);
+
+        provider.cleanup(&box_dir, false).unwrap();
+        assert!(!path.exists());
+        assert!(cached_disk.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_native_ext4_persistent_generation_resumes_without_apfs() {
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let provider = GuestNativeExt4Provider;
+        let staged = provider.prepare_empty(&box_dir).unwrap();
+        std::fs::create_dir_all(staged.join("sbin")).unwrap();
+        std::fs::write(staged.join("sbin/init"), b"guest-init").unwrap();
+
+        let first = provider
+            .finalize_for_boot(
+                &box_dir,
+                &staged,
+                RootfsFinalizeOptions {
+                    disk_mib: 16,
+                    persistent: true,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap();
+        assert!(!box_dir.join("rootfs-apfs-v2.sparseimage").exists());
+        provider.cleanup(&box_dir, true).unwrap();
+
+        let resumed = provider
+            .resume_for_boot(
+                &box_dir,
+                RootfsResumeOptions {
+                    disk_mib: 16,
+                    persistent: true,
+                    snapshot: false,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.source, first);
+        assert_eq!(resumed.guest_init_exec, "/sbin/init");
+
+        provider.cleanup(&box_dir, false).unwrap();
+        let RootfsSource::Ext4Disk { path, .. } = first else {
+            panic!("guest-native provider returned a directory rootfs")
+        };
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_native_ext4_still_rejects_snapshot_generations() {
+        let tmp = TempDir::new().unwrap();
+        let error = GuestNativeExt4Provider
+            .finalize_for_boot(
+                tmp.path(),
+                tmp.path(),
+                RootfsFinalizeOptions {
+                    disk_mib: 32,
+                    persistent: false,
+                    snapshot: true,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("snapshot"), "{error}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_raw_generation_selects_guest_native_provider() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("rootfs-ext4-v1")).unwrap();
+
+        assert_eq!(
+            default_provider_for_box(tmp.path()).name(),
+            "guest-native-ext4"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_migration_transaction_selects_guest_native_provider() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("rootfs-migration-v1.json"), b"incomplete").unwrap();
+
+        assert_eq!(
+            default_provider_for_box(tmp.path()).name(),
+            "guest-native-ext4"
+        );
     }
 
     #[cfg(target_os = "linux")]
