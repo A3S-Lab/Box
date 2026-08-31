@@ -70,7 +70,7 @@ jobs:
           for pattern in "${removed_patterns[@]}"; do
             if git grep -n -I -F -e "$pattern" -- \
               .github compat deploy docs scripts sdk src README.md \
-              ':(exclude)src/Cargo.lock'; then
+              ':(exclude,glob)**/Cargo.lock'; then
               found=1
             fi
           done

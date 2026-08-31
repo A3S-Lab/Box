@@ -33,6 +33,7 @@ pub const EXT4_ARTIFACT_SCHEMA: &str = "a3s.box.rootfs-ext4.v1";
 /// Exact writer identity included in cache keys and artifact manifests.
 pub const EXT4_BUILDER_ID: &str = "mkext4/0.0.3+a3s-adapter-v2";
 /// Builder identities that remain safe to resume as already-published disks.
+#[cfg(any(target_os = "macos", all(unix, test)))]
 pub(super) const LEGACY_EXT4_BUILDER_IDS: &[&str] = &["mkext4/0.0.3+a3s-adapter-v1"];
 
 pub(super) const DISK_FILE_NAME: &str = "rootfs.ext4";
