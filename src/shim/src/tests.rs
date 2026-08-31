@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(not(target_os = "windows"))]
+mod raw_disk_ownership;
+
 #[test]
 fn validates_directory_rootfs_source() {
     let temp = tempfile::tempdir().unwrap();
@@ -60,78 +63,6 @@ fn rejects_symlink_as_ext4_disk_rootfs_source() {
 
     assert!(error.contains("not a regular file"));
     assert!(error.contains(&rootfs.display().to_string()));
-}
-
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn validates_one_read_only_auxiliary_raw_disk() {
-    let temp = tempfile::tempdir().unwrap();
-    let rootfs = temp.path().join("rootfs");
-    let disk = temp.path().join("data.ext4");
-    std::fs::create_dir(&rootfs).unwrap();
-    std::fs::write(&disk, b"raw disk bytes").unwrap();
-    let spec = InstanceSpec {
-        rootfs: RootfsSource::directory(rootfs),
-        block_devices: vec![RawBlockDevice::new("maintenance", disk, true)],
-        ..InstanceSpec::default()
-    };
-
-    validate_raw_block_devices(&spec).unwrap();
-}
-
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn rejects_reserved_or_repeated_auxiliary_raw_disks() {
-    let temp = tempfile::tempdir().unwrap();
-    let rootfs = temp.path().join("rootfs");
-    let disk = temp.path().join("data.ext4");
-    std::fs::create_dir(&rootfs).unwrap();
-    std::fs::write(&disk, b"raw disk bytes").unwrap();
-
-    let reserved = InstanceSpec {
-        rootfs: RootfsSource::directory(&rootfs),
-        block_devices: vec![RawBlockDevice::new("rootfs", &disk, true)],
-        ..InstanceSpec::default()
-    };
-    assert!(validate_raw_block_devices(&reserved)
-        .unwrap_err()
-        .to_string()
-        .contains("reserved"));
-
-    let repeated = InstanceSpec {
-        rootfs: RootfsSource::directory(rootfs),
-        block_devices: vec![
-            RawBlockDevice::new("first", &disk, true),
-            RawBlockDevice::new("second", &disk, true),
-        ],
-        ..InstanceSpec::default()
-    };
-    assert!(validate_raw_block_devices(&repeated)
-        .unwrap_err()
-        .to_string()
-        .contains("more than once"));
-}
-
-#[cfg(unix)]
-#[test]
-fn raw_disk_ownership_lock_rejects_a_second_a3s_owner() {
-    let temp = tempfile::tempdir().unwrap();
-    let rootfs = temp.path().join("rootfs");
-    let disk = temp.path().join("data.ext4");
-    std::fs::create_dir(&rootfs).unwrap();
-    std::fs::write(&disk, b"raw disk bytes").unwrap();
-    let spec = InstanceSpec {
-        rootfs: RootfsSource::directory(rootfs),
-        block_devices: vec![RawBlockDevice::new("maintenance", &disk, true)],
-        ..InstanceSpec::default()
-    };
-
-    let first_owner = lock_raw_disk_ownership(&spec).unwrap();
-    let error = lock_raw_disk_ownership(&spec).unwrap_err().to_string();
-    assert!(error.contains("already owned by another A3S VM"));
-
-    drop(first_owner);
-    lock_raw_disk_ownership(&spec).unwrap();
 }
 
 #[cfg(target_os = "linux")]

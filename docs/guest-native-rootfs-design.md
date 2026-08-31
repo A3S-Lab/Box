@@ -154,6 +154,14 @@ exclusive `flock` for every raw root or auxiliary disk for its entire lifetime.
 This second ownership fence catches stale state records and orphan processes in
 addition to the CLI lifecycle lock.
 
+The standard Unix shim suite fault-injects both sides of that fence in separate
+processes. A maintenance-shaped owner blocks a writable run spec, a
+run-shaped owner blocks a read-only maintenance spec, and an ungraceful owner
+process kill must release the kernel lock before the opposite role can acquire
+the same generation. This test exercises the production validation and lock
+path without requiring a hypervisor; the physical HVF gate separately proves
+that normal and maintenance boots use those exact spec shapes.
+
 ### One-Shot Boot Control
 
 MicroVM launch data is carried in a versioned `a3s.box.guest-boot.v1` bundle,
@@ -481,7 +489,7 @@ window implicitly.
 - [x] Route stopped diff, export, and commit through maintenance control.
 - [x] Add the stopped-box read-only maintenance guest.
 - [ ] Add explicitly scoped stopped file inspection if the product requires it.
-- [ ] Prove maintenance/run exclusive ownership under fault injection.
+- [x] Prove maintenance/run exclusive ownership under fault injection.
 
 ### Phase 4: Migration and default switch
 
