@@ -340,13 +340,15 @@ runtime mutation instead of being stored and silently weakened.
 
 On macOS, `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` enables the in-progress
 guest-native storage path for new MicroVMs and stopped legacy APFS boxes. It
-builds or reuses a pinned, validated ext4 base, gives each box a private APFS
-copy-on-write raw disk, and detaches the temporary case-sensitive construction
-image before the VMM starts.
-Its macOS staging codec keeps APFS-safe physical names while the OCI metadata
-manifest and vendored byte-capable ext4 writer preserve exact Linux filename
-and symlink-target bytes; directory transports fail closed when that reversal
-is required.
+assembles verified OCI layers directly into a pinned, validated ext4 base and
+publishes a private raw disk for each box, using a copy-on-write clone when the
+immutable artifact cache is enabled. New generations do not create a
+guest-named host directory or attach an `A3SRootfs` DiskImage.
+The raw-byte logical assembler preserves Linux filenames, symlink targets,
+hardlinks, whiteouts, xattrs, ownership, modes, and timestamps before invoking
+the vendored ext4 writer. The macOS staging codec remains only for directory
+transport and legacy APFS migration; directory transports fail closed when a
+guest name cannot be represented losslessly.
 Boot configuration and exact workload exit status use private guest-control
 handoffs rather than host access to the active root disk. The first pristine
 `diff` baseline is likewise captured from guest-visible Linux metadata before

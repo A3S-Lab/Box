@@ -9,18 +9,20 @@ libkrun virtio-blk and mounted as `/dev/vda` by libkrun's root-disk remount path
 The per-box case-sensitive APFS sparse image remains a compatibility transport
 during migration. It is not the target storage model.
 
-An experimental macOS provider now implements the running ownership handoff,
-read-only stopped archive path, and stopped legacy migration: APFS is attached
-only while constructing or converting a guest tree, a validated raw ext4
-artifact is atomically published, and APFS is synchronously detached before the
+An experimental macOS provider now implements mount-free construction, the
+running ownership handoff, the read-only stopped archive path, and stopped
+legacy migration. New OCI generations are assembled directly into a validated
+raw ext4 artifact; APFS DiskImages are attached only while converting an
+existing legacy writable generation and are synchronously detached before the
 VMM starts. Persistent boxes restart directly from that guest-written disk;
 clean stopped boxes use a restricted maintenance MicroVM. This remains an
 opt-in path, not yet the default.
 
 ## Problem
 
-The current macOS provider keeps one case-sensitive APFS sparse image attached
-for every running box and exports its directory through virtio-fs. This solves
+The current default macOS compatibility provider keeps one case-sensitive APFS
+sparse image attached for every running box and exports its directory through
+virtio-fs. This solves
 Linux case-sensitivity on a case-insensitive host, but it also makes a guest
 implementation detail visible as one macOS disk device per box. A compose
 application with many services therefore creates many `A3SRootfs` devices.
@@ -90,7 +92,7 @@ host storage optimization.
 ## Ownership State Machine
 
 ```text
-StagingDirectory
+LogicalAssembly | LegacyStagingDirectory
     -> Finalizing
     -> BlockArtifactReady
     -> GuestOwned
@@ -99,7 +101,11 @@ StagingDirectory
     -> GuestOwned | MaintenanceOwned | Deleted
 ```
 
-- `StagingDirectory`: host code may extract OCI layers and install guest-init.
+- `LogicalAssembly`: new OCI layers are resolved in a raw-byte Linux namespace;
+  regular-file payloads use opaque temporary spool names rather than guest path
+  names on the host.
+- `LegacyStagingDirectory`: host code may inspect an attached legacy APFS
+  generation only inside the resumable migration transaction.
 - `Finalizing`: the provider creates a temporary block artifact and validates
   it. No guest may start.
 - `BlockArtifactReady`: the artifact was atomically published; the staging
@@ -141,10 +147,12 @@ migration paths. The ext4 variant has these fixed semantics:
 - an empty, missing, or non-regular artifact is rejected before entering
   libkrun.
 
-`RootfsProvider::finalize_for_boot` is the ownership boundary. It runs after
-all current host-side rootfs mutations and before the VMM starts. Existing
-providers return a directory. The experimental macOS block provider publishes
-the raw artifact, detaches temporary staging storage, and returns `Ext4Disk`.
+`RootfsProvider::prepare_oci_for_boot` is the mount-free ownership boundary for
+new guest-native generations. Directory providers decline it and retain their
+existing staging flow. `RootfsProvider::finalize_for_boot` remains the boundary
+for directory providers and legacy migration: it runs after all permitted
+host-side mutations and before the VMM starts. The experimental macOS block
+provider returns `Ext4Disk` from either boundary.
 
 For stopped inspection, `InstanceSpec::block_devices` carries typed auxiliary
 raw disks. The maintenance spec has a tiny trusted directory root containing
@@ -245,7 +253,8 @@ host-side walk.
 
 The ext4 builder must:
 
-1. take a staged tree plus the OCI metadata manifest as input;
+1. take either the resolved logical OCI namespace or an explicitly migrated
+   legacy staging tree as input;
 2. preserve Linux paths, modes, ownership, timestamps, hard links, symlinks,
    extended attributes, and sparse files;
 3. derive logical capacity from `resources.disk_mb` and fail before boot when
@@ -273,44 +282,47 @@ symlink-target bytes round-trip exactly.
 A3S owns the tree adapter, capacity policy, OCI ownership replay, sparse-file
 discovery, xattr filtering, structural validation, and generation-directory
 publication. The adapter does not use the crate's example tree walker.
+Direct construction authenticates the exact compressed layer snapshot before
+decoding it, reclaims superseded payload spools as whiteouts and replacements
+are applied, and records aligned zero runs as sparse ext4 holes without relying
+on host sparse-file discovery.
 Runtime-managed files use canonical metadata: guest-init is root owned, mode
 `0755`, and timestamped at the filesystem epoch rather than inheriting metadata
 from an image entry it replaced.
 
 APFS cannot materialize every Linux filename byte sequence and normalizes some
-distinct Unicode spellings. On macOS, OCI extraction therefore maps every
-non-ASCII path component, plus literal names in the private codec namespace, to
-the deterministic physical name `.a3s-rp1-<sha256>`. The OCI metadata manifest
-remains authoritative for the original bytes. The ext4 adapter builds a
-collision-checked reverse map, including implicit parent directories, and emits
-only the logical guest names. Whiteouts and hard links use the same mapping.
-An unmapped or pre-codec staging name fails closed and requires cache rebuild;
-it is never reinterpreted. Directory providers also reject a translated tree
-instead of exposing codec names through virtio-fs.
+distinct Unicode spellings. The compatibility extraction path therefore maps
+non-ASCII path components, plus literal names in the private codec namespace,
+to deterministic physical names. That codec and its OCI metadata manifest
+remain necessary for directory transport and legacy migration. New
+guest-native construction never encodes a guest path into a host pathname: it
+tracks raw byte components, inode identity, symlink resolution, whiteouts,
+opaque directories, xattrs, and metadata in memory, while regular payloads are
+spooled under unrelated bounded host names. Directory providers still reject a
+translated tree instead of exposing codec names through virtio-fs.
 
 The byte-capable adapter uses builder identity
-`mkext4/0.0.3+a3s-adapter-v2`, which invalidates immutable v1 cache entries.
-Already-published v1 per-box disks remain valid resumable generations because
-their ext4 bytes no longer depend on a host staging namespace.
+`mkext4/0.0.3+a3s-adapter-v3`, which invalidates older immutable cache entries.
+Already-published v1 and v2 per-box disks remain valid resumable generations
+because their ext4 bytes no longer depend on a host staging namespace.
 
 ## Experimental Handoff
 
 On macOS, set `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` to select the
 experimental provider. Its current lifecycle is:
 
-1. construct a host-safe OCI staging view in the compatibility APFS image while
-   retaining exact Linux path bytes in the metadata manifest;
+1. resolve verified OCI layers into a bounded raw-byte logical namespace,
+   applying lower-layer-only whiteouts without creating a guest-named host tree;
 2. derive an immutable identity from the resolved OCI manifest, Linux platform,
    exact guest-init SHA-256, ext4 contract, writer version, and capacity;
-3. reuse or atomically publish the matching sparse ext4 base under the bounded
-   `rootfs-ext4-v1` cache namespace;
-4. create a private APFS `clonefile` generation at the box-local
-   `rootfs-ext4-v1/rootfs.ext4`; the cached disk is never attached writable;
-5. synchronously detach the APFS staging mount;
-6. pass only the box-local raw disk to libkrun;
-7. on clean stop, wait for guest PID 1 to flush and acknowledge the read-only
+3. when artifact caching is enabled, reuse or atomically publish the matching
+   sparse ext4 base under the bounded `rootfs-ext4-v1` cache namespace;
+4. clone the cached base or atomically publish an uncached private generation at
+   the box-local `rootfs-ext4-v1/rootfs.ext4`; neither form is mounted by macOS;
+5. pass only the box-local raw disk to libkrun;
+6. on clean stop, wait for guest PID 1 to flush and acknowledge the read-only
    root-disk handoff before tearing down host runtime state;
-8. for a persistent box, reopen the exact raw generation on the next start
+7. for a persistent box, reopen the exact raw generation on the next start
    without attaching APFS, pulling the image again, or reconstructing a host
    directory tree.
 
@@ -324,12 +336,11 @@ resolved OCI tree; invalid bytes are never cloned into a box generation.
 One cross-process cache lock currently serializes lookup, first publication,
 cloning, and pruning; this keeps the initial protocol simple and crash-safe.
 
-The cache removes repeated ext4 construction, but a cache miss still attaches
-APFS briefly because the current in-process ext4 tree adapter consumes a
-case-sensitive staging directory. Diff baseline capture no longer reads that
-host tree. Eliminating the remaining construction-time attach requires a
-direct OCI-layer-to-ext4 assembly path; the VMM runtime handoff itself has no
-APFS mount.
+Cache misses now use the same direct OCI-layer-to-ext4 assembly path as
+uncached construction. Cache hits clone the already validated raw base without
+decoding or spooling any layer. Neither path creates or attaches an
+`A3SRootfs` DiskImage. The only remaining APFS attach in the guest-native
+provider is the explicit legacy migration window.
 
 The provider supports persistent clean-stop restart and intentionally rejects
 snapshot-backed boxes. A retained `rootfs-ext4-v1` generation selects the same
@@ -483,6 +494,7 @@ window implicitly.
 - [x] Select and exactly pin the in-process ext4 writer for the experimental path.
 - [x] Add deterministic tree adaptation, sparse output, structural validation, and atomic generation publication.
 - [x] Add raw-byte filename and symlink-target support or replace the writer.
+- [x] Assemble OCI layers directly into ext4 without an APFS staging namespace.
 - [x] Build and reuse a deterministic immutable ext4 base cache from OCI content.
 - [ ] Validate metadata fidelity and filesystem integrity on Linux CI.
 - [x] Add atomic publication and cache-version tests for the experimental artifact.
@@ -493,7 +505,7 @@ window implicitly.
 - [x] Consume the bundle before workload mounts and remove it after guest readiness.
 - [x] Move exact exit status and terminal-generation fencing out of the host tree.
 - [x] Move diff baseline ownership out of the host tree.
-- [x] Hand an ephemeral per-box raw disk to libkrun and synchronously detach APFS first.
+- [x] Hand an ephemeral per-box raw disk to libkrun without creating an APFS construction mount.
 - [x] Clone an immutable base image into one per-box raw disk.
 - [x] Run real macOS success and nonzero-exit smoke tests with zero `A3SRootfs` runtime mounts.
 - [x] Add clean restart and forced-crash recovery to the physical macOS/HVF integration gate.

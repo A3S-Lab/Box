@@ -23,6 +23,8 @@ use super::ext4_artifact::open_ext4_artifact;
 pub const EXT4_CACHE_SCHEMA: &str = "a3s.box.rootfs-ext4-cache.v1";
 const CACHE_MANIFEST_NAME: &str = "cache.json";
 const ARTIFACT_DIRECTORY_NAME: &str = "artifact";
+pub(super) const CACHE_STAGING_PREFIX: &str = ".a3s-rootfs-ext4-cache-";
+pub(super) const CLONE_STAGING_PREFIX: &str = ".a3s-rootfs-ext4-clone-";
 const MAX_CACHE_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_IDENTITY_FIELD_BYTES: usize = 512;
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
@@ -122,6 +124,24 @@ impl Ext4ArtifactCache {
         disk_mib: u32,
         identity: &Ext4CacheIdentity,
     ) -> Result<Ext4Artifact> {
+        self.materialize_with(destination, disk_mib, identity, |destination, options| {
+            publish_ext4_artifact(source, destination, options)
+        })
+    }
+
+    /// Materialize through a publisher that owns its source representation.
+    /// Cache hits never invoke the publisher, so OCI layers do not need to be
+    /// decoded or spooled when an immutable ext4 base already exists.
+    pub(super) fn materialize_with<F>(
+        &self,
+        destination: &Path,
+        disk_mib: u32,
+        identity: &Ext4CacheIdentity,
+        publish: F,
+    ) -> Result<Ext4Artifact>
+    where
+        F: FnOnce(&Path, Ext4ArtifactOptions) -> Result<Ext4Artifact>,
+    {
         identity.validate()?;
         let provisional = Ext4ArtifactOptions::from_disk_mib(disk_mib, [0; 16])?;
         let key = identity.key(provisional.capacity_bytes);
@@ -144,8 +164,10 @@ impl Ext4ArtifactCache {
                 self.root.display()
             ))
         })?;
+        remove_stale_cache_staging(&self.root)?;
 
         let cache_entry = self.root.join(&key);
+        let mut publish = Some(publish);
         let cached = match std::fs::symlink_metadata(&cache_entry) {
             Ok(_) => match open_cache_entry(&cache_entry, &key, identity, options) {
                 Ok(artifact) => artifact,
@@ -156,12 +178,24 @@ impl Ext4ArtifactCache {
                         "Discarding invalid ext4 cache entry before rebuilding"
                     );
                     remove_cache_entry(&cache_entry)?;
-                    publish_cache_entry(source, &self.root, &cache_entry, &key, identity, options)?
+                    publish_cache_entry_with(
+                        &self.root,
+                        &cache_entry,
+                        &key,
+                        identity,
+                        options,
+                        publish.take().expect("ext4 publisher is called once"),
+                    )?
                 }
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                publish_cache_entry(source, &self.root, &cache_entry, &key, identity, options)?
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => publish_cache_entry_with(
+                &self.root,
+                &cache_entry,
+                &key,
+                identity,
+                options,
+                publish.take().expect("ext4 publisher is called once"),
+            )?,
             Err(error) => {
                 return Err(cache_error(format!(
                     "failed to inspect ext4 cache entry {}: {error}",
@@ -249,23 +283,28 @@ struct CacheEntryUsage {
     allocated_bytes: u64,
 }
 
-fn publish_cache_entry(
-    source: &Path,
+fn publish_cache_entry_with<F>(
     root: &Path,
     destination: &Path,
     key: &str,
     identity: &Ext4CacheIdentity,
     options: Ext4ArtifactOptions,
-) -> Result<Ext4Artifact> {
+    publish: F,
+) -> Result<Ext4Artifact>
+where
+    F: FnOnce(&Path, Ext4ArtifactOptions) -> Result<Ext4Artifact>,
+{
     let temporary = tempfile::Builder::new()
-        .prefix(".a3s-rootfs-ext4-cache-")
+        .prefix(CACHE_STAGING_PREFIX)
         .tempdir_in(root)
         .map_err(|error| cache_error(format!("failed to stage ext4 cache entry: {error}")))?;
-    let artifact = publish_ext4_artifact(
-        source,
-        &temporary.path().join(ARTIFACT_DIRECTORY_NAME),
-        options,
-    )?;
+    let artifact_directory = temporary.path().join(ARTIFACT_DIRECTORY_NAME);
+    let artifact = publish(&artifact_directory, options)?;
+    if artifact.directory != artifact_directory {
+        return Err(cache_error(
+            "ext4 cache publisher returned an artifact outside its assigned directory",
+        ));
+    }
     let manifest = Ext4CacheManifest {
         schema: EXT4_CACHE_SCHEMA.to_string(),
         key: key.to_string(),
@@ -359,7 +398,7 @@ fn clone_artifact(source: &Ext4Artifact, destination: &Path) -> Result<Ext4Artif
         Err(error) => return Err(BoxError::IoError(error)),
     }
     let temporary = tempfile::Builder::new()
-        .prefix(".a3s-rootfs-ext4-clone-")
+        .prefix(CLONE_STAGING_PREFIX)
         .tempdir_in(parent)
         .map_err(BoxError::IoError)?;
     let disk = temporary.path().join("rootfs.ext4");
@@ -570,6 +609,20 @@ fn validate_plain_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn remove_stale_cache_staging(root: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(root).map_err(BoxError::IoError)? {
+        let entry = entry.map_err(BoxError::IoError)?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(CACHE_STAGING_PREFIX))
+        {
+            remove_cache_entry(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn remove_cache_entry(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -708,6 +761,64 @@ mod tests {
             .unwrap();
         assert_eq!(first.manifest, second.manifest);
         assert!(second.disk.is_file());
+    }
+
+    #[test]
+    fn cache_hit_does_not_invoke_source_publisher() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source_path = temporary.path().join("source");
+        source(&source_path, b"cached");
+        let cache = Ext4ArtifactCache::new(temporary.path().join("cache"), 4, u64::MAX);
+        let identity = identity("direct-image");
+        cache
+            .materialize(&source_path, &temporary.path().join("first"), 16, &identity)
+            .unwrap();
+
+        let second = cache
+            .materialize_with(
+                &temporary.path().join("second"),
+                16,
+                &identity,
+                |_destination, _options| {
+                    panic!("cache hit must not decode OCI layers");
+                },
+            )
+            .unwrap();
+        let filesystem = mkext4::reader::Fs::open(File::open(second.disk).unwrap()).unwrap();
+        let value = filesystem.resolve("/etc/value").unwrap();
+        assert_eq!(filesystem.read_file(value).unwrap(), b"cached");
+    }
+
+    #[test]
+    fn cache_lock_reclaims_crash_staging_without_following_links() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source_path = temporary.path().join("source");
+        source(&source_path, b"cached");
+        let cache_root = temporary.path().join("cache");
+        std::fs::create_dir(&cache_root).unwrap();
+        let stale_directory = cache_root.join(format!("{CACHE_STAGING_PREFIX}directory"));
+        std::fs::create_dir(&stale_directory).unwrap();
+        std::fs::write(stale_directory.join("partial"), b"partial").unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        let stale_link = cache_root.join(format!("{CACHE_STAGING_PREFIX}link"));
+        symlink(&outside, &stale_link).unwrap();
+        let cache = Ext4ArtifactCache::new(&cache_root, 4, u64::MAX);
+
+        cache
+            .materialize(
+                &source_path,
+                &temporary.path().join("box"),
+                16,
+                &identity("image"),
+            )
+            .unwrap();
+
+        assert!(!stale_directory.exists());
+        assert!(std::fs::symlink_metadata(&stale_link).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
     }
 
     #[test]

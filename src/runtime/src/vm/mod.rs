@@ -76,9 +76,11 @@ pub(crate) struct BoxLayout {
     /// Host staging path for a fresh directory-derived generation.
     ///
     /// This path is intentionally non-authoritative when `resumed_rootfs` is
-    /// present; guest-owned persistent disks never regain a host directory view.
+    /// present; directly assembled and resumed guest-owned disks have no host
+    /// directory view.
     pub(crate) rootfs_path: PathBuf,
-    /// Already finalized guest-owned generation selected for a persistent restart.
+    /// Guest-owned generation finalized before the directory staging boundary.
+    /// This covers direct OCI assembly and persistent restart.
     pub(crate) resumed_rootfs: Option<crate::rootfs::ResumedRootfs>,
     /// Path to the exec Unix socket
     pub(crate) exec_socket_path: PathBuf,

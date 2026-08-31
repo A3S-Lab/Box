@@ -307,6 +307,68 @@ impl VmManager {
         let image_path = oci_image.root_dir().to_path_buf();
         let manifest_digest = oci_image.manifest_digest().to_string();
 
+        if self.rootfs_provider.supports_direct_oci_assembly() {
+            let guest_init = Self::find_guest_init()?;
+            let guest_init_sha256 = Self::guest_init_sha256(&guest_init)?;
+            let image_platform = oci_image.platform();
+            let platform = match image_platform.variant.as_deref() {
+                Some(variant) => format!(
+                    "{}/{}/{}",
+                    image_platform.os, image_platform.architecture, variant
+                ),
+                None => format!("{}/{}", image_platform.os, image_platform.architecture),
+            };
+            let artifact_cache =
+                self.config
+                    .cache
+                    .enabled
+                    .then(|| crate::rootfs::RootfsArtifactCacheOptions {
+                        directory: self.resolve_cache_dir().join("rootfs-ext4-v1"),
+                        oci_manifest_digest: manifest_digest.clone(),
+                        platform: platform.clone(),
+                        guest_init_sha256: guest_init_sha256.clone(),
+                        max_entries: self.config.cache.max_rootfs_entries,
+                        max_allocated_bytes: self.config.cache.max_cache_bytes,
+                    });
+            if let Some(resumed_rootfs) = self.rootfs_provider.prepare_oci_for_boot(
+                &box_dir,
+                crate::rootfs::RootfsOciPrepareOptions {
+                    image: &oci_image,
+                    guest_init: &guest_init,
+                    guest_init_sha256: &guest_init_sha256,
+                    platform: &platform,
+                    disk_mib: self.config.resources.disk_mb,
+                    persistent: self.config.persistent,
+                    snapshot: snapshot_requested,
+                    artifact_cache,
+                },
+            )? {
+                let oci_config = Some(oci_image.config().clone());
+                if let Some(config) = oci_config.as_ref() {
+                    crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
+                }
+                let tee_instance_config = self.generate_tee_config(&box_dir)?;
+                return Ok(BoxLayout {
+                    // The direct provider deliberately leaves this compatibility
+                    // path absent. All rootfs control travels through the private
+                    // boot bundle once `resumed_rootfs` is present.
+                    rootfs_path: box_dir.join("rootfs"),
+                    resumed_rootfs: Some(resumed_rootfs),
+                    exec_socket_path: socket_dir.join("exec.sock"),
+                    pty_socket_path: socket_dir.join("pty.sock"),
+                    attest_socket_path: socket_dir.join("attest.sock"),
+                    port_forward_socket_path: socket_dir.join("portfwd.sock"),
+                    workspace_path,
+                    console_output: Some(logs_dir.join("console.log")),
+                    oci_config,
+                    #[cfg(target_os = "macos")]
+                    oci_manifest_digest: Some(manifest_digest),
+                    prefer_image_rootfs_metadata: false,
+                    tee_instance_config,
+                });
+            }
+        }
+
         // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
         let cache_key = RootfsCache::compute_image_key(reference, &manifest_digest);
         let (rootfs_path, oci_config, prefer_image_rootfs_metadata) =

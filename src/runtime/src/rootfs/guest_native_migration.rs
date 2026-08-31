@@ -81,6 +81,8 @@ pub(super) fn remove_stale_publications(box_dir: &Path) -> Result<()> {
         };
         if !name.starts_with(super::ext4::STAGING_DIRECTORY_PREFIX)
             && !name.starts_with(MIGRATION_STAGING_PREFIX)
+            && !name.starts_with(super::ext4_cache::CLONE_STAGING_PREFIX)
+            && !name.starts_with(super::oci_ext4::CONTENT_STAGING_PREFIX)
         {
             continue;
         }

@@ -601,9 +601,9 @@ impl VmManager {
             box_id: self.box_id.clone(),
             vcpus,
             memory_mib: self.config.resources.memory_mb,
-            // Fresh generations start with the staging directory and are
-            // replaced at the final provider boundary. Persistent guest-owned
-            // generations arrive already finalized and never regain a host view.
+            // Directory-derived generations are replaced at the final provider
+            // boundary. Directly assembled and resumed guest-owned generations
+            // arrive finalized and never gain a host directory view.
             rootfs: layout
                 .resumed_rootfs
                 .as_ref()

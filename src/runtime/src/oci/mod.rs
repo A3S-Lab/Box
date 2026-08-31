@@ -28,8 +28,9 @@
 pub mod build;
 pub mod credentials;
 mod image;
+pub(crate) mod layer_reader;
 mod layers;
-mod limited_reader;
+pub(crate) mod limited_reader;
 mod pull;
 pub mod reference;
 pub mod registry;

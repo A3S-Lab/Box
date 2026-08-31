@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use a3s_box_core::error::{BoxError, Result};
 use mkext4::InodeHandle;
 
-pub(super) enum FileFill {
+pub(crate) enum FileFill {
     Dense {
         handle: InodeHandle,
         path: PathBuf,
@@ -22,7 +22,7 @@ pub(super) enum FileFill {
 }
 
 impl FileFill {
-    pub(super) fn write_into<S: mkext4::RegionSink>(
+    pub(crate) fn write_into<S: mkext4::RegionSink>(
         self,
         writer: &mut mkext4::build::ImageWriter<'_, S>,
     ) -> Result<()> {
@@ -55,18 +55,18 @@ impl FileFill {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum SourceSegment {
+pub(crate) enum SourceSegment {
     Data { len: u64 },
     Hole { len: u64 },
 }
 
-pub(super) struct SparseLayout {
-    pub(super) segments: Vec<SourceSegment>,
-    pub(super) data_ranges: Vec<(u64, u64)>,
+pub(crate) struct SparseLayout {
+    pub(crate) segments: Vec<SourceSegment>,
+    pub(crate) data_ranges: Vec<(u64, u64)>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn sparse_layout(file: &File, length: u64) -> Result<Option<SparseLayout>> {
+pub(crate) fn sparse_layout(file: &File, length: u64) -> Result<Option<SparseLayout>> {
     if length == 0 {
         return Ok(None);
     }
@@ -120,7 +120,7 @@ pub(super) fn sparse_layout(file: &File, length: u64) -> Result<Option<SparseLay
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) fn sparse_layout(_file: &File, _length: u64) -> Result<Option<SparseLayout>> {
+pub(crate) fn sparse_layout(_file: &File, _length: u64) -> Result<Option<SparseLayout>> {
     Ok(None)
 }
 

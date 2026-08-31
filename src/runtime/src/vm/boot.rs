@@ -163,9 +163,8 @@ impl VmManager {
         if layout.resumed_rootfs.is_some() && !uses_guest_boot_config {
             self.cleanup_boot_failure().await;
             return Err(BoxError::BoxBootError {
-                message:
-                    "persistent guest-owned rootfs did not select the private guest boot transport"
-                        .to_string(),
+                message: "guest-owned rootfs did not select the private guest boot transport"
+                    .to_string(),
                 hint: None,
             });
         }
@@ -394,9 +393,6 @@ impl VmManager {
         guest_executable: &str,
         uses_guest_boot_config: bool,
     ) -> Result<Option<crate::rootfs::RootfsArtifactCacheOptions>> {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-
         if !self.rootfs_provider.supports_artifact_cache()
             || !self.config.cache.enabled
             || !uses_guest_boot_config
@@ -414,45 +410,87 @@ impl VmManager {
         })?;
         let guest_init =
             crate::oci::rootfs::resolve_guest_file_path(&layout.rootfs_path, relative)?;
-        let mut file = std::fs::File::open(&guest_init).map_err(BoxError::IoError)?;
-        let metadata = file.metadata().map_err(BoxError::IoError)?;
-        const MAX_GUEST_INIT_BYTES: u64 = 256 * 1024 * 1024;
-        if !metadata.is_file() || metadata.len() > MAX_GUEST_INIT_BYTES {
-            return Err(BoxError::BuildError(format!(
-                "guest-init cache identity source is not a bounded regular file: {}",
-                guest_init.display()
-            )));
-        }
-        let expected_length = metadata.len();
-        let mut read_length = 0u64;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer).map_err(BoxError::IoError)?;
-            if read == 0 {
-                break;
-            }
-            read_length = read_length.saturating_add(read as u64);
-            hasher.update(&buffer[..read]);
-        }
-        if read_length != expected_length
-            || file.metadata().map_err(BoxError::IoError)?.len() != expected_length
-        {
-            return Err(BoxError::BuildError(format!(
-                "guest-init changed while computing cache identity: {}",
-                guest_init.display()
-            )));
-        }
+        let guest_init_sha256 = Self::guest_init_sha256(&guest_init)?;
 
         let architecture = a3s_box_core::platform::Platform::host().architecture;
         Ok(Some(crate::rootfs::RootfsArtifactCacheOptions {
             directory: self.resolve_cache_dir().join("rootfs-ext4-v1"),
             oci_manifest_digest: oci_manifest_digest.clone(),
             platform: format!("linux/{architecture}"),
-            guest_init_sha256: format!("sha256:{}", hex::encode(hasher.finalize())),
+            guest_init_sha256,
             max_entries: self.config.cache.max_rootfs_entries,
             max_allocated_bytes: self.config.cache.max_cache_bytes,
         }))
+    }
+
+    pub(crate) fn guest_init_sha256(path: &std::path::Path) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+
+        let path_metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+        let mut open_options = std::fs::OpenOptions::new();
+        open_options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        let mut file = open_options.open(path).map_err(BoxError::IoError)?;
+        let metadata = file.metadata().map_err(BoxError::IoError)?;
+        const MAX_GUEST_INIT_BYTES: u64 = 256 * 1024 * 1024;
+        if !path_metadata.is_file()
+            || path_metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || path_metadata.len() != metadata.len()
+            || metadata.len() > MAX_GUEST_INIT_BYTES
+        {
+            return Err(BoxError::BuildError(format!(
+                "guest-init cache identity source is not a bounded plain file: {}",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if path_metadata.dev() != metadata.dev() || path_metadata.ino() != metadata.ino() {
+                return Err(BoxError::BuildError(format!(
+                    "guest-init changed while opening cache identity source: {}",
+                    path.display()
+                )));
+            }
+        }
+        let expected_length = metadata.len();
+        let mut read_length = 0u64;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        {
+            let mut bounded = file.by_ref().take(MAX_GUEST_INIT_BYTES + 1);
+            loop {
+                let read = bounded.read(&mut buffer).map_err(BoxError::IoError)?;
+                if read == 0 {
+                    break;
+                }
+                read_length = read_length.checked_add(read as u64).ok_or_else(|| {
+                    BoxError::BuildError("guest-init length overflow".to_string())
+                })?;
+                if read_length > expected_length {
+                    return Err(BoxError::BuildError(format!(
+                        "guest-init changed while computing cache identity: {}",
+                        path.display()
+                    )));
+                }
+                hasher.update(&buffer[..read]);
+            }
+        }
+        if read_length != expected_length
+            || file.metadata().map_err(BoxError::IoError)?.len() != expected_length
+        {
+            return Err(BoxError::BuildError(format!(
+                "guest-init changed while computing cache identity: {}",
+                path.display()
+            )));
+        }
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
     pub(super) fn create_diff_baseline(&self, layout: &BoxLayout) {

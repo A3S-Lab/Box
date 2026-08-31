@@ -26,6 +26,8 @@ mod guest_native_ext4;
 #[cfg(target_os = "macos")]
 mod guest_native_migration;
 mod layout;
+#[cfg(any(target_os = "macos", all(unix, test)))]
+mod oci_ext4;
 pub(crate) mod overlay;
 mod provider;
 mod staging_path;
@@ -47,7 +49,8 @@ pub use guest_native_ext4::GuestNativeExt4Provider;
 pub use layout::{GuestLayout, GUEST_WORKDIR};
 pub use provider::{
     default_provider, default_provider_for_box, CopyProvider, OverlayProvider, ResumedRootfs,
-    RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsProvider, RootfsResumeOptions,
+    RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsOciPrepareOptions, RootfsProvider,
+    RootfsResumeOptions,
 };
 pub(crate) use staging_path::{
     ensure_directory_transport_is_lossless, host_staging_path, logical_path_for_staged_child,

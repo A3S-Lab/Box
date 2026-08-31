@@ -342,6 +342,16 @@ pub struct OciImage {
     layer_paths: Vec<PathBuf>,
 }
 
+/// One layer path paired with the descriptor authenticated by the image
+/// manifest. Consumers must still verify the bytes opened from `path` because
+/// the local OCI layout can change after [`OciImage`] is loaded.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OciLayerBlob<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) digest: &'a str,
+    pub(crate) size: u64,
+}
+
 /// Parsed OCI image configuration with entrypoint and environment.
 #[derive(Debug, Clone)]
 pub struct OciImageConfig {
@@ -479,6 +489,18 @@ impl OciImage {
     /// Get paths to all layer blobs (in order, bottom to top).
     pub fn layer_paths(&self) -> &[PathBuf] {
         &self.layer_paths
+    }
+
+    /// Pair each local layer path with its authenticated manifest descriptor.
+    pub(crate) fn layer_blobs(&self) -> impl ExactSizeIterator<Item = OciLayerBlob<'_>> + '_ {
+        self.layer_paths
+            .iter()
+            .zip(self.manifest.layers())
+            .map(|(path, descriptor)| OciLayerBlob {
+                path,
+                digest: descriptor.digest().as_ref(),
+                size: descriptor.size(),
+            })
     }
 
     /// Get the root directory of the OCI image.

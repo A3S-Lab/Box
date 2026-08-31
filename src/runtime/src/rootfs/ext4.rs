@@ -24,17 +24,18 @@ use mkext4::{FsBuilder, InodeHandle, Meta, Options, SparseSeg, SpecialKind, ROOT
 use serde::{Deserialize, Serialize};
 
 #[path = "ext4_sparse.rs"]
-mod sparse;
+pub(super) mod sparse;
 
 use sparse::{sparse_layout, FileFill, SourceSegment};
 
 /// Versioned A3S wrapper contract for a published ext4 artifact directory.
 pub const EXT4_ARTIFACT_SCHEMA: &str = "a3s.box.rootfs-ext4.v1";
 /// Exact writer identity included in cache keys and artifact manifests.
-pub const EXT4_BUILDER_ID: &str = "mkext4/0.0.3+a3s-adapter-v2";
+pub const EXT4_BUILDER_ID: &str = "mkext4/0.0.3+a3s-adapter-v3";
 /// Builder identities that remain safe to resume as already-published disks.
 #[cfg(any(target_os = "macos", all(unix, test)))]
-pub(super) const LEGACY_EXT4_BUILDER_IDS: &[&str] = &["mkext4/0.0.3+a3s-adapter-v1"];
+pub(super) const LEGACY_EXT4_BUILDER_IDS: &[&str] =
+    &["mkext4/0.0.3+a3s-adapter-v1", "mkext4/0.0.3+a3s-adapter-v2"];
 
 pub(super) const DISK_FILE_NAME: &str = "rootfs.ext4";
 pub(super) const MANIFEST_FILE_NAME: &str = "artifact.json";
@@ -141,6 +142,34 @@ pub fn publish_ext4_artifact(
     })?;
     validate_source_and_destination(source, destination)?;
 
+    let (builder, fills) = declare_source_tree(source, options)?;
+    publish_ext4_build_plan(destination, options, builder, fills)
+}
+
+/// Publish a fully declared ext4 namespace without requiring a host directory
+/// tree. The OCI direct assembler uses this boundary after resolving all layer
+/// operations in raw guest-path space.
+pub(super) fn publish_ext4_build_plan(
+    destination: &Path,
+    options: Ext4ArtifactOptions,
+    builder: FsBuilder,
+    fills: Vec<FileFill>,
+) -> Result<Ext4Artifact> {
+    options.validate()?;
+    let parent = destination.parent().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "ext4 artifact destination has no parent: {}",
+            destination.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to create ext4 artifact parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    validate_artifact_destination(destination)?;
+
     let temporary = tempfile::Builder::new()
         .prefix(STAGING_DIRECTORY_PREFIX)
         .tempdir_in(parent)
@@ -152,7 +181,6 @@ pub fn publish_ext4_artifact(
         })?;
     let temporary_disk = temporary.path().join(DISK_FILE_NAME);
 
-    let (builder, fills) = declare_source_tree(source, options)?;
     let layout = builder.seal().map_err(|error| {
         BoxError::BuildError(format!(
             "Failed to lay out {}-byte ext4 artifact: {error}",
@@ -228,6 +256,28 @@ pub fn publish_ext4_artifact(
     })
 }
 
+pub(super) fn new_ext4_fs_builder(options: Ext4ArtifactOptions) -> Result<FsBuilder> {
+    options.validate()?;
+    let mut mkfs_options = Options::new(options.capacity_bytes, options.fs_uuid, options.epoch);
+    mkfs_options.label = Some("a3s-rootfs".to_string());
+    mkfs_options.reserved_percent = 0;
+    FsBuilder::new(mkfs_options).map_err(mkext4_build_error)
+}
+
+fn validate_artifact_destination(destination: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => Err(BoxError::BuildError(format!(
+            "ext4 artifact generation already exists: {}",
+            destination.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BoxError::BuildError(format!(
+            "Failed to inspect ext4 artifact destination {}: {error}",
+            destination.display()
+        ))),
+    }
+}
+
 fn validate_source_and_destination(source: &Path, destination: &Path) -> Result<()> {
     let source_metadata = std::fs::symlink_metadata(source).map_err(|error| {
         BoxError::BuildError(format!(
@@ -241,21 +291,7 @@ fn validate_source_and_destination(source: &Path, destination: &Path) -> Result<
             source.display()
         )));
     }
-    match std::fs::symlink_metadata(destination) {
-        Ok(_) => {
-            return Err(BoxError::BuildError(format!(
-                "ext4 artifact generation already exists: {}",
-                destination.display()
-            )))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(BoxError::BuildError(format!(
-                "Failed to inspect ext4 artifact destination {}: {error}",
-                destination.display()
-            )))
-        }
-    }
+    validate_artifact_destination(destination)?;
 
     let canonical_source = source.canonicalize().map_err(BoxError::IoError)?;
     if let Some(parent) = destination.parent() {
@@ -274,10 +310,7 @@ fn declare_source_tree(
     source: &Path,
     options: Ext4ArtifactOptions,
 ) -> Result<(FsBuilder, Vec<FileFill>)> {
-    let mut mkfs_options = Options::new(options.capacity_bytes, options.fs_uuid, options.epoch);
-    mkfs_options.label = Some("a3s-rootfs".to_string());
-    mkfs_options.reserved_percent = 0;
-    let mut builder = FsBuilder::new(mkfs_options).map_err(mkext4_build_error)?;
+    let mut builder = new_ext4_fs_builder(options)?;
     let metadata = ImageMetadata::load(source)?;
     let root_metadata = std::fs::symlink_metadata(source).map_err(BoxError::IoError)?;
     builder
@@ -587,7 +620,7 @@ fn apply_xattrs(builder: &mut FsBuilder, handle: InodeHandle, path: &Path) -> Re
     Ok(())
 }
 
-fn is_linux_xattr_name(name: &str) -> bool {
+pub(super) fn is_linux_xattr_name(name: &str) -> bool {
     name.strip_prefix("user.")
         .is_some_and(|suffix| !suffix.is_empty())
         || name

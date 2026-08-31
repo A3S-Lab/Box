@@ -9,10 +9,10 @@ use a3s_box_core::rootfs_metadata::{
     ROOTFS_METADATA_TEMP_PATH,
 };
 use base64::Engine;
-use flate2::read::GzDecoder;
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
@@ -73,46 +73,9 @@ fn extract_layer_with_cap(
         ))
     })?;
 
-    // Open layer file
-    let mut file = File::open(layer_path).map_err(|e| {
-        BoxError::OciImageError(format!(
-            "Failed to open layer file {}: {}",
-            layer_path.display(),
-            e
-        ))
-    })?;
-
-    // Detect the layer's compression from its magic bytes — OCI layers are gzip
-    // (1f 8b), zstd (28 b5 2f fd, e.g. buildkit/nerdctl `--compression zstd`), or
-    // an uncompressed tar. Peek, rewind, then pick the matching decoder; relying
-    // on the media type alone would miss layers stored without one.
-    let mut magic = [0u8; 4];
-    let read = file.read(&mut magic).map_err(|e| {
-        BoxError::OciImageError(format!(
-            "Failed to read layer header {}: {e}",
-            layer_path.display()
-        ))
-    })?;
-    file.seek(SeekFrom::Start(0)).map_err(|e| {
-        BoxError::OciImageError(format!(
-            "Failed to rewind layer {}: {e}",
-            layer_path.display()
-        ))
-    })?;
-
-    let decoder: Box<dyn Read> = if read >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
-        Box::new(GzDecoder::new(file))
-    } else if read >= 4 && magic == [0x28, 0xb5, 0x2f, 0xfd] {
-        Box::new(zstd::stream::read::Decoder::new(file).map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Failed to init zstd decoder for {}: {e}",
-                layer_path.display()
-            ))
-        })?)
-    } else {
-        // Uncompressed tar (some registries / `--compression none`).
-        Box::new(file)
-    };
+    // Compression is detected from magic bytes rather than media type because
+    // registries and build tools may omit or mislabel the compression suffix.
+    let decoder = super::layer_reader::open(layer_path)?;
 
     let decoder = super::limited_reader::LimitedReader::new(decoder, max_layer_bytes);
 

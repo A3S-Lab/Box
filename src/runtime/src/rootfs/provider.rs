@@ -58,6 +58,19 @@ pub struct RootfsArtifactCacheOptions {
     pub max_allocated_bytes: u64,
 }
 
+/// Verified OCI inputs for a provider that can publish a bootable artifact
+/// without first materializing a host-visible rootfs directory.
+pub struct RootfsOciPrepareOptions<'a> {
+    pub image: &'a crate::oci::OciImage,
+    pub guest_init: &'a Path,
+    pub guest_init_sha256: &'a str,
+    pub platform: &'a str,
+    pub disk_mib: u32,
+    pub persistent: bool,
+    pub snapshot: bool,
+    pub artifact_cache: Option<RootfsArtifactCacheOptions>,
+}
+
 /// Abstracts how a rootfs directory is prepared for a box from a cached lower layer.
 pub trait RootfsProvider: Send + Sync {
     /// Reopen a durable guest-owned generation without reconstructing a host
@@ -66,6 +79,18 @@ pub trait RootfsProvider: Send + Sync {
         &self,
         box_dir: &Path,
         options: RootfsResumeOptions,
+    ) -> Result<Option<ResumedRootfs>> {
+        let _ = (box_dir, options);
+        Ok(None)
+    }
+
+    /// Build a rootfs artifact directly from verified OCI layers. Providers
+    /// that require a directory staging view return `None` and retain the
+    /// compatibility preparation flow.
+    fn prepare_oci_for_boot(
+        &self,
+        box_dir: &Path,
+        options: RootfsOciPrepareOptions<'_>,
     ) -> Result<Option<ResumedRootfs>> {
         let _ = (box_dir, options);
         Ok(None)
@@ -142,6 +167,12 @@ pub trait RootfsProvider: Send + Sync {
 
     /// Whether this provider can consume the immutable artifact cache contract.
     fn supports_artifact_cache(&self) -> bool {
+        false
+    }
+
+    /// Whether layout preparation should offer verified OCI inputs before
+    /// allocating a directory staging transport.
+    fn supports_direct_oci_assembly(&self) -> bool {
         false
     }
 

@@ -7,12 +7,12 @@ use a3s_box_core::vmm::RootfsSource;
 
 use super::guest_native_migration::{self as migration, MigrationState};
 use super::provider::{
-    CaseSensitiveApfsProvider, ResumedRootfs, RootfsFinalizeOptions, RootfsProvider,
-    RootfsResumeOptions,
+    CaseSensitiveApfsProvider, ResumedRootfs, RootfsFinalizeOptions, RootfsOciPrepareOptions,
+    RootfsProvider, RootfsResumeOptions,
 };
 
-/// Uses APFS only as a private construction workspace, then hands a raw ext4
-/// disk to the guest and detaches APFS before the VMM starts.
+/// Builds new OCI generations directly into ext4 and uses APFS only when a
+/// legacy writable generation must be migrated without losing guest state.
 ///
 /// Persistent generations reuse the validated raw disk directly. Stopped
 /// archive operations use a separate read-only maintenance VM; snapshot-backed
@@ -100,6 +100,78 @@ impl GuestNativeExt4Provider {
         uuid[8] = (uuid[8] & 0x3f) | 0x80;
         Ok(uuid)
     }
+
+    fn direct_filesystem_uuid(identity: &super::Ext4CacheIdentity, disk_mib: u32) -> [u8; 16] {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        for field in [
+            super::EXT4_BUILDER_ID.as_bytes(),
+            identity.schema.as_bytes(),
+            identity.oci_manifest_digest.as_bytes(),
+            identity.platform.as_bytes(),
+            identity.guest_init_sha256.as_bytes(),
+            &disk_mib.to_le_bytes(),
+        ] {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field);
+        }
+        let digest = hasher.finalize();
+        let mut uuid = [0; 16];
+        uuid.copy_from_slice(&digest[..16]);
+        uuid[6] = (uuid[6] & 0x0f) | 0x50;
+        uuid[8] = (uuid[8] & 0x3f) | 0x80;
+        uuid
+    }
+
+    fn host_directory_generation_exists(box_dir: &Path) -> Result<bool> {
+        for directory in [
+            box_dir.join("rootfs"),
+            box_dir.join("upper"),
+            box_dir.join("merged"),
+        ] {
+            match std::fs::read_dir(&directory) {
+                Ok(mut entries) => {
+                    if entries.next().is_some() {
+                        return Ok(true);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Failed to inspect legacy rootfs directory {}: {error}",
+                        directory.display()
+                    )))
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn remove_compatibility_staging_directories(box_dir: &Path) -> Result<()> {
+        for path in [
+            box_dir.join("rootfs"),
+            box_dir.join("upper"),
+            box_dir.join("work"),
+            box_dir.join("merged"),
+        ] {
+            if super::is_mountpoint(&path) {
+                return Err(BoxError::BuildError(format!(
+                    "Compatibility rootfs remained mounted after cleanup: {}",
+                    path.display()
+                )));
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    std::fs::remove_dir_all(&path).map_err(BoxError::IoError)?;
+                }
+                Ok(_) => std::fs::remove_file(&path).map_err(BoxError::IoError)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(BoxError::IoError(error)),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RootfsProvider for GuestNativeExt4Provider {
@@ -117,6 +189,7 @@ impl RootfsProvider for GuestNativeExt4Provider {
                     .to_string(),
             ));
         }
+        migration::remove_stale_publications(box_dir)?;
 
         let directory = Self::artifact_directory(box_dir);
         match std::fs::symlink_metadata(&directory) {
@@ -148,6 +221,101 @@ impl RootfsProvider for GuestNativeExt4Provider {
         if !migration::reconcile_for_resume(box_dir)? {
             CaseSensitiveApfsProvider.cleanup(box_dir, false)?;
         }
+        Ok(Some(ResumedRootfs {
+            source: RootfsSource::ext4_disk(artifact.disk, false),
+            guest_init_exec: "/sbin/init".to_string(),
+        }))
+    }
+
+    fn prepare_oci_for_boot(
+        &self,
+        box_dir: &Path,
+        options: RootfsOciPrepareOptions<'_>,
+    ) -> Result<Option<ResumedRootfs>> {
+        if options.snapshot {
+            return Err(BoxError::BuildError(
+                "guest-native ext4 is not yet enabled for snapshot-backed boxes; use the APFS compatibility provider"
+                    .to_string(),
+            ));
+        }
+        // A legacy sparse image is mutable user state, not an OCI cache miss.
+        // Keep the existing attach-and-migrate transaction for that one case.
+        if options.persistent && migration::begin_if_needed(box_dir)? {
+            return Ok(None);
+        }
+        if !options.persistent {
+            migration::remove_stale_publications(box_dir)?;
+        }
+        if options.persistent && Self::host_directory_generation_exists(box_dir)? {
+            return Err(BoxError::StateError(
+                "Persistent host-directory rootfs state cannot be replaced by a new OCI ext4 generation; select the compatibility provider and migrate or commit that state first"
+                    .to_string(),
+            ));
+        }
+
+        let identity = super::Ext4CacheIdentity::new(
+            options.image.manifest_digest(),
+            options.platform,
+            options.guest_init_sha256,
+        )?;
+        if let Some(cache) = options.artifact_cache.as_ref() {
+            if cache.oci_manifest_digest != identity.oci_manifest_digest
+                || cache.platform != identity.platform
+                || cache.guest_init_sha256 != identity.guest_init_sha256
+            {
+                return Err(BoxError::BuildError(
+                    "Direct OCI rootfs identity disagrees with its ext4 cache identity".to_string(),
+                ));
+            }
+        }
+
+        // No compatibility construction image is authoritative here. Remove
+        // any abandoned plain staging state before publishing the sole rootfs
+        // generation for this box.
+        CaseSensitiveApfsProvider.cleanup(box_dir, false)?;
+        Self::remove_compatibility_staging_directories(box_dir)?;
+        if !options.persistent {
+            migration::remove(box_dir)?;
+        }
+        Self::remove_artifact(box_dir)?;
+        migration::remove_stale_publications(box_dir)?;
+        let destination = Self::artifact_directory(box_dir);
+        let artifact = match options.artifact_cache.as_ref() {
+            Some(cache) => super::Ext4ArtifactCache::new(
+                &cache.directory,
+                cache.max_entries,
+                cache.max_allocated_bytes,
+            )
+            .materialize_with(
+                &destination,
+                options.disk_mib,
+                &identity,
+                |cache_destination, artifact_options| {
+                    super::oci_ext4::publish_oci_layers_ext4(
+                        options.image,
+                        options.guest_init,
+                        options.guest_init_sha256,
+                        cache_destination,
+                        artifact_options,
+                    )
+                },
+            )?,
+            None => super::oci_ext4::publish_oci_layers_ext4(
+                options.image,
+                options.guest_init,
+                options.guest_init_sha256,
+                &destination,
+                super::Ext4ArtifactOptions::from_disk_mib(
+                    options.disk_mib,
+                    Self::direct_filesystem_uuid(&identity, options.disk_mib),
+                )?,
+            )?,
+        };
+        tracing::info!(
+            disk = %artifact.disk.display(),
+            layers = options.image.layer_paths().len(),
+            "Prepared guest-native ext4 directly from OCI layers"
+        );
         Ok(Some(ResumedRootfs {
             source: RootfsSource::ext4_disk(artifact.disk, false),
             guest_init_exec: "/sbin/init".to_string(),
@@ -273,6 +441,10 @@ impl RootfsProvider for GuestNativeExt4Provider {
         true
     }
 
+    fn supports_direct_oci_assembly(&self) -> bool {
+        true
+    }
+
     fn guest_owns_terminal_fencing(&self) -> bool {
         true
     }
@@ -288,6 +460,156 @@ mod tests {
         self as migration, MigrationManifest, MigrationState, MIGRATION_STAGING_PREFIX,
     };
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn write_blob(root: &Path, bytes: &[u8]) -> String {
+        let digest = hex::encode(Sha256::digest(bytes));
+        let path = root.join("blobs/sha256").join(&digest);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        format!("sha256:{digest}")
+    }
+
+    fn direct_test_image(root: &Path) -> crate::oci::OciImage {
+        let mut layer = tar::Builder::new(Vec::new());
+        let content = b"mount-free";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o640);
+        header.set_uid(101);
+        header.set_gid(202);
+        header.set_mtime(1_704_067_200);
+        header.set_cksum();
+        layer
+            .append_data(&mut header, "payload", content.as_slice())
+            .unwrap();
+        layer.finish().unwrap();
+        let layer = layer.into_inner().unwrap();
+        let layer_digest = write_blob(root, &layer);
+        let config = serde_json::to_vec(&serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Cmd": ["/bin/true"]},
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": [format!("sha256:{}", hex::encode(Sha256::digest(&layer)))]
+            }
+        }))
+        .unwrap();
+        let config_digest = write_blob(root, &config);
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config.len()
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer_digest,
+                "size": layer.len()
+            }]
+        }))
+        .unwrap();
+        let manifest_digest = write_blob(root, &manifest);
+        std::fs::write(
+            root.join("oci-layout"),
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [{
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": manifest_digest,
+                    "size": manifest.len(),
+                    "platform": {"os": "linux", "architecture": "arm64"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::oci::OciImage::from_path(root).unwrap()
+    }
+
+    #[test]
+    fn new_oci_generation_is_published_without_apfs_or_a_host_rootfs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let image = direct_test_image(&temporary.path().join("image"));
+        let box_dir = temporary.path().join("box");
+        let guest_init = temporary.path().join("guest-init");
+        std::fs::write(&guest_init, b"guest-init").unwrap();
+        let guest_init_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(b"guest-init")));
+
+        let prepared = GuestNativeExt4Provider
+            .prepare_oci_for_boot(
+                &box_dir,
+                RootfsOciPrepareOptions {
+                    image: &image,
+                    guest_init: &guest_init,
+                    guest_init_sha256: &guest_init_sha256,
+                    platform: "linux/arm64",
+                    disk_mib: 16,
+                    persistent: false,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        let RootfsSource::Ext4Disk { path, read_only } = prepared.source else {
+            panic!("direct OCI preparation must return an ext4 disk");
+        };
+        assert!(!read_only);
+        assert!(path.is_file());
+        assert!(!box_dir.join("rootfs").exists());
+        assert!(!CaseSensitiveApfsProvider::image_path(&box_dir).exists());
+        let filesystem = mkext4::reader::Fs::open(std::fs::File::open(path).unwrap()).unwrap();
+        let payload = filesystem.resolve("/payload").unwrap();
+        assert_eq!(filesystem.read_file(payload).unwrap(), b"mount-free");
+        let inode = filesystem.inode(payload).unwrap();
+        assert_eq!((inode.uid, inode.gid), (101, 202));
+        let init = filesystem.resolve("/sbin/init").unwrap();
+        assert_eq!(filesystem.read_file(init).unwrap(), b"guest-init");
+    }
+
+    #[test]
+    fn direct_preparation_never_discards_persistent_directory_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let image = direct_test_image(&temporary.path().join("image"));
+        let box_dir = temporary.path().join("box");
+        let legacy_file = box_dir.join("rootfs/guest-write");
+        std::fs::create_dir_all(legacy_file.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_file, b"keep").unwrap();
+        let guest_init = temporary.path().join("guest-init");
+        std::fs::write(&guest_init, b"guest-init").unwrap();
+        let guest_init_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(b"guest-init")));
+
+        let error = GuestNativeExt4Provider
+            .prepare_oci_for_boot(
+                &box_dir,
+                RootfsOciPrepareOptions {
+                    image: &image,
+                    guest_init: &guest_init,
+                    guest_init_sha256: &guest_init_sha256,
+                    platform: "linux/arm64",
+                    disk_mib: 16,
+                    persistent: true,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("cannot be replaced"), "{error}");
+        assert_eq!(std::fs::read(legacy_file).unwrap(), b"keep");
+        assert!(!GuestNativeExt4Provider::artifact_directory(&box_dir).exists());
+    }
 
     #[test]
     fn migration_intent_is_durable_and_idempotent() {
@@ -416,6 +738,14 @@ mod tests {
         let stale_file = temporary
             .path()
             .join(format!("{MIGRATION_STAGING_PREFIX}file"));
+        let stale_content = temporary.path().join(format!(
+            "{}content",
+            super::super::oci_ext4::CONTENT_STAGING_PREFIX
+        ));
+        let stale_clone = temporary.path().join(format!(
+            "{}clone",
+            super::super::ext4_cache::CLONE_STAGING_PREFIX
+        ));
         let outside = temporary.path().join("outside");
         let stale_link = temporary.path().join(format!(
             "{}link",
@@ -423,6 +753,9 @@ mod tests {
         ));
         std::fs::create_dir(&stale_directory).unwrap();
         std::fs::write(stale_directory.join("partial"), b"partial").unwrap();
+        std::fs::create_dir(&stale_content).unwrap();
+        std::fs::write(stale_content.join("payload"), b"partial").unwrap();
+        std::fs::write(&stale_clone, b"partial").unwrap();
         std::fs::write(&stale_file, b"partial").unwrap();
         std::fs::write(&outside, b"keep").unwrap();
         symlink(&outside, &stale_link).unwrap();
@@ -431,6 +764,8 @@ mod tests {
 
         assert!(!stale_directory.exists());
         assert!(!stale_file.exists());
+        assert!(!stale_content.exists());
+        assert!(!stale_clone.exists());
         assert!(std::fs::symlink_metadata(&stale_link).is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
     }

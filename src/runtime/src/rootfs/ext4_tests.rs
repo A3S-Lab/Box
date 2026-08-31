@@ -306,23 +306,26 @@ fn oci_raw_bytes_survive_staging_and_ext4_publication_end_to_end() {
 }
 
 #[test]
-fn published_v1_artifacts_remain_resumable_after_builder_upgrade() {
+fn published_legacy_artifacts_remain_resumable_after_builder_upgrade() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     std::fs::create_dir(&source).unwrap();
     std::fs::write(source.join("payload"), b"legacy").unwrap();
     let artifact =
         publish_ext4_artifact(&source, &temp.path().join("artifact"), options()).unwrap();
-    let mut manifest = artifact.manifest;
-    manifest.builder = LEGACY_EXT4_BUILDER_IDS[0].to_string();
-    std::fs::write(
-        artifact.directory.join(MANIFEST_FILE_NAME),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    for builder in LEGACY_EXT4_BUILDER_IDS {
+        let mut manifest = artifact.manifest.clone();
+        manifest.builder = (*builder).to_string();
+        std::fs::write(
+            artifact.directory.join(MANIFEST_FILE_NAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
-    let reopened = crate::rootfs::ext4_artifact::open_ext4_artifact(&artifact.directory).unwrap();
-    assert_eq!(reopened.manifest.builder, LEGACY_EXT4_BUILDER_IDS[0]);
+        let reopened =
+            crate::rootfs::ext4_artifact::open_ext4_artifact(&artifact.directory).unwrap();
+        assert_eq!(reopened.manifest.builder, *builder);
+    }
 }
 
 #[test]
