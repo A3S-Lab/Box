@@ -149,14 +149,19 @@ Current notes:
   logic. The long-running `monitor` command runs due probes itself, so detached
   boxes no longer depend on short-lived CLI health-check tasks to move from
   `starting` to `healthy`/`unhealthy` and trigger restart policy handling.
-- The A3S Runtime provider now advertises HTTP, TCP, and command health probes
-  for Services. HTTP and TCP reuse the generation-fenced
-  `ExecutionPortConnector`; command probes reuse the generation-fenced exec
-  session manager. Apply honors the Runtime start period and success/failure
-  thresholds, while inspect and exec return one current bounded sample and
-  re-read lifecycle state so a Service exit wins a probe race. Runtime policies
-  are not copied into `ExecutionRecordPolicy.health_check`, so a Runtime-owned
-  Service never starts a second CLI monitor or health worker.
+- The A3S Runtime provider pins Runtime 0.5.0 and advertises HTTP, TCP, and
+  command readiness plus the atomic `ServiceLifecycle` feature. Readiness and
+  liveness have independent start periods and success/failure thresholds; HTTP
+  and TCP reuse the generation-fenced `ExecutionPortConnector`, and command
+  probes reuse the generation-fenced exec session manager. Unhealthy liveness
+  applies at most one restart per public operation through the durable Box
+  generation and declared restart policy. The lifecycle maps exact graceful
+  shutdown intent to `SIGTERM` plus the persisted deadline, reserves the whole
+  grace before its provider timeout, and forces a non-cooperative workload at
+  the deadline. Lifecycle state is re-read after each probe so terminal state
+  wins every race. Runtime policies are not copied into
+  `ExecutionRecordPolicy.health_check`, so a Runtime-owned Service never starts
+  a second CLI monitor or health worker.
 - `logs` now treats missing log files for an existing box as empty output
   instead of an error, waits for the first log file when following a running box,
   prefers structured JSON logs when available, and starts `--follow --tail`

@@ -34,7 +34,8 @@ pub(super) async fn run(
     command_threshold_transitions_from_unhealthy_to_healthy(fixture, client).await?;
     command_probe_timeout_is_bounded(fixture, client).await?;
     start_period_defers_failure_accounting(fixture, client).await?;
-    service_exit_wins_over_an_in_flight_probe(fixture, client).await
+    service_exit_wins_over_an_in_flight_probe(fixture, client).await?;
+    super::service_lifecycle_profile::run(fixture, client).await
 }
 
 async fn http_probe_reaches_the_generation_fenced_service(

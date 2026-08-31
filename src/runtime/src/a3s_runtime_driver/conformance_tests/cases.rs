@@ -195,6 +195,7 @@ impl CaseFactory {
                 },
                 isolation: IsolationLevel::Sandbox,
                 health: None,
+                service_lifecycle: None,
                 restart,
                 outputs: Vec::new(),
                 semantics_profile_digest: None,

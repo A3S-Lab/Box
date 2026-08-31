@@ -39,6 +39,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Provider-neutral Service lifecycle enforcement.** Box now pins
+  `a3s-runtime` 0.5.0 and advertises its atomic `ServiceLifecycle` contract.
+  The Runtime provider evaluates readiness and liveness with independent
+  start-period and threshold state, restarts an unhealthy Service at most once
+  per public operation according to its durable restart policy, and preserves
+  terminal state over stale in-flight probes. Lifecycle intent maps to an
+  exact persisted `SIGTERM` grace interval, reserves that complete interval
+  beyond the ordinary control timeout, and then force-stops a non-cooperative
+  workload. Capability-triggered real-provider cases cover probe separation,
+  liveness transition/recovery, cooperative stop, and deadline force-stop.
 - **Downstream real-process Runtime provider qualification seam.** The Linux
   Box Runtime driver can be compiled with the explicit
   `runtime-provider-qualification` feature to accept a caller-owned execution

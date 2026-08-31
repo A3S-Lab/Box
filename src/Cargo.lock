@@ -296,8 +296,8 @@ dependencies = [
 
 [[package]]
 name = "a3s-runtime"
-version = "0.4.0"
-source = "git+https://github.com/A3S-Lab/Runtime.git?rev=3b62bb3bae036636fee48c2725446e9ffc2a0c6c#3b62bb3bae036636fee48c2725446e9ffc2a0c6c"
+version = "0.5.0"
+source = "git+https://github.com/A3S-Lab/Runtime.git?rev=4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd#4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd"
 dependencies = [
  "async-trait",
  "fs2",

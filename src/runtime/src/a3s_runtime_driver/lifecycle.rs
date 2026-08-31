@@ -6,8 +6,8 @@ use std::time::Duration;
 use a3s_box_core::{ExecutionManager, KillOutcome, ReconcileOutcome};
 use a3s_runtime::contract::{
     IsolationLevel, RestartPolicy, RuntimeActionRequest, RuntimeEvidence, RuntimeFailure,
-    RuntimeInspection, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass, RuntimeUnitSpec,
-    RuntimeUnitState,
+    RuntimeHealthState, RuntimeInspection, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass,
+    RuntimeUnitSpec, RuntimeUnitState,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use sha2::{Digest, Sha256};
@@ -99,7 +99,10 @@ impl BoxRuntimeDriver {
         // observation acquires and persists attestation, then releases the main
         // process. This must happen before a Task wait or a Service health probe.
         let attested_running = if spec.isolation == IsolationLevel::Confidential {
-            Some(self.observation(spec, &record, None, None).await?)
+            // Building the raw evidence acquires attestation and releases the
+            // deferred main process. A running Service is not validated or
+            // published until its readiness and liveness evidence is attached.
+            Some(self.build_observation(spec, &record, None, None).await?)
         } else {
             None
         };
@@ -110,10 +113,11 @@ impl BoxRuntimeDriver {
                 self.wait_for_service_health(spec, record).await?
             }
             RuntimeUnitClass::Service => match attested_running {
-                Some(observation) => observation,
+                Some(observation) => self.finish_observation(spec, &record, observation).await?,
                 None => self.observation(spec, &record, None, None).await?,
             },
         };
+        let observation = self.recover_unhealthy_liveness(spec, observation).await?;
         super::attestation::validate_continuity(current, &observation)?;
         Ok(observation)
     }
@@ -149,6 +153,9 @@ impl BoxRuntimeDriver {
             record
         };
         let observation = self.observe_service_health(&unit.spec, &record).await?;
+        let observation = self
+            .recover_unhealthy_liveness(&unit.spec, observation)
+            .await?;
         super::attestation::validate_continuity(&unit.observation, &observation)?;
         Ok(RuntimeInspection::Found {
             schema: RuntimeInspection::SCHEMA.into(),
@@ -480,7 +487,7 @@ impl BoxRuntimeDriver {
         let (execution_id, generation, _) = local_identity(&record)?;
         let operation_id = restart_operation(spec, generation)?;
         let result = self
-            .bounded("restart", async {
+            .bounded_lifecycle(spec, "restart", async {
                 self.manager
                     .restart(&execution_id, generation, &operation_id)
                     .await
@@ -493,6 +500,53 @@ impl BoxRuntimeDriver {
                 .await;
         }
         self.load_record(spec, &execution_id).await
+    }
+
+    /// Applies at most one liveness-driven recovery per public Runtime
+    /// operation. This keeps an `Always` policy from spinning forever inside
+    /// the provider while still ensuring that unhealthy liveness is an active
+    /// recovery signal rather than passive telemetry.
+    pub(super) async fn recover_unhealthy_liveness(
+        &self,
+        spec: &RuntimeUnitSpec,
+        observation: RuntimeObservation,
+    ) -> RuntimeResult<RuntimeObservation> {
+        if spec.class != RuntimeUnitClass::Service
+            || observation.state != RuntimeUnitState::Running
+            || observation.liveness.as_ref().map(|health| health.state)
+                != Some(RuntimeHealthState::Unhealthy)
+        {
+            return Ok(observation);
+        }
+
+        let Some(record) = self.find_generation(spec).await? else {
+            return Err(RuntimeError::ProviderUnavailable(format!(
+                "Box lost Service {:?} before liveness recovery",
+                spec.unit_id
+            )));
+        };
+        provider_identity_matches(&observation, &record)?;
+        let record = self.refresh_record(spec, record).await?;
+        let state = local_identity(&record)?.2;
+        let restart = if state == ManagedExecutionState::Running {
+            should_restart_unhealthy_liveness(spec, &record)?
+        } else if state.is_terminal() {
+            should_restart(spec, &record)?
+        } else {
+            false
+        };
+        if !restart {
+            if state == ManagedExecutionState::Running {
+                return Ok(observation);
+            }
+            return self.observation(spec, &record, None, None).await;
+        }
+
+        let record = self.restart_record(spec, record).await?;
+        if spec.isolation == IsolationLevel::Confidential {
+            self.build_observation(spec, &record, None, None).await?;
+        }
+        self.wait_for_service_health(spec, record).await
     }
 
     async fn retire_stale_generations(
@@ -559,7 +613,7 @@ impl BoxRuntimeDriver {
                 .operation_id
                 .clone();
             match self
-                .bounded("restart reconciliation", async {
+                .bounded_record_lifecycle(&record, "restart reconciliation", async {
                     self.manager
                         .reconcile(&create_operation)
                         .await
@@ -597,7 +651,7 @@ impl BoxRuntimeDriver {
                 | ManagedExecutionState::Removing
         ) {
             match self
-                .bounded("generation retirement stop", async {
+                .bounded_record_lifecycle(&record, "generation retirement stop", async {
                     self.manager
                         .kill(&execution_id, generation)
                         .await
@@ -648,6 +702,22 @@ impl BoxRuntimeDriver {
     }
 
     pub(super) async fn observation(
+        &self,
+        spec: &RuntimeUnitSpec,
+        record: &BoxRecord,
+        state_override: Option<RuntimeUnitState>,
+        failure_override: Option<RuntimeFailure>,
+    ) -> RuntimeResult<RuntimeObservation> {
+        let observation = self
+            .build_observation(spec, record, state_override, failure_override)
+            .await?;
+        self.finish_observation(spec, record, observation).await
+    }
+
+    /// Builds provider evidence without publishing or validating a potentially
+    /// incomplete running Service observation. Health owns the only call path
+    /// that adds readiness and liveness before final endpoint reconciliation.
+    pub(super) async fn build_observation(
         &self,
         spec: &RuntimeUnitSpec,
         record: &BoxRecord,
@@ -738,6 +808,7 @@ impl BoxRuntimeDriver {
             started_at_ms,
             finished_at_ms,
             health: None,
+            liveness: None,
             outputs,
             usage: None,
             evidence: Some(RuntimeEvidence {
@@ -750,6 +821,17 @@ impl BoxRuntimeDriver {
             provider_attestation,
             failure,
         };
+        Ok(observation)
+    }
+
+    /// Reconciles Service endpoints after all lifecycle evidence has been
+    /// attached, then performs the single externally relevant validation.
+    pub(super) async fn finish_observation(
+        &self,
+        spec: &RuntimeUnitSpec,
+        record: &BoxRecord,
+        observation: RuntimeObservation,
+    ) -> RuntimeResult<RuntimeObservation> {
         if spec.class == RuntimeUnitClass::Service {
             let (execution_id, execution_generation, _) = local_identity(record)?;
             return self
@@ -835,6 +917,21 @@ fn should_restart(spec: &RuntimeUnitSpec, record: &BoxRecord) -> RuntimeResult<b
     })
 }
 
+fn should_restart_unhealthy_liveness(
+    spec: &RuntimeUnitSpec,
+    record: &BoxRecord,
+) -> RuntimeResult<bool> {
+    if local_identity(record)?.2 != ManagedExecutionState::Running {
+        return Ok(false);
+    }
+    let attempts = local_identity(record)?.1.get().saturating_sub(1);
+    Ok(match &spec.restart {
+        RestartPolicy::Never => false,
+        RestartPolicy::Always => spec.class == RuntimeUnitClass::Service,
+        RestartPolicy::OnFailure { max_retries } => attempts < u64::from(*max_retries),
+    })
+}
+
 fn restart_operation(
     spec: &RuntimeUnitSpec,
     generation: a3s_box_core::ExecutionGeneration,
@@ -867,6 +964,7 @@ fn unknown_observation(current: &RuntimeObservation) -> RuntimeResult<RuntimeObs
     unknown.observed_at_ms = unknown.observed_at_ms.max(now_ms());
     unknown.finished_at_ms = None;
     unknown.health = None;
+    unknown.liveness = None;
     unknown.outputs.clear();
     unknown.failure = None;
     unknown.clear_service_endpoints();

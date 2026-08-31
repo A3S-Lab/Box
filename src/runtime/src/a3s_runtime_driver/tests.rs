@@ -8,7 +8,8 @@ use a3s_runtime::contract::{
     ArtifactRef, HealthCheckKind, HealthProbe, IsolationLevel, MountKind, NetworkMode,
     ResourceControl, ResourceLimits, RestartPolicy, RuntimeFeature, RuntimeHealthCheck,
     RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec, RuntimePort, RuntimeProcessSpec,
-    RuntimeUnitClass, RuntimeUnitSpec, SecretReference, SecretTarget, TransportProtocol,
+    RuntimeServiceLifecycle, RuntimeUnitClass, RuntimeUnitSpec, SecretReference, SecretTarget,
+    TransportProtocol,
 };
 use a3s_runtime::RuntimeDriver;
 
@@ -54,6 +55,7 @@ fn spec(class: RuntimeUnitClass) -> RuntimeUnitSpec {
         },
         isolation: IsolationLevel::Sandbox,
         health: None,
+        service_lifecycle: None,
         restart: if class == RuntimeUnitClass::Task {
             RestartPolicy::Never
         } else {
@@ -245,6 +247,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
             RuntimeFeature::ServiceTcp,
             RuntimeFeature::Logs,
             RuntimeFeature::Exec,
+            RuntimeFeature::ServiceLifecycle,
         ]
     );
 }
@@ -473,6 +476,60 @@ fn runtime_health_does_not_enable_cli_or_image_health_policy() {
 
     assert!(request.policy.health_check.is_none());
     assert!(request.policy.healthcheck_disabled);
+    assert!(request.policy.stop_signal.is_none());
+    assert!(request.policy.stop_timeout.is_none());
+}
+
+#[test]
+fn service_lifecycle_maps_to_sigterm_and_the_exact_grace_deadline() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    let readiness = RuntimeHealthCheck {
+        probe: HealthProbe::Command {
+            command: vec!["/bin/true".into()],
+        },
+        interval_ms: 1_000,
+        timeout_ms: 500,
+        start_period_ms: 0,
+        success_threshold: 1,
+        failure_threshold: 3,
+    };
+    spec.health = Some(readiness.clone());
+    spec.service_lifecycle = Some(RuntimeServiceLifecycle {
+        liveness: readiness,
+        shutdown_grace_seconds: 17,
+    });
+
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
+
+    assert_eq!(request.policy.stop_signal.as_deref(), Some("SIGTERM"));
+    assert_eq!(request.policy.stop_timeout, Some(17));
+}
+
+#[test]
+fn lifecycle_bound_reserves_the_full_grace_before_provider_timeout() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let mut spec = spec(RuntimeUnitClass::Service);
+    let readiness = RuntimeHealthCheck {
+        probe: HealthProbe::Command {
+            command: vec!["/bin/true".into()],
+        },
+        interval_ms: 1_000,
+        timeout_ms: 500,
+        start_period_ms: 0,
+        success_threshold: 1,
+        failure_threshold: 1,
+    };
+    spec.health = Some(readiness.clone());
+    spec.service_lifecycle = Some(RuntimeServiceLifecycle {
+        liveness: readiness,
+        shutdown_grace_seconds: 17,
+    });
+
+    assert_eq!(
+        driver.lifecycle_control_timeout(&spec),
+        Duration::from_secs(19)
+    );
 }
 
 #[test]
