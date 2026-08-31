@@ -261,26 +261,43 @@ the release archive. Tool discovery from the user's shell is acceptable only
 for development diagnostics, never as the default production path.
 
 The current experimental writer pins `mkext4` exactly at `0.0.3` and compiles
-it into the runtime. A3S owns the tree adapter, capacity policy, OCI ownership
-replay, sparse-file discovery, xattr filtering, structural validation, and
-generation-directory publication. The adapter does not use the crate's example
-tree walker. Runtime-managed files use canonical metadata: guest-init is root
-owned, mode `0755`, and timestamped at the filesystem epoch rather than
-inheriting metadata from an image entry it replaced.
+it into the runtime. The source is vendored from upstream commit
+`645ba8f39e0a935511e233874f7217bcb6e0e4d8`; the A3S patch changes only
+directory-entry and symlink-target inputs from UTF-8 strings to byte slices.
+The writer's validation, hashing, layout, and streaming algorithms remain
+upstream. Its independent reader verifies that arbitrary Linux filename and
+symlink-target bytes round-trip exactly.
 
-`mkext4 0.0.3` exposes directory-entry and symlink-target arguments as Rust
-`&str`, even though ext4 itself stores byte strings. A3S therefore rejects a
-non-UTF-8 source path or symlink target instead of applying a lossy conversion.
-This is acceptable for the explicit experimental path, but raw-byte APIs (or a
-different audited writer) remain a release gate before this provider can become
-the universal default.
+A3S owns the tree adapter, capacity policy, OCI ownership replay, sparse-file
+discovery, xattr filtering, structural validation, and generation-directory
+publication. The adapter does not use the crate's example tree walker.
+Runtime-managed files use canonical metadata: guest-init is root owned, mode
+`0755`, and timestamped at the filesystem epoch rather than inheriting metadata
+from an image entry it replaced.
+
+APFS cannot materialize every Linux filename byte sequence and normalizes some
+distinct Unicode spellings. On macOS, OCI extraction therefore maps every
+non-ASCII path component, plus literal names in the private codec namespace, to
+the deterministic physical name `.a3s-rp1-<sha256>`. The OCI metadata manifest
+remains authoritative for the original bytes. The ext4 adapter builds a
+collision-checked reverse map, including implicit parent directories, and emits
+only the logical guest names. Whiteouts and hard links use the same mapping.
+An unmapped or pre-codec staging name fails closed and requires cache rebuild;
+it is never reinterpreted. Directory providers also reject a translated tree
+instead of exposing codec names through virtio-fs.
+
+The byte-capable adapter uses builder identity
+`mkext4/0.0.3+a3s-adapter-v2`, which invalidates immutable v1 cache entries.
+Already-published v1 per-box disks remain valid resumable generations because
+their ext4 bytes no longer depend on a host staging namespace.
 
 ## Experimental Handoff
 
 On macOS, set `A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1` to select the
 experimental provider. Its current lifecycle is:
 
-1. construct the exact case-sensitive OCI tree in the compatibility APFS image;
+1. construct a host-safe OCI staging view in the compatibility APFS image while
+   retaining exact Linux path bytes in the metadata manifest;
 2. derive an immutable identity from the resolved OCI manifest, Linux platform,
    exact guest-init SHA-256, ext4 contract, writer version, and capacity;
 3. reuse or atomically publish the matching sparse ext4 base under the bounded
@@ -463,7 +480,7 @@ window implicitly.
 
 - [x] Select and exactly pin the in-process ext4 writer for the experimental path.
 - [x] Add deterministic tree adaptation, sparse output, structural validation, and atomic generation publication.
-- [ ] Add raw-byte filename and symlink-target support or replace the writer.
+- [x] Add raw-byte filename and symlink-target support or replace the writer.
 - [x] Build and reuse a deterministic immutable ext4 base cache from OCI content.
 - [ ] Validate metadata fidelity and filesystem integrity on Linux CI.
 - [x] Add atomic publication and cache-version tests for the experimental artifact.
@@ -504,7 +521,8 @@ The default must not switch until CI and host integration prove:
 
 - no macOS DiskImages attachment remains while an ext4-backed box is running;
 - ext4 images pass a pinned independent filesystem check;
-- OCI ownership, modes, links, xattrs, and case-sensitive names survive;
+- OCI ownership, modes, links, xattrs, case-sensitive names, arbitrary filename
+  bytes, and arbitrary symlink-target bytes survive;
 - persistent writes survive restart and host-process crashes;
 - live and stopped commit produce equivalent OCI content;
 - cleanup leaves no shim, block image handle, socket, or temporary artifact;

@@ -189,6 +189,8 @@ fn extract_layer_with_cap(
                 "OCI layer contains reserved internal path {reserved}"
             )));
         }
+        let staging_path = crate::rootfs::host_staging_path(&normalized)?;
+        let translated_for_host = staging_path != normalized;
 
         // A lower OCI layer may leave a directory read-only (for example Go's
         // module cache uses 0555) while an upper layer adds another child. On a
@@ -196,18 +198,22 @@ fn extract_layer_with_cap(
         // metadata finalization. The guard then restores the mode encoded by
         // the newest layer entry (or the original mode when this layer did not
         // modify the directory).
-        parent_write_guards.prepare(target_dir, &normalized)?;
+        parent_write_guards.prepare(target_dir, &staging_path)?;
 
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let file_name = path
+            .file_name()
+            .map(|name| name.as_encoded_bytes())
+            .unwrap_or_default();
 
-        if file_name == ".wh..wh..opq" {
+        if file_name == b".wh..wh..opq" {
             // Opaque directory marker: discard everything already extracted into
             // the parent directory from lower layers, keeping the directory.
             // Resolve the parent WITHIN the rootfs first: a malicious layer can
             // extract an absolute symlink as the parent, and following it here
             // would wipe a host directory OUTSIDE the extraction target.
-            if let Some(parent) = path.parent() {
-                if let Some(dir) = resolve_within(target_dir, parent) {
+            if let Some(parent) = normalized.parent() {
+                let staging_parent = crate::rootfs::host_staging_path(parent)?;
+                if let Some(dir) = resolve_within(target_dir, &staging_parent) {
                     if let Ok(read) = std::fs::read_dir(&dir) {
                         for child in read.flatten() {
                             remove_path(&child.path());
@@ -227,12 +233,13 @@ fn extract_layer_with_cap(
             continue;
         }
 
-        if let Some(victim_name) = file_name.strip_prefix(".wh.") {
+        if let Some(victim_name) = file_name.strip_prefix(b".wh.") {
+            let victim_name = os_string_from_encoded_bytes(victim_name.to_vec());
             let victim = normalize_layer_path(
                 &path
                     .parent()
                     .unwrap_or_else(|| Path::new(""))
-                    .join(victim_name),
+                    .join(&victim_name),
             )
             .ok_or_else(|| BoxError::OciImageError("Invalid whiteout path".to_string()))?;
             if let Some(reserved) = reserved_metadata_path(&victim) {
@@ -243,9 +250,13 @@ fn extract_layer_with_cap(
             // Whiteout marker: remove the named sibling from a lower layer. Resolve
             // the parent within the rootfs so a symlinked parent cannot redirect the
             // deletion to a host file outside the extraction target.
-            if let Some(parent) = path.parent() {
-                if let Some(dir) = resolve_within(target_dir, parent) {
-                    remove_path(&dir.join(victim_name));
+            if let Some(parent) = victim.parent() {
+                let staging_parent = crate::rootfs::host_staging_path(parent)?;
+                let staging_victim = crate::rootfs::host_staging_path(&victim)?;
+                if let Some(dir) = resolve_within(target_dir, &staging_parent) {
+                    if let Some(name) = staging_victim.file_name() {
+                        remove_path(&dir.join(name));
+                    }
                 } else {
                     tracing::warn!(parent = %parent.display(), "Skipping whiteout: parent escapes the rootfs");
                 }
@@ -257,9 +268,9 @@ fn extract_layer_with_cap(
         }
 
         if entry.header().entry_type() == tar::EntryType::Symlink {
-            prepare_symlink_destination(target_dir, &path)?;
+            prepare_symlink_destination(target_dir, &staging_path)?;
         } else if entry.header().entry_type().is_hard_link() {
-            prepare_hardlink_destination(target_dir, &path)?;
+            prepare_hardlink_destination(target_dir, &staging_path)?;
         }
         reject_overlay_private_xattrs(&mut entry, &path)?;
 
@@ -280,7 +291,14 @@ fn extract_layer_with_cap(
         };
         #[cfg(windows)]
         let entry_is_symlink = entry.header().entry_type().is_symlink();
-        let unpacked = entry.unpack_in(target_dir).map_err(|e| {
+        #[cfg(target_os = "macos")]
+        let translated_for_host = translated_for_host || entry.header().entry_type().is_hard_link();
+        let unpacked = (if translated_for_host {
+            unpack_translated_entry(&mut entry, target_dir, &staging_path)
+        } else {
+            entry.unpack_in(target_dir)
+        })
+        .map_err(|e| {
             #[cfg(windows)]
             if entry_is_symlink && windows_symlink_creation_was_denied(&e) {
                 let diagnostic = a3s_box_core::windows_symlink::denial_diagnostic(
@@ -307,7 +325,7 @@ fn extract_layer_with_cap(
         })?;
         if unpacked {
             if let Some(mode) = directory_mode {
-                layer_directory_modes.insert(normalized.clone(), mode);
+                layer_directory_modes.insert(staging_path.clone(), mode);
             }
         }
         if track_metadata && unpacked {
@@ -337,11 +355,7 @@ fn extract_layer_with_cap(
         );
         finalize_image_metadata_with_mode_overrides(target_dir, &mut metadata, &mode_overrides)?;
     }
-    let mut directory_modes: BTreeMap<_, _> = metadata
-        .iter()
-        .filter(|(_, entry)| entry.kind == RootfsEntryKind::Directory)
-        .map(|(path, entry)| (path.clone(), entry.mode))
-        .collect();
+    let mut directory_modes = physical_directory_modes(&metadata)?;
     directory_modes.extend(layer_directory_modes);
     parent_write_guards.restore(&directory_modes)?;
 
@@ -603,11 +617,7 @@ pub(crate) fn finalize_rootfs_metadata(target_dir: &Path) -> Result<()> {
     directory_guards.prepare_metadata_directories(target_dir, &metadata)?;
     let mode_overrides = directory_guards.original_directory_modes();
     finalize_image_metadata_with_mode_overrides(target_dir, &mut metadata, &mode_overrides)?;
-    let directory_modes = metadata
-        .iter()
-        .filter(|(_, entry)| entry.kind == RootfsEntryKind::Directory)
-        .map(|(path, entry)| (path.clone(), entry.mode))
-        .collect();
+    let directory_modes = physical_directory_modes(&metadata)?;
     directory_guards.restore(&directory_modes)?;
     prepare_rootless_metadata_replay(target_dir, &metadata)
 }
@@ -637,16 +647,17 @@ fn prepare_rootless_metadata_replay(
             {
                 continue;
             }
-            let relative_path = relative.to_str().ok_or_else(|| {
+            let staging_path = crate::rootfs::host_staging_path(relative)?;
+            let staging_path = staging_path.to_str().ok_or_else(|| {
                 BoxError::OciImageError(format!(
-                    "Metadata replay path is not UTF-8: {}",
-                    relative.display()
+                    "Host staging path is not UTF-8: {}",
+                    staging_path.display()
                 ))
             })?;
             let target = if entry.kind == RootfsEntryKind::Directory {
-                crate::oci::rootfs::resolve_guest_directory_path(target_dir, relative_path)?
+                crate::oci::rootfs::resolve_guest_directory_path(target_dir, staging_path)?
             } else {
-                crate::oci::rootfs::resolve_guest_file_path(target_dir, relative_path)?
+                crate::oci::rootfs::resolve_guest_file_path(target_dir, staging_path)?
             };
             let current = std::fs::symlink_metadata(&target).map_err(|error| {
                 BoxError::OciImageError(format!(
@@ -693,12 +704,14 @@ fn finalize_image_metadata_with_mode_overrides(
     metadata: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
     mode_overrides: &BTreeMap<PathBuf, u32>,
 ) -> Result<()> {
+    let staging_to_logical = crate::rootfs::staging_path_map(metadata.keys())?;
     let mut final_entries = BTreeMap::new();
     collect_final_metadata(
         target_dir,
-        target_dir,
+        Path::new(""),
         Path::new(""),
         metadata,
+        &staging_to_logical,
         mode_overrides,
         &mut final_entries,
     )?;
@@ -740,18 +753,31 @@ fn os_string_from_encoded_bytes(raw: Vec<u8>) -> std::ffi::OsString {
     unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(raw) }
 }
 
+fn physical_directory_modes(
+    metadata: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+) -> Result<BTreeMap<PathBuf, u32>> {
+    metadata
+        .iter()
+        .filter(|(_, entry)| entry.kind == RootfsEntryKind::Directory)
+        .map(|(logical, entry)| {
+            crate::rootfs::host_staging_path(logical).map(|physical| (physical, entry.mode))
+        })
+        .collect()
+}
+
 fn collect_final_metadata(
-    root: &Path,
     source: &Path,
-    relative: &Path,
+    physical_relative: &Path,
+    logical_relative: &Path,
     desired: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+    staging_to_logical: &BTreeMap<PathBuf, PathBuf>,
     mode_overrides: &BTreeMap<PathBuf, u32>,
     output: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
 ) -> Result<()> {
-    if reserved_metadata_path(relative).is_some()
-        || relative == Path::new(".a3s_image_metadata_v1.json.tmp")
-        || relative == Path::new(".a3s_rootfs_metadata_v1.json.tmp")
-        || relative == Path::new(".a3s_rootfs_metadata_v1.previous.json")
+    if reserved_metadata_path(logical_relative).is_some()
+        || logical_relative == Path::new(".a3s_image_metadata_v1.json.tmp")
+        || logical_relative == Path::new(".a3s_rootfs_metadata_v1.json.tmp")
+        || logical_relative == Path::new(".a3s_rootfs_metadata_v1.previous.json")
     {
         return Ok(());
     }
@@ -759,7 +785,7 @@ fn collect_final_metadata(
         BoxError::OciImageError(format!("Failed to inspect {}: {error}", source.display()))
     })?;
     let file_type = filesystem.file_type();
-    let previous = desired.get(relative);
+    let previous = desired.get(logical_relative);
     let (kind, link_target_base64) = if file_type.is_dir() {
         (RootfsEntryKind::Directory, None)
     } else if file_type.is_file() {
@@ -784,7 +810,7 @@ fn collect_final_metadata(
         use std::os::unix::fs::MetadataExt;
         (
             mode_overrides
-                .get(relative)
+                .get(physical_relative)
                 .copied()
                 .unwrap_or_else(|| filesystem.mode()),
             filesystem.mtime().max(0) as u64,
@@ -803,7 +829,7 @@ fn collect_final_metadata(
         });
     let entry = RootfsMetadataEntry {
         path_base64: base64::engine::general_purpose::STANDARD
-            .encode(archive_metadata_path_bytes(relative)),
+            .encode(archive_metadata_path_bytes(logical_relative)),
         kind,
         mode,
         uid: previous_same_kind.map_or(0, |entry| entry.uid),
@@ -812,7 +838,7 @@ fn collect_final_metadata(
         size,
         link_target_base64,
     };
-    output.insert(relative.to_path_buf(), entry);
+    output.insert(logical_relative.to_path_buf(), entry);
     if file_type.is_dir() {
         let mut children: Vec<_> = std::fs::read_dir(source)
             .map_err(|error| {
@@ -822,17 +848,24 @@ fn collect_final_metadata(
             .map_err(|error| BoxError::OciImageError(format!("Failed to read entry: {error}")))?;
         children.sort_by_key(|entry| entry.file_name());
         for child in children {
+            let physical_child = physical_relative.join(child.file_name());
+            let logical_child = crate::rootfs::logical_path_for_staged_child(
+                staging_to_logical,
+                &physical_child,
+                logical_relative,
+                &child.file_name(),
+            )?;
             collect_final_metadata(
-                root,
                 &child.path(),
-                &relative.join(child.file_name()),
+                &physical_child,
+                &logical_child,
                 desired,
+                staging_to_logical,
                 mode_overrides,
                 output,
             )?;
         }
     }
-    let _ = root;
     Ok(())
 }
 
@@ -900,6 +933,108 @@ fn prepare_symlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Unpack one entry whose guest pathname cannot be represented directly by
+/// APFS. The destination is an ASCII path produced by the staging codec; the
+/// tar header and metadata manifest retain the original guest bytes.
+#[cfg(target_os = "macos")]
+fn unpack_translated_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    target_dir: &Path,
+    staging_path: &Path,
+) -> std::io::Result<bool> {
+    let destination = translated_entry_destination(target_dir, staging_path)?;
+    if entry.header().entry_type().is_hard_link() {
+        let target = entry.link_name()?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "translated hardlink has no target",
+            )
+        })?;
+        let target = normalize_layer_path(&target).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "translated hardlink target is not a safe relative path",
+            )
+        })?;
+        let target = crate::rootfs::host_staging_path(&target)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let target = target_dir.join(target);
+        let canonical_target = target.canonicalize()?;
+        let root = target_dir.canonicalize()?;
+        if !canonical_target.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "translated hardlink target escapes the rootfs",
+            ));
+        }
+        std::fs::hard_link(target, destination)?;
+        return Ok(true);
+    }
+
+    entry.unpack(destination).map(|_| true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unpack_translated_entry<R: Read>(
+    _entry: &mut tar::Entry<'_, R>,
+    _target_dir: &Path,
+    _staging_path: &Path,
+) -> std::io::Result<bool> {
+    Err(std::io::Error::other(
+        "host pathname translation is available only on macOS",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn translated_entry_destination(
+    target_dir: &Path,
+    staging_path: &Path,
+) -> std::io::Result<PathBuf> {
+    let name = staging_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "translated layer entry has no filename",
+        )
+    })?;
+    let requested_parent = staging_path.parent().unwrap_or_else(|| Path::new(""));
+    let root = target_dir.canonicalize()?;
+
+    let mut existing_relative = requested_parent;
+    let existing_parent = loop {
+        match target_dir.join(existing_relative).canonicalize() {
+            Ok(candidate) if candidate.starts_with(&root) => break candidate,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "translated layer parent escapes the rootfs",
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing_relative = existing_relative.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "translated layer entry has no existing in-root parent",
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let missing = requested_parent
+        .strip_prefix(existing_relative)
+        .map_err(std::io::Error::other)?;
+    let parent = existing_parent.join(missing);
+    std::fs::create_dir_all(&parent)?;
+    let parent = parent.canonicalize()?;
+    if !parent.starts_with(&root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "translated layer destination escapes the rootfs",
+        ));
+    }
+    Ok(parent.join(name))
 }
 
 fn prepare_hardlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
@@ -1024,10 +1159,11 @@ impl LayerParentWriteGuards {
     ) -> Result<()> {
         for (relative, entry) in metadata {
             if entry.kind == RootfsEntryKind::Directory {
+                let staging = crate::rootfs::host_staging_path(relative)?;
                 // `prepare` opens a path's parent. A synthetic child therefore
                 // asks it to open the directory represented by this manifest
                 // entry without ever touching or creating the child itself.
-                self.prepare(target_dir, &relative.join(".a3s-metadata-access"))?;
+                self.prepare(target_dir, &staging.join(".a3s-metadata-access"))?;
             }
         }
         Ok(())
@@ -1145,6 +1281,10 @@ fn remove_path(path: &Path) {
         tracing::warn!(path = %path.display(), error = %e, "Failed to apply whiteout deletion");
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "layers_raw_path_tests.rs"]
+mod raw_path_tests;
 
 #[cfg(test)]
 mod tests {

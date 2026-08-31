@@ -29,7 +29,9 @@ use sparse::{sparse_layout, FileFill, SourceSegment};
 /// Versioned A3S wrapper contract for a published ext4 artifact directory.
 pub const EXT4_ARTIFACT_SCHEMA: &str = "a3s.box.rootfs-ext4.v1";
 /// Exact writer identity included in cache keys and artifact manifests.
-pub const EXT4_BUILDER_ID: &str = "mkext4/0.0.3+a3s-adapter-v1";
+pub const EXT4_BUILDER_ID: &str = "mkext4/0.0.3+a3s-adapter-v2";
+/// Builder identities that remain safe to resume as already-published disks.
+pub(super) const LEGACY_EXT4_BUILDER_IDS: &[&str] = &["mkext4/0.0.3+a3s-adapter-v1"];
 
 pub(super) const DISK_FILE_NAME: &str = "rootfs.ext4";
 pub(super) const MANIFEST_FILE_NAME: &str = "artifact.json";
@@ -284,26 +286,35 @@ fn declare_source_tree(
 
     let mut hardlinks = HashMap::new();
     let mut fills = Vec::new();
+    let mut state = TreeDeclarationState {
+        image_metadata: &metadata,
+        hardlinks: &mut hardlinks,
+        fills: &mut fills,
+    };
     declare_directory(
         &mut builder,
         ROOT,
         source,
         Path::new(""),
-        &metadata,
-        &mut hardlinks,
-        &mut fills,
+        Path::new(""),
+        &mut state,
     )?;
     Ok((builder, fills))
+}
+
+struct TreeDeclarationState<'a> {
+    image_metadata: &'a ImageMetadata,
+    hardlinks: &'a mut HashMap<(u64, u64), InodeHandle>,
+    fills: &'a mut Vec<FileFill>,
 }
 
 fn declare_directory(
     builder: &mut FsBuilder,
     parent: InodeHandle,
     directory: &Path,
-    relative_directory: &Path,
-    image_metadata: &ImageMetadata,
-    hardlinks: &mut HashMap<(u64, u64), InodeHandle>,
-    fills: &mut Vec<FileFill>,
+    physical_relative_directory: &Path,
+    logical_relative_directory: &Path,
+    state: &mut TreeDeclarationState<'_>,
 ) -> Result<()> {
     let mut entries = std::fs::read_dir(directory)
         .map_err(|error| {
@@ -322,17 +333,28 @@ fn declare_directory(
 
     for entry in entries {
         let name_os = entry.file_name();
-        let name = name_os
-            .to_str()
-            .ok_or_else(|| unsupported_path(&entry.path()))?;
         let path = entry.path();
-        let relative = relative_directory.join(&name_os);
+        let physical_relative = physical_relative_directory.join(&name_os);
+        let logical_relative = state.image_metadata.logical_path(
+            &physical_relative,
+            logical_relative_directory,
+            &name_os,
+        )?;
+        let name = logical_relative
+            .file_name()
+            .ok_or_else(|| {
+                BoxError::BuildError(format!(
+                    "Guest path has no directory entry name: {}",
+                    logical_relative.display()
+                ))
+            })?
+            .as_bytes();
         let filesystem = std::fs::symlink_metadata(&path).map_err(BoxError::IoError)?;
         let file_type = filesystem.file_type();
 
         if !file_type.is_dir() && filesystem.nlink() > 1 {
             let identity = (filesystem.dev(), filesystem.ino());
-            if let Some(existing) = hardlinks.get(&identity).copied() {
+            if let Some(existing) = state.hardlinks.get(&identity).copied() {
                 builder
                     .hardlink(parent, name, existing)
                     .map_err(mkext4_build_error)?;
@@ -340,27 +362,24 @@ fn declare_directory(
             }
         }
 
-        let metadata = node_meta(&path, &relative, &filesystem, image_metadata)?;
+        let metadata = node_meta(&path, &logical_relative, &filesystem, state.image_metadata)?;
         let handle = if file_type.is_dir() {
             builder
                 .mkdir(parent, name, metadata)
                 .map_err(mkext4_build_error)?
         } else if file_type.is_symlink() {
-            let target = image_metadata.symlink_target(&relative)?.unwrap_or(
-                std::fs::read_link(&path)
-                    .map_err(BoxError::IoError)?
-                    .as_os_str()
-                    .as_bytes()
-                    .to_vec(),
-            );
-            let target = std::str::from_utf8(&target).map_err(|_| {
-                BoxError::BuildError(format!(
-                    "mkext4 {EXT4_BUILDER_ID} cannot represent non-UTF-8 symlink target at {}",
-                    path.display()
-                ))
-            })?;
+            let target = state
+                .image_metadata
+                .symlink_target(&logical_relative)?
+                .unwrap_or(
+                    std::fs::read_link(&path)
+                        .map_err(BoxError::IoError)?
+                        .as_os_str()
+                        .as_bytes()
+                        .to_vec(),
+                );
             builder
-                .symlink(parent, name, target, metadata)
+                .symlink(parent, name, &target, metadata)
                 .map_err(mkext4_build_error)?
         } else if file_type.is_file() {
             let file = File::open(&path).map_err(BoxError::IoError)?;
@@ -377,7 +396,7 @@ fn declare_directory(
                     .file_sparse(parent, name, metadata, &segments)
                     .map_err(mkext4_build_error)?;
                 if !sparse.data_ranges.is_empty() {
-                    fills.push(FileFill::Sparse {
+                    state.fills.push(FileFill::Sparse {
                         handle,
                         path: path.clone(),
                         ranges: sparse.data_ranges,
@@ -389,7 +408,7 @@ fn declare_directory(
                     .file(parent, name, metadata, filesystem.len())
                     .map_err(mkext4_build_error)?;
                 if filesystem.len() > 0 {
-                    fills.push(FileFill::Dense {
+                    state.fills.push(FileFill::Dense {
                         handle,
                         path: path.clone(),
                     });
@@ -423,17 +442,18 @@ fn declare_directory(
 
         apply_xattrs(builder, handle, &path)?;
         if !file_type.is_dir() && filesystem.nlink() > 1 {
-            hardlinks.insert((filesystem.dev(), filesystem.ino()), handle);
+            state
+                .hardlinks
+                .insert((filesystem.dev(), filesystem.ino()), handle);
         }
         if file_type.is_dir() {
             declare_directory(
                 builder,
                 handle,
                 &path,
-                &relative,
-                image_metadata,
-                hardlinks,
-                fills,
+                &physical_relative,
+                &logical_relative,
+                state,
             )?;
         }
     }
@@ -582,6 +602,7 @@ fn is_linux_xattr_name(name: &str) -> bool {
 #[derive(Default)]
 struct ImageMetadata {
     entries: BTreeMap<PathBuf, RootfsMetadataEntry>,
+    staging_to_logical: BTreeMap<PathBuf, PathBuf>,
 }
 
 impl ImageMetadata {
@@ -633,7 +654,25 @@ impl ImageMetadata {
                 ));
             }
         }
-        Ok(Self { entries })
+        let staging_to_logical = super::staging_path_map(entries.keys())?;
+        Ok(Self {
+            entries,
+            staging_to_logical,
+        })
+    }
+
+    fn logical_path(
+        &self,
+        physical: &Path,
+        logical_parent: &Path,
+        physical_name: &std::ffi::OsStr,
+    ) -> Result<PathBuf> {
+        super::logical_path_for_staged_child(
+            &self.staging_to_logical,
+            physical,
+            logical_parent,
+            physical_name,
+        )
     }
 
     fn symlink_target(&self, relative: &Path) -> Result<Option<Vec<u8>>> {
@@ -822,13 +861,6 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 fn mkext4_build_error(error: mkext4::Error) -> BoxError {
     BoxError::BuildError(format!("ext4 artifact builder failed: {error}"))
-}
-
-fn unsupported_path(path: &Path) -> BoxError {
-    BoxError::BuildError(format!(
-        "mkext4 {EXT4_BUILDER_ID} cannot represent non-UTF-8 rootfs path {}; refusing lossy conversion",
-        path.display()
-    ))
 }
 
 fn device_numbers(device: u64) -> (u32, u32) {

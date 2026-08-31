@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      flat_entries:
+        description: "flat-dir benchmark size (120000 = headline run)"
+        default: "20000"
+
+env:
+  # The format oracle. The design's verified claims are against this
+  # exact version; bumping it is a deliberate oracle upgrade.
+  E2FSPROGS_VERSION: 1.47.4
+  # Older fsck generation the images must also satisfy.
+  E2FSPROGS_VINTAGE: 1.46.5
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache pinned e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/e2fsprogs
+          key: e2fsprogs-${{ env.E2FSPROGS_VERSION }}-${{ matrix.os }}
+
+      - name: Cache vintage e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/e2fsprogs-vintage
+          key: e2fsprogs-${{ env.E2FSPROGS_VINTAGE }}-${{ matrix.os }}
+
+      - name: Build pinned e2fsprogs
+        run: |
+          tools/ci-e2fsprogs.sh "$E2FSPROGS_VERSION" "$HOME/e2fsprogs"
+          echo "E2FSPROGS_SBIN=$HOME/e2fsprogs/sbin" >> "$GITHUB_ENV"
+
+      # Published images must be clean under more than one fsck
+      # generation, not just the format oracle.
+      - name: Build vintage e2fsck
+        run: |
+          tools/ci-e2fsprogs.sh "$E2FSPROGS_VINTAGE" "$HOME/e2fsprogs-vintage"
+          echo "E2FSCK_VINTAGE=$HOME/e2fsprogs-vintage/sbin/e2fsck" >> "$GITHUB_ENV"
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: tests (unit + mke2fs differential)
+        run: cargo test
+
+      - name: docs build cleanly
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Kernel oracle: loop-mount a generated image and diff the mounted
+      # tree against the declared namespace. Build unprivileged, run the
+      # test binary under sudo.
+      - name: kernel oracle (loop mount)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq attr >/dev/null
+          BIN=$(cargo test --test mount --no-run --message-format=json \
+                | jq -r 'select(.executable != null) | select(.target.name == "mount") | .executable' | tail -1)
+          sudo MKEXT4_MOUNT=1 "$BIN" --nocapture
+
+  # DESIGN.md §19 gate 10: both benchmarks must beat mke2fs wall-clock.
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache pinned e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/e2fsprogs
+          key: e2fsprogs-${{ env.E2FSPROGS_VERSION }}-ubuntu-24.04
+      - name: Build pinned e2fsprogs
+        run: |
+          tools/ci-e2fsprogs.sh "$E2FSPROGS_VERSION" "$HOME/e2fsprogs"
+          echo "E2SBIN=$HOME/e2fsprogs/sbin" >> "$GITHUB_ENV"
+      - name: Install hyperfine
+        run: sudo apt-get install -y -qq hyperfine >/dev/null
+      - name: Benchmarks (must beat mke2fs)
+        run: ASSERT_FASTER=1 tools/bench.sh build/bench
+        env:
+          FLAT_ENTRIES: ${{ inputs.flat_entries || '20000' }}

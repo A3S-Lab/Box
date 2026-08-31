@@ -106,6 +106,7 @@ pub trait RootfsProvider: Send + Sync {
         options: RootfsFinalizeOptions,
     ) -> Result<RootfsSource> {
         let _ = (box_dir, options);
+        super::ensure_directory_transport_is_lossless(staged_rootfs)?;
         Ok(RootfsSource::directory(staged_rootfs))
     }
 
@@ -446,6 +447,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(source, RootfsSource::directory(rootfs));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_provider_rejects_translated_guest_names() {
+        use a3s_box_core::rootfs_metadata::{
+            RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+            IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_SCHEMA,
+        };
+        use base64::Engine as _;
+
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let manifest = RootfsMetadataManifest {
+            schema: ROOTFS_METADATA_SCHEMA.to_string(),
+            entries: vec![RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD.encode(b"./name-\xff"),
+                kind: RootfsEntryKind::Regular,
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                size: 0,
+                link_target_base64: None,
+            }],
+        };
+        std::fs::write(
+            rootfs.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = CopyProvider
+            .finalize_for_boot(
+                &box_dir,
+                &rootfs,
+                RootfsFinalizeOptions {
+                    disk_mib: 4096,
+                    persistent: false,
+                    snapshot: false,
+                    artifact_cache: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be exposed losslessly"));
+        assert!(error.contains("A3S_BOX_EXPERIMENTAL_GUEST_NATIVE_ROOTFS=1"));
     }
 
     #[test]

@@ -191,11 +191,138 @@ fn failed_build_never_publishes_partial_generation() {
 }
 
 #[test]
-fn non_utf8_names_are_rejected_without_lossy_conversion() {
-    let invalid = std::ffi::OsString::from_vec(vec![b'b', 0xff]);
-    let error = unsupported_path(Path::new(&invalid)).to_string();
-    assert!(error.contains("non-UTF-8"));
-    assert!(error.contains("refusing lossy conversion"));
+fn preserves_raw_filename_and_symlink_target_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+
+    let raw_name = std::ffi::OsString::from_vec(vec![b'n', b'a', b'm', b'e', b'-', 0xff]);
+    let staged_name = crate::rootfs::host_staging_path(Path::new(&raw_name)).unwrap();
+    std::fs::write(source.join(&staged_name), b"raw-name-content").unwrap();
+    std::os::unix::fs::symlink("host-placeholder", source.join("raw-link")).unwrap();
+
+    let mut raw_manifest_path = b"./".to_vec();
+    raw_manifest_path.extend_from_slice(raw_name.as_bytes());
+    let manifest = RootfsMetadataManifest {
+        schema: ROOTFS_METADATA_SCHEMA.to_string(),
+        entries: vec![
+            image_entry(
+                &raw_manifest_path,
+                RootfsEntryKind::Regular,
+                0o640,
+                123,
+                456,
+            ),
+            RootfsMetadataEntry {
+                link_target_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(b"../target-\xfe"),
+                ),
+                ..image_entry(b"./raw-link", RootfsEntryKind::Symlink, 0o777, 0, 0)
+            },
+        ],
+    };
+    std::fs::write(
+        source.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let artifact =
+        publish_ext4_artifact(&source, &temp.path().join("artifact"), options()).unwrap();
+    let filesystem = mkext4::reader::Fs::open(File::open(&artifact.disk).unwrap()).unwrap();
+    let raw_file = filesystem
+        .lookup(mkext4::spec::ROOT_INO, raw_name.as_bytes())
+        .unwrap()
+        .expect("raw filename in ext4 directory");
+    assert_eq!(filesystem.read_file(raw_file).unwrap(), b"raw-name-content");
+    let inode = filesystem.inode(raw_file).unwrap();
+    assert_eq!(inode.mode & 0o7777, 0o640);
+    assert_eq!((inode.uid, inode.gid), (123, 456));
+
+    let symlink = filesystem.resolve("/raw-link").unwrap();
+    assert_eq!(
+        filesystem.symlink_target(symlink).unwrap(),
+        b"../target-\xfe"
+    );
+}
+
+#[test]
+fn oci_raw_bytes_survive_staging_and_ext4_publication_end_to_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let layer = temp.path().join("layer.tar");
+    let source = temp.path().join("source");
+    let raw_name = std::ffi::OsString::from_vec(vec![b'f', b'i', b'l', b'e', b'-', 0xff]);
+    let raw_target = std::ffi::OsString::from_vec(b"../target-\xfe".to_vec());
+
+    let file = File::create(&layer).unwrap();
+    let mut archive = tar::Builder::new(file);
+    let mut file_header = tar::Header::new_gnu();
+    file_header.set_size(7);
+    file_header.set_mode(0o640);
+    file_header.set_uid(123);
+    file_header.set_gid(456);
+    file_header.set_mtime(1_704_067_200);
+    file_header.set_cksum();
+    archive
+        .append_data(
+            &mut file_header,
+            Path::new(&raw_name),
+            b"payload".as_slice(),
+        )
+        .unwrap();
+    let mut link_header = tar::Header::new_gnu();
+    link_header.set_entry_type(tar::EntryType::Symlink);
+    link_header.set_size(0);
+    link_header.set_mode(0o777);
+    link_header.set_uid(0);
+    link_header.set_gid(0);
+    link_header.set_mtime(1_704_067_200);
+    link_header.set_cksum();
+    archive
+        .append_link(&mut link_header, "raw-link", Path::new(&raw_target))
+        .unwrap();
+    archive.finish().unwrap();
+    drop(archive);
+
+    crate::oci::extract_layer_with_metadata(&layer, &source).unwrap();
+    let artifact =
+        publish_ext4_artifact(&source, &temp.path().join("artifact"), options()).unwrap();
+    let filesystem = mkext4::reader::Fs::open(File::open(&artifact.disk).unwrap()).unwrap();
+    let raw_file = filesystem
+        .lookup(mkext4::spec::ROOT_INO, raw_name.as_bytes())
+        .unwrap()
+        .expect("raw OCI filename in ext4");
+    assert_eq!(filesystem.read_file(raw_file).unwrap(), b"payload");
+    let inode = filesystem.inode(raw_file).unwrap();
+    assert_eq!(
+        (inode.mode & 0o7777, inode.uid, inode.gid),
+        (0o640, 123, 456)
+    );
+    let link = filesystem.resolve("/raw-link").unwrap();
+    assert_eq!(
+        filesystem.symlink_target(link).unwrap(),
+        raw_target.as_bytes()
+    );
+}
+
+#[test]
+fn published_v1_artifacts_remain_resumable_after_builder_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("payload"), b"legacy").unwrap();
+    let artifact =
+        publish_ext4_artifact(&source, &temp.path().join("artifact"), options()).unwrap();
+    let mut manifest = artifact.manifest;
+    manifest.builder = LEGACY_EXT4_BUILDER_IDS[0].to_string();
+    std::fs::write(
+        artifact.directory.join(MANIFEST_FILE_NAME),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let reopened = crate::rootfs::ext4_artifact::open_ext4_artifact(&artifact.directory).unwrap();
+    assert_eq!(reopened.manifest.builder, LEGACY_EXT4_BUILDER_IDS[0]);
 }
 
 #[test]

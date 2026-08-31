@@ -1,0 +1,11 @@
+{
+ "algorithm": "half_md4, signed char str2hashbuf (s_flags bit 0)",
+ "seed_uuid": "deadbeef-dead-4ead-8ead-deadbeef0000",
+ "seed_words_le": ["0xefbeadde", "0xad4eadde", "0xaddead8e", "0x0000efbe"],
+ "vectors": [
+  {"name": "entry_00207_pad", "hash": "0x00663894", "minor_hash": "0xfa7cd671"},
+  {"name": "entry_00000_pad", "hash": "0xe289c2b4", "minor_hash": "0x8f16e063"},
+  {"name": "hello.txt", "hash": "0x093b83d6", "minor_hash": "0x33e0ca61"},
+  {"name": "a", "hash": "0x5538916c", "minor_hash": "0x34a29fa3"}
+ ]
+}

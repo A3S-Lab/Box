@@ -1,0 +1,82 @@
+name: Release
+
+# Publishes to crates.io when a merge to main carries a Cargo.toml
+# version that isn't on the registry yet (so ordinary merges are no-ops).
+#
+# Auth, in order of preference:
+#  1. Trusted Publishing (OIDC, no stored secret) — configure the
+#     GitHub repository as a trusted publisher on the crate's
+#     crates.io settings page. Requires the crate to already exist.
+#  2. A CARGO_REGISTRY_TOKEN repository secret — needed exactly once,
+#     for the first-ever publish (crates.io requires a token to create
+#     a crate); delete it after switching to Trusted Publishing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: release
+
+permissions:
+  id-token: write # OIDC token for Trusted Publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether this version is already published
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          PUBLISHED=$(curl -fsSL -H 'User-Agent: mkext4-release-workflow' \
+            "https://crates.io/api/v1/crates/mkext4" \
+            | jq -r '.versions[].num' 2>/dev/null || echo "")
+          if echo "$PUBLISHED" | grep -qx "$VERSION"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "mkext4 $VERSION already on crates.io; nothing to do"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "mkext4 $VERSION is unpublished; releasing"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.version.outputs.skip == 'false'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.skip == 'false'
+
+      # Sanity gate on the exact bytes being released. Oracle-dependent
+      # assertions self-skip on this bare runner; the full CI workflow
+      # runs the complete matrix on the same commit.
+      - name: Tests
+        if: steps.version.outputs.skip == 'false'
+        run: cargo test
+
+      - name: Pick auth method
+        if: steps.version.outputs.skip == 'false'
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "HAS_TOKEN=true" >> "$GITHUB_ENV"
+            echo "using CARGO_REGISTRY_TOKEN secret"
+          else
+            echo "HAS_TOKEN=false" >> "$GITHUB_ENV"
+            echo "using Trusted Publishing (OIDC)"
+          fi
+
+      - name: Authenticate (Trusted Publishing)
+        id: auth
+        if: steps.version.outputs.skip == 'false' && env.HAS_TOKEN == 'false'
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        if: steps.version.outputs.skip == 'false'
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}

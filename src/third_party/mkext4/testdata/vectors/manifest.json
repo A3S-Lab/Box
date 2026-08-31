@@ -1,0 +1,160 @@
+{
+ "blobs": {
+  "block_bitmap_g0.bin": {
+   "len": 4096,
+   "offset": 8192
+  },
+  "block_bitmap_g1.bin": {
+   "len": 4096,
+   "offset": 12288
+  },
+  "dirblock_empty.bin": {
+   "ino": 11,
+   "len": 4096,
+   "offset": 8437760
+  },
+  "dirblock_root.bin": {
+   "ino": 2,
+   "len": 4096,
+   "offset": 8429568
+  },
+  "dx_leaf_bigdir.bin": {
+   "image": "ref512dx.img",
+   "ino": 13,
+   "len": 4096,
+   "offset": 218177536
+  },
+  "dx_root_bigdir.bin": {
+   "image": "ref512dx.img",
+   "ino": 13,
+   "len": 4096,
+   "offset": 218173440
+  },
+  "gdt.bin": {
+   "groups": 4,
+   "len": 128,
+   "offset": 4096
+  },
+  "inode_11_lost_found.bin": {
+   "ino": 11,
+   "len": 256,
+   "offset": 43520
+  },
+  "inode_1_bad_blocks.bin": {
+   "ino": 1,
+   "len": 256,
+   "offset": 40960
+  },
+  "inode_2_root.bin": {
+   "ino": 2,
+   "len": 256,
+   "offset": 41216
+  },
+  "inode_8_journal.bin": {
+   "ino": 8,
+   "len": 256,
+   "offset": 42752
+  },
+  "inode_bigdir_dx.bin": {
+   "image": "ref512dx.img",
+   "ino": 13,
+   "len": 256
+  },
+  "inode_bitmap_g0.bin": {
+   "len": 4096,
+   "offset": 24576
+  },
+  "inode_bitmap_g1.bin": {
+   "len": 4096,
+   "offset": 28672
+  },
+  "inode_dev_c_new.bin": {
+   "ino": 330,
+   "len": 256,
+   "offset": 125184,
+   "path": "/dev_c_new"
+  },
+  "inode_dev_c_old.bin": {
+   "ino": 328,
+   "len": 256,
+   "offset": 124672,
+   "path": "/dev_c_old"
+  },
+  "inode_empty.bin": {
+   "ino": 314,
+   "len": 256,
+   "offset": 121088,
+   "path": "/empty"
+  },
+  "inode_small_txt.bin": {
+   "ino": 315,
+   "len": 256,
+   "offset": 121344,
+   "path": "/small.txt"
+  },
+  "inode_sparse_small.bin": {
+   "ino": 317,
+   "len": 256,
+   "offset": 121856,
+   "path": "/sparse_small"
+  },
+  "inode_sym_59.bin": {
+   "ino": 322,
+   "len": 256,
+   "offset": 123136,
+   "path": "/sym_59"
+  },
+  "inode_sym_60.bin": {
+   "ino": 323,
+   "len": 256,
+   "offset": 123392,
+   "path": "/sym_60"
+  },
+  "inode_xattr_block.bin": {
+   "ino": 325,
+   "len": 256,
+   "offset": 123904,
+   "path": "/xattr_block"
+  },
+  "inode_xattr_ibody.bin": {
+   "ino": 326,
+   "len": 256,
+   "offset": 124160,
+   "path": "/xattr_ibody"
+  },
+  "inode_xattr_mixed.bin": {
+   "ino": 327,
+   "len": 256,
+   "offset": 124416,
+   "path": "/xattr_mixed"
+  },
+  "jsb.bin": {
+   "len": 1024,
+   "offset": 268435456
+  },
+  "sb_backup_g1.bin": {
+   "len": 1024,
+   "offset": 134217728
+  },
+  "sb_primary.bin": {
+   "len": 1024,
+   "offset": 1024
+  },
+  "xattr_block.bin": {
+   "block": 53281,
+   "ino": 325,
+   "len": 4096,
+   "offset": 218238976
+  }
+ },
+ "fs_csum_seed": "0x4216ab51",
+ "hash_seed": [
+  "0xefbeadde",
+  "0xad4eadde",
+  "0xaddead8e",
+  "0x0000efbe"
+ ],
+ "image": "ref512.img",
+ "source": "mke2fs 1.47.4 via tools/mkrefs.sh",
+ "uuid": "d0d0caca000040008000000000000001"
+}

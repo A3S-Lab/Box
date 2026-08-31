@@ -28,6 +28,7 @@ mod guest_native_migration;
 mod layout;
 pub(crate) mod overlay;
 mod provider;
+mod staging_path;
 
 pub use baseline::{
     create_diff_baseline_if_absent, guest_diff_baseline_required, publish_guest_diff_baseline,
@@ -47,6 +48,10 @@ pub use layout::{GuestLayout, GUEST_WORKDIR};
 pub use provider::{
     default_provider, default_provider_for_box, CopyProvider, OverlayProvider, ResumedRootfs,
     RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsProvider, RootfsResumeOptions,
+};
+pub(crate) use staging_path::{
+    ensure_directory_transport_is_lossless, host_staging_path, logical_path_for_staged_child,
+    staging_path_map,
 };
 
 use std::io::Read;

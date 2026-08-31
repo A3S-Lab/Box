@@ -343,6 +343,10 @@ guest-native storage path for new MicroVMs and stopped legacy APFS boxes. It
 builds or reuses a pinned, validated ext4 base, gives each box a private APFS
 copy-on-write raw disk, and detaches the temporary case-sensitive construction
 image before the VMM starts.
+Its macOS staging codec keeps APFS-safe physical names while the OCI metadata
+manifest and vendored byte-capable ext4 writer preserve exact Linux filename
+and symlink-target bytes; directory transports fail closed when that reversal
+is required.
 Boot configuration and exact workload exit status use private guest-control
 handoffs rather than host access to the active root disk. The first pristine
 `diff` baseline is likewise captured from guest-visible Linux metadata before
