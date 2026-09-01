@@ -477,7 +477,7 @@ impl WarmPool {
         template: &'a Arc<Mutex<TemplateState>>,
     ) -> BootVmFuture<'a> {
         Box::pin(async move {
-            if snapshot_fork {
+            if snapshot_fork && crate::vm::native_snapshot_fork_supported() {
                 // Try the snapshot-fork template. If it can't be built (native VM
                 // snapshot unavailable — the verdict is cached so this is attempted at
                 // most once), fall back to a normal cold boot so the warm pool still
@@ -511,6 +511,10 @@ impl WarmPool {
                         tracing::debug!(%error, "snapshot-fork unavailable; cold-booting this pool VM");
                     }
                 }
+            } else if snapshot_fork {
+                tracing::debug!(
+                    "snapshot-fork is unavailable on this build; cold-booting without snapshot side effects"
+                );
             }
             let mut vm = VmManager::new(box_config.clone(), event_emitter.clone());
             vm.boot().await?;
@@ -531,6 +535,11 @@ impl WarmPool {
         event_emitter: &EventEmitter,
         template: &Arc<Mutex<TemplateState>>,
     ) -> Result<PoolTemplate> {
+        if !crate::vm::native_snapshot_fork_supported() {
+            return Err(BoxError::PoolError(
+                "snapshot-fork requires the Linux x86_64 KVM build".to_string(),
+            ));
+        }
         let mut guard = template.lock().await;
         let prior_failures = match &*guard {
             TemplateState::Ready(t) => return Ok(t.clone()),
@@ -974,6 +983,22 @@ mod tests {
             "boot_or_restore future must remain pointer-sized so pool misses fit on Tokio worker stacks; got {} bytes",
             std::mem::size_of_val(&future)
         );
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[tokio::test]
+    async fn unsupported_snapshot_fork_is_rejected_before_template_construction() {
+        let template = Arc::new(Mutex::new(TemplateState::Unbuilt));
+        let result =
+            WarmPool::ensure_template(&BoxConfig::default(), &test_event_emitter(), &template)
+                .await;
+        let error = match result {
+            Ok(_) => panic!("unsupported host unexpectedly built a snapshot template"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("Linux x86_64 KVM"), "{error}");
+        assert!(matches!(&*template.lock().await, TemplateState::Unbuilt));
     }
 
     // --- PoolConfig validation tests ---

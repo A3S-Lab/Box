@@ -2,6 +2,30 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Mount-free guest-native filesystem snapshots on macOS.** Clean stopped
+  raw-ext4 generations are captured as private copy-on-write clones under the
+  versioned `a3s.box.snapshot-rootfs.v1` contract. The manifest binds snapshot
+  and source identities to the ext4 schema, builder, capacity, filesystem UUID,
+  and sparse-content digest. Restore verifies both the immutable source and its
+  new private clone, persists the resolved OCI defaults and artifact-owned disk
+  capacity, and remains valid after the source snapshot is deleted. Legacy
+  directory snapshots retain their shared-lower behavior and remain readable.
+
+### Changed
+
+- Native libkrun memory snapshot-fork inputs are now validated as a coherent
+  Linux x86_64/KVM-only capability before layout preparation. Unsupported
+  explicit launches fail before image, box, RAM, rootfs, or VMM side effects;
+  warm pools skip the unavailable attempt and cold-boot without selecting the
+  APFS compatibility provider.
+- Snapshot deletion now enforces directory-lower references inside the store,
+  including SDK callers; only the CLI's explicit `snapshot rm --force` path can
+  bypass that protection.
+
 ## [3.2.0] — 2026-08-25
 
 ### Fixed

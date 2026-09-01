@@ -64,6 +64,62 @@
         assert_eq!(image_config.working_dir.as_deref(), Some("/home/user"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sdk_clones_guest_native_snapshots_without_directory_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let mut record = box_record(
+            "19191919-1919-4191-8191-191919191919",
+            "native-api",
+            "stopped",
+        );
+        record.box_dir = dir.path().join("boxes").join(&record.id);
+        let logical = record.box_dir.join("logical-rootfs");
+        std::fs::create_dir_all(&logical).unwrap();
+        std::fs::write(logical.join("state"), b"native-snapshot").unwrap();
+        a3s_box_runtime::rootfs::publish_ext4_artifact(
+            &logical,
+            &record.box_dir.join("rootfs-ext4-v1"),
+            a3s_box_runtime::rootfs::Ext4ArtifactOptions::from_disk_mib(16, [9; 16]).unwrap(),
+        )
+        .unwrap();
+        write_resolved_image_config(&record);
+        write_boxes(&client, &[record]);
+
+        let snapshot = client
+            .create_snapshot(
+                "native-api",
+                CreateSnapshot::new().name("native-snapshot"),
+            )
+            .unwrap();
+        let store = client.snapshot_store().unwrap();
+        assert_eq!(
+            store.rootfs_format(&snapshot.id).unwrap(),
+            a3s_box_runtime::SnapshotRootfsFormat::GuestNativeExt4
+        );
+        assert!(!store.rootfs_path(&snapshot.id).exists());
+
+        let restored = client
+            .restore_snapshot(
+                &snapshot.id,
+                RestoreSnapshot::new().name("native-restored"),
+            )
+            .unwrap();
+        let state = StateFile::load(&client.paths().boxes_file).unwrap();
+        let restored = state.find_by_id(&restored.id).unwrap();
+        assert!(restored
+            .box_dir
+            .join("rootfs-ext4-v1/rootfs.ext4")
+            .is_file());
+        assert!(!restored.box_dir.join(".snapshot-lower").exists());
+        assert!(client.remove_snapshot(&snapshot.id).unwrap());
+        assert!(restored
+            .box_dir
+            .join("rootfs-ext4-v1/rootfs.ext4")
+            .is_file());
+    }
+
     #[test]
     fn create_snapshot_rejects_an_active_box_before_rootfs_traversal() {
         let dir = tempfile::tempdir().unwrap();

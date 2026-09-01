@@ -11,7 +11,10 @@ Apple Silicon host. It boots real Box MicroVMs and:
   published-port connections, runs `pg_isready` afterwards, and applies the
   same fatal-log assertions;
 - sends `SIGTERM` to an attached `run --rm`, proves cleanup, and recovers exit
-  status 143 from the removal archive by both name and ID; and
+  status 143 from the removal archive by both name and ID;
+- qualifies guest-native persistent restart, forced-crash journal recovery,
+  stopped maintenance, legacy APFS migration, and mount-free raw-ext4
+  filesystem snapshot create/restore/delete, with no `A3SRootfs` attachment;
 - runs the reduced pnpm fixture through a digest-pinned Node image, Corepack,
   the persistent pnpm cache, outbound registry traffic, tmpfs `node_modules`,
   and a command-wide timeout.
@@ -84,6 +87,9 @@ A3S_BOX_HVF_POSTGRES_IMAGE='docker.io/library/postgres:17-alpine@sha256:742f40ea
     -- --ignored --nocapture --test-threads=1
 cargo test --locked --release -p a3s-box-cli --test core_smoke \
   real_core_foreground_auto_remove_handles_sigterm_and_archives_status \
+  -- --ignored --nocapture --test-threads=1
+cargo test --locked --release -p a3s-box-cli \
+  --test guest_native_rootfs_integration \
   -- --ignored --nocapture --test-threads=1
 cd ..
 A3S_BOX="$PWD/src/target/release/a3s-box" \

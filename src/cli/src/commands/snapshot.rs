@@ -180,22 +180,40 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
         meta.description = desc.clone();
     }
 
-    // Snapshot the box's current root filesystem (overlay `merged` or the plain
-    // provider's `rootfs`), so runtime changes are captured — not an empty dir.
-    // A stopped macOS box retains that filesystem in its APFS sparse image, so
-    // attach it for the duration of the copy instead of archiving the empty
-    // mountpoint left behind after runtime teardown.
-    let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
-    let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-        format!(
-            "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
-             snapshot a stopped box",
-            record.name,
-            record.box_dir.display()
-        )
-    })?;
     let store = SnapshotStore::default_path()?;
-    let saved = store.save(meta, &rootfs_path)?;
+    #[cfg(target_os = "macos")]
+    let saved = if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
+        // The raw generation is already the exact guest filesystem state. Clone
+        // it as a versioned immutable artifact; never attach it to macOS merely
+        // to walk the same bytes through a host directory.
+        store.save_guest_native_ext4(meta, &record.box_dir)?
+    } else {
+        // Compatibility APFS generations still require a bounded attachment
+        // while their historical directory snapshot is copied.
+        let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+        let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+            format!(
+                "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
+                 snapshot a stopped box",
+                record.name,
+                record.box_dir.display()
+            )
+        })?;
+        store.save(meta, &rootfs_path)?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let saved = {
+        let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+        let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+            format!(
+                "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
+                 snapshot a stopped box",
+                record.name,
+                record.box_dir.display()
+            )
+        })?;
+        store.save(meta, &rootfs_path)?
+    };
 
     // Opt-in auto-prune: when A3S_BOX_MAX_SNAPSHOTS / A3S_BOX_MAX_SNAPSHOT_BYTES are
     // set, evict the oldest snapshots beyond the cap after each create so a
@@ -267,19 +285,19 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     std::fs::create_dir_all(&socket_dir)?;
     std::fs::create_dir_all(&logs_dir)?;
 
-    // Point the restored box's overlay at the snapshot's pristine stored rootfs
-    // as a read-only lower (copy-on-write): the box writes to its own upper, the
-    // snapshot stays shared and untouched across all forks, and nothing is
-    // copied. The runtime reads `.snapshot-lower` in `prepare_layout` and mounts
-    // the overlay (or, on a non-overlay host, the CopyProvider falls back to a
-    // full copy — same result, slower). This replaces a full per-restore rootfs
-    // deep-copy, so forking a warmed snapshot is near-instant and space-cheap.
-    let snap_rootfs = store.rootfs_path(&meta.id);
-    if snap_rootfs.exists() {
-        std::fs::write(
-            box_dir.join(".snapshot-lower"),
-            snap_rootfs.to_string_lossy().as_bytes(),
-        )?;
+    // Directory snapshots publish their shared-lower marker while holding the
+    // snapshot-store lock. Guest-native snapshots instead materialize a private
+    // validated raw-ext4 clone, so the restored box has no store dependency and
+    // no macOS filesystem attachment.
+    let restored_rootfs = store.restore_rootfs_to_box(&meta.id, &box_dir)?;
+    let meta = restored_rootfs.metadata;
+    meta.require_image_config()?;
+    #[cfg(windows)]
+    if meta.has_effective_health_check() {
+        return Err(
+            "container health checks are not supported on Windows; the snapshot defines an effective health check"
+                .into(),
+        );
     }
 
     let record = BoxRecord {
@@ -424,7 +442,12 @@ async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         }
-        if store.delete(id)? {
+        let deleted = if args.force {
+            store.delete_force(id)?
+        } else {
+            store.delete(id)?
+        };
+        if deleted {
             println!("{}", id);
         } else {
             eprintln!("Snapshot '{}' not found", id);
@@ -453,7 +476,14 @@ fn boxes_referencing_snapshot(
 /// Whether the box at `box_dir` references `snap_rootfs` as its CoW overlay lower.
 fn box_references_lower(box_dir: &std::path::Path, snap_rootfs: &std::path::Path) -> bool {
     std::fs::read_to_string(box_dir.join(".snapshot-lower"))
-        .map(|s| std::path::Path::new(s.trim()) == snap_rootfs)
+        .map(|s| {
+            let referenced = std::path::PathBuf::from(s.trim());
+            let referenced = referenced.canonicalize().unwrap_or(referenced);
+            let expected = snap_rootfs
+                .canonicalize()
+                .unwrap_or_else(|_| snap_rootfs.to_path_buf());
+            referenced == expected
+        })
         .unwrap_or(false)
 }
 

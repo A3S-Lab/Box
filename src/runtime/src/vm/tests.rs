@@ -5,6 +5,49 @@ use std::sync::{
     Arc,
 };
 
+#[test]
+fn native_snapshot_launch_shape_is_explicit_and_platform_gated() {
+    assert!(validate_snapshot_launch_shape(false, false, false).is_ok());
+
+    if native_snapshot_fork_supported() {
+        assert!(validate_snapshot_launch_shape(true, true, false).is_ok());
+        assert!(validate_snapshot_launch_shape(true, false, true).is_ok());
+        for invalid in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            assert!(validate_snapshot_launch_shape(invalid.0, invalid.1, invalid.2).is_err());
+        }
+    } else {
+        let error = validate_snapshot_launch_shape(true, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Linux x86_64 KVM"), "{error}");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[tokio::test]
+async fn unsupported_native_snapshot_fails_before_layout_side_effects() {
+    let temporary = tempfile::tempdir().unwrap();
+    let box_id = "unsupported-snapshot".to_string();
+    let config = BoxConfig {
+        snapshot_mem_file: Some(temporary.path().join("memory").display().to_string()),
+        snapshot_sock: Some(temporary.path().join("trigger.sock").display().to_string()),
+        ..BoxConfig::default()
+    };
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(8), box_id.clone());
+    vm.home_dir = temporary.path().to_path_buf();
+
+    let error = vm.boot().await.unwrap_err().to_string();
+
+    assert!(error.contains("Linux x86_64 KVM"), "{error}");
+    assert!(!temporary.path().join("boxes").join(box_id).exists());
+    assert!(!temporary.path().join("memory").exists());
+}
+
 struct RecordingHandler {
     stopped: Arc<AtomicBool>,
 }

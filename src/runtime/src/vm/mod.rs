@@ -792,6 +792,62 @@ fn rootfs_snapshot_requested(config: &BoxConfig) -> bool {
     }
 }
 
+/// Whether the vendored libkrun snapshot state contract exists for this build.
+///
+/// Its serialized VM/vCPU/device state is intentionally compiled only for
+/// Linux KVM on x86_64. Detect this before layout preparation so unsupported
+/// hosts do not pull an image, allocate file-backed RAM, or create a temporary
+/// rootfs transport for an operation that cannot produce a restorable state.
+pub(crate) const fn native_snapshot_fork_supported() -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
+}
+
+fn validate_snapshot_launch(config: &BoxConfig) -> Result<()> {
+    let memory = config
+        .snapshot_mem_file
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| snapshot_env_nonempty("KRUN_SNAPSHOT_MEM_FILE"));
+    let trigger = config
+        .snapshot_sock
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| snapshot_env_nonempty("KRUN_SNAPSHOT_SOCK"));
+    let restore = config
+        .restore_from
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| snapshot_env_nonempty("KRUN_RESTORE_FROM"));
+
+    validate_snapshot_launch_shape(memory.is_some(), trigger.is_some(), restore.is_some())
+}
+
+fn validate_snapshot_launch_shape(memory: bool, trigger: bool, restore: bool) -> Result<()> {
+    let requested = memory || trigger || restore;
+    if !requested {
+        return Ok(());
+    }
+    if !native_snapshot_fork_supported() {
+        return Err(BoxError::ConfigError(
+            "native VM snapshot-fork is supported only by the Linux x86_64 KVM build".to_string(),
+        ));
+    }
+    match (memory, trigger, restore) {
+        (true, true, false) | (true, false, true) => Ok(()),
+        _ => Err(BoxError::ConfigError(
+            "invalid native VM snapshot configuration: template mode requires memory + trigger socket, while restore mode requires memory + state file"
+                .to_string(),
+        )),
+    }
+}
+
+fn snapshot_env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 /// Whether this boot is a snapshot-fork restore (the guest is resumed already-booted
 /// rather than cold-booted). PER-VM: a pool / fork daemon sets `config.restore_from`
 /// so one process can restore different VMs; the single-VM `run` path uses the

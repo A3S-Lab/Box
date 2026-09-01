@@ -5,7 +5,7 @@
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant, CoW)
 //!
 //! macOS defaults to a guest-native block artifact and keeps a case-sensitive
-//! APFS provider for snapshot and migration compatibility. The finalizer
+//! APFS provider for explicit legacy and migration compatibility. The finalizer
 //! boundary keeps OCI preparation independent of the selected VMM transport.
 
 use std::path::{Path, PathBuf};
@@ -366,11 +366,7 @@ fn environment_flag(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_provider(
-    box_dir: Option<&Path>,
-    snapshot_requested: bool,
-    legacy_apfs_requested: bool,
-) -> Box<dyn RootfsProvider> {
+fn macos_provider(box_dir: Option<&Path>, legacy_apfs_requested: bool) -> Box<dyn RootfsProvider> {
     if let Some(box_dir) = box_dir {
         for (path, state) in [
             (
@@ -405,10 +401,6 @@ fn macos_provider(
         }
     }
 
-    if snapshot_requested {
-        tracing::info!("Using case-sensitive APFS compatibility provider for snapshot-backed box");
-        return Box::new(CaseSensitiveApfsProvider);
-    }
     if legacy_apfs_requested {
         tracing::warn!(
             environment = LEGACY_APFS_ROOTFS_ENV,
@@ -421,7 +413,7 @@ fn macos_provider(
     Box::new(GuestNativeExt4Provider)
 }
 
-/// Auto-detect the best available rootfs provider for a non-snapshot boot.
+/// Auto-detect the best available rootfs provider for a new boot.
 pub fn default_provider() -> Box<dyn RootfsProvider> {
     default_provider_for_boot(false)
 }
@@ -430,11 +422,11 @@ pub fn default_provider() -> Box<dyn RootfsProvider> {
 pub(crate) fn default_provider_for_boot(snapshot_requested: bool) -> Box<dyn RootfsProvider> {
     #[cfg(target_os = "macos")]
     {
-        macos_provider(
-            None,
-            snapshot_requested,
-            environment_flag(LEGACY_APFS_ROOTFS_ENV),
-        )
+        // VMM memory snapshots are capability-validated before layout side
+        // effects. They must never silently select a mounting rootfs transport
+        // on an unsupported host.
+        let _ = snapshot_requested;
+        macos_provider(None, environment_flag(LEGACY_APFS_ROOTFS_ENV))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -465,11 +457,8 @@ pub(crate) fn default_provider_for_box_boot(
 ) -> Box<dyn RootfsProvider> {
     #[cfg(target_os = "macos")]
     {
-        macos_provider(
-            Some(box_dir),
-            snapshot_requested,
-            environment_flag(LEGACY_APFS_ROOTFS_ENV),
-        )
+        let _ = snapshot_requested;
+        macos_provider(Some(box_dir), environment_flag(LEGACY_APFS_ROOTFS_ENV))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -742,28 +731,19 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_non_snapshot_default_is_guest_native() {
-        assert_eq!(
-            macos_provider(None, false, false).name(),
-            "guest-native-ext4"
-        );
+        assert_eq!(macos_provider(None, false).name(), "guest-native-ext4");
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_snapshot_uses_apfs_compatibility() {
-        assert_eq!(
-            macos_provider(None, true, false).name(),
-            "case-sensitive-apfs"
-        );
+    fn macos_snapshot_request_cannot_select_a_mounting_transport() {
+        assert_eq!(default_provider_for_boot(true).name(), "guest-native-ext4");
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_explicit_legacy_request_uses_apfs_compatibility() {
-        assert_eq!(
-            macos_provider(None, false, true).name(),
-            "case-sensitive-apfs"
-        );
+        assert_eq!(macos_provider(None, true).name(), "case-sensitive-apfs");
     }
 
     #[cfg(target_os = "macos")]
@@ -773,7 +753,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("rootfs-ext4-v1")).unwrap();
 
         assert_eq!(
-            macos_provider(Some(tmp.path()), true, true).name(),
+            macos_provider(Some(tmp.path()), true).name(),
             "guest-native-ext4"
         );
     }

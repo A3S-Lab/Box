@@ -338,7 +338,7 @@ runtime mutation instead of being stored and silently weakened.
 | Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
-On macOS, non-snapshot MicroVMs use a guest-native ext4 rootfs by default. Box
+On macOS, MicroVMs use a guest-native ext4 rootfs by default. Box
 assembles verified OCI layers directly into a pinned, validated ext4 base and
 publishes a private raw disk for each box, using a copy-on-write clone when the
 immutable artifact cache is enabled. New generations do not create a
@@ -367,11 +367,17 @@ lock. Journal-dirty disks are rejected until a normal writable boot and clean
 stop completes recovery. A legacy conversion is recorded as a durable
 `building → artifact_ready → clean_stop_verified` transaction. The old sparse
 image remains detached as rollback evidence after verification; Box does not
-silently delete it. Snapshot-backed boxes automatically use the APFS
-compatibility transport. `A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` is a narrowly
-scoped compatibility override for creating or retaining a new non-snapshot APFS
-generation during rollout; it never overrides an existing raw generation. See
-[Guest-Native Rootfs Design](docs/guest-native-rootfs-design.md).
+silently delete it. Stopped filesystem snapshots now clone the clean raw ext4
+generation into a versioned, integrity-checked bundle and restore a private
+writable clone; create, restore, and later snapshot deletion require no macOS
+mount and never leave the restored box dependent on the snapshot store.
+Libkrun memory snapshot-fork remains an opt-in Linux x86_64/KVM capability.
+Unsupported hosts reject its explicit state inputs before image, RAM, box, or
+rootfs side effects, while warm pools cold-boot without attempting a snapshot.
+`A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` is a narrowly scoped compatibility
+override for creating or retaining a new APFS generation during rollout; it
+never overrides an existing raw generation. See [Guest-Native Rootfs
+Design](docs/guest-native-rootfs-design.md).
 
 A few end-to-end workflows:
 
@@ -523,7 +529,7 @@ operation returns a typed availability error before dispatch.
 | Path | Current evidence | Boundary that remains visible |
 | --- | --- | --- |
 | Linux MicroVM | Primary local path through KVM/libkrun; Runtime 0.5 readiness/liveness and bounded graceful-stop cases are wired into the advertised provider profiles alongside self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | The current revision still requires an enrolled KVM run of all capability-triggered lifecycle cases plus the longer `G2`/`R24` profiles |
-| macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical rootfs-lifecycle and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
+| macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical persistent/crash recovery, mount-free filesystem snapshot, legacy migration, maintenance, and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
 | Linux Sandbox | Real A3S OCI Runtime CI profiles plus Rust, Python, TypeScript, and Go SDK exercises through the production owner route; Runtime 0.5 lifecycle cases are part of the advertised-profile gate | Shared-kernel preview; the current revision still needs retained lifecycle-gate evidence, and VM-only controls are rejected |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |

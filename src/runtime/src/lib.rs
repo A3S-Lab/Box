@@ -128,7 +128,9 @@ pub use prom::RuntimeMetrics;
 
 // Snapshot
 pub use resolved_image::{load_resolved_image_config, RESOLVED_IMAGE_CONFIG_FILE};
-pub use snapshot::SnapshotStore;
+pub use snapshot::{
+    RestoredSnapshotRootfs, SnapshotRootfsFormat, SnapshotStore, SNAPSHOT_ROOTFS_SCHEMA,
+};
 
 // TEE
 #[cfg(unix)]

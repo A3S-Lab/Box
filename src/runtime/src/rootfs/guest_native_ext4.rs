@@ -15,8 +15,9 @@ use super::provider::{
 /// legacy writable generation must be migrated without losing guest state.
 ///
 /// Persistent generations reuse the validated raw disk directly. Stopped
-/// archive operations use a separate read-only maintenance VM; snapshot-backed
-/// generations remain disabled until disk and memory identity are coupled.
+/// archive operations use a separate read-only maintenance VM; filesystem
+/// snapshots clone the clean artifact while VMM memory snapshots remain a
+/// separately gated platform capability.
 pub struct GuestNativeExt4Provider;
 
 impl GuestNativeExt4Provider {
@@ -185,7 +186,7 @@ impl RootfsProvider for GuestNativeExt4Provider {
         }
         if options.snapshot {
             return Err(BoxError::BuildError(
-                "guest-native ext4 is not yet enabled for snapshot-backed boxes; use the APFS compatibility provider"
+                "guest-native ext4 cannot be coupled to an unsupported VMM memory snapshot; capability validation must reject this launch before rootfs preparation"
                     .to_string(),
             ));
         }
@@ -234,7 +235,7 @@ impl RootfsProvider for GuestNativeExt4Provider {
     ) -> Result<Option<ResumedRootfs>> {
         if options.snapshot {
             return Err(BoxError::BuildError(
-                "guest-native ext4 is not yet enabled for snapshot-backed boxes; use the APFS compatibility provider"
+                "guest-native ext4 cannot be coupled to an unsupported VMM memory snapshot; capability validation must reject this launch before rootfs preparation"
                     .to_string(),
             ));
         }
@@ -340,7 +341,7 @@ impl RootfsProvider for GuestNativeExt4Provider {
     ) -> Result<RootfsSource> {
         if options.snapshot {
             return Err(BoxError::BuildError(
-                "guest-native ext4 is not yet enabled for snapshot-backed boxes; use the APFS compatibility provider"
+                "guest-native ext4 cannot be coupled to an unsupported VMM memory snapshot; capability validation must reject this launch before rootfs preparation"
                     .to_string(),
             ));
         }

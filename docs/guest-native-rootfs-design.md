@@ -11,12 +11,14 @@ during migration. It is not the target storage model.
 
 The macOS provider implements mount-free construction, the running ownership
 handoff, the read-only stopped archive path, and stopped legacy migration. New
-non-snapshot OCI generations default to a validated raw ext4 artifact. APFS
-DiskImages are attached only for snapshot compatibility, an explicit legacy
-override, or while converting an existing legacy writable generation, and are
-synchronously detached before an ext4-backed VMM starts. Persistent boxes
-restart directly from that guest-written disk; clean stopped boxes use a
-restricted maintenance MicroVM.
+OCI generations default to a validated raw ext4 artifact. APFS DiskImages are
+attached only for an explicit legacy override or while converting an existing
+legacy writable generation, and are synchronously detached before an
+ext4-backed VMM starts. Persistent boxes restart directly from that
+guest-written disk; clean stopped boxes use a restricted maintenance MicroVM.
+Filesystem snapshots clone the clean raw artifact directly into a versioned
+immutable bundle and restore a private writable clone; macOS never mounts
+either generation.
 
 ## Problem
 
@@ -121,8 +123,10 @@ LogicalAssembly | LegacyStagingDirectory
 - `MaintenanceOwned`: a dedicated maintenance boot owns a clean disk read-only
   for offline diff, export, and commit. It runs no user workload, exposes no
   network or user attachment, and macOS never mounts the disk. Repair,
-  migration, snapshots, and arbitrary file inspection are separate future
-  capabilities and are not implied by archive access.
+  migration, VMM memory snapshots, and arbitrary file inspection are separate
+  capabilities and are not implied by archive access. Filesystem snapshot
+  cloning is a host-level immutable artifact operation and does not enter this
+  maintenance state.
 
 The runtime lifecycle lock must serialize every rootfs ownership transition.
 
@@ -308,17 +312,22 @@ because their ext4 bytes no longer depend on a host staging namespace.
 
 ## Default macOS Handoff
 
-Provider selection follows durable state and boot requirements in this order:
+Provider selection follows durable state and explicit compatibility policy in
+this order:
 
 1. an existing `rootfs-ext4-v1` generation or migration transaction always
    selects guest-native ext4 and fails closed if the requested lifecycle is
    incompatible;
-2. a new snapshot-backed box selects the case-sensitive APFS compatibility
-   provider because disk and memory snapshot identity are not yet coupled for
-   raw ext4;
-3. `A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` explicitly selects APFS for a new
-   non-snapshot compatibility generation;
-4. every other macOS MicroVM selects guest-native ext4.
+2. `A3S_BOX_MACOS_LEGACY_APFS_ROOTFS=1` explicitly selects APFS for a new
+   compatibility generation;
+3. every other macOS MicroVM selects guest-native ext4.
+
+Libkrun VMM memory snapshot-fork is a separate Linux x86_64/KVM capability.
+Its template and restore inputs are shape-validated before layout preparation.
+On macOS and every other unsupported build, an explicit request fails before
+creating the box directory, file-backed RAM, rootfs artifact, or VMM process;
+warm pools skip the attempt and cold-boot. An unsupported memory feature must
+never select a mounting rootfs provider as a side effect.
 
 The guest-native lifecycle is:
 
@@ -353,14 +362,13 @@ decoding or spooling any layer. Neither path creates or attaches an
 `A3SRootfs` DiskImage. The only remaining APFS attach in the guest-native
 provider is the explicit legacy migration window.
 
-The provider supports persistent clean-stop restart and intentionally rejects
-snapshot-backed boxes. A retained `rootfs-ext4-v1` generation selects the same
-provider on every later start, even when a snapshot or legacy compatibility
-setting is supplied; falling back to an old APFS staging tree would lose guest
-data. Clean stopped diff, export, and commit run through the maintenance guest.
-Snapshot and arbitrary file-access operations remain disabled for this
-provider. Fresh snapshot-backed boxes automatically select the compatibility
-provider.
+The provider supports persistent clean-stop restart and mount-free filesystem
+snapshots. A retained `rootfs-ext4-v1` generation selects the same provider on
+every later start, even when a legacy compatibility setting is supplied;
+falling back to an old APFS staging tree would lose guest data. Clean stopped
+diff, export, and commit run through the maintenance guest. Arbitrary stopped
+file access remains disabled. VMM memory snapshot inputs are rejected by the
+platform capability boundary before this provider is asked to prepare a rootfs.
 
 An unclean host or shim exit is a different valid state, not automatic
 corruption. If the mutable disk carries exactly the builder's feature set plus
@@ -435,6 +443,19 @@ Per-box disks branch from an immutable base with clonefile or reflink. A cache
 entry is never opened writable. Snapshot identity must bind the root disk
 generation to the matching memory/VMM generation; restoring either half alone
 is invalid.
+
+Filesystem snapshots use the separate
+`a3s.box.snapshot-rootfs.v1` bundle manifest. A directory payload retains the
+legacy immutable shared-lower behavior. A guest-native payload binds the exact
+ext4 artifact schema, builder, capacity, filesystem UUID, and sparse-content
+digest to the snapshot and source-box identities. Capture accepts only a clean
+stopped generation, publishes the clone and metadata atomically, and never
+attaches it. Restore verifies the immutable source, atomically creates another
+private clone, verifies that clone again, and persists the resolved OCI image
+configuration beside it. The restored box therefore survives immediate
+snapshot deletion and reconstructs its disk capacity from the artifact rather
+than from a process default. A missing rootfs manifest is accepted only as the
+historical directory layout.
 
 The mutable image reference is diagnostic input, not cache authority. A moved
 tag resolves to a different manifest digest and therefore a different base.
@@ -536,8 +557,8 @@ window implicitly.
 ### Phase 4: Migration and default switch
 
 - [x] Implement resumable APFS-to-ext4 migration.
-- [ ] Migrate cache and snapshot formats with versioned manifests.
-- [x] Make guest-native ext4 the macOS default for non-snapshot MicroVMs.
+- [x] Migrate cache and filesystem snapshot formats with versioned manifests.
+- [x] Make guest-native ext4 the macOS default for MicroVMs.
 - [ ] Remove legacy sparse images only after verified rollback windows.
 
 ## Release Gates
@@ -556,7 +577,9 @@ The default path remains qualified by CI and host integration proving:
   path without data loss.
 
 On 2026-09-01, the physical Apple Silicon/HVF gate passed the default-path
-persistent restart, forced-crash journal recovery, stopped maintenance, and
-legacy APFS migration scenarios without an experimental selector or a shell
-library-path override. Both scenarios completed with zero live `A3SRootfs`
-attachments for ext4-backed execution.
+persistent restart, forced-crash journal recovery, stopped maintenance, legacy
+APFS migration, and raw-ext4 filesystem snapshot create/restore/delete
+scenarios without an experimental selector or a shell library-path override.
+The restored snapshot remained live after its immutable source bundle was
+deleted. Every ext4-backed scenario completed with zero live `A3SRootfs`
+attachments.

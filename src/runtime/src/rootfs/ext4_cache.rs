@@ -379,7 +379,7 @@ fn open_cache_entry(
     Ok(artifact)
 }
 
-fn clone_artifact(source: &Ext4Artifact, destination: &Path) -> Result<Ext4Artifact> {
+pub(crate) fn clone_artifact(source: &Ext4Artifact, destination: &Path) -> Result<Ext4Artifact> {
     let parent = destination.parent().ok_or_else(|| {
         cache_error(format!(
             "ext4 clone destination has no parent: {}",
@@ -431,29 +431,137 @@ fn clone_artifact(source: &Ext4Artifact, destination: &Path) -> Result<Ext4Artif
     open_ext4_artifact(destination)
 }
 
-#[cfg(target_os = "macos")]
 fn clone_disk(source: &Path, destination: &Path) -> Result<()> {
-    let output = std::process::Command::new("cp")
-        .arg("-c")
-        .arg(source)
-        .arg(destination)
-        .output()
-        .map_err(|error| cache_error(format!("failed to start APFS clone: {error}")))?;
-    if !output.status.success() {
-        return Err(cache_error(format!(
-            "failed to clone immutable ext4 base {}: {}",
-            source.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    #[cfg(target_os = "macos")]
+    if try_clonefile(source, destination)? {
+        return Ok(());
     }
-    Ok(())
+
+    #[cfg(target_os = "linux")]
+    if try_reflink(source, destination)? {
+        return Ok(());
+    }
+
+    copy_sparse_file(source, destination)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn clone_disk(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(BoxError::IoError)
+#[cfg(target_os = "macos")]
+fn try_clonefile(source: &Path, destination: &Path) -> Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source_c = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| cache_error("ext4 clone source contains a NUL byte"))?;
+    let destination_c = std::ffi::CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| cache_error("ext4 clone destination contains a NUL byte"))?;
+    // SAFETY: both C strings remain valid for the duration of clonefile(2).
+    // Failure is not fatal because a sparse extent-preserving copy is the
+    // explicit cross-volume fallback.
+    let result = unsafe { libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    match std::fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BoxError::IoError(error)),
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn try_reflink(source: &Path, destination: &Path) -> Result<bool> {
+    let source = File::open(source).map_err(BoxError::IoError)?;
+    let destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(BoxError::IoError)?;
+    // SAFETY: the ioctl receives two valid regular-file descriptors and does
+    // not outlive either File value.
+    let result = unsafe {
+        libc::ioctl(
+            destination_file.as_raw_fd(),
+            libc::FICLONE as _,
+            source.as_raw_fd(),
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+    drop(destination_file);
+    match std::fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BoxError::IoError(error)),
+    }
+    Ok(false)
+}
+
+/// Copy a sparse raw disk without ever allocating its logical capacity.
+///
+/// Snapshot and cache roots may live on different volumes, where APFS
+/// clonefile or Linux reflink is unavailable. Treating a 64 GiB sparse rootfs
+/// as a normal byte stream would turn a harmless fallback into a host-disk
+/// exhaustion event, so the fallback is explicitly extent preserving and
+/// fails closed when the filesystem cannot report sparse extents.
+fn copy_sparse_file(source: &Path, destination: &Path) -> Result<()> {
+    let mut source_file = File::open(source).map_err(BoxError::IoError)?;
+    let source_metadata = source_file.metadata().map_err(BoxError::IoError)?;
+    if !source_metadata.is_file() {
+        return Err(cache_error(format!(
+            "ext4 clone source is not a regular file: {}",
+            source.display()
+        )));
+    }
+    let length = source_metadata.len();
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(BoxError::IoError)?;
+    destination_file
+        .set_len(length)
+        .map_err(BoxError::IoError)?;
+
+    let mut offset = 0u64;
+    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
+    while offset < length {
+        let Some(data) = seek_extent(&source_file, offset, libc::SEEK_DATA, source)? else {
+            break;
+        };
+        let hole = seek_extent(&source_file, data, libc::SEEK_HOLE, source)?.unwrap_or(length);
+        if data < offset || hole <= data || hole > length {
+            return Err(cache_error(format!(
+                "invalid sparse extent while cloning {}",
+                source.display()
+            )));
+        }
+        source_file
+            .seek(SeekFrom::Start(data))
+            .map_err(BoxError::IoError)?;
+        destination_file
+            .seek(SeekFrom::Start(data))
+            .map_err(BoxError::IoError)?;
+        let mut remaining = hole - data;
+        while remaining > 0 {
+            let requested = buffer.len().min(remaining as usize);
+            let read = source_file
+                .read(&mut buffer[..requested])
+                .map_err(BoxError::IoError)?;
+            if read == 0 {
+                return Err(cache_error(format!(
+                    "unexpected EOF while cloning {}",
+                    source.display()
+                )));
+            }
+            destination_file
+                .write_all(&buffer[..read])
+                .map_err(BoxError::IoError)?;
+            remaining -= read as u64;
+        }
+        offset = hole;
+    }
+    destination_file.sync_all().map_err(BoxError::IoError)
 }
 
 fn write_cache_manifest(path: &Path, manifest: &Ext4CacheManifest) -> Result<()> {
@@ -505,7 +613,7 @@ fn read_bounded_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     })
 }
 
-fn sparse_sha256(path: &Path, expected_length: u64) -> Result<String> {
+pub(crate) fn sparse_sha256(path: &Path, expected_length: u64) -> Result<String> {
     let mut file = File::open(path).map_err(BoxError::IoError)?;
     let length = file.metadata().map_err(BoxError::IoError)?.len();
     if length != expected_length {
@@ -574,7 +682,7 @@ fn seek_extent(file: &File, offset: u64, whence: i32, path: &Path) -> Result<Opt
     )))
 }
 
-fn allocated_bytes(path: &Path) -> Result<u64> {
+pub(crate) fn allocated_bytes(path: &Path) -> Result<u64> {
     let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
     if metadata.file_type().is_symlink() {
         return Err(cache_error(format!(

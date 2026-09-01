@@ -366,6 +366,9 @@ pub(crate) fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String
     }
     a3s_box_core::dns::parse_add_host_entries(&record.add_host)
         .map_err(|e| format!("Invalid persisted add-host entry: {e}"))?;
+    let disk_mb = a3s_box_runtime::rootfs::guest_native_ext4_disk_mib(&record.box_dir)
+        .map_err(|error| format!("Invalid retained rootfs capacity: {error}"))?
+        .unwrap_or_else(|| ResourceConfig::default().disk_mb);
 
     Ok(BoxConfig {
         isolation: record.isolation,
@@ -373,6 +376,7 @@ pub(crate) fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String
         resources: ResourceConfig {
             vcpus: record.cpus,
             memory_mb: record.memory_mb,
+            disk_mb,
             ..Default::default()
         },
         cmd: record.cmd.clone(),
@@ -721,6 +725,27 @@ mod tests {
         let config = config_from_record(&record).unwrap();
 
         assert_eq!(config.network, a3s_box_core::NetworkMode::Tsi);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn config_from_record_uses_retained_raw_disk_capacity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut record = sample_record();
+        record.box_dir = temporary.path().join("box");
+        let logical = temporary.path().join("logical");
+        std::fs::create_dir(&logical).unwrap();
+        std::fs::write(logical.join("state"), b"custom-capacity").unwrap();
+        a3s_box_runtime::rootfs::publish_ext4_artifact(
+            &logical,
+            &record.box_dir.join("rootfs-ext4-v1"),
+            a3s_box_runtime::rootfs::Ext4ArtifactOptions::from_disk_mib(16, [5; 16]).unwrap(),
+        )
+        .unwrap();
+
+        let config = config_from_record(&record).unwrap();
+
+        assert_eq!(config.resources.disk_mb, 16);
     }
 
     #[test]

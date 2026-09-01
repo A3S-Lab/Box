@@ -388,6 +388,93 @@ fn guest_native_persistent_restart_and_crash_recovery() {
     smoke.remove();
 }
 
+#[test]
+#[ignore]
+fn guest_native_filesystem_snapshot_clone_is_mount_free() {
+    let mut smoke = GuestNativeSmoke::new();
+    smoke.name = format!("guest-native-snapshot-{}", std::process::id());
+    let restored_name = format!("{}-restored", smoke.name);
+    let image = std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
+    let source_name = smoke.name.clone();
+
+    smoke.ok(&[
+        "run",
+        "--detach",
+        "--persistent",
+        "--name",
+        &source_name,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf snapshot-generation >/snapshot-generation; exec sleep 3600",
+    ]);
+    smoke.ok(&[
+        "exec",
+        &source_name,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /snapshot-generation)\" = snapshot-generation; sync",
+    ]);
+    smoke.ok(&["stop", &source_name]);
+
+    let source_disk = smoke.box_dir().join("rootfs-ext4-v1/rootfs.ext4");
+    let source_before = disk_observation(&source_disk);
+    let snapshot_id = smoke
+        .ok(&[
+            "snapshot",
+            "create",
+            &source_name,
+            "--name",
+            "mount-free-snapshot",
+        ])
+        .trim()
+        .to_string();
+    assert!(snapshot_id.starts_with("snap-"), "{snapshot_id}");
+    let snapshot_dir = smoke.home.path().join("snapshots").join(&snapshot_id);
+    assert!(snapshot_dir.join("rootfs-ext4-v1/rootfs.ext4").is_file());
+    assert!(snapshot_dir.join("rootfs.json").is_file());
+    assert!(!snapshot_dir.join("rootfs").exists());
+    assert_eq!(disk_observation(&source_disk), source_before);
+    smoke.assert_no_host_attachment();
+
+    smoke.ok(&[
+        "snapshot",
+        "restore",
+        &snapshot_id,
+        "--name",
+        &restored_name,
+    ]);
+    let restored = smoke.ok(&["start", &restored_name]);
+    assert!(restored.contains(&restored_name));
+    smoke.ok(&[
+        "exec",
+        &restored_name,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /snapshot-generation)\" = snapshot-generation",
+    ]);
+    smoke.assert_no_host_attachment();
+
+    // A raw restore owns a private clone, unlike a directory snapshot lower.
+    // Deleting the immutable source snapshot cannot invalidate the live box.
+    smoke.ok(&["snapshot", "rm", &snapshot_id]);
+    assert!(!snapshot_dir.exists());
+    smoke.ok(&[
+        "exec",
+        &restored_name,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /snapshot-generation)\" = snapshot-generation",
+    ]);
+    smoke.ok(&["stop", &restored_name]);
+    smoke.ok(&["rm", "--force", &restored_name]);
+    smoke.remove();
+}
+
 fn find_binary() -> PathBuf {
     if let Ok(test_binary) = std::env::current_exe() {
         if let Some(profile_dir) = test_binary.parent().and_then(Path::parent) {

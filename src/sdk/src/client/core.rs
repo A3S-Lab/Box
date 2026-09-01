@@ -636,13 +636,6 @@ impl A3sBoxClient {
                 record.name
             )));
         }
-        let rootfs_path = resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-            ClientError::Validation(format!(
-                "rootfs not found for box {} under {} (looked for merged/ and rootfs/)",
-                record.name,
-                record.box_dir.display()
-            ))
-        })?;
         let snapshot_id = format!(
             "snap-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
@@ -678,9 +671,38 @@ impl A3sBoxClient {
             )));
         }
 
-        Ok(SnapshotSummary::from(
-            self.snapshot_store()?.save(metadata, &rootfs_path)?,
-        ))
+        let store = self.snapshot_store()?;
+        #[cfg(target_os = "macos")]
+        let saved = if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(
+            &record.box_dir,
+        )? {
+            store.save_guest_native_ext4(metadata, &record.box_dir)?
+        } else {
+            let _attached =
+                a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+            let rootfs_path = resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+                ClientError::Validation(format!(
+                    "rootfs not found for box {} under {} (looked for merged/ and rootfs/)",
+                    record.name,
+                    record.box_dir.display()
+                ))
+            })?;
+            store.save(metadata, &rootfs_path)?
+        };
+        #[cfg(not(target_os = "macos"))]
+        let saved = {
+            let _attached =
+                a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+            let rootfs_path = resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+                ClientError::Validation(format!(
+                    "rootfs not found for box {} under {} (looked for merged/ and rootfs/)",
+                    record.name,
+                    record.box_dir.display()
+                ))
+            })?;
+            store.save(metadata, &rootfs_path)?
+        };
+        Ok(SnapshotSummary::from(saved))
     }
 
     /// Restore a snapshot into a new, created box record.
@@ -714,14 +736,6 @@ impl A3sBoxClient {
             )));
         }
 
-        let snap_rootfs = store.rootfs_path(&metadata.id);
-        if !snap_rootfs.exists() {
-            return Err(ClientError::Validation(format!(
-                "snapshot rootfs is missing for snapshot {}",
-                metadata.id
-            )));
-        }
-
         let box_id = uuid::Uuid::new_v4().to_string();
         let short_id = BoxRecord::make_short_id(&box_id);
         let box_dir = self.paths.home.join("boxes").join(&box_id);
@@ -730,10 +744,18 @@ impl A3sBoxClient {
         let mut box_dir_guard = BoxDirGuard::new(box_dir.clone());
         std::fs::create_dir_all(&socket_dir)?;
         std::fs::create_dir_all(&logs_dir)?;
-        std::fs::write(
-            box_dir.join(".snapshot-lower"),
-            snap_rootfs.to_string_lossy().as_bytes(),
-        )?;
+        let restored_rootfs = store.restore_rootfs_to_box(&metadata.id, &box_dir)?;
+        let metadata = restored_rootfs.metadata;
+        metadata
+            .require_image_config()
+            .map_err(|error| ClientError::Validation(error.to_string()))?;
+        #[cfg(windows)]
+        if metadata.has_effective_health_check() {
+            return Err(ClientError::Validation(
+                "container health checks are not supported on Windows; the snapshot defines an effective health check"
+                    .to_string(),
+            ));
+        }
 
         let record = BoxRecord {
             id: box_id,

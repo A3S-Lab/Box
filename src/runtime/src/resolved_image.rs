@@ -33,6 +33,17 @@ pub fn load_resolved_image_config(box_dir: &Path) -> Result<Option<SnapshotImage
 
 pub(crate) fn persist_resolved_image_config(box_dir: &Path, config: &OciImageConfig) -> Result<()> {
     let config = SnapshotImageConfig::from(config);
+    persist_snapshot_image_config(box_dir, &config)
+}
+
+/// Persist the resolved defaults carried by a filesystem snapshot before its
+/// rootfs is booted. Raw-ext4 restores have no host directory lower from which
+/// layout preparation could recover this metadata, so the snapshot bundle is
+/// the authority for the new box-local copy.
+pub(crate) fn persist_snapshot_image_config(
+    box_dir: &Path,
+    config: &SnapshotImageConfig,
+) -> Result<()> {
     let mut encoded = serde_json::to_vec_pretty(&config).map_err(|error| {
         BoxError::SerializationError(format!(
             "Failed to encode resolved image configuration: {error}"

@@ -291,6 +291,8 @@
             std::fs::read_to_string(record.box_dir.join(".snapshot-lower")).unwrap(),
             store
                 .rootfs_path("snap-restore")
+                .canonicalize()
+                .unwrap()
                 .to_string_lossy()
                 .to_string()
         );

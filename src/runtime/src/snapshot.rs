@@ -2,10 +2,13 @@
 //!
 //! Snapshots are stored as directories under `~/.a3s/snapshots/<id>/`:
 //! - `metadata.json` — SnapshotMetadata (config, resources, env, etc.)
-//! - `rootfs/` — Copy of the box's rootfs (or symlink to cache)
+//! - `rootfs.json` — versioned payload identity
+//! - `rootfs/` — immutable directory payload (legacy-compatible), or
+//! - `rootfs-ext4-v1/` — immutable guest-native raw artifact
 //!
-//! Restore creates a new box from the saved configuration, leveraging
-//! rootfs caching for sub-500ms cold start.
+//! Directory restore creates a shared copy-on-write lower. Guest-native restore
+//! creates and verifies a private raw clone, so the restored box has no
+//! continued dependency on the snapshot bundle.
 
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
@@ -22,8 +25,10 @@ use a3s_box_core::SnapshotStoreBackend;
 use crate::file_lock::FileLock;
 
 mod copy;
+mod rootfs_bundle;
 
 use copy::{copy_dir_recursive, dir_size, install_rootfs_metadata};
+pub use rootfs_bundle::{RestoredSnapshotRootfs, SnapshotRootfsFormat, SNAPSHOT_ROOTFS_SCHEMA};
 
 /// Persistent store for VM snapshots.
 pub struct SnapshotStore {
@@ -66,7 +71,12 @@ impl SnapshotStore {
         // process can match it — it would leak permanently without this sweep.
         if let Ok(entries) = std::fs::read_dir(base_dir) {
             for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(".staging-") {
+                let is_plain_directory = entry
+                    .file_type()
+                    .is_ok_and(|file_type| file_type.is_dir() && !file_type.is_symlink());
+                if is_plain_directory
+                    && entry.file_name().to_string_lossy().starts_with(".staging-")
+                {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
@@ -112,6 +122,7 @@ impl SnapshotStore {
         rootfs_source: &Path,
         rootfs_metadata: Option<&RootfsMetadataManifest>,
     ) -> Result<SnapshotMetadata> {
+        rootfs_bundle::validate_snapshot_id(&metadata.id)?;
         let _lock = FileLock::acquire(&self.base_dir.join(".snapshot-store")).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to lock snapshot directory {}: {}",
@@ -120,11 +131,15 @@ impl SnapshotStore {
             ))
         })?;
         let snap_dir = self.base_dir.join(&metadata.id);
-        if snap_dir.exists() {
-            return Err(BoxError::CacheError(format!(
-                "Snapshot '{}' already exists",
-                metadata.id
-            )));
+        match std::fs::symlink_metadata(&snap_dir) {
+            Ok(_) => {
+                return Err(BoxError::CacheError(format!(
+                    "Snapshot '{}' already exists",
+                    metadata.id
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BoxError::IoError(error)),
         }
 
         // Build the whole snapshot in a staging dir, then atomically rename it to
@@ -160,6 +175,12 @@ impl SnapshotStore {
         // Calculate size
         metadata.size_bytes = dir_size(&rootfs_dest)?;
 
+        // New snapshots publish an explicit rootfs representation contract.
+        // Readers still accept a missing manifest only for the exact legacy
+        // directory layout, so existing snapshots remain restorable without
+        // letting a future payload be guessed from ambient files.
+        rootfs_bundle::write_directory_manifest(staging.path(), &metadata)?;
+
         // Write metadata into the staging dir.
         let meta_path = staging.path().join("metadata.json");
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
@@ -188,22 +209,10 @@ impl SnapshotStore {
 
     /// Load snapshot metadata by ID.
     pub fn get(&self, id: &str) -> Result<Option<SnapshotMetadata>> {
-        let meta_path = self.base_dir.join(id).join("metadata.json");
-        if !meta_path.exists() {
-            return Ok(None);
-        }
-
-        let data = std::fs::read_to_string(&meta_path).map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to read snapshot metadata {}: {}",
-                meta_path.display(),
-                e
-            ))
-        })?;
-        let metadata: SnapshotMetadata = serde_json::from_str(&data).map_err(|e| {
-            BoxError::SerializationError(format!("Failed to parse snapshot metadata: {}", e))
-        })?;
-        Ok(Some(metadata))
+        Ok(
+            rootfs_bundle::load_snapshot_metadata(&self.base_dir, id)?
+                .map(|(_, metadata)| metadata),
+        )
     }
 
     /// Get the rootfs path for a snapshot.
@@ -230,27 +239,28 @@ impl SnapshotStore {
             let entry = entry.map_err(|e| {
                 BoxError::CacheError(format!("Failed to read snapshot entry: {}", e))
             })?;
-            let meta_path = entry.path().join("metadata.json");
-            if meta_path.exists() {
-                match std::fs::read_to_string(&meta_path) {
-                    Ok(data) => match serde_json::from_str::<SnapshotMetadata>(&data) {
-                        Ok(meta) => snapshots.push(meta),
-                        // Don't silently skip: a metadata file that won't parse
-                        // makes the snapshot invisible to count/total_size/prune
-                        // while its rootfs keeps consuming disk. Surface it so it
-                        // can be diagnosed and cleaned up.
-                        Err(e) => tracing::warn!(
-                            path = %meta_path.display(),
-                            error = %e,
-                            "Skipping snapshot with unparseable metadata.json (orphaned on disk)"
-                        ),
-                    },
-                    Err(e) => tracing::warn!(
-                        path = %meta_path.display(),
-                        error = %e,
-                        "Skipping snapshot with unreadable metadata.json"
-                    ),
-                }
+            let entry_type = entry.file_type().map_err(BoxError::IoError)?;
+            if !entry_type.is_dir() || entry_type.is_symlink() {
+                continue;
+            }
+            let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    "Skipping snapshot with a non-UTF-8 store identity"
+                );
+                continue;
+            };
+            match self.get(&id) {
+                Ok(Some(metadata)) => snapshots.push(metadata),
+                Ok(None) => {}
+                // Don't silently skip: invalid metadata would make the
+                // snapshot invisible to count/total_size/prune while its
+                // payload keeps consuming disk. Surface it for diagnosis.
+                Err(error) => tracing::warn!(
+                    path = %entry.path().display(),
+                    %error,
+                    "Skipping snapshot with invalid persisted metadata"
+                ),
             }
         }
 
@@ -261,6 +271,22 @@ impl SnapshotStore {
 
     /// Delete a snapshot by ID.
     pub fn delete(&self, id: &str) -> Result<bool> {
+        rootfs_bundle::validate_snapshot_id(id)?;
+        let _lock = self.acquire_exclusive_lock()?;
+        let rootfs = normalize_snapshot_reference(self.rootfs_path(id));
+        if self.referenced_rootfs_paths().contains(&rootfs) {
+            return Err(BoxError::StateError(format!(
+                "Snapshot '{id}' is still used as a copy-on-write rootfs lower"
+            )));
+        }
+        self.delete_locked(id)
+    }
+
+    /// Delete a snapshot even when a restored directory-backed box still
+    /// references it. This deliberately unsafe operation exists only for the
+    /// CLI's explicit `snapshot rm --force` contract.
+    pub fn delete_force(&self, id: &str) -> Result<bool> {
+        rootfs_bundle::validate_snapshot_id(id)?;
         let _lock = self.acquire_exclusive_lock()?;
         self.delete_locked(id)
     }
@@ -270,9 +296,18 @@ impl SnapshotStore {
     /// This is crate-visible so managed execution reservation can validate and
     /// persist a Snapshot reference under the same lock used by deletion.
     pub(crate) fn delete_locked(&self, id: &str) -> Result<bool> {
+        rootfs_bundle::validate_snapshot_id(id)?;
         let snap_dir = self.base_dir.join(id);
-        if !snap_dir.exists() {
-            return Ok(false);
+        let metadata = match std::fs::symlink_metadata(&snap_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(BoxError::CacheError(format!(
+                "Snapshot bundle is not a plain directory: {}",
+                snap_dir.display()
+            )));
         }
 
         std::fs::remove_dir_all(&snap_dir).map_err(|e| {
@@ -313,9 +348,9 @@ impl SnapshotStore {
             }
 
             // Oldest (last) snapshot that is not an in-use CoW lower.
-            let idx = snapshots
-                .iter()
-                .rposition(|s| !protected.contains(&self.rootfs_path(&s.id)));
+            let idx = snapshots.iter().rposition(|s| {
+                !protected.contains(&normalize_snapshot_reference(self.rootfs_path(&s.id)))
+            });
             match idx {
                 Some(i) => {
                     let snap = snapshots.remove(i);
@@ -352,12 +387,16 @@ impl SnapshotStore {
         if let Ok(entries) = std::fs::read_dir(&boxes) {
             for entry in entries.flatten() {
                 if let Ok(content) = std::fs::read_to_string(entry.path().join(".snapshot-lower")) {
-                    set.insert(PathBuf::from(content.trim()));
+                    set.insert(normalize_snapshot_reference(PathBuf::from(content.trim())));
                 }
             }
         }
         set
     }
+}
+
+fn normalize_snapshot_reference(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
 }
 
 impl SnapshotStoreBackend for SnapshotStore {
@@ -523,6 +562,73 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
         assert!(!store.delete("nope").unwrap());
+    }
+
+    #[test]
+    fn snapshot_ids_cannot_escape_the_store() {
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = make_rootfs(&tmp);
+
+        for id in ["", ".", "..", "../outside", "nested/snapshot"] {
+            let save_error = store
+                .save(make_metadata(id, "invalid"), &rootfs)
+                .unwrap_err()
+                .to_string();
+            assert!(save_error.contains("invalid snapshot id"), "{save_error}");
+            let get_error = store.get(id).unwrap_err().to_string();
+            assert!(get_error.contains("invalid snapshot id"), "{get_error}");
+            let delete_error = store.delete_force(id).unwrap_err().to_string();
+            assert!(
+                delete_error.contains("invalid snapshot id"),
+                "{delete_error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_delete_never_follows_a_bundle_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let snapshots = tmp.path().join("snapshots");
+        let store = SnapshotStore::new(&snapshots).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), b"external").unwrap();
+        std::os::unix::fs::symlink(&outside, snapshots.join("forged")).unwrap();
+
+        let error = store.delete_force("forged").unwrap_err().to_string();
+
+        assert!(error.contains("not a plain directory"), "{error}");
+        assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"external");
+        assert!(snapshots.join("forged").symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn delete_refuses_a_referenced_directory_snapshot_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = make_rootfs(&tmp);
+        store
+            .save(make_metadata("snap-used", "used"), &rootfs)
+            .unwrap();
+        let box_dir = tmp.path().join("boxes/restored");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            store
+                .rootfs_path("snap-used")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        let error = store.delete("snap-used").unwrap_err().to_string();
+        assert!(error.contains("still used"), "{error}");
+        assert!(store.get("snap-used").unwrap().is_some());
+        assert!(store.delete_force("snap-used").unwrap());
     }
 
     #[test]

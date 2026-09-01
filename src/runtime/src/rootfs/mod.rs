@@ -207,6 +207,99 @@ pub fn guest_native_ext4_generation_exists(box_dir: &Path) -> Result<bool> {
     }
 }
 
+/// Return the logical disk capacity owned by a retained guest-native rootfs.
+///
+/// CLI state predates block-root capacities and therefore cannot be the source
+/// of truth for a restored raw snapshot. Reconstructing a boot must use the
+/// validated artifact's own immutable geometry instead of silently applying a
+/// process default that may disagree with it.
+pub fn guest_native_ext4_disk_mib(box_dir: &Path) -> Result<Option<u32>> {
+    if !guest_native_ext4_generation_exists(box_dir)? {
+        return Ok(None);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let directory = GuestNativeExt4Provider::artifact_directory(box_dir);
+        let (artifact, _) = ext4_artifact::open_ext4_artifact_for_resume(&directory)?;
+        const MIB: u64 = 1024 * 1024;
+        if artifact.manifest.capacity_bytes % MIB != 0 {
+            return Err(BoxError::StateError(format!(
+                "Guest-native rootfs capacity is not MiB-aligned at {}",
+                artifact.disk.display()
+            )));
+        }
+        let disk_mib = u32::try_from(artifact.manifest.capacity_bytes / MIB).map_err(|_| {
+            BoxError::StateError(format!(
+                "Guest-native rootfs capacity exceeds the Box configuration range at {}",
+                artifact.disk.display()
+            ))
+        })?;
+        Ok(Some(disk_mib))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(BoxError::StateError(format!(
+            "Guest-native rootfs state is unsupported on this host: {}",
+            box_dir.join("rootfs-ext4-v1").display()
+        )))
+    }
+}
+
+/// Open a clean guest-native generation for an immutable filesystem snapshot.
+///
+/// A snapshot is observational state: it must never replay a guest journal or
+/// capture a disk whose final writes are still ambiguous. Normal writable boot
+/// owns recovery; callers can retry after one successful start and clean stop.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_clean_guest_native_ext4_artifact(
+    artifact_directory: &Path,
+) -> Result<Ext4Artifact> {
+    let (artifact, validation) = ext4_artifact::open_ext4_artifact_for_resume(artifact_directory)?;
+    if validation == ext4::Ext4ResumeValidation::JournalRecoveryRequired {
+        return Err(BoxError::StateError(format!(
+            "Guest-native rootfs at {} needs ext4 journal recovery; start the box and stop it cleanly before creating or restoring a filesystem snapshot",
+            artifact.disk.display()
+        )));
+    }
+    Ok(artifact)
+}
+
+/// Clone one clean raw-ext4 generation into a private atomically published
+/// artifact directory. The source is never attached or opened writable.
+#[cfg(target_os = "macos")]
+pub(crate) fn clone_clean_guest_native_ext4_artifact(
+    artifact_directory: &Path,
+    destination: &Path,
+) -> Result<Ext4Artifact> {
+    let source = open_clean_guest_native_ext4_artifact(artifact_directory)?;
+    let cloned = ext4_cache::clone_artifact(&source, destination)?;
+    let validated = match open_clean_guest_native_ext4_artifact(destination) {
+        Ok(validated) => validated,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(destination);
+            return Err(error);
+        }
+    };
+    if cloned != validated || source.manifest != validated.manifest {
+        let _ = std::fs::remove_dir_all(destination);
+        return Err(BoxError::StateError(format!(
+            "Cloned guest-native rootfs identity changed at {}",
+            destination.display()
+        )));
+    }
+    Ok(validated)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn guest_native_ext4_sparse_digest(artifact: &Ext4Artifact) -> Result<String> {
+    ext4_cache::sparse_sha256(&artifact.disk, artifact.manifest.capacity_bytes)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn guest_native_ext4_allocated_bytes(artifact_directory: &Path) -> Result<u64> {
+    ext4_cache::allocated_bytes(artifact_directory)
+}
+
 /// Resolve a clean guest-native generation for the trusted read-only
 /// maintenance VM.
 ///

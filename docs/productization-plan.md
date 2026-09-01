@@ -688,13 +688,15 @@ Current notes:
   container rootfs snapshot and surfaced through `ContainerStatus`, while
   writable, SELinux relabel, non-private propagation, and device mounts fail
   explicitly until real runtime mount plumbing is added.
-- macOS non-snapshot MicroVM root filesystems now default to private raw ext4
+- macOS MicroVM root filesystems now default to private raw ext4
   disks assembled directly from verified OCI layers. Persistent generations
-  restart from the same guest-written disk, while snapshot-backed and explicitly
-  requested legacy generations use the case-sensitive APFS compatibility
+  restart from the same guest-written disk, filesystem snapshots clone it
+  through a versioned integrity-checked bundle, and only explicitly requested
+  legacy generations or migration use the case-sensitive APFS compatibility
   provider. Real HVF regressions verify case-sensitive names, clean restart,
-  forced-crash journal recovery, stopped maintenance operations, APFS migration,
-  and zero `A3SRootfs` attachments for the default path.
+  forced-crash journal recovery, stopped maintenance operations, mount-free
+  snapshot restore, APFS migration, and zero `A3SRootfs` attachments for the
+  guest-native path.
 - CI rejects the removed external VM backend identifiers, CLI flags,
   environment variables, and source module so another build engine cannot be
   reintroduced as a compatibility fallback.
