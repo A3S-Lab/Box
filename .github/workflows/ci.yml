@@ -529,6 +529,13 @@ jobs:
             "$RUNNER_TEMP" \
             "$install_dir"
 
+          sudo install -d -m 755 "$A3S_HOME/bin"
+          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
+            sudo ln -s "$install_dir/$artifact" "$A3S_HOME/bin/$artifact"
+            test "$(realpath "$A3S_HOME/bin/$artifact")" = \
+              "$(realpath "$install_dir/$artifact")"
+          done
+
           {
             echo "A3S_BOX_INSTALL_DIR=$install_dir"
             echo "A3S_BOX_BINARY=$install_dir/a3s-box"
