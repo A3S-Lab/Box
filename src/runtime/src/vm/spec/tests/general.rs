@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn anonymous_volume_plan_normalizes_deduplicates_and_honors_explicit_mounts() {
+    let explicit = tempfile::tempdir().unwrap();
+    let vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data/./", explicit.path().display())],
+        ..Default::default()
+    });
+    let mut image = test_oci_config(None, None);
+    image.volumes = vec![
+        "/data".to_string(),
+        "/data/".to_string(),
+        "/cache/./".to_string(),
+        "/cache".to_string(),
+    ];
+
+    let plan = vm.plan_anonymous_volumes(&image).unwrap();
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].guest_path, "/cache");
+}
+
+#[test]
+fn anonymous_volume_identity_is_deterministic_and_bound_to_the_full_execution_id() {
+    let image = OciImageConfig {
+        volumes: vec!["/var/cache".to_string(), "/data".to_string()],
+        ..test_oci_config(None, None)
+    };
+    let reordered_image = OciImageConfig {
+        volumes: vec!["/data".to_string(), "/var/cache".to_string()],
+        ..test_oci_config(None, None)
+    };
+    let first = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(1),
+        "12345678-0000-0000-0000-000000000001".to_string(),
+    );
+    let second = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(1),
+        "12345678-0000-0000-0000-000000000002".to_string(),
+    );
+
+    let first_plan = first.plan_anonymous_volumes(&image).unwrap();
+    let replay = first.plan_anonymous_volumes(&reordered_image).unwrap();
+    let second_plan = second.plan_anonymous_volumes(&image).unwrap();
+
+    assert_eq!(first_plan, replay);
+    assert_ne!(first_plan[0].name, second_plan[0].name);
+    assert!(first_plan[0].name.starts_with("anon_12345678_"));
+}
+
+#[test]
 fn test_build_instance_spec_passes_configured_virtiofs_cache_mode() {
     let dir = tempdir().unwrap();
     let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);

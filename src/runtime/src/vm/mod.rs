@@ -620,7 +620,7 @@ impl VmManager {
         );
 
         for volume_name in &created {
-            if let Err(error) = store.remove(volume_name, true) {
+            if let Err(error) = store.remove_anonymous(volume_name, &self.box_id) {
                 tracing::debug!(
                     box_id = %self.box_id,
                     volume = volume_name,

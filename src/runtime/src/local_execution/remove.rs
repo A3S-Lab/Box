@@ -153,15 +153,9 @@ fn remove_anonymous_volumes(home_dir: &Path, record: &BoxRecord) -> ExecutionMan
     }
     let store = crate::VolumeStore::new(home_dir.join("volumes.json"), home_dir.join("volumes"));
     for name in &record.anonymous_volumes {
-        if store
-            .get(name)
-            .map_err(|error| cleanup_error(record, "inspect an anonymous volume", error))?
-            .is_some()
-        {
-            store
-                .remove(name, true)
-                .map_err(|error| cleanup_error(record, "remove an anonymous volume", error))?;
-        }
+        store
+            .remove_anonymous(name, &record.id)
+            .map_err(|error| cleanup_error(record, "remove an anonymous volume", error))?;
     }
     Ok(())
 }

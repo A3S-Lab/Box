@@ -640,7 +640,7 @@ async fn cleanup_managed_execution(
         if natural_exit {
             // Explicit managed kills remove auto-remove anonymous volumes in the
             // backend. Natural exit has no kill path, so the CLI owns cleanup.
-            crate::cleanup::cleanup_anonymous_volumes(&ctx.anonymous_volumes);
+            crate::cleanup::cleanup_anonymous_volumes(&ctx.box_id, &ctx.anonymous_volumes);
         }
         if let Err(error) = std::fs::remove_dir_all(&ctx.box_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {

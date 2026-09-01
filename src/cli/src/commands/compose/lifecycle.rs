@@ -80,7 +80,7 @@ pub(super) fn cleanup_partial_service_box(
     anonymous_volumes: &[String],
 ) {
     crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name);
-    crate::cleanup::cleanup_anonymous_volumes(anonymous_volumes);
+    crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes);
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above

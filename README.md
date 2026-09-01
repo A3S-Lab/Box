@@ -295,8 +295,11 @@ endpoint must be supplied explicitly so this experimental service can never
 activate by accident.
 
 Current Linux opt-in limits are intentional: only new Sandbox reservations are
-routed there; `all`/MicroVM migration is rejected on Linux; image-declared
-anonymous volumes must be replaced by explicit named or bind mounts. CLI
+routed there, and `all`/MicroVM migration is rejected on Linux. Image-declared
+anonymous volumes are planned from normalized image metadata after capability
+preflight, persisted in the initial Box reservation, and atomically claimed by
+the exact execution during bundle preparation. Recovery and removal therefore
+use durable ownership rather than scanning host directories. CLI
 `attach` now uses the persisted OCI route: read-only attach follows the
 generation-fenced Box console projection, while `attach -t` opens an exact
 managed PTY session; neither path falls back to a Box-owned runtime socket.

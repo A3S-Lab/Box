@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use super::record::build_managed_record;
 use super::{
     LocalExecutionBackend, LocalExecutionBackendRouter, LocalExecutionHandle,
-    LocalExecutionManager, LocalExecutionObservation, OciMigrationPolicy,
+    LocalExecutionManager, LocalExecutionObservation, LocalExecutionResourcePlan,
+    OciMigrationPolicy,
 };
 use crate::{BoxRecord, ManagedRuntimeRoute};
 
@@ -24,6 +25,7 @@ struct RoutedProbeBackend {
     kills: AtomicUsize,
     observed_isolations: Mutex<Vec<ExecutionIsolation>>,
     observed_routes: Mutex<Vec<ManagedRuntimeRoute>>,
+    planned_anonymous_volumes: Mutex<Vec<String>>,
 }
 
 impl RoutedProbeBackend {
@@ -53,6 +55,11 @@ impl RoutedProbeBackend {
 
     fn observed_isolations(&self) -> Vec<ExecutionIsolation> {
         self.observed_isolations.lock().unwrap().clone()
+    }
+
+    fn plan_anonymous_volumes(&self, names: &[&str]) {
+        *self.planned_anonymous_volumes.lock().unwrap() =
+            names.iter().map(|name| (*name).to_string()).collect();
     }
 }
 
@@ -89,6 +96,15 @@ impl LocalExecutionBackend for RoutedProbeBackend {
         } else {
             Ok(())
         }
+    }
+
+    async fn plan_create_resources(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        Ok(LocalExecutionResourcePlan {
+            anonymous_volumes: self.planned_anonymous_volumes.lock().unwrap().clone(),
+        })
     }
 
     async fn start(&self, _record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
@@ -164,6 +180,7 @@ async fn sandbox_policy_stamps_oci_route_before_preflight_and_reservation() {
     let temporary = tempfile::tempdir().unwrap();
     let legacy = Arc::new(RoutedProbeBackend::default());
     let oci = Arc::new(RoutedProbeBackend::default());
+    oci.plan_anonymous_volumes(&["anon_planned_one", "anon_planned_two"]);
     let router = LocalExecutionBackendRouter::new(
         legacy.clone(),
         oci.clone(),
@@ -189,12 +206,45 @@ async fn sandbox_policy_stamps_oci_route_before_preflight_and_reservation() {
         .expect("reserved record");
 
     assert_eq!(
-        record.managed_execution.unwrap().runtime_route,
+        record.managed_execution.as_ref().unwrap().runtime_route,
         ManagedRuntimeRoute::OciSdk
     );
     assert_eq!(legacy.preflights(), 0);
     assert_eq!(oci.preflights(), 1);
     assert_eq!(oci.observed_routes(), vec![ManagedRuntimeRoute::OciSdk]);
+    assert_eq!(
+        record.anonymous_volumes,
+        vec!["anon_planned_one", "anon_planned_two"]
+    );
+}
+
+#[tokio::test]
+async fn invalid_backend_resource_plan_is_never_reserved() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("boxes.json");
+    let legacy = Arc::new(RoutedProbeBackend::default());
+    let oci = Arc::new(RoutedProbeBackend::default());
+    oci.plan_anonymous_volumes(&["../escaped"]);
+    let manager = LocalExecutionManager::new(
+        &state_path,
+        temporary.path(),
+        Arc::new(LocalExecutionBackendRouter::new(
+            legacy,
+            oci,
+            OciMigrationPolicy::AllViaOci,
+        )),
+    );
+
+    let error = manager
+        .create(
+            request(ExecutionIsolation::Sandbox),
+            &OperationId::new("invalid-resource-plan").unwrap(),
+        )
+        .await
+        .expect_err("unsafe planned identities must fail before reservation");
+
+    assert!(matches!(error, ExecutionManagerError::Internal(_)));
+    assert!(!state_path.exists());
 }
 
 #[tokio::test]

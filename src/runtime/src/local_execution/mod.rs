@@ -58,7 +58,7 @@ use a3s_box_core::{
 
 pub use backend::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
-    LocalExecutionTermination,
+    LocalExecutionResourcePlan, LocalExecutionTermination,
 };
 pub use oci_backend::{
     oci_isolation_request, OciBundlePreparationContext, OciBundleProvider, OciLifecycleAdapter,

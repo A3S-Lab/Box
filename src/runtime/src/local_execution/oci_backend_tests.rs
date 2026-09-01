@@ -1268,6 +1268,7 @@ impl OciRuntimeService for FakeRuntimeService {
 
 #[derive(Default)]
 struct FakeBundleProvider {
+    resource_plans: AtomicUsize,
     prepares: AtomicUsize,
     cleanups: AtomicUsize,
     projection_ensures: AtomicUsize,
@@ -1278,10 +1279,25 @@ struct FakeBundleProvider {
     expected_snapshot_lower: Mutex<Option<std::path::PathBuf>>,
     snapshot_lower_observed: AtomicBool,
     last_box_dir: Mutex<Option<std::path::PathBuf>>,
+    planned_anonymous_volumes: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl OciBundleProvider for FakeBundleProvider {
+    async fn plan_create_resources(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        self.resource_plans.fetch_add(1, Ordering::SeqCst);
+        Ok(LocalExecutionResourcePlan {
+            anonymous_volumes: self
+                .planned_anonymous_volumes
+                .lock()
+                .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?
+                .clone(),
+        })
+    }
+
     async fn prepare(
         &self,
         record: &BoxRecord,
@@ -1714,6 +1730,39 @@ async fn isolation_preflight_rejects_probe_only_driver_without_product_mutation(
     assert!(!manager.state_path().exists());
     assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
     assert!(service.create_requests().is_empty());
+}
+
+#[tokio::test]
+async fn create_persists_provider_resource_plan_before_any_runtime_preparation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    *provider.planned_anonymous_volumes.lock().unwrap() =
+        vec!["anon_12345678_0123456789abcdef0123456789abcdef".to_string()];
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+
+    let reservation = manager
+        .create(
+            request("planned-resources", ExecutionIsolation::Sandbox),
+            &box_operation("planned-resources-create"),
+        )
+        .await
+        .expect("reserve the provider resource plan");
+    let record = persisted(&manager, &reservation.execution_id);
+
+    assert_eq!(
+        record.anonymous_volumes,
+        vec!["anon_12345678_0123456789abcdef0123456789abcdef"]
+    );
+    assert_eq!(provider.resource_plans.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
+    assert!(service.create_requests().is_empty());
+    assert!(!record.box_dir.exists());
 }
 
 #[tokio::test]

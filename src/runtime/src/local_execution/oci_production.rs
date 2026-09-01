@@ -11,10 +11,11 @@ use a3s_oci_sdk::{CreateAttachments, IoMode, IsolationRequest, OciBundle, Proces
 use async_trait::async_trait;
 
 use super::{
-    OciBundlePreparationContext, OciBundleProvider, OciPreparedExecution, VmLocalExecutionBackend,
+    LocalExecutionResourcePlan, OciBundlePreparationContext, OciBundleProvider,
+    OciPreparedExecution, VmLocalExecutionBackend,
 };
 use crate::sandbox::probe_sandbox_capabilities_for;
-use crate::BoxRecord;
+use crate::{BoxRecord, ManagedExecutionMetadata};
 
 /// Prepares immutable bundles from Box image/rootfs policy while the separate
 /// A3S OCI Runtime service owns container lifecycle and I/O.
@@ -79,32 +80,49 @@ impl NativeLinuxOciBundleProvider {
 
 #[async_trait]
 impl OciBundleProvider for NativeLinuxOciBundleProvider {
+    async fn plan_create_resources(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        let metadata = native_linux_metadata(record)?;
+        let mut manager = self.preparer.new_oci_preparation_manager(record)?;
+        let anonymous_volumes =
+            if let Some(snapshot_id) = metadata.request.rootfs_snapshot_id.as_ref() {
+                let home_dir = self.preparer.home_dir().to_path_buf();
+                let snapshot_id = snapshot_id.to_string();
+                let expected_image = metadata.request.config.image.clone();
+                let config = tokio::task::spawn_blocking(move || {
+                    let store = crate::SnapshotStore::new(&home_dir.join("snapshots"))?;
+                    let _snapshot_lock = store.acquire_exclusive_lock()?;
+                    let rootfs = store.rootfs_path(&snapshot_id);
+                    crate::resolved_image::load_snapshot_oci_config(&rootfs, &expected_image)
+                })
+                .await
+                .map_err(|error| {
+                    ExecutionManagerError::Internal(format!(
+                        "native Linux OCI snapshot resource planning task failed: {error}"
+                    ))
+                })?
+                .map_err(|error| preparation_error("plan snapshot-owned resources", error))?;
+                manager
+                    .plan_anonymous_volumes(&config)
+                    .map(|plans| plans.into_iter().map(|plan| plan.name).collect())
+                    .map_err(|error| preparation_error("plan snapshot-owned resources", error))?
+            } else {
+                manager
+                    .plan_image_anonymous_volumes()
+                    .await
+                    .map_err(|error| preparation_error("plan image-owned resources", error))?
+            };
+        Ok(LocalExecutionResourcePlan { anonymous_volumes })
+    }
+
     async fn prepare(
         &self,
         record: &BoxRecord,
         _context: &OciBundlePreparationContext,
     ) -> ExecutionManagerResult<OciPreparedExecution> {
-        if record.isolation != ExecutionIsolation::Sandbox {
-            return Err(ExecutionManagerError::InvalidRequest(format!(
-                "native Linux OCI migration only prepares Sandbox executions, got {:?}",
-                record.isolation
-            )));
-        }
-        let metadata = record.managed_execution.as_ref().ok_or_else(|| {
-            ExecutionManagerError::Internal(format!(
-                "execution {} has no managed lifecycle metadata",
-                record.id
-            ))
-        })?;
-        metadata
-            .validate()
-            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
-        if metadata.plan.backend != ExecutionBackend::A3sOci {
-            return Err(ExecutionManagerError::InvalidRequest(format!(
-                "execution {} did not resolve to the A3S OCI Sandbox backend",
-                record.id
-            )));
-        }
+        let metadata = native_linux_metadata(record)?;
 
         // Re-hash the exact configured artifacts immediately before rootfs or
         // bundle mutations. Owner startup and bundle evidence use this same pair.
@@ -546,6 +564,31 @@ fn preparation_error(action: &str, error: BoxError) -> ExecutionManagerError {
     }
 }
 
+fn native_linux_metadata(record: &BoxRecord) -> ExecutionManagerResult<&ManagedExecutionMetadata> {
+    if record.isolation != ExecutionIsolation::Sandbox {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "native Linux OCI migration only prepares Sandbox executions, got {:?}",
+            record.isolation
+        )));
+    }
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "execution {} has no managed lifecycle metadata",
+            record.id
+        ))
+    })?;
+    metadata
+        .validate()
+        .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+    if metadata.plan.backend != ExecutionBackend::A3sOci {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "execution {} did not resolve to the A3S OCI Sandbox backend",
+            record.id
+        )));
+    }
+    Ok(metadata)
+}
+
 fn cleanup_after_prepare_failure(
     manager: &crate::VmManager,
     message: String,
@@ -555,5 +598,75 @@ fn cleanup_after_prepare_failure(
         Err(cleanup) => {
             ExecutionManagerError::Internal(format!("{message}; cleanup also failed: {cleanup}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use a3s_box_core::{
+        BoxConfig, CreateExecutionRequest, ExecutionId, ExecutionIsolation, ExecutionSnapshotId,
+        NetworkMode, OperationId, SnapshotImageConfig, SnapshotMetadata,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn native_resource_plan_uses_snapshot_metadata_without_resolving_a_moved_tag() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("home");
+        let snapshot_id = "anonymous-volume-snapshot";
+        let image = "example.invalid/moved:latest";
+        let source = temporary.path().join("snapshot-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        let mut snapshot = SnapshotMetadata::new(
+            snapshot_id.to_string(),
+            snapshot_id.to_string(),
+            "source-execution".to_string(),
+            image.to_string(),
+        );
+        snapshot.image_config = Some(SnapshotImageConfig {
+            volumes: vec!["/snapshot-data".to_string()],
+            ..Default::default()
+        });
+        crate::SnapshotStore::new(&home.join("snapshots"))
+            .unwrap()
+            .save(snapshot, &source)
+            .unwrap();
+
+        let execution_id =
+            ExecutionId::new("12345678-0000-0000-0000-000000000001".to_string()).unwrap();
+        let request = CreateExecutionRequest {
+            external_sandbox_id: "snapshot-plan".to_string(),
+            config: BoxConfig {
+                image: image.to_string(),
+                isolation: ExecutionIsolation::Sandbox,
+                network: NetworkMode::None,
+                ..Default::default()
+            },
+            labels: BTreeMap::new(),
+            policy: Default::default(),
+            rootfs_snapshot_id: Some(ExecutionSnapshotId::new(snapshot_id).unwrap()),
+        };
+        let mut record = crate::local_execution::record::build_managed_record(
+            &home,
+            &execution_id,
+            OperationId::new("snapshot-resource-plan").unwrap(),
+            request,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        record.managed_execution.as_mut().unwrap().runtime_route =
+            crate::ManagedRuntimeRoute::OciSdk;
+        let provider = NativeLinuxOciBundleProvider::new(&home, "/runtime", "/agent");
+
+        let plan = provider.plan_create_resources(&record).await.unwrap();
+
+        assert_eq!(plan.anonymous_volumes.len(), 1);
+        assert!(plan.anonymous_volumes[0].starts_with("anon_12345678_"));
+        assert!(!home.join("images").exists());
+        assert!(!record.box_dir.exists());
+        assert!(!home.join("volumes").exists());
     }
 }

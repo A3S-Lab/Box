@@ -18,6 +18,41 @@ mod image;
 pub(crate) use image::persistent_rootfs_generation_exists;
 use image::{registry_auth_for_image, validate_image_health_support};
 impl VmManager {
+    /// Resolve only immutable image metadata needed to reserve Box-owned
+    /// resources. This deliberately does not prepare a rootfs, workspace,
+    /// socket, mount, or volume directory.
+    pub(crate) async fn plan_image_anonymous_volumes(&mut self) -> Result<Vec<String>> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let image_config = match crate::resolved_image::load_resolved_image_config(&box_dir)? {
+            Some(persisted) => crate::oci::OciImageConfig::from(persisted),
+            None => {
+                let reference = self.config.image.clone();
+                let images_dir = self.home_dir.join("images");
+                let store =
+                    crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
+                let auth = registry_auth_for_image(
+                    &self.home_dir,
+                    &reference,
+                    self.transient_registry_auth.take(),
+                )?;
+                let mut puller = crate::oci::ImagePuller::new(std::sync::Arc::new(store), auth);
+                if let Some(ref metrics) = self.prom {
+                    puller = puller.set_metrics(metrics.clone());
+                }
+                if let Some(ref progress) = self.pull_progress_fn {
+                    puller = puller.with_progress_fn(progress.clone());
+                }
+                let image = puller.pull(&reference).await?;
+                let config = image.config().clone();
+                drop(puller);
+                config
+            }
+        };
+
+        self.plan_anonymous_volumes(&image_config)
+            .map(|plans| plans.into_iter().map(|plan| plan.name).collect())
+    }
+
     pub(crate) async fn prepare_layout(&mut self) -> Result<BoxLayout> {
         let transient_registry_auth = self.transient_registry_auth.take();
         // Create box-specific directories

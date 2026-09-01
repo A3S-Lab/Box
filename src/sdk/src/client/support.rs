@@ -515,7 +515,7 @@ fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) {
 fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) {
     detach_volumes(paths, &record.volume_names, &record.id);
     cleanup_network_endpoint(paths, record);
-    cleanup_anonymous_volumes(paths, &record.anonymous_volumes);
+    cleanup_anonymous_volumes(paths, &record.id, &record.anonymous_volumes);
     remove_host_cgroup(record);
     if record.box_dir.exists() {
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
@@ -538,10 +538,10 @@ fn detach_volumes(paths: &A3sBoxPaths, volume_names: &[String], box_id: &str) {
     }
 }
 
-fn cleanup_anonymous_volumes(paths: &A3sBoxPaths, volume_names: &[String]) {
+fn cleanup_anonymous_volumes(paths: &A3sBoxPaths, owner: &str, volume_names: &[String]) {
     let store = VolumeStore::new(&paths.volumes_file, &paths.volumes_dir);
     for volume_name in volume_names {
-        let _ = store.remove(volume_name, true);
+        let _ = store.remove_anonymous(volume_name, owner);
     }
 }
 

@@ -95,8 +95,8 @@ async fn test_cleanup_boot_failure_stops_handler_and_removes_created_volumes() {
     let mut vm =
         VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
     vm.home_dir = tmp.path().to_path_buf();
-    vm.anonymous_volumes = vec!["created-volume".to_string(), "reused-volume".to_string()];
-    vm.created_anonymous_volumes = vec!["created-volume".to_string()];
+    vm.anonymous_volumes = vec!["anon_created".to_string(), "anon_reused".to_string()];
+    vm.created_anonymous_volumes = vec!["anon_created".to_string()];
 
     let stopped = Arc::new(AtomicBool::new(false));
     *vm.handler.write().await = Some(Box::new(RecordingHandler {
@@ -110,24 +110,17 @@ async fn test_cleanup_boot_failure_stops_handler_and_removes_created_volumes() {
         tmp.path().join("volumes.json"),
         tmp.path().join("volumes"),
     );
-    store
-        .create(a3s_box_core::volume::VolumeConfig::new(
-            "created-volume",
-            "",
-        ))
-        .unwrap();
-    store
-        .create(a3s_box_core::volume::VolumeConfig::new("reused-volume", ""))
-        .unwrap();
+    store.claim_anonymous("anon_created", &box_id).unwrap();
+    store.claim_anonymous("anon_reused", &box_id).unwrap();
 
     vm.cleanup_boot_failure().await;
 
     assert!(stopped.load(Ordering::SeqCst));
     assert!(vm.handler.read().await.is_none());
     assert!(vm.created_anonymous_volumes.is_empty());
-    assert_eq!(vm.anonymous_volumes, vec!["reused-volume".to_string()]);
-    assert!(store.get("created-volume").unwrap().is_none());
-    assert!(store.get("reused-volume").unwrap().is_some());
+    assert_eq!(vm.anonymous_volumes, vec!["anon_reused".to_string()]);
+    assert!(store.get("anon_created").unwrap().is_none());
+    assert!(store.get("anon_reused").unwrap().is_some());
     assert!(!box_dir.exists());
 }
 

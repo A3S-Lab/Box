@@ -266,6 +266,11 @@ The bundle compiler distinguishes:
 Mount destinations are normalized, traversal is rejected, and overlapping
 reserved paths fail validation. Volume ownership and UID/GID mapping are
 preserved across stop/restart and released exactly once at terminal cleanup.
+Image-declared anonymous volumes use a two-phase Box contract: immutable image
+metadata produces deterministic execution-bound identities before the initial
+record is reserved, then bundle preparation atomically claims only those exact
+identities. A named-volume collision or a different existing owner fails closed;
+no rootfs, mount, workspace, socket, or volume is created by the planning phase.
 
 Caller-owned read-only sources may live below a provider directory that is
 intentionally not searchable by the mapped container identity. Box opens the

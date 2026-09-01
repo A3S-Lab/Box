@@ -473,7 +473,8 @@ impl VmLocalExecutionBackend {
             if anonymous_volumes.is_empty() {
                 anonymous_volumes = self.anonymous_volumes_for_record(record).await;
             }
-            self.cleanup_anonymous_volumes(anonymous_volumes).await;
+            self.cleanup_anonymous_volumes(&record.id, anonymous_volumes)
+                .await;
         }
         Ok(LocalExecutionTermination {
             outcome: KillOutcome::Killed,
@@ -530,18 +531,19 @@ impl VmLocalExecutionBackend {
         }
     }
 
-    async fn cleanup_anonymous_volumes(&self, names: Vec<String>) {
+    async fn cleanup_anonymous_volumes(&self, owner: &str, names: Vec<String>) {
         if names.is_empty() {
             return;
         }
         let home_dir = self.home_dir.clone();
+        let owner = owner.to_string();
         let task = tokio::task::spawn_blocking(move || {
             let store = crate::VolumeStore::new(
                 home_dir.join("volumes.json"),
                 home_dir.join("volumes"),
             );
             for name in names {
-                if let Err(error) = store.remove(&name, true) {
+                if let Err(error) = store.remove_anonymous(&name, &owner) {
                     tracing::warn!(volume = %name, %error, "Failed to remove managed anonymous volume");
                 }
             }

@@ -39,6 +39,10 @@ impl ExecutionManager for LocalExecutionManager {
             })?
             .runtime_route = route;
         self.backend.preflight(&record).await?;
+        self.backend
+            .plan_create_resources(&record)
+            .await?
+            .apply_to(&mut record)?;
         let reservation = self.reserve(record).await?;
         super::record::reservation_from_record(reservation.record())
     }
