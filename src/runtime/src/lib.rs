@@ -83,10 +83,10 @@ pub use box_state::BoxStateStore;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
     LocalExecutionBackendRouter, LocalExecutionHandle, LocalExecutionManager,
-    LocalExecutionObservation, LocalExecutionTermination, OciBundlePreparationContext,
-    OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend, OciMigrationPolicy,
-    OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint, OciRuntimeLaunch,
-    OCI_RUNTIME_BINDING_SCHEMA_VERSION,
+    LocalExecutionObservation, LocalExecutionResourcePlan, LocalExecutionTermination,
+    OciBundlePreparationContext, OciBundleProvider, OciLifecycleAdapter, OciLocalExecutionBackend,
+    OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint,
+    OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 #[cfg(feature = "vm")]
 pub use local_execution::{

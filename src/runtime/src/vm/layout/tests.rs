@@ -97,6 +97,40 @@ fn write_static_test_elf(path: &Path) {
     std::fs::write(path, elf).unwrap();
 }
 
+#[tokio::test]
+async fn image_resource_planning_reads_metadata_without_preparing_runtime_artifacts() {
+    let home = TempDir::new().unwrap();
+    let mut vm = make_vm_manager_with_home(home.path());
+    vm.box_id = "12345678-0000-0000-0000-000000000001".to_string();
+    vm.config.image = "example.invalid/must-not-pull:latest".to_string();
+    let box_dir = home.path().join("boxes").join(&vm.box_id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let config = crate::oci::OciImageConfig {
+        entrypoint: None,
+        cmd: None,
+        env: Vec::new(),
+        working_dir: None,
+        user: None,
+        exposed_ports: Vec::new(),
+        labels: std::collections::HashMap::new(),
+        volumes: vec!["/data".to_string(), "/data/./".to_string()],
+        stop_signal: None,
+        health_check: None,
+        onbuild: Vec::new(),
+    };
+    crate::resolved_image::persist_resolved_image_config(&box_dir, &config).unwrap();
+
+    let planned = vm.plan_image_anonymous_volumes().await.unwrap();
+
+    assert_eq!(planned.len(), 1);
+    assert!(planned[0].starts_with("anon_12345678_"));
+    assert!(!home.path().join("images").exists());
+    assert!(!home.path().join("volumes").exists());
+    assert!(!box_dir.join("rootfs").exists());
+    assert!(!box_dir.join("workspace").exists());
+    assert!(!box_dir.join("sockets").exists());
+}
+
 #[test]
 fn installed_guest_init_cannot_be_shadowed_by_a_stale_development_build() {
     let temporary = TempDir::new().unwrap();

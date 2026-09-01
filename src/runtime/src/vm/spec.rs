@@ -15,7 +15,7 @@ use a3s_box_core::guest_exec::{
 };
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 
-use super::{fnv1a_hash, BoxLayout, VmManager};
+use super::{BoxLayout, VmManager};
 
 const SBIN_INIT: &str = "/sbin/init";
 const USR_SBIN_INIT: &str = "/usr/sbin/init";
@@ -129,71 +129,97 @@ impl VmManager {
             fs_mounts.push(mount);
         }
 
-        // Auto-create anonymous volumes for OCI VOLUME directives
-        let user_guest_paths: std::collections::HashSet<String> = parsed_volumes
-            .iter()
-            .map(|volume| volume.guest_path.clone())
-            .collect();
-        let mut anon_vol_offset = self.config.volumes.len();
+        // Materialize the identities that were deterministically planned from
+        // image metadata. Legacy names remain reusable for existing records,
+        // but every newly derived identity is bound to the full Box ID.
+        let anonymous_volume_plan = layout
+            .oci_config
+            .as_ref()
+            .map(|config| self.plan_anonymous_volumes(config))
+            .transpose()?
+            .unwrap_or_default();
+        let durable_anonymous_volumes = self.anonymous_volumes.clone();
         let mut seen_anonymous_volumes = std::collections::HashSet::new();
+        let mut materialized_anonymous_destinations = Vec::new();
         self.anonymous_volumes
             .retain(|name| seen_anonymous_volumes.insert(name.clone()));
+        let materialization_plan = anonymous_volume_plan
+            .iter()
+            .map(|planned| {
+                let name = if seen_anonymous_volumes.contains(&planned.name) {
+                    planned.name.clone()
+                } else if seen_anonymous_volumes.contains(&planned.legacy_name) {
+                    planned.legacy_name.clone()
+                } else {
+                    planned.name.clone()
+                };
+                (planned, name)
+            })
+            .collect::<Vec<_>>();
 
-        if let Some(ref oci_config) = layout.oci_config {
-            for vol_path in &oci_config.volumes {
-                Self::validate_guest_mount_path(vol_path)?;
-                // Skip if the user already mounted something at this path
-                if user_guest_paths.contains(vol_path) {
-                    tracing::debug!(
-                        path = vol_path,
-                        "Skipping anonymous volume — user volume already covers this path"
+        if self.config.isolation.is_sandbox() {
+            let planned_names = materialization_plan
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let durable_names = durable_anonymous_volumes
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            if planned_names.len() != materialization_plan.len()
+                || durable_names.len() != durable_anonymous_volumes.len()
+                || planned_names != durable_names
+            {
+                return Err(BoxError::ConfigError(
+                    "OCI image-declared anonymous volumes drifted from the durable Box ownership plan"
+                        .to_string(),
+                ));
+            }
+        }
+
+        for (planned, anon_name) in materialization_plan {
+            // Create the volume via VolumeStore (best-effort)
+            match self.create_anonymous_volume(&anon_name) {
+                Ok((host_path, created)) => {
+                    // `workspace` is the only non-volume mount before this
+                    // sequence, so the next fs-mount position is the exact
+                    // contiguous volume tag even when a MicroVM best-effort
+                    // anonymous claim was skipped.
+                    let tag = format!("vol{}", fs_mounts.len().saturating_sub(1));
+                    fs_mounts.push(FsMount {
+                        tag: tag.clone(),
+                        host_path: PathBuf::from(&host_path),
+                        read_only: false,
+                    });
+                    materialized_anonymous_destinations.push(planned.guest_path.clone());
+                    if seen_anonymous_volumes.insert(anon_name.clone()) {
+                        self.anonymous_volumes.push(anon_name.clone());
+                    }
+                    if created {
+                        self.created_anonymous_volumes.push(anon_name);
+                    }
+                    tracing::info!(
+                        volume = %tag,
+                        guest_path = %planned.guest_path,
+                        host_path = %host_path,
+                        "Created anonymous volume for OCI VOLUME directive"
                     );
-                    continue;
                 }
-
-                // Generate a deterministic anonymous volume name
-                let path_hash = &format!("{:x}", fnv1a_hash(vol_path))[..8];
-                let short_box_id = &self.box_id[..8.min(self.box_id.len())];
-                let anon_name = format!("anon_{}_{}", short_box_id, path_hash);
-
-                // Create the volume via VolumeStore (best-effort)
-                match self.create_anonymous_volume(&anon_name) {
-                    Ok((host_path, created)) => {
-                        let tag = format!("vol{}", anon_vol_offset);
-                        fs_mounts.push(FsMount {
-                            tag: tag.clone(),
-                            host_path: PathBuf::from(&host_path),
-                            read_only: false,
+                Err(e) => {
+                    if self.config.isolation.is_sandbox() {
+                        return Err(BoxError::BoxBootError {
+                            message: format!(
+                                "Failed to create required Sandbox anonymous volume for {}: {e}",
+                                planned.guest_path
+                            ),
+                            hint: None,
                         });
-                        if seen_anonymous_volumes.insert(anon_name.clone()) {
-                            self.anonymous_volumes.push(anon_name.clone());
-                        }
-                        if created {
-                            self.created_anonymous_volumes.push(anon_name);
-                        }
-                        anon_vol_offset += 1;
-                        tracing::info!(
-                            volume = %tag,
-                            guest_path = vol_path,
-                            host_path = %host_path,
-                            "Created anonymous volume for OCI VOLUME directive"
-                        );
                     }
-                    Err(e) => {
-                        if self.config.isolation.is_sandbox() {
-                            return Err(BoxError::BoxBootError {
-                                message: format!(
-                                    "Failed to create required Sandbox anonymous volume for {vol_path}: {e}"
-                                ),
-                                hint: None,
-                            });
-                        }
-                        tracing::warn!(
-                            path = vol_path,
-                            error = %e,
-                            "Failed to create anonymous volume, skipping"
-                        );
-                    }
+                    tracing::warn!(
+                        path = %planned.guest_path,
+                        error = %e,
+                        "Failed to create anonymous volume, skipping"
+                    );
                 }
             }
         }
@@ -385,18 +411,12 @@ impl VmManager {
             }
 
             // Pass anonymous volume mounts (from OCI VOLUME directives) to guest init
-            if let Some(ref oci_config) = layout.oci_config {
-                let mut anon_idx = self.config.volumes.len();
-                for vol_path in &oci_config.volumes {
-                    if user_guest_paths.contains(vol_path) {
-                        continue;
-                    }
-                    env.push((
-                        format!("BOX_VOL_{}", anon_idx),
-                        format!("vol{}:{}:copy", anon_idx, vol_path),
-                    ));
-                    anon_idx += 1;
-                }
+            for (offset, guest_path) in materialized_anonymous_destinations.iter().enumerate() {
+                let index = self.config.volumes.len() + offset;
+                env.push((
+                    format!("BOX_VOL_{}", index),
+                    format!("vol{}:{}:copy", index, guest_path),
+                ));
             }
 
             // Pass tmpfs mounts to guest init.

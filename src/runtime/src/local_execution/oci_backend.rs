@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use super::resources::ExecutionResourceGuard;
 use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
-    LocalExecutionTermination,
+    LocalExecutionResourcePlan, LocalExecutionTermination,
 };
 use crate::{BoxRecord, ManagedExecutionState};
 
@@ -419,7 +419,7 @@ impl OciPreparedExecution {
         }
         if self.anonymous_volumes != record.anonymous_volumes {
             return Err(ExecutionManagerError::InvalidRequest(format!(
-                "A3S OCI preparation introduced uncommitted anonymous-volume state for {}",
+                "A3S OCI preparation drifted from the durable anonymous-volume plan for {}",
                 record.id
             )));
         }
@@ -523,6 +523,15 @@ pub trait OciBundleProvider: Send + Sync {
         _context: &OciBundlePreparationContext,
     ) -> ExecutionManagerResult<()> {
         Ok(())
+    }
+
+    /// Derive Box-owned identities from immutable image metadata without
+    /// creating the bundle, rootfs, mounts, or volumes they will later name.
+    async fn plan_create_resources(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        Ok(LocalExecutionResourcePlan::default())
     }
 
     /// Prepare one immutable OCI bundle after runtime capability preflight.
@@ -1545,6 +1554,14 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         let info = self.adapter.require_isolation(record.isolation).await?;
         let context = self.preparation_context(record, &info)?;
         self.provider.preflight(record, &context)
+    }
+
+    async fn plan_create_resources(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        self.metadata(record)?;
+        self.provider.plan_create_resources(record).await
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {

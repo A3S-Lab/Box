@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
-    LocalExecutionTermination,
+    LocalExecutionResourcePlan, LocalExecutionTermination,
 };
 use crate::{BoxRecord, ManagedRuntimeRoute};
 
@@ -157,6 +157,15 @@ impl LocalExecutionBackend for LocalExecutionBackendRouter {
 
     async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.backend_for_record(record)?.preflight(record).await
+    }
+
+    async fn plan_create_resources(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        self.backend_for_record(record)?
+            .plan_create_resources(record)
+            .await
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {

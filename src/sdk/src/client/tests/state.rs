@@ -232,13 +232,16 @@
         record.box_dir = dir.path().join("boxes").join(&record.id);
         record.exec_socket_path = dir.path().join("external-sockets").join("exec.sock");
         record.volume_names = vec!["data".to_string()];
-        record.anonymous_volumes = vec!["anon".to_string()];
+        let anonymous_volume = "anon_sdk_removal";
+        record.anonymous_volumes = vec![anonymous_volume.to_string()];
         std::fs::create_dir_all(record.box_dir.join("merged")).unwrap();
         std::fs::create_dir_all(record.exec_socket_path.parent().unwrap()).unwrap();
         write_boxes(&client, &[record.clone()]);
 
         client.create_volume(CreateVolume::new("data")).unwrap();
-        client.create_volume(CreateVolume::new("anon")).unwrap();
+        client
+            .create_volume(CreateVolume::new(anonymous_volume))
+            .unwrap();
         client
             .volume_store()
             .modify("data", |volume| {
@@ -247,8 +250,19 @@
             .unwrap();
         client
             .volume_store()
-            .modify("anon", |volume| {
+            .modify(anonymous_volume, |volume| {
                 volume.in_use_by = vec![record.id.clone()];
+                volume
+                    .labels
+                    .insert("anonymous".to_string(), "true".to_string());
+                volume.labels.insert(
+                    "a3s.box.volume.kind".to_string(),
+                    "anonymous-v1".to_string(),
+                );
+                volume.labels.insert(
+                    "a3s.box.volume.owner".to_string(),
+                    record.id.clone(),
+                );
             })
             .unwrap();
         client
@@ -269,7 +283,7 @@
             .unwrap()
             .in_use_by
             .is_empty());
-        assert!(client.get_volume("anon").unwrap().is_none());
+        assert!(client.get_volume(anonymous_volume).unwrap().is_none());
         assert_eq!(
             client.get_network("dev").unwrap().unwrap().endpoint_count,
             0

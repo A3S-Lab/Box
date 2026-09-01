@@ -402,7 +402,7 @@ impl VmManager {
             let instance_spec = self.build_runtime_owned_instance_spec(&layout)?;
             if self.anonymous_volumes != original_anonymous_volumes {
                 return Err(BoxError::ConfigError(
-                    "OCI migration does not yet introduce image-declared anonymous volumes; create an explicit named or bind mount before enabling migration"
+                    "OCI image-declared anonymous volumes drifted from the durable Box ownership plan"
                         .to_string(),
                 ));
             }
@@ -531,12 +531,9 @@ impl VmManager {
         }
 
         if let Some(image) = layout.oci_config.as_ref() {
-            let mut anonymous_index = self.config.volumes.len();
-            for destination in &image.volumes {
-                let destination = normalized_container_path(destination, "volume destination")?;
-                if user_destinations.contains(&destination) {
-                    continue;
-                }
+            for (offset, planned) in self.plan_anonymous_volumes(image)?.into_iter().enumerate() {
+                let anonymous_index = self.config.volumes.len() + offset;
+                let destination = PathBuf::from(planned.guest_path);
                 let tag = format!("vol{anonymous_index}");
                 let source = instance_spec
                     .fs_mounts
@@ -556,7 +553,6 @@ impl VmManager {
                     destination,
                     read_only: false,
                 });
-                anonymous_index += 1;
             }
         }
 

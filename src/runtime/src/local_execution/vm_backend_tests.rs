@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use a3s_box_core::{
-    volume::VolumeConfig, BoxConfig, CreateExecutionRequest, ExecutionGeneration,
-    ExecutionIsolation, NetworkMode, OperationId, VmHandler, VmMetrics,
+    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, NetworkMode,
+    OperationId, VmHandler, VmMetrics,
 };
 
 use super::*;
@@ -489,12 +489,12 @@ async fn retained_stops_preserve_anonymous_volumes_but_auto_remove_kill_removes_
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
-    let volume_name = "anonymous-restart-volume";
+    let volume_name = "anon_restart_volume";
     let volumes = crate::VolumeStore::new(
         temporary.path().join("volumes.json"),
         temporary.path().join("volumes"),
     );
-    volumes.create(VolumeConfig::new(volume_name, "")).unwrap();
+    volumes.claim_anonymous(volume_name, &record.id).unwrap();
     record.anonymous_volumes = vec![volume_name.to_string()];
     let sentinel = record.box_dir.join("rootfs/workspace/cold-pause.txt");
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();

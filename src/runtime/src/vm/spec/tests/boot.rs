@@ -578,6 +578,31 @@ fn test_build_instance_spec_tracks_new_anonymous_volumes_only() {
 }
 
 #[test]
+fn sandbox_rejects_anonymous_plan_drift_before_volume_materialization() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let mut oci_config = test_oci_config(None, None);
+    oci_config.volumes = vec!["/data".to_string()];
+    let layout = test_layout(layout_dir.path(), Some(oci_config), true);
+    let mut vm = test_vm_manager(BoxConfig {
+        isolation: a3s_box_core::ExecutionIsolation::Sandbox,
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let error = vm
+        .build_runtime_owned_instance_spec(&layout)
+        .expect_err("Sandbox may only materialize its durable ownership plan");
+
+    assert!(error
+        .to_string()
+        .contains("drifted from the durable Box ownership plan"));
+    assert!(!home.path().join("volumes").exists());
+    assert!(vm.anonymous_volumes.is_empty());
+    assert!(vm.created_anonymous_volumes.is_empty());
+}
+
+#[test]
 fn test_guest_init_exec_path_supports_usr_sbin_without_sbin() {
     let dir = tempdir().unwrap();
     let rootfs = dir.path();

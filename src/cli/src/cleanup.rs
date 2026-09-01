@@ -98,14 +98,14 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
 }
 
 /// Remove anonymous volumes created from OCI `VOLUME` declarations.
-pub fn cleanup_anonymous_volumes(anonymous_volumes: &[String]) {
+pub fn cleanup_anonymous_volumes(box_id: &str, anonymous_volumes: &[String]) {
     if anonymous_volumes.is_empty() {
         return;
     }
 
     if let Ok(vol_store) = a3s_box_runtime::VolumeStore::default_path() {
         for volume_name in anonymous_volumes {
-            if let Err(err) = vol_store.remove(volume_name, true) {
+            if let Err(err) = vol_store.remove_anonymous(volume_name, box_id) {
                 tracing::debug!(
                     volume = volume_name,
                     error = %err,
@@ -176,7 +176,7 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
             .map(String::as_str),
     )?;
     cleanup_record_resources(record);
-    cleanup_anonymous_volumes(&record.anonymous_volumes);
+    cleanup_anonymous_volumes(&record.id, &record.anonymous_volumes);
     remove_host_cgroup(record);
 
     if record.box_dir.exists() {

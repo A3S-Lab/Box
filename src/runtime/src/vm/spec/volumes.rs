@@ -5,6 +5,13 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedAnonymousVolume {
+    pub(crate) name: String,
+    pub(crate) legacy_name: String,
+    pub(crate) guest_path: String,
+}
+
 impl VmManager {
     /// Parse a volume mount string from the right so colons in a host path do
     /// not consume the host/guest separator. The guest always uses an absolute
@@ -44,7 +51,7 @@ impl VmManager {
         })
     }
 
-    pub(super) fn validate_guest_mount_path(guest_path: &str) -> Result<()> {
+    pub(super) fn normalize_guest_mount_path(guest_path: &str) -> Result<String> {
         if !guest_path.starts_with('/')
             || guest_path.contains('\0')
             || guest_path.split('/').any(|component| component == "..")
@@ -71,7 +78,82 @@ impl VmManager {
                 "Guest volume path {guest_path:?} overlaps reserved runtime state /run/a3s-box"
             )));
         }
-        Ok(())
+        Ok(normalized)
+    }
+
+    pub(super) fn validate_guest_mount_path(guest_path: &str) -> Result<()> {
+        Self::normalize_guest_mount_path(guest_path).map(|_| ())
+    }
+
+    /// Derive stable anonymous-volume identities from immutable image metadata.
+    ///
+    /// The result is pure: no directory or store entry is created. Equivalent
+    /// guest paths are normalized and deduplicated, and an explicit user mount
+    /// always overrides an image `VOLUME` declaration.
+    pub(crate) fn plan_anonymous_volumes(
+        &self,
+        oci_config: &crate::oci::OciImageConfig,
+    ) -> Result<Vec<PlannedAnonymousVolume>> {
+        let explicit_destinations = self
+            .config
+            .volumes
+            .iter()
+            .map(|volume| {
+                let parsed = Self::parse_volume_spec(volume)?;
+                Self::normalize_guest_mount_path(&parsed.guest_path)
+            })
+            .collect::<Result<std::collections::HashSet<_>>>()?;
+        let mut declared_destinations = oci_config
+            .volumes
+            .iter()
+            .map(|raw_path| {
+                Self::normalize_guest_mount_path(raw_path)
+                    .map(|guest_path| (guest_path, raw_path.as_str()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        declared_destinations.sort_unstable();
+        let mut planned_destinations = std::collections::HashSet::new();
+        let short_box_id = self
+            .box_id
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(8)
+            .collect::<String>();
+
+        let mut plans = Vec::new();
+        for (guest_path, raw_path) in declared_destinations {
+            if explicit_destinations.contains(&guest_path)
+                || !planned_destinations.insert(guest_path.clone())
+            {
+                continue;
+            }
+
+            let mut identity = Sha256::new();
+            identity.update(b"a3s-box-anonymous-volume-v1\0");
+            identity.update(self.box_id.as_bytes());
+            identity.update(b"\0");
+            identity.update(guest_path.as_bytes());
+            let digest = identity.finalize();
+            let name = format!(
+                "anon_{}_{}",
+                if short_box_id.is_empty() {
+                    "box"
+                } else {
+                    short_box_id.as_str()
+                },
+                hex::encode(&digest[..16])
+            );
+
+            let legacy_path_hash = format!("{:016x}", crate::vm::fnv1a_hash(raw_path));
+            let legacy_short_box_id = self.box_id.chars().take(8).collect::<String>();
+            let legacy_name = format!("anon_{}_{}", legacy_short_box_id, &legacy_path_hash[..8]);
+            plans.push(PlannedAnonymousVolume {
+                name,
+                legacy_name,
+                guest_path,
+            });
+        }
+        Ok(plans)
     }
 
     pub(super) fn prepare_volume_mount(
@@ -289,17 +371,7 @@ impl VmManager {
             self.home_dir.join("volumes"),
         );
 
-        // If the volume already exists (e.g., from a previous run), reuse it
-        if let Some(existing) = store.get(name)? {
-            return Ok((existing.mount_point, false));
-        }
-
-        let mut config = a3s_box_core::volume::VolumeConfig::new(name, "");
-        config
-            .labels
-            .insert("anonymous".to_string(), "true".to_string());
-        config.attach(&self.box_id);
-        let created = store.create(config)?;
-        Ok((created.mount_point, true))
+        let (volume, created) = store.claim_anonymous(name, &self.box_id)?;
+        Ok((volume.mount_point, created))
     }
 }

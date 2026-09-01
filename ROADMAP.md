@@ -432,11 +432,15 @@ owner replacement, and must publish final drain evidence before deletion.
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots.
+- [x] Persist normalized image-declared anonymous-volume identities before OCI
+  bundle preparation, enforce exact single-owner claims, and keep recovery and
+  removal driven by the durable Box record.
 
-The production provider currently accepts explicit bind/named/tmpfs mounts but
-rejects newly introduced image-declared anonymous volumes before Runtime
-mutation. That rejection remains until the complete B3 ownership and cleanup
-contract is qualified.
+The production provider accepts explicit bind/named/tmpfs mounts and now plans
+image-declared anonymous volumes without creating execution artifacts. Bundle
+preparation must reproduce the exact persisted plan before Runtime mutation;
+name collisions, ownership drift, duplicate destinations, and unsafe identities
+fail closed. The complete B3 storage/network qualification gate remains open.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or

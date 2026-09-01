@@ -24,6 +24,11 @@ struct VolumesFile {
     volumes: HashMap<String, VolumeConfig>,
 }
 
+const ANONYMOUS_LABEL: &str = "anonymous";
+const ANONYMOUS_KIND_LABEL: &str = "a3s.box.volume.kind";
+const ANONYMOUS_KIND: &str = "anonymous-v1";
+const ANONYMOUS_OWNER_LABEL: &str = "a3s.box.volume.owner";
+
 impl VolumeStore {
     /// Create a new store at the given path.
     pub fn new(path: impl Into<PathBuf>, volumes_dir: impl Into<PathBuf>) -> Self {
@@ -175,6 +180,70 @@ impl VolumeStore {
         })
     }
 
+    /// Atomically create or reclaim one Box-owned anonymous volume.
+    ///
+    /// Anonymous identities are single-owner capabilities. An existing named
+    /// volume, a volume owned by another execution, or metadata pointing away
+    /// from the canonical managed directory all fail closed without mutation.
+    pub(crate) fn claim_anonymous(&self, name: &str, owner: &str) -> Result<(VolumeConfig, bool)> {
+        validate_anonymous_identity(name, owner)?;
+
+        let expected_mount_point = self.volumes_dir.join(name).to_string_lossy().into_owned();
+        self.with_write_lock(|volumes| {
+            if let Some(existing) = volumes.get_mut(name) {
+                validate_anonymous_config(existing, name, owner, &expected_mount_point)?;
+                ensure_managed_volume_directory(Path::new(&expected_mount_point))?;
+                existing.attach(owner);
+                existing
+                    .labels
+                    .insert(ANONYMOUS_KIND_LABEL.to_string(), ANONYMOUS_KIND.to_string());
+                existing
+                    .labels
+                    .insert(ANONYMOUS_OWNER_LABEL.to_string(), owner.to_string());
+                return Ok((existing.clone(), false));
+            }
+
+            let mut config = VolumeConfig::new(name, "");
+            config
+                .labels
+                .insert(ANONYMOUS_LABEL.to_string(), "true".to_string());
+            config
+                .labels
+                .insert(ANONYMOUS_KIND_LABEL.to_string(), ANONYMOUS_KIND.to_string());
+            config
+                .labels
+                .insert(ANONYMOUS_OWNER_LABEL.to_string(), owner.to_string());
+            config.attach(owner);
+            self.materialize(config, volumes)
+                .map(|created| (created, true))
+        })
+    }
+
+    /// Remove only the anonymous volume capability owned by `owner`.
+    ///
+    /// The directory is removed while the metadata lock is held, before the
+    /// atomic metadata update. If a previous claim created the deterministic
+    /// directory but crashed before publishing metadata, the durable Box
+    /// record can use this operation to remove that orphan safely.
+    pub fn remove_anonymous(&self, name: &str, owner: &str) -> Result<bool> {
+        validate_anonymous_identity(name, owner)?;
+        let expected_mount_point = self.volumes_dir.join(name).to_string_lossy().into_owned();
+        self.with_write_lock(|volumes| {
+            let existed = if let Some(existing) = volumes.get(name) {
+                validate_anonymous_config(existing, name, owner, &expected_mount_point)?;
+                true
+            } else {
+                false
+            };
+
+            remove_managed_volume_path(Path::new(&expected_mount_point))?;
+            if existed {
+                volumes.remove(name);
+            }
+            Ok(existed)
+        })
+    }
+
     /// Create the volume's data directory, set its mount point, and insert it
     /// into `volumes`. Caller must already hold the write lock.
     fn materialize(
@@ -183,13 +252,7 @@ impl VolumeStore {
         volumes: &mut HashMap<String, VolumeConfig>,
     ) -> Result<VolumeConfig> {
         let vol_dir = self.volumes_dir.join(&config.name);
-        std::fs::create_dir_all(&vol_dir).map_err(|e| {
-            BoxError::ConfigError(format!(
-                "failed to create volume directory {}: {}",
-                vol_dir.display(),
-                e
-            ))
-        })?;
+        ensure_managed_volume_directory(&vol_dir)?;
         config.mount_point = vol_dir.to_string_lossy().into_owned();
         volumes.insert(config.name.clone(), config.clone());
         Ok(config)
@@ -293,6 +356,127 @@ impl VolumeStore {
     /// Get the store file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+fn valid_anonymous_volume_name(name: &str) -> bool {
+    name.starts_with("anon_")
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn validate_anonymous_identity(name: &str, owner: &str) -> Result<()> {
+    if !valid_anonymous_volume_name(name) {
+        return Err(BoxError::ConfigError(format!(
+            "invalid anonymous volume name {name:?}"
+        )));
+    }
+    if owner.is_empty() || owner.contains('\0') {
+        return Err(BoxError::ConfigError(
+            "anonymous volume owner must be a non-empty execution identity".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_anonymous_config(
+    config: &VolumeConfig,
+    name: &str,
+    owner: &str,
+    expected_mount_point: &str,
+) -> Result<()> {
+    if config.labels.get(ANONYMOUS_LABEL).map(String::as_str) != Some("true") {
+        return Err(BoxError::ConfigError(format!(
+            "volume {name:?} is not an anonymous volume"
+        )));
+    }
+    if config.driver != "local" {
+        return Err(BoxError::ConfigError(format!(
+            "anonymous volume {name:?} does not use the local driver"
+        )));
+    }
+    if config.mount_point != expected_mount_point {
+        return Err(BoxError::ConfigError(format!(
+            "anonymous volume {name:?} does not use its canonical managed directory"
+        )));
+    }
+    let exact_owner = config.in_use_by.len() == 1
+        && config
+            .in_use_by
+            .first()
+            .is_some_and(|current| current == owner);
+    if config.in_use_by.iter().any(|current| current != owner) {
+        return Err(BoxError::ConfigError(format!(
+            "anonymous volume {name:?} is owned by another execution"
+        )));
+    }
+    match config.labels.get(ANONYMOUS_KIND_LABEL).map(String::as_str) {
+        Some(ANONYMOUS_KIND)
+            if exact_owner
+                && config
+                    .labels
+                    .get(ANONYMOUS_OWNER_LABEL)
+                    .is_some_and(|current| current == owner) =>
+        {
+            Ok(())
+        }
+        None if exact_owner => Ok(()),
+        _ => Err(BoxError::ConfigError(format!(
+            "anonymous volume {name:?} has no compatible ownership contract"
+        ))),
+    }
+}
+
+fn ensure_managed_volume_directory(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(BoxError::ConfigError(format!(
+                "managed volume path {} is not a directory",
+                path.display()
+            )))
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BoxError::ConfigError(format!(
+                "failed to inspect volume directory {}: {error}",
+                path.display()
+            )))
+        }
+    }
+    std::fs::create_dir_all(path).map_err(|error| {
+        BoxError::ConfigError(format!(
+            "failed to create volume directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        BoxError::ConfigError(format!(
+            "failed to verify volume directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(BoxError::ConfigError(format!(
+            "managed volume path {} is not a directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn remove_managed_volume_path(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path).map_err(BoxError::IoError)
+    } else {
+        std::fs::remove_file(path).map_err(BoxError::IoError)
     }
 }
 
@@ -548,6 +732,198 @@ mod tests {
         assert_eq!(reused.size_limit, 4096);
         assert_eq!(reused.in_use_by, vec!["box-1"]);
         assert!(PathBuf::from(&reused.mount_point).exists());
+    }
+
+    #[test]
+    fn claim_anonymous_is_idempotent_for_the_exact_owner() {
+        let (_dir, store) = temp_store();
+
+        let (first, first_created) = store.claim_anonymous("anon_owned", "box-owner").unwrap();
+        let (second, second_created) = store.claim_anonymous("anon_owned", "box-owner").unwrap();
+
+        assert!(first_created);
+        assert!(!second_created);
+        assert_eq!(first.mount_point, second.mount_point);
+        assert_eq!(second.in_use_by, vec!["box-owner"]);
+        assert_eq!(
+            second.labels.get(ANONYMOUS_LABEL).map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            second.labels.get(ANONYMOUS_KIND_LABEL).map(String::as_str),
+            Some(ANONYMOUS_KIND)
+        );
+        assert_eq!(
+            second.labels.get(ANONYMOUS_OWNER_LABEL).map(String::as_str),
+            Some("box-owner")
+        );
+    }
+
+    #[test]
+    fn claim_anonymous_upgrades_an_exact_owner_legacy_volume() {
+        let (_dir, store) = temp_store();
+        let mut legacy = VolumeConfig::new("anon_legacy", "");
+        legacy
+            .labels
+            .insert(ANONYMOUS_LABEL.to_string(), "true".to_string());
+        legacy.attach("box-owner");
+        store.create(legacy).unwrap();
+
+        let (claimed, created) = store.claim_anonymous("anon_legacy", "box-owner").unwrap();
+
+        assert!(!created);
+        assert_eq!(
+            claimed.labels.get(ANONYMOUS_KIND_LABEL).map(String::as_str),
+            Some(ANONYMOUS_KIND)
+        );
+        assert_eq!(
+            claimed
+                .labels
+                .get(ANONYMOUS_OWNER_LABEL)
+                .map(String::as_str),
+            Some("box-owner")
+        );
+    }
+
+    #[test]
+    fn claim_anonymous_rejects_named_volume_collision_without_mutation() {
+        let (_dir, store) = temp_store();
+        let named = store
+            .create(VolumeConfig::new("anon_collision", ""))
+            .unwrap();
+
+        let error = store
+            .claim_anonymous("anon_collision", "box-owner")
+            .expect_err("a named volume must never become anonymously owned");
+
+        assert!(error.to_string().contains("not an anonymous volume"));
+        assert_eq!(
+            store.get("anon_collision").unwrap().unwrap().in_use_by,
+            named.in_use_by
+        );
+    }
+
+    #[test]
+    fn claim_anonymous_rejects_a_different_owner_without_mutation() {
+        let (_dir, store) = temp_store();
+        store.claim_anonymous("anon_owned", "box-one").unwrap();
+
+        let error = store
+            .claim_anonymous("anon_owned", "box-two")
+            .expect_err("anonymous volumes have exactly one Box owner");
+
+        assert!(error.to_string().contains("owned by another execution"));
+        assert_eq!(
+            store.get("anon_owned").unwrap().unwrap().in_use_by,
+            vec!["box-one"]
+        );
+    }
+
+    #[test]
+    fn claim_anonymous_rejects_unsafe_identity_before_creating_a_directory() {
+        let (dir, store) = temp_store();
+
+        let error = store
+            .claim_anonymous("../escaped", "box-owner")
+            .expect_err("managed identities may not escape the volume root");
+
+        assert!(error.to_string().contains("invalid anonymous volume name"));
+        assert!(!dir.path().join("escaped").exists());
+        assert!(store.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_anonymous_claims_publish_one_exact_owner() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(VolumeStore::new(
+            dir.path().join("volumes.json"),
+            dir.path().join("volumes"),
+        ));
+        let handles = (0..16)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    store
+                        .claim_anonymous("anon_concurrent", "box-owner")
+                        .unwrap()
+                        .1
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let created = handles
+            .into_iter()
+            .map(|handle| usize::from(handle.join().unwrap()))
+            .sum::<usize>();
+        let claimed = store.get("anon_concurrent").unwrap().unwrap();
+
+        assert_eq!(created, 1);
+        assert_eq!(claimed.in_use_by, vec!["box-owner"]);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_anonymous_requires_and_removes_the_exact_owner() {
+        let (_dir, store) = temp_store();
+        let (claimed, _) = store.claim_anonymous("anon_owned", "box-owner").unwrap();
+
+        let removed = store.remove_anonymous("anon_owned", "box-owner").unwrap();
+
+        assert!(removed);
+        assert!(store.get("anon_owned").unwrap().is_none());
+        assert!(!PathBuf::from(claimed.mount_point).exists());
+    }
+
+    #[test]
+    fn remove_anonymous_rejects_named_and_different_owner_collisions() {
+        let (_dir, store) = temp_store();
+        let named = store.create(VolumeConfig::new("anon_named", "")).unwrap();
+        store.claim_anonymous("anon_owned", "box-one").unwrap();
+
+        let named_error = store
+            .remove_anonymous("anon_named", "box-one")
+            .expect_err("named volume metadata must fail closed");
+        let owner_error = store
+            .remove_anonymous("anon_owned", "box-two")
+            .expect_err("another owner must fail closed");
+
+        assert!(named_error.to_string().contains("not an anonymous volume"));
+        assert!(owner_error
+            .to_string()
+            .contains("owned by another execution"));
+        assert!(PathBuf::from(named.mount_point).exists());
+        assert!(store.get("anon_owned").unwrap().is_some());
+    }
+
+    #[test]
+    fn remove_anonymous_cleans_an_unpublished_deterministic_directory() {
+        let (_dir, store) = temp_store();
+        let orphan = store.volume_dir("anon_unpublished");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("partial"), b"partial").unwrap();
+
+        let removed = store
+            .remove_anonymous("anon_unpublished", "box-owner")
+            .unwrap();
+
+        assert!(!removed);
+        assert!(!orphan.exists());
+        assert!(store.get("anon_unpublished").unwrap().is_none());
+    }
+
+    #[test]
+    fn reclaim_anonymous_recreates_a_missing_owned_directory() {
+        let (_dir, store) = temp_store();
+        let (claimed, _) = store.claim_anonymous("anon_owned", "box-owner").unwrap();
+        std::fs::remove_dir_all(&claimed.mount_point).unwrap();
+
+        let (reclaimed, created) = store.claim_anonymous("anon_owned", "box-owner").unwrap();
+
+        assert!(!created);
+        assert!(PathBuf::from(reclaimed.mount_point).is_dir());
     }
 
     #[test]

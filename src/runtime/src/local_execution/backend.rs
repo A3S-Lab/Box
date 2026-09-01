@@ -11,9 +11,59 @@ use a3s_box_core::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 
 use crate::local_execution::OciRuntimeBinding;
 use crate::{BoxRecord, ManagedRuntimeRoute};
+
+/// Product resources derived by a backend before a new execution is reserved.
+///
+/// Planning may resolve immutable image metadata, but it must not create any
+/// execution-owned resource. The manager validates and persists this plan in
+/// the [`BoxRecord`] before `start` may materialize it, so restart recovery and
+/// removal never have to infer ownership from host artifacts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalExecutionResourcePlan {
+    /// Exact Box-owned anonymous volume identities required by the image.
+    pub anonymous_volumes: Vec<String>,
+}
+
+impl LocalExecutionResourcePlan {
+    pub(crate) fn apply_to(self, record: &mut BoxRecord) -> ExecutionManagerResult<()> {
+        if !record.anonymous_volumes.is_empty() {
+            return Err(ExecutionManagerError::Internal(format!(
+                "new execution {} already contains anonymous-volume ownership",
+                record.id
+            )));
+        }
+
+        let mut seen = HashSet::with_capacity(self.anonymous_volumes.len());
+        for name in &self.anonymous_volumes {
+            if !valid_planned_volume_name(name) {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "backend planned an invalid anonymous-volume identity for {}: {name:?}",
+                    record.id
+                )));
+            }
+            if !seen.insert(name) {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "backend planned duplicate anonymous-volume identity {name:?} for {}",
+                    record.id
+                )));
+            }
+        }
+        record.anonymous_volumes = self.anonymous_volumes;
+        Ok(())
+    }
+}
+
+fn valid_planned_volume_name(name: &str) -> bool {
+    name.starts_with("anon_")
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
 
 /// Runtime evidence persisted after an execution becomes ready.
 #[derive(Debug, Clone)]
@@ -121,6 +171,17 @@ pub trait LocalExecutionBackend: Send + Sync {
     /// published. Backends must repeat mutable capability checks at launch.
     async fn preflight(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
         Ok(())
+    }
+
+    /// Derive execution-owned resource identities without materializing them.
+    ///
+    /// The manager invokes this only after backend preflight and publishes the
+    /// returned identities as part of the initial durable reservation.
+    async fn plan_create_resources(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        Ok(LocalExecutionResourcePlan::default())
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
