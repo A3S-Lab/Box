@@ -394,8 +394,10 @@ fn resolve_exec_executable(
             })
         })
         .unwrap_or(DEFAULT_CONTAINER_PATH);
-    *command = resolve_runtime_executable(&record.box_dir.join("rootfs"), cwd, path, command)
-        .map_err(exec_path_request_error)?;
+    let rootfs = super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir)
+        .unwrap_or_else(|| record.box_dir.join("rootfs"));
+    *command =
+        resolve_runtime_executable(&rootfs, cwd, path, command).map_err(exec_path_request_error)?;
     Ok(())
 }
 

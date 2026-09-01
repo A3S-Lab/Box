@@ -1,6 +1,6 @@
 //! Crash-recoverable filesystem snapshots for managed executions.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::{
@@ -335,12 +335,13 @@ impl LocalExecutionManager {
                 }
                 return Ok(existing.size_bytes);
             }
-            let rootfs = resolve_managed_rootfs(&record.box_dir).ok_or_else(|| {
-                ExecutionManagerError::Unavailable(format!(
-                    "execution {} has no populated managed rootfs to snapshot",
-                    record.id
-                ))
-            })?;
+            let rootfs = super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir)
+                .ok_or_else(|| {
+                    ExecutionManagerError::Unavailable(format!(
+                        "execution {} has no populated managed rootfs to snapshot",
+                        record.id
+                    ))
+                })?;
             let metadata = build_snapshot_metadata(&record, &snapshot_id)?;
             #[cfg(target_os = "linux")]
             let rootfs_metadata = capture_sandbox_rootfs_metadata(&record, &rootfs)?;
@@ -509,25 +510,6 @@ fn execution_state(state: ManagedExecutionState) -> ExecutionManagerResult<Execu
             "invalid stable snapshot state {state}"
         ))),
     }
-}
-
-fn resolve_managed_rootfs(box_dir: &Path) -> Option<PathBuf> {
-    let populated = |path: &Path| {
-        path.is_dir()
-            && std::fs::read_dir(path)
-                .map(|mut entries| entries.next().is_some())
-                .unwrap_or(false)
-    };
-    let merged = box_dir.join("merged");
-    if populated(&merged) {
-        return Some(merged);
-    }
-    let rootfs = box_dir.join("rootfs");
-    let apfs_data = rootfs.join(".a3s-rootfs");
-    if populated(&apfs_data) {
-        return Some(apfs_data);
-    }
-    populated(&rootfs).then_some(rootfs)
 }
 
 #[cfg(target_os = "linux")]
