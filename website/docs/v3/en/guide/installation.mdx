@@ -64,7 +64,7 @@ a3s-box info
 
 | Behavior                       | Linux/macOS                   | Windows                         |
 | ------------------------------ | ----------------------------- | ------------------------------- |
-| Pin a release                  | `--version v3.2.1`            | `-Version v3.2.1`               |
+| Pin a release                  | `--version v3.2.2`            | `-Version v3.2.2`               |
 | Choose destination             | `--install-dir PATH`          | `-InstallDir PATH`              |
 | Do not change `PATH`           | `--no-modify-path`            | `-NoModifyPath`                 |
 | Replace an unmanaged directory | `--force`                     | `-Force`                        |
@@ -75,14 +75,14 @@ Pass Unix options after `sh -s --`:
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
-  sh -s -- --version v3.2.1 --no-modify-path
+  sh -s -- --version v3.2.2 --no-modify-path
 ```
 
 Invoke downloaded PowerShell text as a script block when options are needed:
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
-& ([scriptblock]::Create($installer)) -Version v3.2.1 -NoModifyPath
+& ([scriptblock]::Create($installer)) -Version v3.2.2 -NoModifyPath
 ```
 
 The corresponding environment variables are `A3S_BOX_VERSION`,

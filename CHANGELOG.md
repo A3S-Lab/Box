@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.2] — 2026-09-02
+
+### Fixed
+
+- Clean macOS source builds now keep Homebrew LLVM out of the global dynamic
+  loader search path used by libkrun's nested Cargo process. Bindgen continues
+  to discover Homebrew libclang through its scoped paths, while nested `rustc`
+  keeps the ABI-compatible LLVM bundled with the Rust toolchain instead of
+  aborting before compilation with a missing-symbol error.
+
 ## [3.2.1] — 2026-09-02
 
 ### Added

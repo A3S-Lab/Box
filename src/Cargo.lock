@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-cli"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-core"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-acl",
  "a3s-common",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-cri"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-guest-init"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "a3s-common",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-mkext4"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "crc32c",
  "proptest",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-netproxy"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "libc",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-runtime"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-acl",
  "a3s-box-core",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-sdk"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-shim"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-libkrun-sys"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "libc",
  "num_cpus",

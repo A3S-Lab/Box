@@ -103,7 +103,7 @@ directory must contain the platform tarball, the matching standalone
 
 ```bash
 sudo deploy/scripts/install-runtimeclass.sh \
-  --version v3.2.1 \
+  --version v3.2.2 \
   --from-dir /opt/a3s-box-artifacts \
   --warmup-image docker.m.daocloud.io/library/busybox:latest
 ```
