@@ -651,11 +651,32 @@ jobs:
         if: always()
         run: |
           cleanup_status=0
-          if [ -f /tmp/a3s-box-ci-kvm-sentinel ]; then
-            if [ -c /dev/kvm ]; then
-              sudo rm -f /dev/kvm || cleanup_status=1
+          kvm_marker=/tmp/a3s-box-ci-kvm-sentinel
+          saved_kvm=/dev/a3s-box-ci-host-kvm
+          if [[ -e "$kvm_marker" || -L "$kvm_marker" ]]; then
+            if [[ -d /dev/kvm && ! -L /dev/kvm ]]; then
+              sudo rmdir /dev/kvm || cleanup_status=1
+            elif [[ -e /dev/kvm || -L /dev/kvm ]]; then
+              echo "::error::Refusing to remove an unexpected replacement at /dev/kvm"
+              cleanup_status=1
             fi
-            rm -f /tmp/a3s-box-ci-kvm-sentinel || cleanup_status=1
+            if [[ -e "$saved_kvm" || -L "$saved_kvm" ]]; then
+              if [[ ! -c "$saved_kvm" || -L "$saved_kvm" ]]; then
+                echo "::error::Saved host KVM device has the wrong type"
+                cleanup_status=1
+              elif [[ -e /dev/kvm || -L /dev/kvm ]]; then
+                echo "::error::Cannot restore the host KVM device because /dev/kvm is occupied"
+                cleanup_status=1
+              else
+                sudo mv -- "$saved_kvm" /dev/kvm || cleanup_status=1
+              fi
+            fi
+            if ((cleanup_status == 0)); then
+              rm -f -- "$kvm_marker" || cleanup_status=1
+            fi
+          elif [[ -e "$saved_kvm" || -L "$saved_kvm" ]]; then
+            echo "::error::Saved host KVM device exists without its ownership marker"
+            cleanup_status=1
           fi
           sudo python3 - "$A3S_BOX_OCI_HOST_ROOT/box-owner.json" <<'PY' || cleanup_status=1
           import json

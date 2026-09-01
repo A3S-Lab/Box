@@ -37,16 +37,88 @@ for artifact in \
     esac
 done
 
-sentinel_created=0
 sentinel_marker="/tmp/a3s-box-ci-kvm-sentinel"
-cleanup_kvm_sentinel() {
-    if ((sentinel_created)); then
-        sudo rm -f /dev/kvm
-        rm -f -- "$sentinel_marker"
-        sentinel_created=0
+saved_kvm="/dev/a3s-box-ci-host-kvm"
+kvm_state_owned=0
+kvm_original_moved=0
+kvm_test_directory_created=0
+
+cleanup_kvm_state() {
+    local cleanup_status=0
+
+    if ((kvm_test_directory_created)); then
+        if [[ -d /dev/kvm && ! -L /dev/kvm ]]; then
+            sudo rmdir /dev/kvm || cleanup_status=1
+        elif [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            echo "refusing to remove an unexpected replacement at /dev/kvm" >&2
+            cleanup_status=1
+        fi
+    fi
+
+    if ((kvm_original_moved)); then
+        if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            echo "cannot restore the host KVM device because /dev/kvm is occupied" >&2
+            cleanup_status=1
+        elif [[ ! -c "$saved_kvm" || -L "$saved_kvm" ]]; then
+            echo "saved host KVM device is missing or has the wrong type" >&2
+            cleanup_status=1
+        else
+            sudo mv -- "$saved_kvm" /dev/kvm || cleanup_status=1
+        fi
+    fi
+
+    if ((cleanup_status == 0)); then
+        if rm -f -- "$sentinel_marker"; then
+            kvm_state_owned=0
+            kvm_original_moved=0
+            kvm_test_directory_created=0
+        else
+            cleanup_status=1
+        fi
+    fi
+
+    return "$cleanup_status"
+}
+
+handle_exit() {
+    local command_status=$?
+    trap - EXIT
+    if ((kvm_state_owned)) && ! cleanup_kvm_state; then
+        command_status=1
+    fi
+    exit "$command_status"
+}
+trap handle_exit EXIT
+
+prepare_kvm_states() {
+    if [[ -e "$sentinel_marker" || -L "$sentinel_marker" ]]; then
+        echo "refusing to replace an existing KVM ownership marker" >&2
+        exit 1
+    fi
+    if [[ -e "$saved_kvm" || -L "$saved_kvm" ]]; then
+        echo "refusing to replace a saved host KVM device" >&2
+        exit 1
+    fi
+    if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+        if [[ ! -c /dev/kvm || -L /dev/kvm ]]; then
+            echo "host /dev/kvm exists but is not a character device" >&2
+            exit 1
+        fi
+    fi
+
+    printf '%s\n' 'owned by scripts/no-kvm-packaged-sdk-smoke.sh' \
+        > "$sentinel_marker"
+    kvm_state_owned=1
+
+    if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+        sudo mv -- /dev/kvm "$saved_kvm"
+        kvm_original_moved=1
+    fi
+    if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+        echo "failed to establish the KVM-absent test state" >&2
+        exit 1
     fi
 }
-trap cleanup_kvm_sentinel EXIT
 
 validate_recovery_report() {
     local report="$1"
@@ -76,34 +148,30 @@ run_sdk_phase() {
 
     case "$phase" in
         absent)
-            if [ -e /dev/kvm ]; then
-                echo "/dev/kvm unexpectedly exists on the no-KVM runner" >&2
+            if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+                echo "/dev/kvm unexpectedly exists in the KVM-absent phase" >&2
                 exit 1
             fi
             expected_info_pattern='KVM is not available: /dev/kvm not found'
             ;;
         inaccessible)
-            test ! -e /dev/kvm
-            test ! -e "$sentinel_marker"
-            printf '%s\n' 'owned by scripts/no-kvm-packaged-sdk-smoke.sh' \
-                > "$sentinel_marker"
-            sentinel_created=1
-            sudo mknod -m 000 /dev/kvm c 10 232
+            [[ ! -e /dev/kvm && ! -L /dev/kvm ]]
+            kvm_test_directory_created=1
+            sudo install -d -m 000 /dev/kvm
             sudo python3 - <<'PY'
+import errno
 import os
 import stat
 
 metadata = os.lstat("/dev/kvm")
-assert stat.S_ISCHR(metadata.st_mode), "/dev/kvm sentinel is not a character device"
-assert os.major(metadata.st_rdev) == 10, "/dev/kvm sentinel has the wrong major number"
-assert os.minor(metadata.st_rdev) == 232, "/dev/kvm sentinel has the wrong minor number"
+assert stat.S_ISDIR(metadata.st_mode), "/dev/kvm test path is not a directory"
 try:
     descriptor = os.open("/dev/kvm", os.O_RDWR)
-except OSError:
-    pass
+except OSError as error:
+    assert error.errno == errno.EISDIR, error
 else:
     os.close(descriptor)
-    raise RuntimeError("/dev/kvm sentinel unexpectedly opened read/write")
+    raise RuntimeError("/dev/kvm test path unexpectedly opened read/write")
 PY
             expected_info_pattern='KVM access denied|Failed to access /dev/kvm'
             ;;
@@ -144,12 +212,13 @@ PY
     validate_recovery_report "$report"
 
     if [ "$phase" = inaccessible ]; then
-        test -c /dev/kvm
-        cleanup_kvm_sentinel
+        [[ -d /dev/kvm && ! -L /dev/kvm ]]
+        cleanup_kvm_state
     else
-        test ! -e /dev/kvm
+        [[ ! -e /dev/kvm && ! -L /dev/kvm ]]
     fi
 }
 
+prepare_kvm_states
 run_sdk_phase absent
 run_sdk_phase inaccessible

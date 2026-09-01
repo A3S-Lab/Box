@@ -120,15 +120,15 @@ x86_64 and aarch64 hosts without KVM. Each must:
 3. build release Box binaries with the vendored libkrun and libkrunfw runtime,
    plus guest init, the pinned OCI runtime, and the agent;
 4. assemble the supported Linux release layout, install it through `install.sh`,
-   validate the install marker and OCI revision, and reject any executable path
-   outside that installation;
+   validate every executable dependency, require the shim to resolve libkrun
+   from that layout, validate the install marker and OCI revision, and reject
+   any executable path outside that installation;
 5. require `/dev/kvm` to be absent, verify the installed product reports that
    exact condition, and execute the unchanged Rust, Python, TypeScript, and Go
    local SDK lifecycles;
-6. create a runner-local KVM character-device node whose read/write open is
-   rejected even for the root test process, verify the installed product
-   reports the access failure, and execute the same four-language lifecycle a
-   second time;
+6. create a runner-local `/dev/kvm` path whose read/write open is rejected even
+   for the root test process, verify the installed product reports the access
+   failure, and execute the same four-language lifecycle a second time;
 7. cover image management, named volumes, files, logs, metrics, pause/resume,
    exact CPU/memory/PID enforcement, stop/restart, filesystem snapshots, and
    complete cleanup;
@@ -138,6 +138,11 @@ x86_64 and aarch64 hosts without KVM. Each must:
    generation, and restart exactly the next Box and OCI generations;
 9. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
    remains.
+
+If a hosted runner initially exposes a KVM character device, the gate moves it
+aside only after creating an exact ownership marker and restores it from both
+the script trap and the workflow's unconditional cleanup. Unexpected device
+types, replacement paths, stale markers, and backup collisions fail closed.
 
 ### Native configuration matrix
 

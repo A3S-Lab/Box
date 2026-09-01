@@ -370,10 +370,12 @@ libkrunfw, installs it through the user installer, certifies every advertised
 R17 provider profile, and runs the real Rust, Python, TypeScript, and Go SDK
 lifecycle exclusively through the installed Box, shim, guest init, runtime, and
 agent. The complete SDK lifecycle runs once with `/dev/kvm` absent and again
-with a present KVM character-device node that cannot be opened read/write;
+with a present `/dev/kvm` path that cannot be opened read/write;
 `a3s-box info` must report the matching host condition before each run. The
-resource profile observes exact CPU, memory, and PID limits, forces throttling,
-PID exhaustion, and a
+gate moves aside and later restores an initially present host KVM character
+device under an exact ownership marker, and fails closed on path or type drift.
+The resource profile observes exact CPU, memory, and PID limits, forces
+throttling, PID exhaustion, and a
 workload-only OOM, verifies the long-lived Service and exec transport remain
 available, and requires complete cgroup cleanup. The SDK matrix covers images,
 files, logs, metrics, named volumes, snapshots, pause/resume, filesystem-only
