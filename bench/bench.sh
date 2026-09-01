@@ -513,11 +513,18 @@ bench_pnpm() {
   echo "  config: project=$project cpus=$PNPM_CPUS memory=$PNPM_MEMORY timeout=${PNPM_TIMEOUT}s package-cache=$PNPM_CACHE node_modules=$PNPM_NODE_MODULES reset-a3s-cache=$PNPM_RESET_A3S_CACHE"
   echo "  logs:   $PNPM_LOG_DIR"
 
-  local prepare_cmd fetch_cmd offline_cmd full_cmd
+  local prepare_cmd project_cleanup_cmd tmpfs_cleanup_cmd fetch_cmd
+  local offline_project_cmd offline_tmpfs_cmd full_project_cmd full_tmpfs_cmd
   prepare_cmd="corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && pnpm --version >/dev/null"
-  fetch_cmd="$prepare_cmd && rm -rf node_modules && pnpm fetch --frozen-lockfile --reporter append-only"
-  offline_cmd="$prepare_cmd && rm -rf node_modules && pnpm install --offline --frozen-lockfile --ignore-scripts --reporter append-only"
-  full_cmd="$prepare_cmd && rm -rf node_modules && pnpm install --frozen-lockfile --reporter append-only"
+  project_cleanup_cmd="rm -rf node_modules"
+  # A tmpfs target is a Linux mount point and cannot itself be unlinked. Clear
+  # its children while retaining the mount boundary for the measured install.
+  tmpfs_cleanup_cmd="find node_modules -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"
+  fetch_cmd="$prepare_cmd && $project_cleanup_cmd && pnpm fetch --frozen-lockfile --reporter append-only"
+  offline_project_cmd="$prepare_cmd && $project_cleanup_cmd && pnpm install --offline --frozen-lockfile --ignore-scripts --reporter append-only"
+  offline_tmpfs_cmd="$prepare_cmd && $tmpfs_cleanup_cmd && pnpm install --offline --frozen-lockfile --ignore-scripts --reporter append-only"
+  full_project_cmd="$prepare_cmd && $project_cleanup_cmd && pnpm install --frozen-lockfile --reporter append-only"
+  full_tmpfs_cmd="$prepare_cmd && $tmpfs_cleanup_cmd && pnpm install --frozen-lockfile --reporter append-only"
 
   run_a3s_pnpm() {
     local log_file="$1"; shift
@@ -569,22 +576,22 @@ bench_pnpm() {
     measure_a3s_samples "fetch" "$fetch_cmd" -v "$project:/work" -w /work || return $?
     fetch_samples="$MEASURED_SAMPLES"
 
-    measure_a3s_samples "offline-project" "$offline_cmd" -v "$project:/work" -w /work || return $?
+    measure_a3s_samples "offline-project" "$offline_project_cmd" -v "$project:/work" -w /work || return $?
     offline_project_samples="$MEASURED_SAMPLES"
 
     if [ "$PNPM_NODE_MODULES" = "tmpfs" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
-      measure_a3s_samples "offline-tmpfs" "$offline_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
+      measure_a3s_samples "offline-tmpfs" "$offline_tmpfs_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
       offline_tmpfs_samples="$MEASURED_SAMPLES"
     fi
   fi
 
   if [ "$PNPM_NODE_MODULES" = "project" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
-    measure_a3s_samples "install-project" "$full_cmd" -v "$project:/work" -w /work || return $?
+    measure_a3s_samples "install-project" "$full_project_cmd" -v "$project:/work" -w /work || return $?
     install_project_samples="$MEASURED_SAMPLES"
   fi
 
   if [ "$PNPM_NODE_MODULES" = "tmpfs" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
-    measure_a3s_samples "install-tmpfs" "$full_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
+    measure_a3s_samples "install-tmpfs" "$full_tmpfs_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
     install_tmpfs_samples="$MEASURED_SAMPLES"
   fi
 
