@@ -75,6 +75,19 @@ impl LocalExecutionBackendRouter {
         self.policy
     }
 
+    fn backend_for_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> &Arc<dyn LocalExecutionBackend> {
+        match self.policy.route(isolation) {
+            ManagedRuntimeRoute::BoxVm => &self.legacy,
+            ManagedRuntimeRoute::OciSdk => &self.oci,
+            ManagedRuntimeRoute::Unspecified => {
+                unreachable!("creation policy always selects a route")
+            }
+        }
+    }
+
     fn route_for_record(&self, record: &BoxRecord) -> ExecutionManagerResult<ManagedRuntimeRoute> {
         resolved_runtime_route(record)
     }
@@ -123,6 +136,15 @@ pub(super) fn resolved_runtime_route(
 
 #[async_trait]
 impl LocalExecutionBackend for LocalExecutionBackendRouter {
+    async fn preflight_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        self.backend_for_isolation(isolation)
+            .preflight_isolation(isolation)
+            .await
+    }
+
     fn route_for_create(&self, record: &BoxRecord) -> ExecutionManagerResult<ManagedRuntimeRoute> {
         if record.managed_execution.is_none() {
             return Err(ExecutionManagerError::Internal(format!(

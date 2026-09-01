@@ -51,7 +51,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManagerError,
+    ExecutionManagerResult,
 };
 
 pub use backend::{
@@ -100,6 +101,16 @@ impl LocalExecutionManager {
 
     pub fn state_path(&self) -> &std::path::Path {
         self.store.path()
+    }
+
+    /// Probe the backend selected by the current creation policy before an
+    /// image pull or other product preparation. Record creation repeats all
+    /// mutable capability checks before publishing durable state.
+    pub async fn preflight_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        self.backend.preflight_isolation(isolation).await
     }
 
     pub(super) async fn require_running_record(

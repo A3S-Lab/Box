@@ -17,19 +17,30 @@ use crate::{BoxRecord, ManagedRuntimeRoute};
 
 #[derive(Default)]
 struct RoutedProbeBackend {
+    fail_isolation_preflight: AtomicBool,
     fail_preflight: AtomicBool,
+    isolation_preflights: AtomicUsize,
     preflights: AtomicUsize,
     kills: AtomicUsize,
+    observed_isolations: Mutex<Vec<ExecutionIsolation>>,
     observed_routes: Mutex<Vec<ManagedRuntimeRoute>>,
 }
 
 impl RoutedProbeBackend {
+    fn reject_isolation_preflight(&self) {
+        self.fail_isolation_preflight.store(true, Ordering::Relaxed);
+    }
+
     fn reject_preflight(&self) {
         self.fail_preflight.store(true, Ordering::Relaxed);
     }
 
     fn preflights(&self) -> usize {
         self.preflights.load(Ordering::Relaxed)
+    }
+
+    fn isolation_preflights(&self) -> usize {
+        self.isolation_preflights.load(Ordering::Relaxed)
     }
 
     fn kills(&self) -> usize {
@@ -39,10 +50,29 @@ impl RoutedProbeBackend {
     fn observed_routes(&self) -> Vec<ManagedRuntimeRoute> {
         self.observed_routes.lock().unwrap().clone()
     }
+
+    fn observed_isolations(&self) -> Vec<ExecutionIsolation> {
+        self.observed_isolations.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl LocalExecutionBackend for RoutedProbeBackend {
+    async fn preflight_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        self.isolation_preflights.fetch_add(1, Ordering::Relaxed);
+        self.observed_isolations.lock().unwrap().push(isolation);
+        if self.fail_isolation_preflight.load(Ordering::Relaxed) {
+            Err(ExecutionManagerError::Unavailable(
+                "selected isolation is unavailable".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
         self.preflights.fetch_add(1, Ordering::Relaxed);
         self.observed_routes.lock().unwrap().push(
@@ -98,6 +128,35 @@ impl LocalExecutionBackend for RoutedProbeBackend {
         self.kills.fetch_add(1, Ordering::Relaxed);
         Ok(KillOutcome::Killed)
     }
+}
+
+#[tokio::test]
+async fn selected_oci_isolation_preflight_fails_closed_without_fallback_or_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("boxes.json");
+    let legacy = Arc::new(RoutedProbeBackend::default());
+    let oci = Arc::new(RoutedProbeBackend::default());
+    oci.reject_isolation_preflight();
+    let manager = LocalExecutionManager::new(
+        &state_path,
+        temporary.path(),
+        Arc::new(LocalExecutionBackendRouter::new(
+            legacy.clone(),
+            oci.clone(),
+            OciMigrationPolicy::AllViaOci,
+        )),
+    );
+
+    let error = manager
+        .preflight_isolation(ExecutionIsolation::Microvm)
+        .await
+        .expect_err("selected OCI isolation must fail closed");
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert_eq!(legacy.isolation_preflights(), 0);
+    assert_eq!(oci.isolation_preflights(), 1);
+    assert_eq!(oci.observed_isolations(), vec![ExecutionIsolation::Microvm]);
+    assert!(!state_path.exists());
 }
 
 #[tokio::test]

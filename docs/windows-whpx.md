@@ -110,7 +110,9 @@ the Cargo target directory.
 
 Requests such as `--cpus 2` or `--health-cmd ...` fail before image pull with
 an explicit WHPX diagnostic. `--no-healthcheck` remains available to disable an
-image-defined health check.
+image-defined health check. Qualification-mode `run` and `create` also require
+the configured OCI service to advertise one launch-ready `DedicatedVm` driver
+before named-volume creation or image-cache access.
 
 ## Smoke test
 

@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Fail-closed OCI isolation before CLI product mutation.** `run` and `create`
+  now ask the active migration router to preflight the selected isolation before
+  named-volume creation or image-cache access. OCI-routed MicroVM requests
+  require a launch-ready `DedicatedVm` driver without falling back to the legacy
+  backend, and record creation repeats the mutable capability check before
+  durable reservation.
 - MicroVM and Compose startup now preserve container-runtime invariants across
   arbitrary images: `--network none` disables networking, completed
   dependencies require an authoritative zero exit status, empty managed

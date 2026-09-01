@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use a3s_box_core::{
     pty::PtyRequest, ExecOutput, ExecRequest, ExecutionEventBatch, ExecutionEventsRequest,
-    ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionProcess,
-    ExecutionProcessInventory, ExecutionResourceUpdate, ExecutionState, ExecutionStats,
-    FileRequest, FileResponse, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId,
+    ExecutionId, ExecutionIsolation, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionProcess, ExecutionProcessInventory, ExecutionResourceUpdate, ExecutionState,
+    ExecutionStats, FileRequest, FileResponse, FilesystemRequest, FilesystemResponse, KillOutcome,
+    OperationId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -97,6 +98,16 @@ impl LocalExecutionObservation {
 /// external sandbox ID in managed metadata is an untrusted diagnostic label.
 #[async_trait]
 pub trait LocalExecutionBackend: Send + Sync {
+    /// Perform any backend-only launch-readiness probe available before callers
+    /// execute external image operations. Backends without a context-free probe
+    /// may defer to record preflight. Mutable checks must be repeated there.
+    async fn preflight_isolation(
+        &self,
+        _isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     /// Select the durable route for a new record before capability preflight.
     ///
     /// Custom test or embedding backends may leave the route unspecified. Box
