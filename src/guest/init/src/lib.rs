@@ -13,6 +13,8 @@
 pub mod attest_server;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
+#[cfg(target_os = "linux")]
+mod container_devices;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod diff_baseline;
 pub mod exec_server;

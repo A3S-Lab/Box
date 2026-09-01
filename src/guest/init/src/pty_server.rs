@@ -300,7 +300,7 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
         // /proc + /sys, then the standard /dev nodes — many workloads read
         // /proc/self/* or /dev/urandom and won't start without them. Idempotent.
         crate::exec_server::ensure_container_pseudo_filesystems(rootfs);
-        crate::exec_server::ensure_container_dev_nodes(rootfs);
+        crate::container_devices::ensure_container_dev_nodes(rootfs);
         // CRI MaskedPaths / ReadonlyPaths (best-effort; a path that doesn't exist
         // is skipped) — these need /proc + /sys mounted above.
         let masked = crate::exec_server::parse_sec_path_list(&request.env, "A3S_SEC_MASKED_PATHS=");

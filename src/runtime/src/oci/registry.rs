@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
-use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
+use futures::{stream, StreamExt, TryStreamExt};
+use oci_distribution::client::{
+    ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse, DEFAULT_MAX_CONCURRENT_UPLOAD,
+};
 use oci_distribution::errors::{OciDistributionError, OciErrorCode};
 use oci_distribution::manifest::{
     ImageIndexEntry, OciImageManifest, IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE,
 };
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
-use oci_distribution::{Client, Reference};
+use oci_distribution::{Client, Reference, RegistryOperation};
 use oci_reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use zeroize::Zeroize;
 
@@ -848,17 +851,54 @@ impl RegistryPusher {
         manifest_data: &[u8],
     ) -> std::result::Result<PushResponse, OciDistributionError> {
         let auth = self.auth.to_oci_auth();
-        match self
-            .client
-            .push(
-                oci_ref,
-                layers,
-                config.clone(),
-                &auth,
-                Some(manifest.clone()),
-            )
-            .await
-        {
+        let push = async {
+            self.client
+                .auth(oci_ref, &auth, RegistryOperation::Push)
+                .await?;
+
+            stream::iter(layers.iter().zip(&manifest.layers))
+                .map(|(layer, descriptor)| async move {
+                    self.client
+                        .push_blob(oci_ref, &layer.data, &descriptor.digest)
+                        .await?;
+                    Ok::<(), OciDistributionError>(())
+                })
+                .buffer_unordered(DEFAULT_MAX_CONCURRENT_UPLOAD)
+                .try_collect::<Vec<_>>()
+                .await?;
+            let config_url = self
+                .client
+                .push_blob(oci_ref, &config.data, &manifest.config.digest)
+                .await?;
+
+            // `Client::push` canonicalizes a typed manifest before uploading it.
+            // That is semantically equivalent JSON but has a different OCI
+            // content digest when the local layout stores pretty-printed bytes.
+            // Preserve the layout's content-addressed identity by uploading the
+            // already verified bytes through the client's authenticated raw API.
+            let media_type = manifest
+                .media_type
+                .as_deref()
+                .unwrap_or(OCI_IMAGE_MEDIA_TYPE);
+            let content_type = oci_reqwest::header::HeaderValue::from_bytes(media_type.as_bytes())
+                .map_err(|error| {
+                    OciDistributionError::GenericError(Some(format!(
+                        "invalid manifest media type {media_type:?}: {error}"
+                    )))
+                })?;
+            let manifest_url = self
+                .client
+                .push_manifest_raw(oci_ref, manifest_data.to_vec(), content_type)
+                .await?;
+
+            Ok(PushResponse {
+                config_url,
+                manifest_url,
+            })
+        }
+        .await;
+
+        match push {
             Err(first_error)
                 if is_unauthorized_registry_error(&first_error)
                     && self.auth.basic_credentials().is_some() =>
@@ -2202,5 +2242,7 @@ mod tests {
 
 #[cfg(test)]
 mod basic_pull_tests;
+#[cfg(test)]
+mod push_tests;
 #[cfg(test)]
 mod resilient_pull_tests;

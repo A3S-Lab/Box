@@ -977,6 +977,7 @@ fn test_real_build_run_pool_smoke() {
         format!(
             r#"FROM {image}
 WORKDIR /work
+RUN test -c /dev/null && test -c /dev/urandom && printf 'discarded\n' > /dev/null
 RUN printf 'shell-ok\n' > /shell.txt
 RUN ["/bin/sh", "-c", "printf 'exec-ok\n' > exec.txt"]
 RUN --mount=type=cache,id=warm-smoke,sharing=locked,mode=0750,target=/root/.cache printf 'cache-only\n' > /root/.cache/cache.txt

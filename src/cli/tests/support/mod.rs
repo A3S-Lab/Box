@@ -757,7 +757,9 @@ pub fn create_minimal_oci_tar(path: &Path, reference: &str) {
             "size": layer.len()
         }]
     });
-    let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+    // Keep this non-canonical on purpose: registry push must preserve the exact
+    // content-addressed bytes instead of reserializing the typed manifest.
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
     let manifest_digest = sha256_hex(&manifest_bytes);
     std::fs::write(blobs.join(&manifest_digest), &manifest_bytes).expect("write manifest blob");
 
