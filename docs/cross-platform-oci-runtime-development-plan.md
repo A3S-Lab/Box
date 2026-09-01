@@ -117,16 +117,26 @@ x86_64 and aarch64 hosts without KVM. Each must:
 
 1. check out the exact pinned OCI Runtime revision;
 2. run its native Linux qualification script;
-3. build Box, the shim, guest init, the runtime, and the agent;
-4. execute the unchanged Rust, Python, TypeScript, and Go local SDK lifecycles;
-5. cover image management, named volumes, files, logs, metrics, pause/resume,
+3. build release Box binaries with the vendored libkrun and libkrunfw runtime,
+   plus guest init, the pinned OCI runtime, and the agent;
+4. assemble the supported Linux release layout, install it through `install.sh`,
+   validate the install marker and OCI revision, and reject any executable path
+   outside that installation;
+5. require `/dev/kvm` to be absent, verify the installed product reports that
+   exact condition, and execute the unchanged Rust, Python, TypeScript, and Go
+   local SDK lifecycles;
+6. create a runner-local KVM character-device node whose read/write open is
+   rejected even for the root test process, verify the installed product
+   reports the access failure, and execute the same four-language lifecycle a
+   second time;
+7. cover image management, named volumes, files, logs, metrics, pause/resume,
    exact CPU/memory/PID enforcement, stop/restart, filesystem snapshots, and
    complete cleanup;
-6. kill the exact OCI owner under a running Sandbox, prove the launcher and init
+8. kill the exact OCI owner under a running Sandbox, prove the launcher and init
    terminate, then use distinct Box processes to rebind the endpoint, reconcile
    stopped-only state without a synthetic exit status, delete the old
    generation, and restart exactly the next Box and OCI generations;
-7. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
+9. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
    remains.
 
 ### Native configuration matrix
@@ -171,7 +181,8 @@ Sandbox isolation on non-Linux hosts.
 A release is blocked unless:
 
 - formatting, strict Clippy, and workspace unit tests pass;
-- the local SDK real-runtime gate passes against the pinned revision;
+- the installed-product SDK gate passes twice against the pinned revision, with
+  `/dev/kvm` first absent and then present but inaccessible;
 - network, storage, and initialization profiles pass;
 - Linux archives contain executable `a3s-oci` and `a3s-oci-agent`;
 - `OCI-RUNTIME-REVISION` equals the dependency revision;

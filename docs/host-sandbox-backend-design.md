@@ -365,13 +365,19 @@ for:
 - pause, resume, stop, delete, and post-stop hooks;
 - PID, namespace, mount, cgroup, socket, owner, and session cleanup.
 
-Box then certifies every advertised R17 provider profile and runs the real Rust,
-Python, TypeScript, and Go SDK lifecycle against those artifacts. The resource
-profile observes exact CPU, memory, and PID limits, forces throttling, PID
-exhaustion, and a workload-only OOM, verifies the long-lived Service and exec
-transport remain available, and requires complete cgroup cleanup. The SDK
-matrix covers images, files, logs, metrics, named volumes, snapshots,
-pause/resume, filesystem-only restart, and final cleanup.
+Box then builds a self-contained Linux package with vendored libkrun and
+libkrunfw, installs it through the user installer, certifies every advertised
+R17 provider profile, and runs the real Rust, Python, TypeScript, and Go SDK
+lifecycle exclusively through the installed Box, shim, guest init, runtime, and
+agent. The complete SDK lifecycle runs once with `/dev/kvm` absent and again
+with a present KVM character-device node that cannot be opened read/write;
+`a3s-box info` must report the matching host condition before each run. The
+resource profile observes exact CPU, memory, and PID limits, forces throttling,
+PID exhaustion, and a
+workload-only OOM, verifies the long-lived Service and exec transport remain
+available, and requires complete cgroup cleanup. The SDK matrix covers images,
+files, logs, metrics, named volumes, snapshots, pause/resume, filesystem-only
+restart, and final cleanup.
 
 The Runtime networking profile also starts two real private Sandbox Services on
 the same guest TCP port, requires distinct typed host-loopback endpoints, sends
