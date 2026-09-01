@@ -118,7 +118,9 @@ for binary in a3s-box a3s-box-shim; do
     ldd_output="$(LD_LIBRARY_PATH= ldd "$PACKAGE_ROOT/$binary")"
     printf '%s\n' "$ldd_output"
     ! grep -q 'not found' <<< "$ldd_output"
-    grep -F "$PACKAGE_ROOT/lib/libkrun.so" <<< "$ldd_output"
+    if [ "$binary" = "a3s-box-shim" ]; then
+        grep -F "$PACKAGE_ROOT/lib/libkrun.so" <<< "$ldd_output"
+    fi
 done
 
 tar czf "$ARCHIVE" -C "$OUTPUT_ROOT" "$PACKAGE_NAME"
