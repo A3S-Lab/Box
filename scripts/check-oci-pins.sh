@@ -6,32 +6,32 @@ REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 read_workflow_pin() {
     local workflow="$1"
-    local matches
-    mapfile -t matches < <(
+    local match
+    match="$(
         sed -nE \
             's/^[[:space:]]*A3S_OCI_RUNTIME_REV:[[:space:]]*([0-9a-f]{40})[[:space:]]*$/\1/p' \
             "$workflow"
-    )
-    if [[ "${#matches[@]}" -ne 1 ]]; then
+    )"
+    if [[ -z "$match" || "$match" == *$'\n'* ]]; then
         echo "$workflow must contain exactly one 40-character OCI revision" >&2
         return 1
     fi
-    printf '%s\n' "${matches[0]}"
+    printf '%s\n' "$match"
 }
 
 read_sdk_pin() {
     local manifest="$1"
-    local matches
-    mapfile -t matches < <(
+    local match
+    match="$(
         sed -nE \
             's/^[[:space:]]*a3s-oci-sdk[[:space:]]*=.*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*$/\1/p' \
             "$manifest"
-    )
-    if [[ "${#matches[@]}" -ne 1 ]]; then
+    )"
+    if [[ -z "$match" || "$match" == *$'\n'* ]]; then
         echo "$manifest must contain exactly one 40-character OCI SDK revision" >&2
         return 1
     fi
-    printf '%s\n' "${matches[0]}"
+    printf '%s\n' "$match"
 }
 
 ci_pin="$(read_workflow_pin "$REPOSITORY_ROOT/.github/workflows/ci.yml")"
