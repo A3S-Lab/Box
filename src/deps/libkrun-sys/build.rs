@@ -487,12 +487,22 @@ fn make_command(
         .env("PREFIX", install_dir)
         .current_dir(source_dir);
 
-    // Darwin reports Apple Silicon as `arm64`, while the Debian sysroot used
-    // to build libkrun's Linux guest init stores its CRT and libgcc files under
-    // the GNU `aarch64-linux-gnu` tuple. Override the vendored Makefile's
-    // uname-derived value so clang searches the populated sysroot directory.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cmd.arg("ARCH=aarch64");
+    // The vendored Makefile overloads ARCH for both the Debian repository path
+    // and clang's GNU target. Debian calls AArch64 `arm64`, while the compiler
+    // and extracted sysroot use `aarch64-linux-gnu`. Supply each naming domain
+    // explicitly so a clean macOS build downloads and links the same sysroot.
+    #[cfg(target_os = "macos")]
+    {
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
+            .expect("CARGO_CFG_TARGET_ARCH is required for a macOS libkrun build");
+        let architecture = build_support::debian_cross_architecture(&target_arch)
+            .unwrap_or_else(|| panic!("unsupported macOS libkrun architecture: {target_arch}"));
+        cmd.arg(format!("ARCH={}", architecture.repository_arch));
+        cmd.arg(format!(
+            "CC_LINUX=/usr/bin/clang -target {} -fuse-ld=lld -Wl,-strip-debug --sysroot $(SYSROOT_LINUX) -Wno-c23-extensions",
+            architecture.gnu_target
+        ));
+    }
 
     for (key, value) in extra_env {
         cmd.env(key, value);

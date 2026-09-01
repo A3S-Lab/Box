@@ -3,6 +3,32 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DebianCrossArchitecture {
+    pub(crate) repository_arch: &'static str,
+    pub(crate) gnu_target: &'static str,
+}
+
+/// Translate a Rust host architecture into the two names required by the
+/// vendored libkrun macOS cross-build.
+///
+/// Debian repository paths and GNU compiler targets intentionally use
+/// different architecture vocabularies. Keeping both values explicit avoids
+/// overloading libkrun's `ARCH` make variable for two incompatible domains.
+pub(crate) fn debian_cross_architecture(target_arch: &str) -> Option<DebianCrossArchitecture> {
+    match target_arch {
+        "aarch64" => Some(DebianCrossArchitecture {
+            repository_arch: "arm64",
+            gnu_target: "aarch64-linux-gnu",
+        }),
+        "x86_64" => Some(DebianCrossArchitecture {
+            repository_arch: "amd64",
+            gnu_target: "x86_64-linux-gnu",
+        }),
+        _ => None,
+    }
+}
+
 /// Calculate a lowercase SHA-256 digest without relying on platform commands.
 pub(crate) fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;

@@ -26,6 +26,13 @@ All notable changes to A3S Box will be documented in this file.
   including SDK callers; only the CLI's explicit `snapshot rm --force` path can
   bypass that protection.
 
+### Fixed
+
+- Clean Apple Silicon release builds now keep Debian's `arm64` repository name
+  separate from clang's `aarch64-linux-gnu` target while preparing libkrun's
+  guest-init sysroot, avoiding a deterministic package-index 404 without
+  falling back to an older system libkrun.
+
 ## [3.2.0] — 2026-08-25
 
 ### Fixed
