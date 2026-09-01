@@ -29,6 +29,29 @@ jobs:
         with:
           components: rustfmt
       - run: cd src && cargo fmt --all -- --check
+      - name: Verify CI and release OCI artifact pins agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          read_pin() {
+            local workflow="$1"
+            local matches
+            mapfile -t matches < <(
+              sed -nE 's/^[[:space:]]*A3S_OCI_RUNTIME_REV:[[:space:]]*([0-9a-f]{40})[[:space:]]*$/\1/p' \
+                "$workflow"
+            )
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "$workflow must contain exactly one 40-character OCI revision" >&2
+              exit 1
+            fi
+            printf '%s\n' "${matches[0]}"
+          }
+          ci_pin="$(read_pin .github/workflows/ci.yml)"
+          release_pin="$(read_pin .github/workflows/release.yml)"
+          if [ "$ci_pin" != "$release_pin" ]; then
+            echo "CI OCI revision $ci_pin differs from release revision $release_pin" >&2
+            exit 1
+          fi
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
@@ -429,13 +452,15 @@ jobs:
           - job_name: SDK Local Sandbox (A3S OCI Runtime)
             os: ubuntu-24.04
             guest_target: x86_64-unknown-linux-musl
+            platform: linux-x86_64
             recovery_artifact: a3s-box-native-owner-recovery
           - job_name: SDK Local Sandbox (A3S OCI Runtime, aarch64)
             os: ubuntu-24.04-arm
             guest_target: aarch64-unknown-linux-musl
+            platform: linux-arm64
             recovery_artifact: a3s-box-native-owner-recovery-aarch64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       A3S_HOME: /tmp/a3s-local-sdk-smoke-runtime-conformance
       A3S_BOX_OCI_RUNTIME_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci
@@ -468,7 +493,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential musl-tools protobuf-compiler
+          sudo apt-get install -y \
+            build-essential libclang-dev libssl-dev musl-tools patchelf \
+            pkg-config protobuf-compiler
           rustup target add "${{ matrix.guest_target }}"
           sed -nE \
             's/^[[:space:]]*pub fn (krun_[A-Za-z0-9_]+).*/long \1(void) { return -1; }/p' \
@@ -481,28 +508,36 @@ jobs:
       - name: Qualify pinned OCI lifecycle, filesystem, and attachment profiles
         working-directory: oci-runtime
         run: bash .github/scripts/native-linux-smoke.sh
-      - name: Build local SDK runtime artifacts
+      - name: Build release-layout SDK runtime artifacts
         run: |
           cd src
-          cargo build --locked -p a3s-box-cli -p a3s-box-shim
+          cargo clean -p a3s-libkrun-sys
+          env -u A3S_DEPS_STUB A3S_BUILD_LIBKRUN=1 \
+            cargo build --locked --release -p a3s-box-cli -p a3s-box-shim
           cargo build --locked --release -p a3s-box-guest-init \
             --target "${{ matrix.guest_target }}"
           cd ../oci-runtime
           cargo build --locked --release -p a3s-oci-cli -p a3s-oci-agent
-      - name: Install R17 runtime artifacts and host identity ranges
+      - name: Package and install the no-KVM product
         run: |
-          sudo install -d -m 755 "$A3S_HOME/bin"
-          sudo install -m 755 src/target/debug/a3s-box-shim \
-            "$A3S_HOME/bin/a3s-box-shim"
-          sudo install -m 755 \
-            "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" \
-            "$A3S_HOME/bin/a3s-box-guest-init"
-          sudo install -m 755 oci-runtime/target/release/a3s-oci "$A3S_BOX_OCI_RUNTIME_PATH"
-          sudo install -m 755 oci-runtime/target/release/a3s-oci-agent "$A3S_BOX_OCI_AGENT_PATH"
-          test -x "$A3S_HOME/bin/a3s-box-shim"
-          test -x "$A3S_HOME/bin/a3s-box-guest-init"
-          test -x "$A3S_BOX_OCI_RUNTIME_PATH"
-          test -x "$A3S_BOX_OCI_AGENT_PATH"
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/a3s-box-installed-${{ matrix.platform }}"
+          bash scripts/package-no-kvm-product.sh \
+            "${{ matrix.guest_target }}" \
+            "${{ matrix.platform }}" \
+            "$A3S_OCI_RUNTIME_REV" \
+            "$RUNNER_TEMP" \
+            "$install_dir"
+
+          {
+            echo "A3S_BOX_INSTALL_DIR=$install_dir"
+            echo "A3S_BOX_BINARY=$install_dir/a3s-box"
+            echo "A3S_BOX_SHIM_BINARY=$install_dir/a3s-box-shim"
+            echo "A3S_BOX_GUEST_INIT_BINARY=$install_dir/a3s-box-guest-init"
+            echo "A3S_BOX_OCI_RUNTIME_PATH=$install_dir/a3s-oci"
+            echo "A3S_BOX_OCI_AGENT_PATH=$install_dir/a3s-oci-agent"
+          } >> "$GITHUB_ENV"
+
           grep -q '^root:' /etc/subuid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
@@ -521,7 +556,7 @@ jobs:
               HOME="$HOME" \
               A3S_DEPS_STUB=1 \
               A3S_HOME="$A3S_HOME" \
-              "$GITHUB_WORKSPACE/src/target/debug/a3s-box" pull \
+              "$A3S_BOX_BINARY" pull \
                 'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
       - name: Certify all advertised R17 profiles and private registry pull
         run: |
@@ -583,47 +618,11 @@ jobs:
             echo "::error title=Production Box-to-OCI owner composition failure::$diagnostic"
           fi
           exit "$status"
-      - name: Test Rust, Python, TypeScript, and Go SDKs without credentials
+      - name: Test the installed SDK product with KVM absent and inaccessible
         run: |
           set +e
           log="$RUNNER_TEMP/a3s-box-local-sdk-smoke.log"
-          {
-            sudo env \
-                PATH="$PATH" \
-                HOME="$HOME" \
-                RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
-                CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-                A3S_DEPS_STUB=1 \
-                A3S_HOME="$A3S_HOME" \
-                A3S_BOX_OCI_MIGRATION=sandbox \
-                A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
-                A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
-                A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
-                A3S_BOX_OCI_OWNER_RECOVERY_REPORT="$A3S_BOX_OCI_OWNER_RECOVERY_REPORT" \
-                A3S_BOX_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box" \
-                A3S_BOX_SHIM_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box-shim" \
-                A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" \
-                RUST_MIN_STACK=16777216 \
-                PYTHON=python3 \
-                GO=go \
-                scripts/local-sdk-smoke.sh sandbox
-            test -s "$A3S_BOX_OCI_OWNER_RECOVERY_REPORT"
-            jq --exit-status \
-              '.schema_version == "a3s.box.native-linux-owner-recovery.v1"
-               and .status == "available" and .platform == "linux"
-               and (.sandbox_id | length > 0)
-               and (.runtime_container_id == ("a3s-box-" + .sandbox_id))
-               and (.new_box_generation == (.old_box_generation + 1))
-               and (.new_runtime_generation == (.old_runtime_generation + 1))
-               and (.old_owner.pid > 0) and (.new_owner.pid > 0)
-               and (.old_init.pid > 0) and (.new_init.pid > 0)
-               and (.old_owner != .new_owner) and (.old_init != .new_init)
-               and .old_owner_gone and .old_launcher_gone and .old_init_gone
-               and .socket_rebound and .stopped_without_invented_exit_status
-               and .old_generation_deleted and .old_executor_root_removed
-               and .replacement_generation_running' \
-              "$A3S_BOX_OCI_OWNER_RECOVERY_REPORT" >/dev/null
-          } 2>&1 | tee "$log"
+          bash scripts/no-kvm-packaged-sdk-smoke.sh 2>&1 | tee "$log"
           status=${PIPESTATUS[0]}
           if ((status != 0)); then
             while IFS= read -r worker_log; do
@@ -645,13 +644,19 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ matrix.recovery_artifact }}
-          path: ${{ env.A3S_BOX_OCI_OWNER_RECOVERY_REPORT }}
+          path: /tmp/a3s-box-native-owner-recovery-*.json
           if-no-files-found: warn
           retention-days: 14
       - name: Verify cleanup
         if: always()
         run: |
           cleanup_status=0
+          if [ -f /tmp/a3s-box-ci-kvm-sentinel ]; then
+            if [ -c /dev/kvm ]; then
+              sudo rm -f /dev/kvm || cleanup_status=1
+            fi
+            rm -f /tmp/a3s-box-ci-kvm-sentinel || cleanup_status=1
+          fi
           sudo python3 - "$A3S_BOX_OCI_HOST_ROOT/box-owner.json" <<'PY' || cleanup_status=1
           import json
           import os
