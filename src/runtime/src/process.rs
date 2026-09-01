@@ -37,19 +37,23 @@ pub fn is_process_alive(_pid: u32) -> bool {
     false
 }
 
-/// Read a process's Linux start time as a stable PID identity token.
+/// Read a process start time as a stable PID identity token.
 ///
-/// The value is field 22 of `/proc/<pid>/stat`, measured in clock ticks since
-/// boot. It distinguishes a recorded process from a later process that reused
-/// the same PID. Other platforms return `None` until they provide an equivalent
-/// stable token.
+/// Linux returns field 22 of `/proc/<pid>/stat`, measured in clock ticks since
+/// boot. macOS returns the `proc_bsdinfo` start timestamp in microseconds. Both
+/// distinguish a recorded process from a later process that reused the same PID.
 #[cfg(target_os = "linux")]
 pub fn pid_start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     linux_process_identity_from_stat(&stat).map(|(_, start_time)| start_time)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    macos_process_identity(pid).map(|identity| identity.start_time)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn pid_start_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -88,9 +92,62 @@ pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u6
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u64>) -> bool {
+    match macos_process_identity(pid) {
+        Some(identity) => {
+            identity.running
+                && expected_start_time
+                    .map(|expected| expected == identity.start_time)
+                    .unwrap_or(true)
+        }
+        // A legacy record without an identity token can retain the portable
+        // existence fallback if libproc denies inspection. New records fail
+        // closed because signalling a PID with an unverified identity is unsafe.
+        None => expected_start_time.is_none() && is_process_alive(pid),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u64>) -> bool {
     is_process_alive_with_identity(pid, expected_start_time)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MacosProcessIdentity {
+    start_time: u64,
+    running: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_identity(pid: u32) -> Option<MacosProcessIdentity> {
+    let raw_pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: `info` points to writable storage of exactly the size passed to
+    // libproc. A full-size return is required before the value is initialized.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            raw_pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            i32::try_from(expected_size).ok()?,
+        )
+    };
+    if read != i32::try_from(expected_size).ok()? {
+        return None;
+    }
+    // SAFETY: proc_pidinfo returned the complete proc_bsdinfo payload above.
+    let info = unsafe { info.assume_init() };
+    Some(MacosProcessIdentity {
+        start_time: info
+            .pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.pbi_start_tvusec),
+        running: info.pbi_status != libc::SZOMB,
+    })
 }
 
 /// Wait until a process identity is no longer actively executing.
@@ -158,7 +215,7 @@ pub(crate) fn wait_for_process_exit_with_identity(
 ///
 /// Returns `true` once the recorded identity has disappeared. `false` means
 /// the process is still present and must be reaped by its owning parent.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn try_reap_exited_child_with_identity(pid: u32, expected_start_time: u64) -> bool {
     if !is_process_alive_with_identity(pid, Some(expected_start_time)) {
         return true;
@@ -172,7 +229,7 @@ fn try_reap_exited_child_with_identity(pid: u32, expected_start_time: u64) -> bo
     waited == raw_pid || !is_process_alive_with_identity(pid, Some(expected_start_time))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 #[allow(dead_code)]
 fn try_reap_exited_child_with_identity(pid: u32, expected_start_time: u64) -> bool {
     !is_process_alive_with_identity(pid, Some(expected_start_time))
@@ -208,6 +265,42 @@ mod tests {
     #[test]
     fn missing_process_is_not_alive() {
         assert!(!is_process_alive(0x7fff_fffe));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_identity_distinguishes_a_reused_pid() {
+        let pid = std::process::id();
+        let start_time = pid_start_time(pid);
+        assert!(
+            start_time.is_some(),
+            "live process must have a start-time token"
+        );
+        assert!(is_process_alive_with_identity(pid, start_time));
+        assert!(!is_process_alive_with_identity(pid, Some(u64::MAX)));
+        assert!(is_process_running_with_identity(pid, start_time));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::zombie_processes)] // Intentionally retain Child until state inspection.
+    fn macos_running_identity_rejects_a_zombie() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start_time = pid_start_time(pid).expect("capture child identity");
+        child.kill().expect("terminate child without reaping it");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while is_process_running_with_identity(pid, Some(start_time))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(!is_process_running_with_identity(pid, Some(start_time)));
+        let _ = child.wait();
     }
 
     #[cfg(target_os = "linux")]
