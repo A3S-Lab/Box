@@ -182,6 +182,10 @@ jobs:
           ref: ${{ env.A3S_OCI_RUNTIME_REV }}
           path: oci-runtime
 
+      - name: Verify pinned OCI contracts
+        if: runner.os == 'Linux'
+        run: bash scripts/check-oci-pins.sh oci-runtime
+
       # dtolnay/rust-toolchain stable (2026-07-16)
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
