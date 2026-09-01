@@ -102,7 +102,7 @@ def event_stream_response(request: Mapping[str, object]) -> dict[str, Any]:
     events = [
         {
             "sequence": sequence,
-            "timestamp_unix_ns": 1_700_000_000_000_000_000 + sequence,
+            "timestamp_unix_ns": str(1_700_000_000_000_000_000 + sequence),
             "process_id": "init" if sequence == 5 else None,
             "kind": (
                 "container-started"
@@ -321,7 +321,7 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return {
             "execution_id": request["sandbox_id"],
             "generation": request["generation"],
-            "timestamp_unix_ns": 1_000_000,
+            "timestamp_unix_ns": "1700000000000000123",
             "cpu": {
                 "usage_ns": 300,
                 "user_ns": 200,
@@ -343,7 +343,7 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
             "events": [
                 {
                     "sequence": int(request["after_sequence"]) + 1,
-                    "timestamp_unix_ns": 1_000_001,
+                    "timestamp_unix_ns": "1700000000000000124",
                     "process_id": "exec-1",
                     "kind": "process-exited",
                     "attributes": {"exit_code": "0"},
@@ -902,7 +902,7 @@ class SdkTests(unittest.TestCase):
                 {
                     "execution_id": "sandbox-local-1",
                     "generation": 1,
-                    "timestamp_unix_ns": 0,
+                    "timestamp_unix_ns": "0",
                     "cpu": {
                         "usage_ns": 1,
                         "user_ns": 1,
@@ -927,7 +927,7 @@ class SdkTests(unittest.TestCase):
                     "events": [
                         {
                             "sequence": 7,
-                            "timestamp_unix_ns": 1,
+                            "timestamp_unix_ns": "1",
                             "process_id": None,
                             "kind": "runtime-warning",
                             "attributes": {},
@@ -1015,9 +1015,11 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(logs[0].stream, "stdout")
         self.assertEqual(stats.memory_percent, 50.0)
         self.assertEqual(processes.processes[0].process_id, "init")
+        self.assertEqual(runtime_stats.timestamp_unix_ns, 1_700_000_000_000_000_123)
         self.assertEqual(runtime_stats.cpu.usage_ns, 300)
         self.assertEqual(runtime_stats.metrics["io.read_bytes"], 64)
         self.assertEqual(events.events[0].kind, "process-exited")
+        self.assertEqual(events.events[0].timestamp_unix_ns, 1_700_000_000_000_000_124)
         self.assertEqual(events.next_sequence, 8)
         self.assertEqual(sandbox.state, "removed")
         self.assertEqual(
@@ -1584,6 +1586,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logs[0].message, "sdk-log\n")
         self.assertEqual(stats.block_write_bytes, 40)
         self.assertEqual(processes.processes[1].terminal, True)
+        self.assertEqual(runtime_stats.timestamp_unix_ns, 1_700_000_000_000_000_123)
         self.assertEqual(runtime_stats.memory.limit_bytes, 2048)
         self.assertEqual(events.next_sequence, 11)
         self.assertEqual(sandboxes[0].id, "sandbox-local-1")

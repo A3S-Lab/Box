@@ -167,7 +167,7 @@ type ExecutionMemoryStats struct {
 type ExecutionStats struct {
 	ExecutionID     string               `json:"execution_id"`
 	Generation      uint64               `json:"generation"`
-	TimestampUnixNS uint64               `json:"timestamp_unix_ns"`
+	TimestampUnixNS uint64               `json:"timestamp_unix_ns,string"`
 	CPU             ExecutionCPUStats    `json:"cpu"`
 	Memory          ExecutionMemoryStats `json:"memory"`
 	ProcessCount    uint64               `json:"process_count"`
@@ -194,7 +194,7 @@ const (
 
 type ExecutionRuntimeEvent struct {
 	Sequence        uint64             `json:"sequence"`
-	TimestampUnixNS uint64             `json:"timestamp_unix_ns"`
+	TimestampUnixNS uint64             `json:"timestamp_unix_ns,string"`
 	ProcessID       *string            `json:"process_id"`
 	Kind            ExecutionEventKind `json:"kind"`
 	Attributes      map[string]string  `json:"attributes"`

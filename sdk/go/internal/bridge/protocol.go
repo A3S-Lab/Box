@@ -4,7 +4,7 @@ package bridge
 
 import "encoding/json"
 
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 // RequiredOperations is the complete operation set used by this SDK version.
 // New clients verify this inventory before issuing a mutating request.

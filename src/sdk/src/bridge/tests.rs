@@ -137,6 +137,54 @@ async fn malformed_json_returns_a_versioned_error_envelope() {
 }
 
 #[test]
+fn runtime_observation_timestamps_are_exact_decimal_strings() {
+    let timestamp_unix_ns = 1_700_000_000_000_000_123;
+    let stats = ExecutionStats {
+        execution_id: ExecutionId::new("box-1").unwrap(),
+        generation: ExecutionGeneration::INITIAL,
+        timestamp_unix_ns,
+        cpu: a3s_box_core::ExecutionCpuStats {
+            usage_ns: 300,
+            user_ns: 200,
+            system_ns: 100,
+            throttled_ns: 5,
+        },
+        memory: a3s_box_core::ExecutionMemoryStats {
+            usage_bytes: 1024,
+            limit_bytes: Some(2048),
+            peak_bytes: Some(1536),
+        },
+        process_count: 2,
+        metrics: BTreeMap::from([("io.read_bytes".to_string(), 64)]),
+    };
+    let stats_value = serialize_execution_stats(stats).unwrap();
+    assert_eq!(
+        stats_value["timestamp_unix_ns"],
+        timestamp_unix_ns.to_string()
+    );
+    assert_eq!(stats_value["cpu"]["usage_ns"], 300);
+
+    let batch = ExecutionEventBatch {
+        execution_id: ExecutionId::new("box-1").unwrap(),
+        generation: ExecutionGeneration::INITIAL,
+        events: vec![a3s_box_core::ExecutionRuntimeEvent {
+            sequence: 1,
+            timestamp_unix_ns,
+            process_id: None,
+            kind: a3s_box_core::ExecutionEventKind::ContainerStarted,
+            attributes: BTreeMap::new(),
+        }],
+        next_sequence: 1,
+    };
+    let batch_value = serialize_execution_event_batch(batch).unwrap();
+    assert_eq!(
+        batch_value["events"][0]["timestamp_unix_ns"],
+        timestamp_unix_ns.to_string()
+    );
+    assert_eq!(batch_value["events"][0]["sequence"], 1);
+}
+
+#[test]
 fn runtime_configuration_errors_are_invalid_requests() {
     let failure = BridgeFailure::from(ClientError::Runtime(
         a3s_box_core::error::BoxError::ConfigError("invalid CPU count".to_string()),

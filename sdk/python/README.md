@@ -146,7 +146,9 @@ default to 256 items and accept at most 4,096. A synchronous stream can use a
 an async iterator whose task cancellation kills the active local bridge
 process. Streams terminate on generation drift instead of following a restart.
 Reuse an explicit resource-update `operation_id` when retrying an outcome that
-is not yet known.
+is not yet known. Bridge protocol version 4 transports Unix-nanosecond
+timestamps as canonical decimal strings; the Python SDK decodes them to exact
+`int` values.
 
 ## Builder-style programmable CI/CD
 
@@ -243,6 +245,6 @@ client.prune_volumes()
 client.prune_networks()
 ```
 
-`client.capabilities()` returns bridge protocol version 3 and the exact 52
+`client.capabilities()` returns bridge protocol version 4 and the exact 52
 supported operation names. Registry passwords are passed only to the local
 runtime process.

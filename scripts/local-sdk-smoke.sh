@@ -705,7 +705,7 @@ try {
       if (
         runtimeStats.executionId !== sandbox.id ||
         runtimeStats.generation !== sandbox.generation ||
-        runtimeStats.timestampUnixNs <= 0 ||
+        runtimeStats.timestampUnixNs <= 0n ||
         runtimeStats.processCount <= 0
       ) {
         throw new Error('runtime stats returned an invalid Sandbox snapshot')
