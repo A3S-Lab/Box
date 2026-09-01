@@ -501,7 +501,7 @@ jobs:
       - name: Package and install the no-KVM product
         run: |
           set -euo pipefail
-          install_dir="$RUNNER_TEMP/a3s-box-installed-${{ matrix.platform }}"
+          install_dir="$A3S_HOME/bin"
           bash scripts/package-no-kvm-product.sh \
             "${{ matrix.guest_target }}" \
             "${{ matrix.platform }}" \
@@ -509,12 +509,12 @@ jobs:
             "$RUNNER_TEMP" \
             "$install_dir"
 
-          sudo install -d -m 755 "$A3S_HOME/bin"
           for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
-            sudo ln -s "$install_dir/$artifact" "$A3S_HOME/bin/$artifact"
-            test "$(realpath "$A3S_HOME/bin/$artifact")" = \
-              "$(realpath "$install_dir/$artifact")"
+            test -x "$install_dir/$artifact"
+            test ! -L "$install_dir/$artifact"
           done
+          test -d "$install_dir/lib"
+          test ! -L "$install_dir/lib"
 
           {
             echo "A3S_BOX_INSTALL_DIR=$install_dir"

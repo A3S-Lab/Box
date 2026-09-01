@@ -124,8 +124,10 @@ x86_64 and aarch64 hosts without KVM. Each must:
 4. assemble the supported Linux release layout, install it through `install.sh`,
    validate every executable dependency, require the shim to resolve libkrun
    from that layout, validate the install marker and OCI revision, and reject
-   any executable path outside that installation; the R17 conformance home
-   binds its required binaries to that exact installation;
+   any executable path outside that installation; install the self-contained
+   distribution directly at the R17 conformance home's `bin` directory so the
+   required binaries and their `$ORIGIN/lib` dependencies retain one exact
+   installation identity without loader-breaking executable symlinks;
 5. require `/dev/kvm` to be absent, verify the installed product reports that
    exact condition, and execute the unchanged Rust, Python, TypeScript, and Go
    local SDK lifecycles;

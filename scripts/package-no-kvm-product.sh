@@ -141,5 +141,9 @@ jq --exit-status \
 for artifact in a3s-box a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
     test -x "$INSTALL_DIR/$artifact"
 done
+installed_shim_ldd_output="$(LD_LIBRARY_PATH= ldd "$INSTALL_DIR/a3s-box-shim")"
+printf '%s\n' "$installed_shim_ldd_output"
+! grep -q 'not found' <<< "$installed_shim_ldd_output"
+grep -F "$INSTALL_DIR/lib/libkrun.so" <<< "$installed_shim_ldd_output"
 
 printf 'Installed %s from %s (sha256:%s)\n' "$PACKAGE_NAME" "$ARCHIVE" "$DIGEST"

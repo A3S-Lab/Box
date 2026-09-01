@@ -81,9 +81,20 @@ if [ -z "${A3S_HOME:-}" ] ||
     exit 1
 fi
 
+install_runtime_asset() {
+    local source="$1"
+    local destination="$2"
+
+    if [[ -e "$destination" || -L "$destination" ]] &&
+        [[ "$source" -ef "$destination" ]]; then
+        return
+    fi
+    install -m 755 "$source" "$destination"
+}
+
 mkdir -p "$A3S_HOME/bin"
-install -m 755 "$A3S_BOX_SHIM_BINARY" "$A3S_HOME/bin/a3s-box-shim"
-install -m 755 "$guest_init" "$A3S_HOME/bin/a3s-box-guest-init"
+install_runtime_asset "$A3S_BOX_SHIM_BINARY" "$A3S_HOME/bin/a3s-box-shim"
+install_runtime_asset "$guest_init" "$A3S_HOME/bin/a3s-box-guest-init"
 
 echo "==> Rust SDK ($ISOLATION)"
 (
