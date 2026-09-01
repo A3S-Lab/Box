@@ -28,6 +28,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Warm-pool Dockerfile `RUN` now mounts an ephemeral guest-native `/dev` and
+  binds the guest's standard devices before chroot. Character device numbers
+  are no longer persisted through macOS VirtioFS as unusable `0:0` nodes, so
+  tools can reliably open `/dev/null`, `/dev/urandom`, and their peers without
+  committing runtime devices to image layers.
+- Registry push now uploads the exact verified manifest bytes from the local
+  OCI layout through the authenticated raw-manifest API. Pretty-printed local
+  manifests retain their content digest instead of being silently
+  canonicalized to a second digest before post-push verification.
 - macOS VirtioFS directory iteration now snapshots entries per open or rewound
   handle, returns synthetic FUSE resume cookies, and gives `fdopendir` its own
   descriptor. Paginated, mutating tree deletion no longer skips unrelated
