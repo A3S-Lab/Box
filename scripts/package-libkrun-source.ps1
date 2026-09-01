@@ -14,6 +14,9 @@ $provenanceFile = Join-Path $repositoryRoot 'src/deps/libkrun-sys/SOURCE-PROVENA
 $temporary = Join-Path $env:TEMP (
     'a3s-libkrun-source-{0}.tar' -f [Guid]::NewGuid().ToString('N')
 )
+$workspaceCheck = Join-Path $env:TEMP (
+    'a3s-libkrun-source-check-{0}' -f [Guid]::NewGuid().ToString('N')
+)
 
 if (-not (Test-Path -LiteralPath (Join-Path $nestedRoot 'Cargo.toml') -PathType Leaf)) {
     throw "Initialized libkrun submodule is required at $nestedRoot"
@@ -74,6 +77,7 @@ $archivePaths = @(
     'third_party',
     'krun-sys-windows/Cargo.toml',
     'krun-sys-windows/build.rs',
+    'krun-sys-windows/examples/start_vm.rs',
     'krun-sys-windows/src'
 )
 
@@ -86,6 +90,17 @@ try {
         "--output=$temporary" HEAD @archivePaths
     if ($LASTEXITCODE -ne 0) {
         throw "git archive failed with exit code $LASTEXITCODE."
+    }
+
+    New-Item -ItemType Directory -Path $workspaceCheck | Out-Null
+    & tar -xf $temporary -C $workspaceCheck
+    if ($LASTEXITCODE -ne 0) {
+        throw "source archive extraction failed with exit code $LASTEXITCODE."
+    }
+    & cargo metadata --locked --no-deps --format-version 1 `
+        --manifest-path (Join-Path $workspaceCheck 'libkrun/Cargo.toml') | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "archived libkrun workspace metadata failed with exit code $LASTEXITCODE."
     }
 
     $generatedHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
@@ -151,6 +166,9 @@ try {
     Write-Output 'Update LIBKRUN_SOURCE_ARCHIVE_SHA256 in build.rs when the digest changes.'
 }
 finally {
+    if (Test-Path -LiteralPath $workspaceCheck -PathType Container) {
+        Remove-Item -LiteralPath $workspaceCheck -Recurse -Force
+    }
     if (Test-Path -LiteralPath $temporary -PathType Leaf) {
         Remove-Item -LiteralPath $temporary -Force
     }
