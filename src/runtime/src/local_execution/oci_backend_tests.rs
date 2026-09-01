@@ -783,6 +783,7 @@ impl OciRuntimeService for FakeRuntimeService {
                 sequence,
                 timestamp_unix_ns: 1_700_000_000_000_000_000 + sequence,
                 container: target.clone(),
+                operation_id: None,
                 process_id: (sequence == 8).then(ProcessId::init),
                 kind: if sequence == 5 {
                     RuntimeEventKind::ContainerStarted
@@ -5032,6 +5033,8 @@ fn runtime_record(
         generation,
         driver,
         isolation,
+        guest_session: None,
+        network_enforcement: None,
         config_digest: config_digest.to_string(),
         attachments_digest: attachments_digest.map(str::to_string),
     })

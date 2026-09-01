@@ -61,13 +61,15 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`9c3be8e126dda7ff7add5e6e88c427f68c7d6629`, which retains the qualified
-control/workload cgroup and read-only bind behavior and adds deterministic
-multi-driver registration, isolation selection, and durable recorded-driver
-routing required by the unified execution migration. It also publishes stable
-aggregate workload block-I/O byte metrics consumed by Box statistics and
-isolates an aborted SDK connection from the shared host-service lifetime. Runtime service startup
-also fails closed when historical state references a missing driver or a
+`438e4b7936cd08d408160fe9341a21786f60cd26`. The Rust SDK dependency and the
+runtime and agent built by CI and release workflows all use this same source
+revision. It retains the qualified control/workload cgroup and read-only bind
+behavior, deterministic multi-driver registration, isolation selection, and
+durable recorded-driver routing required by the unified execution migration.
+It also publishes stable aggregate workload block-I/O byte metrics consumed by
+Box statistics and isolates an aborted SDK connection from the shared
+host-service lifetime. Runtime service startup also fails closed when
+historical state references a missing driver or a
 driver whose advertised isolation has drifted. Startup then calls only the
 exact recorded driver's idempotent recovery hook and commits any legal state
 observation before serving. Windows additionally has a protected, local-only
@@ -122,7 +124,8 @@ x86_64 and aarch64 hosts without KVM. Each must:
 4. assemble the supported Linux release layout, install it through `install.sh`,
    validate every executable dependency, require the shim to resolve libkrun
    from that layout, validate the install marker and OCI revision, and reject
-   any executable path outside that installation;
+   any executable path outside that installation; the R17 conformance home
+   binds its required binaries to that exact installation;
 5. require `/dev/kvm` to be absent, verify the installed product reports that
    exact condition, and execute the unchanged Rust, Python, TypeScript, and Go
    local SDK lifecycles;

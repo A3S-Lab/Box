@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 9c3be8e126dda7ff7add5e6e88c427f68c7d6629
+  A3S_OCI_RUNTIME_REV: 438e4b7936cd08d408160fe9341a21786f60cd26
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -29,29 +29,9 @@ jobs:
         with:
           components: rustfmt
       - run: cd src && cargo fmt --all -- --check
-      - name: Verify CI and release OCI artifact pins agree
+      - name: Verify OCI SDK and artifact pins agree
         shell: bash
-        run: |
-          set -euo pipefail
-          read_pin() {
-            local workflow="$1"
-            local matches
-            mapfile -t matches < <(
-              sed -nE 's/^[[:space:]]*A3S_OCI_RUNTIME_REV:[[:space:]]*([0-9a-f]{40})[[:space:]]*$/\1/p' \
-                "$workflow"
-            )
-            if [ "${#matches[@]}" -ne 1 ]; then
-              echo "$workflow must contain exactly one 40-character OCI revision" >&2
-              exit 1
-            fi
-            printf '%s\n' "${matches[0]}"
-          }
-          ci_pin="$(read_pin .github/workflows/ci.yml)"
-          release_pin="$(read_pin .github/workflows/release.yml)"
-          if [ "$ci_pin" != "$release_pin" ]; then
-            echo "CI OCI revision $ci_pin differs from release revision $release_pin" >&2
-            exit 1
-          fi
+        run: bash scripts/check-oci-pins.sh
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
