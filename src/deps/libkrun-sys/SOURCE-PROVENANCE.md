@@ -24,7 +24,7 @@ flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`645995d2ff02f5040f081e41cb9298c66672863daa148934b8c53c5fa3dd55a7`).
+`4fd16a222e3ff952d74a284f36a1108517526687fcdff48f4a356e7a7fbb687d`).
 The deterministic archive was generated from local tooling commit
 `4ebb0f250a6e8506901037c46cf5b522d2ab9a6f`; that revision snapshots macOS
 VirtioFS directory entries for each open handle, returns mutation-stable

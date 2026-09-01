@@ -33,6 +33,9 @@ All notable changes to A3S Box will be documented in this file.
   reap it before applying restart policy. A short-lived service can no longer
   remain falsely `running` forever or leave a defunct shim behind after its
   guest workload exits.
+- The deterministic libkrun source archive now includes the `start_vm` example
+  declared by its Windows bindings manifest. Clean macOS release builds can
+  parse the archived workspace instead of failing before libkrun compilation.
 - Warm-pool Dockerfile `RUN` now mounts an ephemeral guest-native `/dev` and
   binds the guest's standard devices before chroot. Character device numbers
   are no longer persisted through macOS VirtioFS as unusable `0:0` nodes, so
