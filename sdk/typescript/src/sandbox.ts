@@ -190,6 +190,7 @@ export interface ExecutionMemoryStats {
 export interface ExecutionStats {
   executionId: string
   generation: number
+  /** Unix epoch nanoseconds; JavaScript may round sub-microsecond digits. */
   timestampUnixNs: number
   cpu: ExecutionCpuStats
   memory: ExecutionMemoryStats
@@ -214,6 +215,7 @@ export type ExecutionEventKind =
 
 export interface ExecutionRuntimeEvent {
   sequence: number
+  /** Unix epoch nanoseconds; JavaScript may round sub-microsecond digits. */
   timestampUnixNs: number
   processId?: string
   kind: ExecutionEventKind

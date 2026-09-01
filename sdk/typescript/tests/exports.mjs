@@ -208,7 +208,7 @@ class FakeRuntime {
         return {
           execution_id: request.sandbox_id,
           generation: request.generation,
-          timestamp_unix_ns: 1_000_000,
+          timestamp_unix_ns: 1_700_000_000_000_000_000,
           cpu: {
             usage_ns: 300,
             user_ns: 200,
@@ -230,7 +230,7 @@ class FakeRuntime {
           events: [
             {
               sequence: request.after_sequence + 1,
-              timestamp_unix_ns: 1_000_001,
+              timestamp_unix_ns: 1_700_000_000_000_000_000,
               process_id: 'exec-1',
               kind: 'process-exited',
               attributes: { exit_code: '0' },
@@ -856,7 +856,7 @@ function eventStreamResponse(request) {
     .slice(0, request.limit)
     .map((sequence) => ({
       sequence,
-      timestamp_unix_ns: 1_700_000_000_000_000 + sequence,
+      timestamp_unix_ns: 1_700_000_000_000_000_000 + sequence,
       process_id: sequence === 5 ? 'init' : null,
       kind:
         sequence === 2
@@ -923,6 +923,30 @@ await assert.rejects(
   (error) =>
     error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
 )
+
+for (const timestampUnixNs of [
+  -1,
+  1.5,
+  Number.POSITIVE_INFINITY,
+  Number.MAX_VALUE,
+]) {
+  const invalidTimestampSandbox = await Sandbox.create(undefined, {
+    runtime: new MalformedSandboxRuntime('sandbox_runtime_stats', {
+      execution_id: 'sandbox-local-1',
+      generation: 1,
+      timestamp_unix_ns: timestampUnixNs,
+      cpu: { usage_ns: 1, user_ns: 1, system_ns: 0, throttled_ns: 0 },
+      memory: { usage_bytes: 0, limit_bytes: null, peak_bytes: null },
+      process_count: 1,
+      metrics: {},
+    }),
+  })
+  await assert.rejects(
+    invalidTimestampSandbox.runtimeStats(),
+    (error) =>
+      error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+  )
+}
 
 const malformedEventsSandbox = await Sandbox.create(undefined, {
   runtime: new MalformedSandboxRuntime('sandbox_events', {
@@ -1059,9 +1083,17 @@ assert.equal(lifecycleSandbox.state, 'removed')
 assert.equal(lifecycleLogs[0].message, 'sdk-log\n')
 assert.equal(lifecycleStats.memoryPercent, 50)
 assert.equal(lifecycleProcesses.processes[0].processId, 'init')
+assert.equal(
+  lifecycleRuntimeStats.timestampUnixNs,
+  1_700_000_000_000_000_000
+)
 assert.equal(lifecycleRuntimeStats.cpu.usageNs, 300)
 assert.equal(lifecycleRuntimeStats.metrics['io.read_bytes'], 64)
 assert.equal(lifecycleEvents.events[0].kind, 'process-exited')
+assert.equal(
+  lifecycleEvents.events[0].timestampUnixNs,
+  1_700_000_000_000_000_000
+)
 assert.equal(lifecycleEvents.nextSequence, 8)
 assert.deepEqual(
   lifecycleRuntime.requests.map((request) => request.operation),

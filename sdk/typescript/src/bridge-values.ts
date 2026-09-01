@@ -227,7 +227,7 @@ export function executionStats(result: BridgeResult): ExecutionStats {
   return {
     executionId: requiredString(result, 'execution_id'),
     generation: requiredGeneration(result, 'generation'),
-    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    timestampUnixNs: requiredUnixNanoseconds(result, 'timestamp_unix_ns'),
     cpu: executionCpuStats(cpu),
     memory: executionMemoryStats(memory),
     processCount: requiredUnsignedInteger(result, 'process_count'),
@@ -266,7 +266,7 @@ export function executionEventBatch(
 function executionRuntimeEvent(result: BridgeResult): ExecutionRuntimeEvent {
   return {
     sequence: requiredUnsignedInteger(result, 'sequence'),
-    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    timestampUnixNs: requiredUnixNanoseconds(result, 'timestamp_unix_ns'),
     processId: optionalString(result, 'process_id'),
     kind: executionEventKind(result, 'kind'),
     attributes: stringRecord(result.attributes),
@@ -422,6 +422,23 @@ export function optionalUnsignedInteger(
   const value = result[key]
   if (value === null || value === undefined) return undefined
   return requiredUnsignedInteger(result, key)
+}
+
+function requiredUnixNanoseconds(
+  result: BridgeResult,
+  key: string
+): number {
+  const value = requiredNumber(result, key)
+  // Current epoch nanoseconds exceed MAX_SAFE_INTEGER. Protocol v3 uses JSON
+  // numbers, so retain the nearest JavaScript value while enforcing u64 bounds.
+  if (
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > Number((1n << 64n) - 1n)
+  ) {
+    bridgeTypeError(key)
+  }
+  return value
 }
 
 export function requiredGeneration(
