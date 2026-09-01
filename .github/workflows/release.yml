@@ -920,10 +920,12 @@ jobs:
           esac
 
           # Order matters: a dependent is published AFTER its internal deps so
-          # the index has them. libkrun-sys is deliberately excluded: its
-          # dedicated workflow performs native clean-package, size, and
-          # corresponding-source gates that this stub-mode job cannot bypass.
-          for crate in a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
+          # the index has them. The A3S ext4 fork must precede Runtime so its
+          # normalized registry manifest cannot fall back to upstream mkext4.
+          # libkrun-sys is deliberately excluded: its dedicated workflow
+          # performs native clean-package, size, and corresponding-source gates
+          # that this stub-mode job cannot bypass.
+          for crate in a3s-box-mkext4 a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
             code="$(crate_status "$crate")"
             case "$code" in
               200)

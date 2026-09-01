@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-09-02
+
 ### Added
 
 - **Mount-free guest-native filesystem snapshots on macOS.** Clean stopped
@@ -28,6 +30,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Published `a3s-box-runtime` packages now retain the audited raw-byte ext4
+  writer through the explicit `a3s-box-mkext4` package. Registry consumers no
+  longer fall back to upstream `mkext4` and fail to compile the guest-native
+  rootfs implementation that passed in-repository tests.
 - macOS lifecycle reconciliation now records each shim's native process start
   identity, treats an unreaped zombie as exited, and lets the owning monitor
   reap it before applying restart policy. A short-lived service can no longer

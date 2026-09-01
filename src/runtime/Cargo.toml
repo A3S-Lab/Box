@@ -117,11 +117,12 @@ a3s-box-netproxy = { version = "3.2", path = "../netproxy" }
 filetime = "0.2"
 xattr = "1.6"
 
-# Guest-native rootfs artifact writer. The direct path is intentional: Cargo
-# does not propagate workspace-root patches to Git consumers. Keep the exact
-# version because a writer bump is a cache-schema migration rather than a
-# routine dependency update. See third_party/mkext4/A3S_PATCHES.md.
-mkext4 = { version = "=0.0.3", path = "../third_party/mkext4" }
+# Guest-native rootfs artifact writer. The explicit package name makes the A3S
+# fork available to crates.io consumers, while the direct path keeps Git and
+# workspace consumers on the same audited source. Keep the exact version
+# because a writer bump is a cache-schema migration rather than a routine
+# dependency update. See third_party/mkext4/A3S_PATCHES.md.
+mkext4 = { package = "a3s-box-mkext4", version = "=3.2.1", path = "../third_party/mkext4" }
 
 # TEE attestation verification
 p384 = { workspace = true }

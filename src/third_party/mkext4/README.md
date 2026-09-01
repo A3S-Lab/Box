@@ -1,8 +1,13 @@
-# mkext4
+# a3s-box-mkext4
 
-[![crates.io](https://img.shields.io/crates/v/mkext4)](https://crates.io/crates/mkext4)
-[![docs.rs](https://img.shields.io/docsrs/mkext4)](https://docs.rs/mkext4)
-[![CI](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/a3s-box-mkext4)](https://crates.io/crates/a3s-box-mkext4)
+[![docs.rs](https://img.shields.io/docsrs/a3s-box-mkext4)](https://docs.rs/a3s-box-mkext4)
+[![CI](https://github.com/A3S-Lab/Box/actions/workflows/ci.yml/badge.svg)](https://github.com/A3S-Lab/Box/actions/workflows/ci.yml)
+
+This is the A3S Box release-owned fork of upstream `mkext4` 0.0.3. It keeps
+the upstream implementation and adds byte-preserving Linux directory-entry and
+symbolic-link inputs required by Box's guest-native rootfs builder. See
+[`A3S_PATCHES.md`](A3S_PATCHES.md) for the exact provenance and patch boundary.
 
 Deterministic, streaming, pure-Rust ext4 image builder — plus a
 verification-grade reader. No C dependencies, no kernel mounts, no clocks,
@@ -144,7 +149,7 @@ mount read-write on any modern Linux kernel.
 ## Installing
 
 ```sh
-cargo add mkext4
+cargo add a3s-box-mkext4 --rename mkext4
 ```
 
 Early release (0.0.x): the API may still move before 0.1.
