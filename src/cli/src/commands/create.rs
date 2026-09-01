@@ -48,24 +48,6 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         ensure_network_exists(network)?;
     }
 
-    let image_config = common::cached_image_config(&args.common.image).await?;
-    let health_check = common::effective_health_check(
-        &args.common,
-        image_config
-            .as_ref()
-            .and_then(|config| config.health_check.as_ref()),
-    );
-    common::validate_health_check_support(health_check.as_ref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let effective_stop_signal = common::effective_stop_signal(
-        args.common.stop_signal.as_deref(),
-        image_config
-            .as_ref()
-            .and_then(|config| config.stop_signal.as_deref()),
-    );
-    let isolation = common::execution_isolation(&args.common);
-    let name = args.common.name.unwrap_or_else(generate_name);
-
     // Parse --shm-size
     let shm_size = match &args.common.shm_size {
         Some(s) => {
@@ -74,19 +56,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         None => None,
     };
 
-    let home = a3s_box_core::dirs_home();
-
-    // Resolve named volumes
-    let mut resolved_volumes = Vec::new();
-    let mut volume_names = Vec::new();
-    for vol_spec in &args.common.volumes {
-        let (resolved, vol_name) = super::volume::resolve_named_volume(vol_spec)?;
-        if let Some(name) = vol_name {
-            volume_names.push(name);
-        }
-        resolved_volumes.push(resolved);
-    }
-
+    let isolation = common::execution_isolation(&args.common);
     let entrypoint = args
         .common
         .entrypoint
@@ -96,7 +66,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let mut extra_env = env.into_iter().collect::<Vec<_>>();
     extra_env.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let config = BoxConfig {
+    let mut config = BoxConfig {
         isolation,
         image: args.common.image.clone(),
         resources: ResourceConfig {
@@ -109,7 +79,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         user: args.common.user.clone(),
         workdir: args.common.workdir.clone(),
         hostname: args.common.hostname.clone(),
-        volumes: resolved_volumes,
+        volumes: args.common.volumes.clone(),
         virtiofs_cache: args
             .common
             .virtiofs_cache
@@ -131,6 +101,44 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         persistent: true,
         ..Default::default()
     };
+    a3s_box_core::resolve_execution(&config)?;
+
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+    manager.preflight_isolation(isolation).await?;
+
+    // Resolve named volumes only after the selected route is launch-ready.
+    let mut resolved_volumes = Vec::new();
+    let mut volume_names = Vec::new();
+    for vol_spec in &args.common.volumes {
+        let (resolved, vol_name) = super::volume::resolve_named_volume(vol_spec)?;
+        if let Some(name) = vol_name {
+            volume_names.push(name);
+        }
+        resolved_volumes.push(resolved);
+    }
+    config.volumes = resolved_volumes;
+
+    // Image-defined lifecycle defaults are read only after the selected
+    // backend proves that this isolation currently has a launch-ready route.
+    // Record creation repeats mutable capability checks before reservation.
+    let image_config = common::cached_image_config(&args.common.image).await?;
+    let health_check = common::effective_health_check(
+        &args.common,
+        image_config
+            .as_ref()
+            .and_then(|config| config.health_check.as_ref()),
+    );
+    common::validate_health_check_support(health_check.as_ref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let effective_stop_signal = common::effective_stop_signal(
+        args.common.stop_signal.as_deref(),
+        image_config
+            .as_ref()
+            .and_then(|config| config.stop_signal.as_deref()),
+    );
+    let name = args.common.name.unwrap_or_else(generate_name);
+
     let policy = ExecutionRecordPolicy {
         name: Some(name.clone()),
         auto_remove: false,
@@ -159,7 +167,6 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         policy,
         rootfs_snapshot_id: None,
     };
-    let manager = super::configured_local_execution_manager(&home).await?;
     let reservation = manager.create(request, &operation_id).await?;
     let box_id = reservation.execution_id.to_string();
 

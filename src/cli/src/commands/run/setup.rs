@@ -55,9 +55,9 @@ pub(super) async fn setup_and_boot(
         .entrypoint
         .as_ref()
         .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
+
     let mut volume_specs = args.common.volumes.clone();
     apply_package_caches(&args.package_cache, &mut volume_specs, &mut env);
-    let (resolved_volumes, volume_names) = resolve_volumes(&volume_specs)?;
 
     // Parse --shm-size once; reuse for both tmpfs entry and the box record.
     let shm_size = match &args.common.shm_size {
@@ -87,12 +87,12 @@ pub(super) async fn setup_and_boot(
 
     let tee = build_tee_config(args);
 
-    let config = build_box_config(
+    let mut config = build_box_config(
         args,
         memory_mb,
         resource_limits.clone(),
         entrypoint_override.clone(),
-        resolved_volumes.clone(),
+        volume_specs.clone(),
         env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         port_map.clone(),
         network_mode.clone(),
@@ -102,11 +102,26 @@ pub(super) async fn setup_and_boot(
     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     a3s_box_core::resolve_execution(&config)?;
 
-    // Freeze image-defined lifecycle defaults into the managed creation
-    // request. Pulling is cache-first, and happens only after the pure backend
-    // compatibility check above, so an invalid Sandbox request has no registry
-    // or runtime side effects.
+    // Probe the route selected by the active migration policy after complete,
+    // side-effect-free configuration validation but before named-volume
+    // creation or image-cache access. Record creation repeats mutable checks.
     let pull_progress_fn = pull_progress_callback(args.common.image.clone());
+    let home = a3s_box_core::dirs_home();
+    let manager = LocalExecutionManager::with_configured_backend_and_pull_progress(
+        home.join("boxes.json"),
+        &home,
+        Some(std::sync::Arc::clone(&pull_progress_fn)),
+    )
+    .await?;
+    manager.preflight_isolation(config.isolation).await?;
+
+    let (resolved_volumes, volume_names) = resolve_volumes(&volume_specs)?;
+    config.volumes = resolved_volumes;
+
+    // Freeze image-defined lifecycle defaults into the managed creation
+    // request. Pulling is cache-first and happens only after both the pure
+    // configuration check and the selected backend's launch-readiness probe.
+    // Record creation repeats mutable capability checks before reservation.
     let image_config_start = std::time::Instant::now();
     let image_config = pull_image_config(args, std::sync::Arc::clone(&pull_progress_fn)).await?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
@@ -139,13 +154,6 @@ pub(super) async fn setup_and_boot(
             stop_signal: effective_stop_signal,
         },
     );
-    let home = a3s_box_core::dirs_home();
-    let manager = LocalExecutionManager::with_configured_backend_and_pull_progress(
-        home.join("boxes.json"),
-        &home,
-        Some(pull_progress_fn),
-    )
-    .await?;
     let reserve_start = std::time::Instant::now();
     let reservation = manager.create(request, &operation_id).await?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase("cli.reserve", reserve_start.elapsed());

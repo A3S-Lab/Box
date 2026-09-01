@@ -1526,6 +1526,13 @@ async fn rollback_execution_resources(resources: ExecutionResourceGuard, record:
 
 #[async_trait]
 impl LocalExecutionBackend for OciLocalExecutionBackend {
+    async fn preflight_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        self.adapter.require_isolation(isolation).await.map(|_| ())
+    }
+
     fn route_for_create(
         &self,
         _record: &BoxRecord,

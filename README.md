@@ -288,9 +288,11 @@ rootfs into the exact operation-scoped SDK handoff, converts its image metadata
 to `a3s.oci.rootfs-metadata.v1`, emits a relative `rootfs` OCI specification
 without a user namespace, and atomically publishes the bundle. OCI Runtime
 then moves that bundle into the exact WHPX generation share. Missing extension
-support or any unqualified option fails before image preparation. The endpoint
-must be supplied explicitly so this experimental service can never activate by
-accident.
+support or any unqualified option fails before image preparation. In addition,
+`run` and `create` require the migration router to observe a launch-ready
+`DedicatedVm` driver before named-volume creation or image-cache access. The
+endpoint must be supplied explicitly so this experimental service can never
+activate by accident.
 
 Current Linux opt-in limits are intentional: only new Sandbox reservations are
 routed there; `all`/MicroVM migration is rejected on Linux; image-declared

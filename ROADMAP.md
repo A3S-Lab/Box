@@ -118,8 +118,11 @@ pass, and Box has not yet selected the unified backend for production MicroVM
 launches.
 
 Box now also contains an explicitly constructed `OciLocalExecutionBackend` and
-SDK-only lifecycle adapter. The opt-in path preflights launch-ready isolation
-and `a3s.oci.attachments.v1` support before reservation or bundle preparation,
+SDK-only lifecycle adapter. The CLI asks the active migration router to
+preflight the selected isolation before named-volume creation or image-cache
+access. An OCI route requires a launch-ready driver at that boundary, then
+repeats launch-readiness and `a3s.oci.attachments.v1` checks during record
+preflight before reservation or bundle preparation,
 keeps Box and runtime generations in separate durable fields, derives a
 versioned manifest for rootfs, mounts, networking, process I/O, secret
 classifications, and optional extensions, and persists exact
@@ -253,6 +256,14 @@ recovery remains a release gate rather than claimed evidence.
   process I/O, secrets, and optional runtime extensions.
 - [x] Reject an unavailable isolation class before image or product-state
   mutation.
+
+The early boundary is exercised through
+`selected_oci_isolation_preflight_fails_closed_without_fallback_or_state` at
+the migration router and
+`isolation_preflight_rejects_probe_only_driver_without_product_mutation`
+against the SDK-backed backend. The `run` and `create` CLI paths invoke that
+boundary before named-volume or image operations; record creation deliberately
+repeats the mutable capability check before durable reservation.
 
 Exit gate: the target architecture compiles behind an opt-in migration flag,
 and dependency checks prove that Box imports no OCI Runtime implementation

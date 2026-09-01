@@ -1690,6 +1690,32 @@ fn durable_state_rejects_a_runtime_binding_owned_by_another_product_execution() 
 }
 
 #[tokio::test]
+async fn isolation_preflight_rejects_probe_only_driver_without_product_mutation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::probe_only());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        provider.clone(),
+    );
+
+    let error = manager
+        .preflight_isolation(ExecutionIsolation::Microvm)
+        .await
+        .expect_err("probe-only driver must fail the early isolation preflight");
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message) if message.contains("launch-ready")
+    ));
+    assert!(!manager.state_path().exists());
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 0);
+    assert!(service.create_requests().is_empty());
+}
+
+#[tokio::test]
 async fn preflight_rejects_probe_only_isolation_before_store_or_preparation() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::probe_only());
