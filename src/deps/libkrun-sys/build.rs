@@ -476,6 +476,12 @@ fn make_command(
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CLIPPY_ARGS")
+        // Never let a host LLVM override leak into the nested compiler.  In
+        // particular, Homebrew's libLLVM is not ABI-compatible with the LLVM
+        // bundled by rustc.  Bindgen still finds libclang through
+        // LIBCLANG_PATH (and its fallback path below), without this global
+        // loader override.
+        .env_remove("DYLD_LIBRARY_PATH")
         // The outer Cargo holds a shared lock in its package cache throughout
         // this build script. libkrun's Makefile launches Cargo again, and that
         // process can wait forever when it tries to upgrade the same cache to
@@ -815,8 +821,13 @@ fn append_env_path(var: &str, path: &Path) {
 #[cfg(target_os = "macos")]
 fn setup_libclang_path() {
     if let Some(existing) = env::var_os("LIBCLANG_PATH").map(PathBuf::from) {
+        // Keep the libclang search path scoped to clang/bindgen.  Putting a
+        // Homebrew LLVM directory in DYLD_LIBRARY_PATH changes the loader's
+        // search order for every child process, including the nested rustc
+        // invoked by libkrun's Makefile.  Homebrew's LLVM and Rust's bundled
+        // LLVM are not ABI-compatible, so that global override can abort
+        // rustc with `dyld: missing symbol called` before compilation starts.
         append_env_path("DYLD_FALLBACK_LIBRARY_PATH", &existing);
-        append_env_path("DYLD_LIBRARY_PATH", &existing);
         return;
     }
     if Command::new("llvm-config")
@@ -837,7 +848,6 @@ fn setup_libclang_path() {
             if lib_path.join("libclang.dylib").exists() {
                 env::set_var("LIBCLANG_PATH", &lib_path);
                 append_env_path("DYLD_FALLBACK_LIBRARY_PATH", &lib_path);
-                append_env_path("DYLD_LIBRARY_PATH", &lib_path);
                 println!("cargo:warning=Set LIBCLANG_PATH to {}", lib_path.display());
             }
         }
