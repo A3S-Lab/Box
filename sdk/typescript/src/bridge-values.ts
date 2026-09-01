@@ -31,6 +31,8 @@ import type {
   FilesystemSnapshotInfo,
 } from './sandbox.js'
 
+const MAX_UNSIGNED_64 = (1n << 64n) - 1n
+
 export function buildImageInfo(result: BridgeResult): BuildImageInfo {
   return {
     reference: requiredString(result, 'reference'),
@@ -227,7 +229,7 @@ export function executionStats(result: BridgeResult): ExecutionStats {
   return {
     executionId: requiredString(result, 'execution_id'),
     generation: requiredGeneration(result, 'generation'),
-    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    timestampUnixNs: requiredUnsignedBigInt(result, 'timestamp_unix_ns'),
     cpu: executionCpuStats(cpu),
     memory: executionMemoryStats(memory),
     processCount: requiredUnsignedInteger(result, 'process_count'),
@@ -266,7 +268,7 @@ export function executionEventBatch(
 function executionRuntimeEvent(result: BridgeResult): ExecutionRuntimeEvent {
   return {
     sequence: requiredUnsignedInteger(result, 'sequence'),
-    timestampUnixNs: requiredUnsignedInteger(result, 'timestamp_unix_ns'),
+    timestampUnixNs: requiredUnsignedBigInt(result, 'timestamp_unix_ns'),
     processId: optionalString(result, 'process_id'),
     kind: executionEventKind(result, 'kind'),
     attributes: stringRecord(result.attributes),
@@ -413,6 +415,19 @@ export function requiredUnsignedInteger(
   const value = requiredNumber(result, key)
   if (!Number.isSafeInteger(value) || value < 0) bridgeTypeError(key)
   return value
+}
+
+export function requiredUnsignedBigInt(
+  result: BridgeResult,
+  key: string
+): bigint {
+  const value = requiredString(result, key)
+  if (value.length > 20 || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    bridgeTypeError(key)
+  }
+  const decoded = BigInt(value)
+  if (decoded > MAX_UNSIGNED_64) bridgeTypeError(key)
+  return decoded
 }
 
 export function optionalUnsignedInteger(

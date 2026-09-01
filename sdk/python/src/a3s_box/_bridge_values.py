@@ -242,7 +242,7 @@ def execution_stats(result: Mapping[str, object]) -> ExecutionStats:
     return ExecutionStats(
         execution_id=string(result["execution_id"]),
         generation=integer(result["generation"]),
-        timestamp_unix_ns=unsigned_integer(result["timestamp_unix_ns"]),
+        timestamp_unix_ns=unsigned_decimal(result["timestamp_unix_ns"]),
         cpu=ExecutionCpuStats(
             usage_ns=unsigned_integer(cpu["usage_ns"]),
             user_ns=unsigned_integer(cpu["user_ns"]),
@@ -268,7 +268,7 @@ def execution_event_batch(
         events=tuple(
             ExecutionRuntimeEvent(
                 sequence=unsigned_integer(item["sequence"]),
-                timestamp_unix_ns=unsigned_integer(item["timestamp_unix_ns"]),
+                timestamp_unix_ns=unsigned_decimal(item["timestamp_unix_ns"]),
                 process_id=optional_string(item.get("process_id")),
                 kind=execution_event_kind(item["kind"]),
                 attributes=string_mapping(item["attributes"]),
@@ -473,6 +473,21 @@ def unsigned_integer(value: object) -> int:
     result = integer(value)
     if result < 0 or result > (1 << 64) - 1:
         protocol_error("an out-of-range unsigned integer")
+    return result
+
+
+def unsigned_decimal(value: object) -> int:
+    encoded = string(value)
+    if (
+        not encoded
+        or len(encoded) > 20
+        or (len(encoded) > 1 and encoded.startswith("0"))
+        or any(character not in "0123456789" for character in encoded)
+    ):
+        protocol_error("an invalid unsigned decimal string")
+    result = int(encoded)
+    if result > (1 << 64) - 1:
+        protocol_error("an out-of-range unsigned decimal string")
     return result
 
 

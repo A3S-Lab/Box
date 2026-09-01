@@ -139,7 +139,9 @@ default to 256 items and accept at most 4,096. `streamEvents()` is an
 `AsyncIterable`; pass an `AbortSignal` to cancel an active local bridge process.
 Streams terminate on generation drift instead of following a restart. Reuse an
 explicit resource-update `operationId` when retrying an outcome that is not yet
-known.
+known. Unix-nanosecond timestamps are `bigint` values; bridge protocol version
+4 transports them as canonical decimal strings so JavaScript never rounds the
+wire value through `number`.
 
 ## Builder-style programmable CI/CD
 
@@ -242,6 +244,6 @@ await client.pruneVolumes()
 await client.pruneNetworks()
 ```
 
-`client.capabilities()` returns bridge protocol version 3 and the exact 52
+`client.capabilities()` returns bridge protocol version 4 and the exact 52
 supported operation names. Registry passwords are passed only to the local
 runtime process.

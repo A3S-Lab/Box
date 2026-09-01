@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use a3s_box_core::{
-    error::BoxError, ExecutionEventsRequest, ExecutionGeneration, ExecutionId, ExecutionIsolation,
-    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, FilesystemEntry, FilesystemEntryKind,
-    OperationId, Platform, PortMapping,
+    error::BoxError, ExecutionEventBatch, ExecutionEventsRequest, ExecutionGeneration, ExecutionId,
+    ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStats,
+    FilesystemEntry, FilesystemEntryKind, OperationId, Platform, PortMapping,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -32,7 +32,7 @@ pub use request::{
     BRIDGE_OPERATIONS,
 };
 
-pub const BRIDGE_PROTOCOL_VERSION: u8 = 3;
+pub const BRIDGE_PROTOCOL_VERSION: u8 = 4;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct BridgeSandboxCreateRequest {
@@ -560,7 +560,7 @@ async fn execute_request(
             generation,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            serialize_value(sandbox.runtime_stats().await?)
+            serialize_execution_stats(sandbox.runtime_stats().await?)
         }
         BridgeRequest::SandboxEvents {
             sandbox_id,
@@ -578,7 +578,7 @@ async fn execute_request(
                 .validate()
                 .map_err(|error| invalid(error.to_string()))?;
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            serialize_value(sandbox.events(request).await?)
+            serialize_execution_event_batch(sandbox.events(request).await?)
         }
         BridgeRequest::SandboxUpdateResources {
             sandbox_id,
@@ -862,6 +862,59 @@ fn serialize_value(value: impl Serialize) -> Result<Value, BridgeFailure> {
         code: "runtime_error",
         message: format!("failed to encode SDK bridge result: {error}"),
     })
+}
+
+fn serialize_execution_stats(stats: ExecutionStats) -> Result<Value, BridgeFailure> {
+    let timestamp_unix_ns = stats.timestamp_unix_ns.to_string();
+    let mut value = serialize_value(stats)?;
+    replace_unsigned_decimal(&mut value, "timestamp_unix_ns", timestamp_unix_ns)?;
+    Ok(value)
+}
+
+fn serialize_execution_event_batch(batch: ExecutionEventBatch) -> Result<Value, BridgeFailure> {
+    let timestamps = batch
+        .events
+        .iter()
+        .map(|event| event.timestamp_unix_ns.to_string())
+        .collect::<Vec<_>>();
+    let mut value = serialize_value(batch)?;
+    let events = value
+        .get_mut("events")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| bridge_encoding_failure("runtime event batch has no event array"))?;
+    if events.len() != timestamps.len() {
+        return Err(bridge_encoding_failure(
+            "runtime event batch changed length during bridge encoding",
+        ));
+    }
+    for (event, timestamp_unix_ns) in events.iter_mut().zip(timestamps) {
+        replace_unsigned_decimal(event, "timestamp_unix_ns", timestamp_unix_ns)?;
+    }
+    Ok(value)
+}
+
+fn replace_unsigned_decimal(
+    value: &mut Value,
+    field: &str,
+    decimal: String,
+) -> Result<(), BridgeFailure> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| bridge_encoding_failure("runtime observation is not a JSON object"))?;
+    if !object.contains_key(field) {
+        return Err(bridge_encoding_failure(format!(
+            "runtime observation has no {field} field"
+        )));
+    }
+    object.insert(field.to_string(), Value::String(decimal));
+    Ok(())
+}
+
+fn bridge_encoding_failure(message: impl Into<String>) -> BridgeFailure {
+    BridgeFailure {
+        code: "runtime_error",
+        message: format!("failed to encode SDK bridge result: {}", message.into()),
+    }
 }
 
 fn serialize_field(name: &str, value: impl Serialize) -> Result<Value, BridgeFailure> {

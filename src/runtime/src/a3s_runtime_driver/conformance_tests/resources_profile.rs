@@ -1,5 +1,5 @@
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use a3s_box_core::ExecutionIsolation;
 use a3s_oci_sdk::{CONTROL_CGROUP_NAME, WORKLOAD_CGROUP_NAME};
@@ -15,6 +15,8 @@ const CPU_PERIOD_US: u64 = 100_000;
 const CPU_QUOTA_US: u64 = CPU_MILLIS * (CPU_PERIOD_US / 1_000);
 const MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 const PIDS: u32 = 32;
+const TASK_EXECUTION_TIMEOUT_MS: u64 = 400;
+const TASK_TIMEOUT_MAX_RUNTIME_MS: u64 = 5_000;
 
 pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
@@ -296,19 +298,30 @@ pub(super) async fn run(
         ),
     )?;
 
-    let timeout = fixture
-        .cases
-        .task("resources-execution-timeout", "exec sleep 3600", 400);
-    let started = Instant::now();
+    let timeout = fixture.cases.task(
+        "resources-execution-timeout",
+        "exec sleep 3600",
+        TASK_EXECUTION_TIMEOUT_MS,
+    );
+    let applied_at = Instant::now();
     let timed_out = client.apply(&timeout).await?;
+    let wall_elapsed_ms = applied_at.elapsed().as_millis();
+    let provider_elapsed_ms = timed_out
+        .started_at_ms
+        .zip(timed_out.finished_at_ms)
+        .and_then(|(started, finished)| finished.checked_sub(started));
     require(
         timed_out.state == RuntimeUnitState::Failed
             && timed_out
                 .failure
                 .as_ref()
                 .is_some_and(|failure| failure.code == "execution_timeout" && !failure.retryable)
-            && started.elapsed() < Duration::from_secs(5),
-        "Task execution timeout was not behaviorally enforced",
+            && provider_elapsed_ms
+                .is_some_and(|elapsed| elapsed < TASK_TIMEOUT_MAX_RUNTIME_MS),
+        format!(
+            "Task execution timeout was not behaviorally enforced: state={:?} failure={:?} provider_elapsed_ms={provider_elapsed_ms:?} wall_elapsed_ms={wall_elapsed_ms}",
+            timed_out.state, timed_out.failure
+        ),
     )?;
     fixture
         .remove_unit(client, &timeout.spec, "resources-execution-timeout")

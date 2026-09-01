@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 
 import { A3SBoxError, A3SBoxNotInstalledError } from './errors.js'
 
-export const BRIDGE_PROTOCOL_VERSION = 3
+export const BRIDGE_PROTOCOL_VERSION = 4
 export const SUPPORTED_BRIDGE_OPERATIONS = [
   'sdk_capabilities',
   'runtime_diagnostics',

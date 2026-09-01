@@ -783,6 +783,7 @@ impl OciRuntimeService for FakeRuntimeService {
                 sequence,
                 timestamp_unix_ns: 1_700_000_000_000_000_000 + sequence,
                 container: target.clone(),
+                operation_id: None,
                 process_id: (sequence == 8).then(ProcessId::init),
                 kind: if sequence == 5 {
                     RuntimeEventKind::ContainerStarted
@@ -2274,7 +2275,7 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
 }
 
 #[tokio::test]
-async fn relative_exec_resolves_against_the_prepared_rootfs_path() {
+async fn relative_exec_tracks_the_prepared_rootfs_layout() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
     let manager = manager(
@@ -2290,21 +2291,25 @@ async fn relative_exec_resolves_against_the_prepared_rootfs_path() {
         )
         .await
         .expect("initial launch");
-    let rootfs = directory
+    let box_dir = directory
         .path()
         .join("home")
         .join("boxes")
-        .join(lease.execution_id.as_str())
-        .join("rootfs");
-    std::fs::create_dir_all(rootfs.join("usr/bin")).expect("create rootfs PATH directory");
-    let executable = rootfs.join("usr/bin/printf");
-    std::fs::write(&executable, b"fake executable").expect("create rootfs executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
-            .expect("mark rootfs command executable");
-    }
+        .join(lease.execution_id.as_str());
+    let prepare_executable = |rootfs: &std::path::Path, relative: &str| {
+        let executable = rootfs.join(relative);
+        std::fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create rootfs PATH directory");
+        std::fs::write(&executable, b"fake executable").expect("create rootfs executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                .expect("mark rootfs command executable");
+        }
+    };
+
+    prepare_executable(&box_dir.join("rootfs"), "usr/bin/printf");
 
     let mut exec = box_exec_request(Some("relative-path-command"));
     exec.cmd = vec!["printf".to_string(), "sdk-ok".to_string()];
@@ -2313,11 +2318,25 @@ async fn relative_exec_resolves_against_the_prepared_rootfs_path() {
         .await
         .expect("relative exec through OCI backend");
 
+    // A later generation of the same image uses the overlay cache-hit view.
+    // Keep the old rootfs populated to prove the resolver prefers `merged`.
+    prepare_executable(&box_dir.join("merged"), "usr/local/bin/printf");
+    let mut cached_exec = box_exec_request(Some("relative-path-cache-hit-command"));
+    cached_exec.cmd = vec!["printf".to_string(), "cache-hit".to_string()];
+    manager
+        .execute(&lease.execution_id, lease.generation, cached_exec)
+        .await
+        .expect("relative exec through cached overlay rootfs");
+
     let calls = service.exec_requests();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     assert_eq!(
         calls[0].process.args().as_ref().expect("process args"),
         &["/usr/bin/printf", "sdk-ok"]
+    );
+    assert_eq!(
+        calls[1].process.args().as_ref().expect("process args"),
+        &["/usr/local/bin/printf", "cache-hit"]
     );
 }
 
@@ -5032,6 +5051,8 @@ fn runtime_record(
         generation,
         driver,
         isolation,
+        guest_session: None,
+        network_enforcement: None,
         config_digest: config_digest.to_string(),
         attachments_digest: attachments_digest.map(str::to_string),
     })

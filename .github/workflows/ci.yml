@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 9c3be8e126dda7ff7add5e6e88c427f68c7d6629
+  A3S_OCI_RUNTIME_REV: 438e4b7936cd08d408160fe9341a21786f60cd26
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -29,29 +29,9 @@ jobs:
         with:
           components: rustfmt
       - run: cd src && cargo fmt --all -- --check
-      - name: Verify CI and release OCI artifact pins agree
+      - name: Verify OCI SDK and artifact pins agree
         shell: bash
-        run: |
-          set -euo pipefail
-          read_pin() {
-            local workflow="$1"
-            local matches
-            mapfile -t matches < <(
-              sed -nE 's/^[[:space:]]*A3S_OCI_RUNTIME_REV:[[:space:]]*([0-9a-f]{40})[[:space:]]*$/\1/p' \
-                "$workflow"
-            )
-            if [ "${#matches[@]}" -ne 1 ]; then
-              echo "$workflow must contain exactly one 40-character OCI revision" >&2
-              exit 1
-            fi
-            printf '%s\n' "${matches[0]}"
-          }
-          ci_pin="$(read_pin .github/workflows/ci.yml)"
-          release_pin="$(read_pin .github/workflows/release.yml)"
-          if [ "$ci_pin" != "$release_pin" ]; then
-            echo "CI OCI revision $ci_pin differs from release revision $release_pin" >&2
-            exit 1
-          fi
+        run: bash scripts/check-oci-pins.sh
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
@@ -477,6 +457,8 @@ jobs:
           repository: A3S-Lab/OCI-Runtime
           ref: ${{ env.A3S_OCI_RUNTIME_REV }}
           path: oci-runtime
+      - name: Verify pinned OCI contracts
+        run: bash scripts/check-oci-pins.sh oci-runtime
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
@@ -521,13 +503,20 @@ jobs:
       - name: Package and install the no-KVM product
         run: |
           set -euo pipefail
-          install_dir="$RUNNER_TEMP/a3s-box-installed-${{ matrix.platform }}"
+          install_dir="$A3S_HOME/bin"
           bash scripts/package-no-kvm-product.sh \
             "${{ matrix.guest_target }}" \
             "${{ matrix.platform }}" \
             "$A3S_OCI_RUNTIME_REV" \
             "$RUNNER_TEMP" \
             "$install_dir"
+
+          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
+            test -x "$install_dir/$artifact"
+            test ! -L "$install_dir/$artifact"
+          done
+          test -d "$install_dir/lib"
+          test ! -L "$install_dir/lib"
 
           {
             echo "A3S_BOX_INSTALL_DIR=$install_dir"
@@ -651,11 +640,32 @@ jobs:
         if: always()
         run: |
           cleanup_status=0
-          if [ -f /tmp/a3s-box-ci-kvm-sentinel ]; then
-            if [ -c /dev/kvm ]; then
-              sudo rm -f /dev/kvm || cleanup_status=1
+          kvm_marker=/tmp/a3s-box-ci-kvm-sentinel
+          saved_kvm=/dev/a3s-box-ci-host-kvm
+          if [[ -e "$kvm_marker" || -L "$kvm_marker" ]]; then
+            if [[ -d /dev/kvm && ! -L /dev/kvm ]]; then
+              sudo rmdir /dev/kvm || cleanup_status=1
+            elif [[ -e /dev/kvm || -L /dev/kvm ]]; then
+              echo "::error::Refusing to remove an unexpected replacement at /dev/kvm"
+              cleanup_status=1
             fi
-            rm -f /tmp/a3s-box-ci-kvm-sentinel || cleanup_status=1
+            if [[ -e "$saved_kvm" || -L "$saved_kvm" ]]; then
+              if [[ ! -c "$saved_kvm" || -L "$saved_kvm" ]]; then
+                echo "::error::Saved host KVM device has the wrong type"
+                cleanup_status=1
+              elif [[ -e /dev/kvm || -L /dev/kvm ]]; then
+                echo "::error::Cannot restore the host KVM device because /dev/kvm is occupied"
+                cleanup_status=1
+              else
+                sudo mv -- "$saved_kvm" /dev/kvm || cleanup_status=1
+              fi
+            fi
+            if ((cleanup_status == 0)); then
+              rm -f -- "$kvm_marker" || cleanup_status=1
+            fi
+          elif [[ -e "$saved_kvm" || -L "$saved_kvm" ]]; then
+            echo "::error::Saved host KVM device exists without its ownership marker"
+            cleanup_status=1
           fi
           sudo python3 - "$A3S_BOX_OCI_HOST_ROOT/box-owner.json" <<'PY' || cleanup_status=1
           import json

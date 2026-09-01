@@ -198,7 +198,9 @@ idempotent after successful cleanup, and retryable after a cleanup failure.
 
 Runtime-native process inventory, normalized stats, ordered event polls and
 streams are exact-generation operations available for a running or paused
-Sandbox. Live resource updates require a running Sandbox:
+Sandbox. Live resource updates require a running Sandbox. Bridge protocol
+version 4 transports Unix-nanosecond timestamps as canonical decimal strings;
+the Go SDK decodes them to exact `uint64` values:
 
 ```go
 processes, err := sandbox.Processes(ctx)

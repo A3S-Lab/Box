@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  A3S_OCI_RUNTIME_REV: 9c3be8e126dda7ff7add5e6e88c427f68c7d6629
+  A3S_OCI_RUNTIME_REV: 438e4b7936cd08d408160fe9341a21786f60cd26
 
 jobs:
   # ── Tests must pass before release ─────────────────────────────
@@ -181,6 +181,10 @@ jobs:
           repository: A3S-Lab/OCI-Runtime
           ref: ${{ env.A3S_OCI_RUNTIME_REV }}
           path: oci-runtime
+
+      - name: Verify pinned OCI contracts
+        if: runner.os == 'Linux'
+        run: bash scripts/check-oci-pins.sh oci-runtime
 
       # dtolnay/rust-toolchain stable (2026-07-16)
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4

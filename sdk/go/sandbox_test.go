@@ -123,7 +123,7 @@ func TestSandboxRuntimeControlUsesExactGeneration(t *testing.T) {
 			return ExecutionStats{
 				ExecutionID:     "box-1",
 				Generation:      3,
-				TimestampUnixNS: 1_000_000,
+				TimestampUnixNS: 1_700_000_000_000_000_123,
 				CPU: ExecutionCPUStats{
 					UsageNS:     300,
 					UserNS:      200,
@@ -149,7 +149,7 @@ func TestSandboxRuntimeControlUsesExactGeneration(t *testing.T) {
 				Generation:  3,
 				Events: []ExecutionRuntimeEvent{{
 					Sequence:        8,
-					TimestampUnixNS: 1_000_001,
+					TimestampUnixNS: 1_700_000_000_000_000_124,
 					ProcessID:       &processID,
 					Kind:            EventProcessExited,
 					Attributes:      map[string]string{"exit_code": "0"},
@@ -181,11 +181,18 @@ func TestSandboxRuntimeControlUsesExactGeneration(t *testing.T) {
 		t.Fatalf("processes=%+v err=%v", processes, err)
 	}
 	stats, err := sandbox.RuntimeStats(ctx)
-	if err != nil || stats.CPU.UsageNS != 300 || stats.Metrics["io.read_bytes"] != 64 {
+	if err != nil ||
+		stats.TimestampUnixNS != 1_700_000_000_000_000_123 ||
+		stats.CPU.UsageNS != 300 ||
+		stats.Metrics["io.read_bytes"] != 64 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
 	}
 	events, err := sandbox.Events(ctx, ExecutionEventsRequest{AfterSequence: 7, WaitTimeoutMS: &waitTimeoutMS})
-	if err != nil || len(events.Events) != 1 || events.Events[0].Kind != EventProcessExited || events.NextSequence != 8 {
+	if err != nil ||
+		len(events.Events) != 1 ||
+		events.Events[0].TimestampUnixNS != 1_700_000_000_000_000_124 ||
+		events.Events[0].Kind != EventProcessExited ||
+		events.NextSequence != 8 {
 		t.Fatalf("events=%+v err=%v", events, err)
 	}
 	cpuShares := uint64(512)

@@ -118,8 +118,9 @@ for binary in a3s-box a3s-box-shim; do
     ldd_output="$(LD_LIBRARY_PATH= ldd "$PACKAGE_ROOT/$binary")"
     printf '%s\n' "$ldd_output"
     ! grep -q 'not found' <<< "$ldd_output"
-    grep -F "$PACKAGE_ROOT/lib/libkrun.so" <<< "$ldd_output"
 done
+shim_ldd_output="$(LD_LIBRARY_PATH= ldd "$PACKAGE_ROOT/a3s-box-shim")"
+grep -F "$PACKAGE_ROOT/lib/libkrun.so" <<< "$shim_ldd_output"
 
 tar czf "$ARCHIVE" -C "$OUTPUT_ROOT" "$PACKAGE_NAME"
 DIGEST="$(sha256sum "$ARCHIVE" | awk '{ print $1 }')"
@@ -140,5 +141,9 @@ jq --exit-status \
 for artifact in a3s-box a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
     test -x "$INSTALL_DIR/$artifact"
 done
+installed_shim_ldd_output="$(LD_LIBRARY_PATH= ldd "$INSTALL_DIR/a3s-box-shim")"
+printf '%s\n' "$installed_shim_ldd_output"
+! grep -q 'not found' <<< "$installed_shim_ldd_output"
+grep -F "$INSTALL_DIR/lib/libkrun.so" <<< "$installed_shim_ldd_output"
 
 printf 'Installed %s from %s (sha256:%s)\n' "$PACKAGE_NAME" "$ARCHIVE" "$DIGEST"

@@ -61,13 +61,15 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`9c3be8e126dda7ff7add5e6e88c427f68c7d6629`, which retains the qualified
-control/workload cgroup and read-only bind behavior and adds deterministic
-multi-driver registration, isolation selection, and durable recorded-driver
-routing required by the unified execution migration. It also publishes stable
-aggregate workload block-I/O byte metrics consumed by Box statistics and
-isolates an aborted SDK connection from the shared host-service lifetime. Runtime service startup
-also fails closed when historical state references a missing driver or a
+`438e4b7936cd08d408160fe9341a21786f60cd26`. The Rust SDK dependency and the
+runtime and agent built by CI and release workflows all use this same source
+revision. It retains the qualified control/workload cgroup and read-only bind
+behavior, deterministic multi-driver registration, isolation selection, and
+durable recorded-driver routing required by the unified execution migration.
+It also publishes stable aggregate workload block-I/O byte metrics consumed by
+Box statistics and isolates an aborted SDK connection from the shared
+host-service lifetime. Runtime service startup also fails closed when
+historical state references a missing driver or a
 driver whose advertised isolation has drifted. Startup then calls only the
 exact recorded driver's idempotent recovery hook and commits any legal state
 observation before serving. Windows additionally has a protected, local-only
@@ -116,28 +118,38 @@ The `SDK Local Sandbox (A3S OCI Runtime)` and
 x86_64 and aarch64 hosts without KVM. Each must:
 
 1. check out the exact pinned OCI Runtime revision;
-2. run its native Linux qualification script;
-3. build release Box binaries with the vendored libkrun and libkrunfw runtime,
+2. compare the Box recovery-evidence contract with the current recovery writer
+   schema in that exact OCI checkout before starting long builds or soak tests;
+3. run its native Linux qualification script;
+4. build release Box binaries with the vendored libkrun and libkrunfw runtime,
    plus guest init, the pinned OCI runtime, and the agent;
-4. assemble the supported Linux release layout, install it through `install.sh`,
-   validate the install marker and OCI revision, and reject any executable path
-   outside that installation;
-5. require `/dev/kvm` to be absent, verify the installed product reports that
+5. assemble the supported Linux release layout, install it through `install.sh`,
+   validate every executable dependency, require the shim to resolve libkrun
+   from that layout, validate the install marker and OCI revision, and reject
+   any executable path outside that installation; install the self-contained
+   distribution directly at the R17 conformance home's `bin` directory so the
+   required binaries and their `$ORIGIN/lib` dependencies retain one exact
+   installation identity without loader-breaking executable symlinks;
+6. require `/dev/kvm` to be absent, verify the installed product reports that
    exact condition, and execute the unchanged Rust, Python, TypeScript, and Go
    local SDK lifecycles;
-6. create a runner-local KVM character-device node whose read/write open is
-   rejected even for the root test process, verify the installed product
-   reports the access failure, and execute the same four-language lifecycle a
-   second time;
-7. cover image management, named volumes, files, logs, metrics, pause/resume,
+7. create a runner-local `/dev/kvm` path whose read/write open is rejected even
+   for the root test process, verify the installed product reports the access
+   failure, and execute the same four-language lifecycle a second time;
+8. cover image management, named volumes, files, logs, metrics, pause/resume,
    exact CPU/memory/PID enforcement, stop/restart, filesystem snapshots, and
    complete cleanup;
-8. kill the exact OCI owner under a running Sandbox, prove the launcher and init
+9. kill the exact OCI owner under a running Sandbox, prove the launcher and init
    terminate, then use distinct Box processes to rebind the endpoint, reconcile
    stopped-only state without a synthetic exit status, delete the old
    generation, and restart exactly the next Box and OCI generations;
-9. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
+10. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
    remains.
+
+If a hosted runner initially exposes a KVM character device, the gate moves it
+aside only after creating an exact ownership marker and restores it from both
+the script trap and the workflow's unconditional cleanup. Unexpected device
+types, replacement paths, stale markers, and backup collisions fail closed.
 
 ### Native configuration matrix
 

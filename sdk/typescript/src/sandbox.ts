@@ -190,7 +190,8 @@ export interface ExecutionMemoryStats {
 export interface ExecutionStats {
   executionId: string
   generation: number
-  timestampUnixNs: number
+  /** Exact Unix epoch nanoseconds. */
+  timestampUnixNs: bigint
   cpu: ExecutionCpuStats
   memory: ExecutionMemoryStats
   processCount: number
@@ -214,7 +215,8 @@ export type ExecutionEventKind =
 
 export interface ExecutionRuntimeEvent {
   sequence: number
-  timestampUnixNs: number
+  /** Exact Unix epoch nanoseconds. */
+  timestampUnixNs: bigint
   processId?: string
   kind: ExecutionEventKind
   attributes: Readonly<Record<string, string>>
@@ -791,7 +793,7 @@ function validateProcessInventory(
 
 function validateExecutionStats(stats: ExecutionStats): void {
   if (
-    stats.timestampUnixNs <= 0 ||
+    stats.timestampUnixNs <= 0n ||
     stats.cpu.userNs + stats.cpu.systemNs > stats.cpu.usageNs ||
     (stats.memory.peakBytes !== undefined &&
       stats.memory.peakBytes < stats.memory.usageBytes) ||
@@ -815,7 +817,7 @@ function validateExecutionEventBatch(
 ): void {
   let previous = afterSequence
   for (const event of batch.events) {
-    if (event.sequence <= previous || event.timestampUnixNs <= 0) {
+    if (event.sequence <= previous || event.timestampUnixNs <= 0n) {
       throw new A3SBoxError(
         'Bridge returned an invalid runtime event order',
         'bridge_protocol_error'

@@ -24,6 +24,7 @@ mod oci_production;
 mod oci_session;
 mod operations;
 mod port;
+mod prepared_rootfs;
 mod record;
 mod recovery;
 mod remove;

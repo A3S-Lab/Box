@@ -267,7 +267,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=82cbc663f0ab7a0a888defe71a5a7d257ae1f9de#82cbc663f0ab7a0a888defe71a5a7d257ae1f9de"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=438e4b7936cd08d408160fe9341a21786f60cd26#438e4b7936cd08d408160fe9341a21786f60cd26"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -276,7 +276,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=82cbc663f0ab7a0a888defe71a5a7d257ae1f9de#82cbc663f0ab7a0a888defe71a5a7d257ae1f9de"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=438e4b7936cd08d408160fe9341a21786f60cd26#438e4b7936cd08d408160fe9341a21786f60cd26"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
@@ -1810,7 +1810,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3723,7 +3723,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4750,7 +4750,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.11.0",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
