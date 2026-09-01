@@ -226,7 +226,11 @@ impl SnapshotStore {
                     format: SnapshotRootfsFormat::Directory,
                 })
             }
-            ValidatedPayload::RawExt4 { source, identity } => {
+            ValidatedPayload::RawExt4 {
+                source,
+                #[cfg(target_os = "macos")]
+                identity,
+            } => {
                 #[cfg(target_os = "macos")]
                 {
                     let destination = box_dir.join(RAW_EXT4_DIRECTORY_NAME);
@@ -266,7 +270,7 @@ impl SnapshotStore {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = (source, identity);
+                    let _ = source;
                     Err(snapshot_error(format!(
                         "snapshot {} contains a guest-native macOS rootfs that this host cannot restore",
                         metadata.id
@@ -291,6 +295,7 @@ enum ValidatedPayload {
     Directory(PathBuf),
     RawExt4 {
         source: PathBuf,
+        #[cfg(target_os = "macos")]
         identity: RawExt4Identity,
     },
 }
@@ -304,6 +309,7 @@ impl ValidatedPayload {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct RawExt4Identity {
     artifact: Ext4ArtifactIdentity,
     sparse_sha256: String,
@@ -332,6 +338,7 @@ fn inspect_payload(snapshot_dir: &Path, metadata: &SnapshotMetadata) -> Result<V
             validate_raw_payload(&source, &artifact, &sparse_sha256)?;
             Ok(ValidatedPayload::RawExt4 {
                 source,
+                #[cfg(target_os = "macos")]
                 identity: RawExt4Identity {
                     artifact,
                     sparse_sha256,
@@ -602,6 +609,7 @@ fn publish_staging(staging: tempfile::TempDir, destination: &Path, base_dir: &Pa
     sync_directory(base_dir)
 }
 
+#[cfg(target_os = "macos")]
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
