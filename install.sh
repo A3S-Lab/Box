@@ -54,7 +54,7 @@ Usage:
   install.sh [options]
 
 Options:
-  --version VERSION       Install a release such as v3.2.0 (default: latest).
+  --version VERSION       Install a release such as v3.2.1 (default: latest).
   --install-dir PATH      Install the self-contained distribution at PATH.
   --archive PATH          Install a local release tarball without downloading.
   --sha256 HEX            Expected SHA-256 for --archive.

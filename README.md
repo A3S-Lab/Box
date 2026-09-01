@@ -350,8 +350,9 @@ immutable artifact cache is enabled. New generations do not create a
 guest-named host directory or attach an `A3SRootfs` DiskImage.
 The raw-byte logical assembler preserves Linux filenames, symlink targets,
 hardlinks, whiteouts, xattrs, ownership, modes, and timestamps before invoking
-the vendored ext4 writer. The macOS staging codec remains only for directory
-transport and legacy APFS migration; directory transports fail closed when a
+the audited, separately publishable `a3s-box-mkext4` writer. The macOS staging
+codec remains only for directory transport and legacy APFS migration;
+directory transports fail closed when a
 guest name cannot be represented losslessly.
 Boot configuration and exact workload exit status use private guest-control
 handoffs rather than host access to the active root disk. The first pristine
@@ -616,6 +617,7 @@ src/sdk/           native Rust SDK and machine bridge
 src/cri/           CRI v1 adapter
 src/shim/          current host/guest MicroVM control
 src/guest/init/    current guest init and execution service
+src/third_party/mkext4/  release-owned byte-preserving ext4 writer
 sdk/               Python, TypeScript, and Go packages
 containerd-shim/   RuntimeClass integration
 ```

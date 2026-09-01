@@ -333,6 +333,30 @@ jobs:
             echo "::error title=Workspace library test failure::$diagnostic"
           fi
           exit "$status"
+      - name: Verify crates.io package boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          version="$(
+            jq -r '.packages[] | select(.name == "a3s-box-runtime") | .version' \
+              <<< "$metadata"
+          )"
+          cargo package --locked -p a3s-box-mkext4
+          if ! jq -e --arg version "$version" '
+            (.packages[] | select(.name == "a3s-box-mkext4") | .version) == $version
+            and
+            (.packages[] | select(.name == "a3s-box-runtime") |
+              .dependencies[] |
+              select(.name == "a3s-box-mkext4")) as $dependency |
+            $dependency.rename == "mkext4"
+            and $dependency.req == ("=" + $version)
+            and $dependency.path != null
+          ' <<< "$metadata" >/dev/null; then
+            echo 'Runtime must exactly pin the publishable A3S ext4 package at the Box version' >&2
+            exit 1
+          fi
       - name: Test deterministic CLI workflows
         run: |
           cd src

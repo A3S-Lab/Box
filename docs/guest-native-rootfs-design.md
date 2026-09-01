@@ -273,15 +273,18 @@ The implementation can be an audited in-process writer or a helper shipped in
 the release archive. Tool discovery from the user's shell is acceptable only
 for development diagnostics, never as the default production path.
 
-The release-owned writer pins `mkext4` exactly at `0.0.3` and compiles
-it into the runtime. The source is vendored from upstream commit
+The release-owned writer is derived from `mkext4` 0.0.3 at upstream commit
 `645ba8f39e0a935511e233874f7217bcb6e0e4d8`; the A3S patch changes only
 directory-entry and symlink-target inputs from UTF-8 strings to byte slices.
-Runtime uses a direct versioned path dependency, rather than a workspace-only
-Cargo patch, so Git consumers compile this same audited implementation.
-The writer's validation, hashing, layout, and streaming algorithms remain
-upstream. Its independent reader verifies that arbitrary Linux filename and
-symlink-target bytes round-trip exactly.
+It is published under the explicit `a3s-box-mkext4` package name at the Box
+product version and Runtime pins that exact version alongside the direct path.
+Cargo therefore gives workspace, Git, and crates.io consumers the same audited
+implementation instead of falling back to upstream `mkext4`. The writer's
+validation, hashing, layout, and streaming algorithms remain upstream. Its
+independent reader verifies that arbitrary Linux filename and symlink-target
+bytes round-trip exactly. The cache-schema identity remains based on the
+upstream writer contract, so this packaging-only change does not invalidate
+existing raw disks.
 
 A3S owns the tree adapter, capacity policy, OCI ownership replay, sparse-file
 discovery, xattr filtering, structural validation, and generation-directory
