@@ -233,7 +233,29 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
     candidates = list(root.glob("c-*/recovery.json"))
     assert len(candidates) == 1, f"expected one live recovery record below {root}, found {len(candidates)}"
     recovery = read_private_json(candidates[0])
-    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v1"
+    expected_fields = {
+        "schemaVersion",
+        "target",
+        "configDigest",
+        "owner",
+        "launcher",
+        "init",
+        "cgroup",
+        "intelRdt",
+    }
+    assert set(recovery) == expected_fields, (
+        f"unexpected native recovery fields: {sorted(recovery)}"
+    )
+    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v3", (
+        f"unexpected native recovery schema: {recovery['schemaVersion']}"
+    )
+    config_digest = recovery["configDigest"]
+    assert config_digest.startswith("sha256:") and len(config_digest) == 71 and all(
+        character in "0123456789abcdef" for character in config_digest[7:]
+    ), "native recovery record has an invalid config digest"
+    assert recovery["intelRdt"] is None, (
+        "SDK smoke workload unexpectedly acquired Intel RDT recovery state"
+    )
     assert recovery["target"]["id"] == container_id
     assert int(recovery["owner"]["pid"]) == int(owner["pid"])
     assert int(recovery["owner"]["startTimeTicks"]) == int(owner["pid_start_time"])
