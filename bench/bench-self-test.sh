@@ -22,7 +22,7 @@ if [ -n "${A3S_BOX_STUB_COMMAND_LOG:-}" ]; then
 fi
 
 case "$command" in
-  load|images|volume|snapshot|--version)
+  load|images|pull|volume|snapshot|--version)
     ;;
   ps)
     if [ "${2:-}" = "--format" ] && [ -f "$state" ]; then
@@ -109,6 +109,33 @@ grep -q 'persisted: 3 entries .* (expected 3)' <<<"$success_output"
 grep -q 'PASS: every required launch persisted' <<<"$success_output"
 test ! -s "$STATE"
 
+PNPM_COMMAND_LOG="$TMP_ROOT/pnpm-commands.log"
+: >"$PNPM_COMMAND_LOG"
+A3S_BOX="$STUB" \
+  A3S_BOX_STUB_STATE="$STATE" \
+  A3S_BOX_STUB_COMMAND_LOG="$PNPM_COMMAND_LOG" \
+  PNPM_PROJECT="$REPO_ROOT/bench/fixtures/pnpm" \
+  PNPM_IMAGE=synthetic:latest \
+  PNPM_RUNS=1 \
+  PNPM_NODE_MODULES=both \
+  PNPM_LOG_DIR="$TMP_ROOT/pnpm-logs" \
+  "$REPO_ROOT/bench/bench.sh" pnpm >/dev/null
+
+project_cleanup_count=$(grep -c 'rm -rf node_modules' "$PNPM_COMMAND_LOG")
+if [ "$project_cleanup_count" -ne 3 ]; then
+  echo "pnpm self-test recorded $project_cleanup_count project cleanups; expected 3" >&2
+  exit 1
+fi
+tmpfs_cleanup_count=$(grep -c 'find node_modules -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' "$PNPM_COMMAND_LOG")
+if [ "$tmpfs_cleanup_count" -ne 2 ]; then
+  echo "pnpm self-test recorded $tmpfs_cleanup_count tmpfs cleanups; expected 2" >&2
+  exit 1
+fi
+if grep -- '--tmpfs /work/node_modules' "$PNPM_COMMAND_LOG" | grep -q 'rm -rf node_modules'; then
+  echo "pnpm self-test attempted to unlink a tmpfs mount point" >&2
+  exit 1
+fi
+
 HOST_COMMAND_LOG="$TMP_ROOT/host-commands.log"
 HOST_EVIDENCE="$TMP_ROOT/host-evidence"
 OFFLINE_TAR="$TMP_ROOT/alpine.tar"
@@ -144,4 +171,4 @@ if find "$TMP_ROOT/tmp" -mindepth 1 -print -quit | grep -q .; then
   exit 1
 fi
 
-echo "bench leak/race and offline soak seeding self-test passed"
+echo "bench leak/race, pnpm cleanup, and offline soak seeding self-test passed"

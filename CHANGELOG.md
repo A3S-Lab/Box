@@ -28,6 +28,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- macOS VirtioFS directory iteration now snapshots entries per open or rewound
+  handle, returns synthetic FUSE resume cookies, and gives `fdopendir` its own
+  descriptor. Paginated, mutating tree deletion no longer skips unrelated
+  entries or double-closes the retained handle, so package-manager cleanup can
+  reliably remove large bind-mounted dependency trees.
 - Clean Apple Silicon release builds now keep Debian's `arm64` repository name
   separate from clang's `aarch64-linux-gnu` target while preparing libkrun's
   guest-init sysroot, avoiding a deterministic package-index 404 without

@@ -764,6 +764,11 @@ jobs:
           touch init/init
           cargo test --locked -p devices --features net backpressure -- --nocapture
 
+      - name: Test vendored libkrun macOS VirtioFS directory pagination
+        if: runner.os == 'macOS'
+        working-directory: src/deps/libkrun-sys/vendor/libkrun
+        run: cargo test --locked -p devices --features net readdir -- --nocapture
+
       - name: Check compilation
         run: |
           cd src

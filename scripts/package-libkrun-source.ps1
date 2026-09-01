@@ -78,7 +78,12 @@ $archivePaths = @(
 )
 
 try {
-    & git -C $nestedRoot archive --format=tar --prefix=libkrun/ "--output=$temporary" HEAD @archivePaths
+    # Archive Git object bytes, independent of the checkout platform. Without
+    # these overrides Git for Windows applies core.autocrlf while archiving, so
+    # the same commit produces a different tar stream than Linux and macOS.
+    & git -c core.autocrlf=false -c core.eol=lf -c tar.umask=0002 `
+        -C $nestedRoot archive --format=tar --prefix=libkrun/ `
+        "--output=$temporary" HEAD @archivePaths
     if ($LASTEXITCODE -ne 0) {
         throw "git archive failed with exit code $LASTEXITCODE."
     }

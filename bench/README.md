@@ -91,7 +91,9 @@ Tunables (env):
   offline install to project-mounted `node_modules`, offline install to tmpfs
   `node_modules`, and full `pnpm install --frozen-lockfile`. Every measured run
   uses the command-wide `PNPM_TIMEOUT`, so a network or package-manager stall
-  fails the harness instead of leaving an unbounded workload.
+  fails the harness instead of leaving an unbounded workload. Project-backed
+  samples replace the whole `node_modules` tree; tmpfs samples clear the
+  mounted directory's children without trying to unlink the mount point.
 
 The pnpm benchmark intentionally separates the two likely slow paths:
 
