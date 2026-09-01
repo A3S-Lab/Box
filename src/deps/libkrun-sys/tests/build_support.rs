@@ -4,6 +4,21 @@ mod build_support;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn debian_repository_architectures_are_distinct_from_gnu_targets() {
+    let arm =
+        build_support::debian_cross_architecture("aarch64").expect("AArch64 should be supported");
+    assert_eq!(arm.repository_arch, "arm64");
+    assert_eq!(arm.gnu_target, "aarch64-linux-gnu");
+
+    let x86 =
+        build_support::debian_cross_architecture("x86_64").expect("x86_64 should be supported");
+    assert_eq!(x86.repository_arch, "amd64");
+    assert_eq!(x86.gnu_target, "x86_64-linux-gnu");
+
+    assert_eq!(build_support::debian_cross_architecture("riscv64"), None);
+}
+
+#[test]
 fn sha256_file_hashes_known_content() {
     let temp = tempfile::tempdir().expect("create temporary directory");
     let path = temp.path().join("payload.bin");
