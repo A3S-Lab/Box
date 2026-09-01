@@ -2,13 +2,14 @@
 
 use super::BoxRecord;
 
-/// Record-level liveness with PID-identity verification: live only if the
-/// recorded PID exists AND its start-time identity still matches (when one was
-/// recorded). Prevents a reused PID after a crash/reboot from keeping a dead box
-/// "running". See [`crate::process::is_process_alive_with_identity`].
+/// Record-level execution liveness with PID-identity verification: live only if
+/// the recorded PID is actively executing (not an unreaped zombie) AND its
+/// start-time identity still matches. Prevents both an exited child and a reused
+/// PID from keeping a dead box "running".
 pub(crate) fn is_record_pid_live(record: &BoxRecord) -> bool {
     record.pid.is_some_and(|pid| {
-        crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
+        !crate::process::is_process_exited(pid)
+            && crate::process::is_process_running_with_identity(pid, record.pid_start_time)
     })
 }
 
@@ -172,4 +173,35 @@ pub fn generate_name() -> String {
     let adj = ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())];
     let noun = NOUNS[rng.gen_range(0..NOUNS.len())];
     format!("{adj}_{noun}")
+}
+
+#[cfg(test)]
+mod process_liveness_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::zombie_processes)] // Intentionally retain Child until state reconciliation.
+    fn exited_child_is_not_a_live_box_process() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut record = crate::test_helpers::fixtures::make_record(
+            "process-liveness",
+            "process-liveness",
+            "running",
+            Some(pid),
+        );
+        record.pid_start_time = crate::process::pid_start_time(pid);
+        child.kill().expect("terminate child without reaping it");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while is_record_pid_live(&record) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(!is_record_pid_live(&record));
+        let _ = child.wait();
+    }
 }

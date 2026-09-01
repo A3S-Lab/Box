@@ -97,7 +97,10 @@ pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,
     ManagedExecutionStoreResult,
 };
-pub use process::{is_process_alive, is_process_alive_with_identity, pid_start_time};
+pub use process::{
+    is_process_alive, is_process_alive_with_identity, is_process_running_with_identity,
+    pid_start_time,
+};
 
 // gRPC clients
 #[cfg(unix)]

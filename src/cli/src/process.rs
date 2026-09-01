@@ -1,6 +1,9 @@
 //! Shared process management utilities for CLI commands.
 
-pub use a3s_box_runtime::{is_process_alive, is_process_alive_with_identity, pid_start_time};
+pub use a3s_box_runtime::{
+    is_process_alive, is_process_alive_with_identity, is_process_running_with_identity,
+    pid_start_time,
+};
 
 /// Result of asking a VM/shim process to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +38,16 @@ pub fn is_process_exited(pid: u32) -> bool {
         // Format: "<pid> (<comm>) <state> ...". comm may contain spaces/parens,
         // so scan past the final ')'. Z (zombie) or X (dead) => exited.
         Ok(stat) => match stat.rfind(')') {
-            Some(idx) => matches!(
-                stat[idx + 1..].trim_start().chars().next(),
-                Some('Z') | Some('X')
-            ),
+            Some(idx)
+                if matches!(
+                    stat[idx + 1..].trim_start().chars().next(),
+                    Some('Z') | Some('X')
+                ) =>
+            {
+                reap_exited_child(pid);
+                true
+            }
+            Some(_) => false,
             None => false,
         },
         // No /proc entry => the process is gone.
@@ -58,14 +67,25 @@ pub fn is_process_exited(pid: u32) -> bool {
     }
 
     // `waitpid` returns ECHILD for processes owned by another parent. Fall
-    // back to the portable liveness probe for those and for a child that is
-    // still running. This also handles a PID that disappeared between probes.
+    // back to the portable existence probe; record reconciliation follows with
+    // the identity-aware running-state probe, which detects a foreign zombie.
     !is_process_alive(pid)
 }
 
 #[cfg(not(unix))]
 pub fn is_process_exited(pid: u32) -> bool {
     !is_process_alive(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn reap_exited_child(pid: u32) {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return;
+    };
+    let mut status = 0;
+    // Reap only this known PID and never block. ECHILD simply means another
+    // process owns it, which is valid after monitor or CLI recovery.
+    let _ = unsafe { libc::waitpid(raw_pid, &mut status, libc::WNOHANG) };
 }
 
 /// Terminate a process immediately.

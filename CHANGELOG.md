@@ -28,6 +28,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- macOS lifecycle reconciliation now records each shim's native process start
+  identity, treats an unreaped zombie as exited, and lets the owning monitor
+  reap it before applying restart policy. A short-lived service can no longer
+  remain falsely `running` forever or leave a defunct shim behind after its
+  guest workload exits.
 - Warm-pool Dockerfile `RUN` now mounts an ephemeral guest-native `/dev` and
   binds the guest's standard devices before chroot. Character device numbers
   are no longer persisted through macOS VirtioFS as unusable `0:0` nodes, so
