@@ -61,7 +61,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`438e4b7936cd08d408160fe9341a21786f60cd26`. The Rust SDK dependency and the
+`7f071e0fe6e3daf48e3878a14640fbe47eb9b5d3`. The Rust SDK dependency and the
 runtime and agent built by CI and release workflows all use this same source
 revision. It retains the qualified control/workload cgroup and read-only bind
 behavior, deterministic multi-driver registration, isolation selection, and
