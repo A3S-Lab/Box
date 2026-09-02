@@ -37,6 +37,42 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
     .unwrap()
 }
 
+#[tokio::test]
+async fn sandbox_resource_planning_persists_image_volume_ownership_without_runtime_side_effects() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    std::fs::create_dir_all(&record.box_dir).unwrap();
+    crate::resolved_image::persist_resolved_image_config(
+        &record.box_dir,
+        &crate::oci::OciImageConfig {
+            entrypoint: None,
+            cmd: None,
+            env: Vec::new(),
+            working_dir: None,
+            user: None,
+            exposed_ports: Vec::new(),
+            labels: std::collections::HashMap::new(),
+            volumes: vec!["/data".to_string(), "/data/./".to_string()],
+            stop_signal: None,
+            health_check: None,
+            onbuild: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let plan = backend.plan_create_resources(&record).await.unwrap();
+
+    assert_eq!(plan.anonymous_volumes.len(), 1);
+    assert!(plan.anonymous_volumes[0].starts_with("anon_11111111_"));
+    assert!(!temporary.path().join("images").exists());
+    assert!(!temporary.path().join("volumes.json").exists());
+    assert!(!temporary.path().join("volumes").exists());
+    assert!(!record.box_dir.join("rootfs").exists());
+    assert!(!record.box_dir.join("workspace").exists());
+    assert!(!record.box_dir.join("sockets").exists());
+}
+
 struct DelayedExitStatusHandler {
     exit_polls: Arc<AtomicUsize>,
     stop_calls: Arc<AtomicUsize>,

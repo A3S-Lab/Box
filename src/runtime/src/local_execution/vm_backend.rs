@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a3s_box_core::{
-    EventEmitter, ExecutionBackend, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionState, KillOutcome, DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    BoxError, EventEmitter, ExecutionBackend, ExecutionId, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionState, KillOutcome, DEFAULT_SHUTDOWN_TIMEOUT_MS,
 };
 use async_trait::async_trait;
 use dashmap::mapref::entry::Entry;
@@ -23,7 +23,7 @@ use super::vm_process::{locate_microvm_process, LocatedProcess};
 use super::TransientRegistryAuthBroker;
 use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
-    LocalExecutionTermination,
+    LocalExecutionResourcePlan, LocalExecutionTermination,
 };
 use crate::vm::{TERMINAL_EXIT_POLL_INTERVAL, TERMINAL_EXIT_POLL_TIMEOUT};
 use crate::{
@@ -625,6 +625,32 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         _record: &BoxRecord,
     ) -> ExecutionManagerResult<crate::ManagedRuntimeRoute> {
         Ok(crate::ManagedRuntimeRoute::BoxVm)
+    }
+
+    async fn plan_create_resources(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionResourcePlan> {
+        let metadata = self.metadata(record)?;
+        if !metadata.plan.backend.is_sandbox() {
+            return Ok(LocalExecutionResourcePlan::default());
+        }
+
+        // Resolve only the immutable image metadata needed to derive stable
+        // anonymous-volume identities. The actual VolumeStore claims remain
+        // in `start`, after the reservation has durably recorded ownership.
+        let mut manager = self.new_manager(record)?;
+        let anonymous_volumes = manager
+            .plan_image_anonymous_volumes()
+            .await
+            .map_err(|error| match error {
+                BoxError::ConfigError(message) => ExecutionManagerError::InvalidRequest(message),
+                error => ExecutionManagerError::Unavailable(format!(
+                    "Box image resource planning failed for {}: {error}",
+                    record.id
+                )),
+            })?;
+        Ok(LocalExecutionResourcePlan { anonymous_volumes })
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
