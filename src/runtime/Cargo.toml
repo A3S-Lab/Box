@@ -122,7 +122,7 @@ xattr = "1.6"
 # workspace consumers on the same audited source. Keep the exact version
 # because a writer bump is a cache-schema migration rather than a routine
 # dependency update. See third_party/mkext4/A3S_PATCHES.md.
-mkext4 = { package = "a3s-box-mkext4", version = "=3.2.2", path = "../third_party/mkext4" }
+mkext4 = { package = "a3s-box-mkext4", version = "=3.2.3", path = "../third_party/mkext4" }
 
 # TEE attestation verification
 p384 = { workspace = true }

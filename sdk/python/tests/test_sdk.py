@@ -234,9 +234,9 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return {"names": ["old-network"]}
     if operation == "runtime_diagnostics":
         return {
-            "core_version": "3.2.2",
-            "runtime_version": "3.2.2",
-            "sdk_version": "3.2.2",
+            "core_version": "3.2.3",
+            "runtime_version": "3.2.3",
+            "sdk_version": "3.2.3",
             "home": "/tmp/a3s",
             "virtualization": {
                 "available": True,
@@ -1591,7 +1591,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.next_sequence, 11)
         self.assertEqual(sandboxes[0].id, "sandbox-local-1")
         self.assertEqual(snapshot.id, "ci-async")
-        self.assertEqual(diagnostics.sdk_version, "3.2.2")
+        self.assertEqual(diagnostics.sdk_version, "3.2.3")
         self.assertEqual(disk.snapshots_bytes, 4)
         restart = next(
             request
