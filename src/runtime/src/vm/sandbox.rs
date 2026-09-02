@@ -519,7 +519,15 @@ impl VmManager {
             user_destinations.insert(mount.destination.clone());
             mounts.push(mount);
         }
-        if !user_destinations.contains(Path::new("/workspace")) {
+        let mut tmpfs = Vec::with_capacity(self.config.tmpfs.len());
+        for value in &self.config.tmpfs {
+            tmpfs.push(parse_sandbox_tmpfs(value)?);
+        }
+        // A tmpfs at /workspace is itself the caller's workspace mount. Do not
+        // add Box's implicit writable workspace bind mount alongside it: the
+        // OCI compiler rejects duplicate destinations and, more importantly,
+        // the implicit bind would defeat the requested ephemeral workspace.
+        if !workspace_mount_is_explicitly_configured(&user_destinations, &tmpfs) {
             mounts.insert(
                 0,
                 SandboxMount {
@@ -554,11 +562,6 @@ impl VmManager {
                     read_only: false,
                 });
             }
-        }
-
-        let mut tmpfs = Vec::with_capacity(self.config.tmpfs.len());
-        for value in &self.config.tmpfs {
-            tmpfs.push(parse_sandbox_tmpfs(value)?);
         }
         Ok((mounts, tmpfs))
     }
@@ -669,6 +672,16 @@ impl VmManager {
 
         Ok(managed)
     }
+}
+
+fn workspace_mount_is_explicitly_configured(
+    user_destinations: &HashSet<PathBuf>,
+    tmpfs: &[SandboxTmpfs],
+) -> bool {
+    user_destinations.contains(Path::new("/workspace"))
+        || tmpfs
+            .iter()
+            .any(|mount| mount.destination == Path::new("/workspace"))
 }
 
 fn mount_source_error(action: &str, mount: &SandboxMount, error: BoxError) -> BoxError {
@@ -1330,6 +1343,28 @@ mod tests {
         assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
         assert!(normalized_container_path("relative", "test path").is_err());
         assert!(normalized_container_path("/work/../escape", "test path").is_err());
+    }
+
+    #[test]
+    fn workspace_tmpfs_suppresses_box_implicit_workspace_bind() {
+        let mut destinations = HashSet::new();
+        assert!(!workspace_mount_is_explicitly_configured(
+            &destinations,
+            &[]
+        ));
+
+        let workspace_tmpfs = vec![SandboxTmpfs {
+            destination: PathBuf::from("/workspace"),
+            size_bytes: 64 * 1024 * 1024,
+            read_only: false,
+        }];
+        assert!(workspace_mount_is_explicitly_configured(
+            &destinations,
+            &workspace_tmpfs
+        ));
+
+        destinations.insert(PathBuf::from("/workspace"));
+        assert!(workspace_mount_is_explicitly_configured(&destinations, &[]));
     }
 
     #[test]
