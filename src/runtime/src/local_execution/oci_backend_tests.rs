@@ -4861,6 +4861,7 @@ fn request(external_id: &str, isolation: ExecutionIsolation) -> CreateExecutionR
                 vcpus: 1,
                 memory_mb: 128,
                 disk_mb: 512,
+                ephemeral_storage_bytes: None,
                 timeout: 300,
             },
             ..Default::default()

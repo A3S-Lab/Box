@@ -3,7 +3,9 @@ use std::time::Instant;
 
 use a3s_box_core::ExecutionIsolation;
 use a3s_oci_sdk::{CONTROL_CGROUP_NAME, WORKLOAD_CGROUP_NAME};
-use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
+use a3s_runtime::contract::{
+    ResourceControl, RuntimeCapabilities, RuntimeInspection, RuntimeUnitState,
+};
 use a3s_runtime::RuntimeClient;
 
 use super::cases::ResourceShape;
@@ -17,12 +19,18 @@ const MEMORY_BYTES: u64 = 128 * 1024 * 1024;
 const PIDS: u32 = 32;
 const TASK_EXECUTION_TIMEOUT_MS: u64 = 400;
 const TASK_TIMEOUT_MAX_RUNTIME_MS: u64 = 5_000;
+const EPHEMERAL_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
+    capabilities: &RuntimeCapabilities,
 ) -> Result<()> {
-    let service = fixture.cases.apply(
+    let ephemeral_supported = capabilities
+        .resource_controls
+        .contains(&ResourceControl::EphemeralStorage);
+    let execution_isolation = fixture.driver.execution_isolation();
+    let mut service = fixture.cases.apply(
         "resources-service",
         a3s_runtime::contract::RuntimeUnitClass::Service,
         "printf 'r17-resources-ready\\n'; exec sleep 3600",
@@ -34,6 +42,9 @@ pub(super) async fn run(
         },
         a3s_runtime::contract::RestartPolicy::Never,
     );
+    if ephemeral_supported {
+        service.spec.resources.ephemeral_storage_bytes = Some(EPHEMERAL_STORAGE_BYTES);
+    }
     let running = client.apply(&service).await?;
     require(
         running.state == RuntimeUnitState::Running,
@@ -46,7 +57,6 @@ pub(super) async fn run(
         .ok_or_else(|| super::protocol("resource fixture lost managed metadata"))?
         .request
         .config;
-    let execution_isolation = fixture.driver.execution_isolation();
     require(
         config.resource_limits.cpu_quota == Some(CPU_QUOTA_US as i64)
             && config.resource_limits.cpu_period == Some(CPU_PERIOD_US),
@@ -70,11 +80,42 @@ pub(super) async fn run(
         config.resource_limits.pids_limit == Some(u64::from(PIDS)),
         "PID limit changed before provider launch",
     )?;
+    if ephemeral_supported {
+        require(
+            execution_isolation == ExecutionIsolation::Sandbox
+                && config.resources.ephemeral_storage_bytes == Some(EPHEMERAL_STORAGE_BYTES),
+            "ephemeral storage quota did not reach the Sandbox provider",
+        )?;
+    }
 
     let sandbox_management = match execution_isolation {
         ExecutionIsolation::Sandbox => Some(sandbox_management_cgroup(&record)?),
         ExecutionIsolation::Microvm => None,
     };
+
+    if ephemeral_supported {
+        let quota = client
+            .exec(&fixture.cases.exec(
+                "resources-ephemeral-storage-behavior",
+                &service.spec,
+                vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "path=/var/lib/.a3s-r17-ephemeral-quota; rm -f \"$path\"; if dd if=/dev/zero of=\"$path\" bs=1048576 count=192 2>/dev/null; then printf 'quota-not-enforced\\n'; exit 71; fi; actual=$(wc -c <\"$path\"); test \"$actual\" -gt 0; test \"$actual\" -lt 201326592; printf 'quota-enforced:%s\\n' \"$actual\"; rm -f \"$path\"".into(),
+                ],
+                20_000,
+            ))
+            .await?;
+        require(
+            quota.exit_code == 0
+                && quota.stdout.starts_with("quota-enforced:")
+                && quota.stderr.is_empty(),
+            format!(
+                "ephemeral writable-layer quota was not enforced: exit_code={} stdout={:?} stderr={:?}",
+                quota.exit_code, quota.stdout, quota.stderr
+            ),
+        )?;
+    }
 
     let visible = client
         .exec(&fixture.cases.exec(

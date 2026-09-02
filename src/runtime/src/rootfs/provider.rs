@@ -36,6 +36,16 @@ pub struct RootfsResumeOptions {
     pub snapshot: bool,
 }
 
+/// Resource bounds supplied while preparing a writable rootfs generation.
+///
+/// The optional byte limit is intentionally carried separately from the
+/// logical VM disk size. A provider may only accept it when it can enforce a
+/// real writable-layer quota; the default implementation fails closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RootfsPrepareOptions {
+    pub writable_layer_bytes: Option<u64>,
+}
+
 /// A validated rootfs generation that no longer has a host directory view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumedRootfs {
@@ -102,6 +112,24 @@ pub trait RootfsProvider: Send + Sync {
     /// still inspect and update it until [`Self::finalize_for_boot`] is called.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
+    /// Prepare a rootfs while applying provider-specific writable-layer
+    /// bounds. Providers that do not implement the bound reject it instead of
+    /// silently falling back to an unbounded directory.
+    fn prepare_with_options(
+        &self,
+        box_dir: &Path,
+        cache_dir: &Path,
+        options: RootfsPrepareOptions,
+    ) -> Result<PathBuf> {
+        if options.writable_layer_bytes.is_some() {
+            return Err(BoxError::ConfigError(format!(
+                "rootfs provider {} cannot enforce a writable-layer byte quota",
+                self.name()
+            )));
+        }
+        self.prepare(box_dir, cache_dir)
+    }
+
     /// Prepare an empty writable rootfs for an OCI cache miss.
     fn prepare_empty(&self, box_dir: &Path) -> Result<PathBuf> {
         let rootfs = box_dir.join("rootfs");
@@ -112,6 +140,21 @@ pub trait RootfsProvider: Send + Sync {
             ))
         })?;
         Ok(rootfs)
+    }
+
+    /// Prepare an empty rootfs while applying provider-specific bounds.
+    fn prepare_empty_with_options(
+        &self,
+        box_dir: &Path,
+        options: RootfsPrepareOptions,
+    ) -> Result<PathBuf> {
+        if options.writable_layer_bytes.is_some() {
+            return Err(BoxError::ConfigError(format!(
+                "rootfs provider {} cannot enforce a writable-layer byte quota",
+                self.name()
+            )));
+        }
+        self.prepare_empty(box_dir)
     }
 
     /// Finalize the staged tree and choose the root filesystem transport.
@@ -270,9 +313,30 @@ impl OverlayProvider {
 
 impl RootfsProvider for OverlayProvider {
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
+        self.prepare_with_options(box_dir, cache_dir, RootfsPrepareOptions::default())
+    }
+
+    fn prepare_with_options(
+        &self,
+        box_dir: &Path,
+        cache_dir: &Path,
+        options: RootfsPrepareOptions,
+    ) -> Result<PathBuf> {
         let lower = Self::lower_dir(box_dir, cache_dir)?;
-        let upper = box_dir.join("upper");
-        let work = box_dir.join("work");
+        let (upper, work) = if let Some(bytes) = options.writable_layer_bytes {
+            let layer = super::overlay::prepare_bounded_writable_layer(box_dir, bytes)?;
+            // OverlayFS requires the upperdir and workdir paths to resolve
+            // through the same mount (not merely the same superblock). The
+            // bounded layer keeps historical bind-mounted aliases at
+            // `box_dir/upper` and `box_dir/work`, but those aliases are two
+            // distinct mounts and are rejected by the kernel with EINVAL.
+            // Pass the source directories below the single quota tmpfs
+            // instead; the aliases remain available to lifecycle and
+            // inspection code.
+            (layer.mount.join("upper"), layer.mount.join("work"))
+        } else {
+            (box_dir.join("upper"), box_dir.join("work"))
+        };
         let merged = box_dir.join("merged");
 
         for dir in [&upper, &work, &merged] {
@@ -303,8 +367,71 @@ impl RootfsProvider for OverlayProvider {
         Ok(merged)
     }
 
+    fn prepare_empty_with_options(
+        &self,
+        box_dir: &Path,
+        options: RootfsPrepareOptions,
+    ) -> Result<PathBuf> {
+        if options.writable_layer_bytes.is_none() {
+            return self.prepare_empty(box_dir);
+        }
+
+        // This path is useful to callers that want a bounded empty rootfs.
+        // OCI image extraction deliberately uses an unbounded staging tree and
+        // mounts the quota only after the immutable image has been built (see
+        // VmManager::prepare_layout), so image bytes do not consume the
+        // workload's writable-layer allowance.
+        let rootfs = box_dir.join("rootfs");
+        ensure_empty_rootfs_directory(&rootfs)?;
+        self.prepare_with_options(box_dir, &rootfs, options)
+    }
+
     fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
         let merged = box_dir.join("merged");
+
+        let bounded = box_dir
+            .join(super::overlay::WRITABLE_LAYER_MARKER_NAME)
+            .exists()
+            || super::overlay::is_mountpoint(
+                &box_dir.join(super::overlay::WRITABLE_LAYER_DIR_NAME),
+            )
+            || super::overlay::is_mountpoint(&box_dir.join("upper"))
+            || super::overlay::is_mountpoint(&box_dir.join("work"));
+
+        if bounded {
+            if persistent {
+                // Release the overlay view before removing its host directory,
+                // but retain the quota tmpfs and aliases as the durable
+                // writable generation for the next start.
+                super::unmount_box_overlay_for_reuse(&merged)?;
+                if merged.exists() && !super::overlay::is_mountpoint(&merged) {
+                    if let Err(error) = std::fs::remove_dir_all(&merged) {
+                        tracing::warn!(path = %merged.display(), %error, "Failed to remove bounded overlay view");
+                    }
+                }
+                super::overlay::cleanup_bounded_writable_layer(box_dir, true)?;
+                tracing::info!("Persistent box: keeping bounded writable-layer tmpfs and aliases");
+                return Ok(());
+            }
+
+            super::unmount_box_overlay(&merged);
+            super::overlay::cleanup_bounded_writable_layer(box_dir, false)?;
+            for dir_name in &[
+                "rootfs",
+                "merged",
+                "upper",
+                "work",
+                super::overlay::WRITABLE_LAYER_DIR_NAME,
+            ] {
+                let dir = box_dir.join(dir_name);
+                if dir.exists() && !super::overlay::is_mountpoint(&dir) {
+                    if let Err(error) = std::fs::remove_dir_all(&dir) {
+                        tracing::warn!(path = %dir.display(), %error, "Failed to remove bounded overlay directory");
+                    }
+                }
+            }
+            return Ok(());
+        }
 
         if persistent {
             // A retained upper is about to become the next generation's
@@ -349,6 +476,30 @@ impl RootfsProvider for OverlayProvider {
 
     fn name(&self) -> &'static str {
         "overlay"
+    }
+}
+
+fn ensure_empty_rootfs_directory(rootfs: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(rootfs) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(BoxError::StateError(format!(
+                "Rootfs staging path {} is not a directory",
+                rootfs.display()
+            )))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(rootfs).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to create rootfs {}: {error}",
+                    rootfs.display()
+                ))
+            })
+        }
+        Err(error) => Err(BoxError::BuildError(format!(
+            "Failed to inspect rootfs {}: {error}",
+            rootfs.display()
+        ))),
     }
 }
 
@@ -1052,5 +1203,59 @@ mod tests {
         );
 
         provider.cleanup(&box_dir, false).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_overlay_enforces_the_declared_writable_layer_size() {
+        if !super::super::overlay::writable_layer_quota_supported() {
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&box_dir).unwrap();
+        make_sample_rootfs(&cache_dir);
+
+        let provider = OverlayProvider;
+        let quota = 2 * 1024 * 1024;
+        let merged = provider
+            .prepare_with_options(
+                &box_dir,
+                &cache_dir,
+                RootfsPrepareOptions {
+                    writable_layer_bytes: Some(quota),
+                },
+            )
+            .unwrap();
+
+        let payload = vec![0x5a_u8; 512 * 1024];
+        let mut rejected = false;
+        for index in 0..16 {
+            let path = merged.join(format!("quota-{index}"));
+            match std::fs::write(path, &payload) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WriteZero
+                            | std::io::ErrorKind::StorageFull
+                            | std::io::ErrorKind::Other
+                    ) =>
+                {
+                    rejected = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected bounded overlay write error: {error}"),
+            }
+        }
+        assert!(rejected, "writes exceeded the declared tmpfs quota");
+
+        provider.cleanup(&box_dir, false).unwrap();
+        assert!(!box_dir
+            .join(super::super::overlay::WRITABLE_LAYER_DIR_NAME)
+            .exists());
     }
 }

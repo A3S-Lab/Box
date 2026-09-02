@@ -99,6 +99,10 @@ pub struct BoxRuntimeDriver {
     port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
     execution_isolation: ExecutionIsolation,
+    /// Whether this concrete provider instance can enforce a byte-precise
+    /// Sandbox writable-layer quota. Qualification backends deliberately do
+    /// not inherit the production host probe.
+    supports_ephemeral_storage: bool,
     sev_snp: Option<BoxRuntimeSevSnpConfig>,
     attestation: AttestationArtifactOwner,
     artifact_storage: ArtifactStorageOwner,
@@ -144,6 +148,8 @@ impl BoxRuntimeDriver {
             None,
             None,
             Some(broker),
+            execution_isolation == ExecutionIsolation::Sandbox
+                && crate::rootfs::writable_layer_quota_supported(),
         )
     }
 
@@ -183,6 +189,7 @@ impl BoxRuntimeDriver {
             None,
             None,
             Some(TransientRegistryAuthBroker::default()),
+            false,
         )?;
         driver.provider_build.set(provider_build).map_err(|_| {
             RuntimeError::Protocol(
@@ -216,6 +223,7 @@ impl BoxRuntimeDriver {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_manager_connector_and_materializer(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
@@ -224,6 +232,7 @@ impl BoxRuntimeDriver {
         materializer: Option<Arc<dyn BoxSecretMaterializer>>,
         artifact_port: Option<Arc<dyn BoxArtifactPort>>,
         transient_registry_auth: Option<TransientRegistryAuthBroker>,
+        supports_ephemeral_storage: bool,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let endpoint_connector = Arc::clone(&connector);
@@ -237,6 +246,7 @@ impl BoxRuntimeDriver {
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
+            supports_ephemeral_storage,
             sev_snp: None,
             attestation: AttestationArtifactOwner::default(),
             artifact_storage,
@@ -554,6 +564,15 @@ impl RuntimeDriver for BoxRuntimeDriver {
         if self.sev_snp.is_some() {
             isolation_levels.push(IsolationLevel::Confidential);
         }
+        let mut resource_controls = vec![
+            ResourceControl::Cpu,
+            ResourceControl::Memory,
+            ResourceControl::Pids,
+        ];
+        if self.supports_ephemeral_storage {
+            resource_controls.push(ResourceControl::EphemeralStorage);
+        }
+        resource_controls.push(ResourceControl::ExecutionTimeout);
         let capabilities = RuntimeCapabilities {
             schema: RuntimeCapabilities::SCHEMA.into(),
             provider_id: self.provider_id.clone(),
@@ -570,12 +589,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
                 HealthCheckKind::Tcp,
                 HealthCheckKind::Command,
             ],
-            resource_controls: vec![
-                ResourceControl::Cpu,
-                ResourceControl::Memory,
-                ResourceControl::Pids,
-                ResourceControl::ExecutionTimeout,
-            ],
+            resource_controls,
             features,
         };
         capabilities.validate().map_err(RuntimeError::Protocol)?;

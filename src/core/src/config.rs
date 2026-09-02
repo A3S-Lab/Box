@@ -599,6 +599,16 @@ pub struct ResourceConfig {
     /// Disk space in MB
     pub disk_mb: u32,
 
+    /// Optional writable-layer quota in bytes.
+    ///
+    /// This is distinct from `disk_mb`: the latter describes the logical
+    /// capacity of a MicroVM root disk, while this bound applies to the
+    /// mutable overlay layer used by the Linux Sandbox provider. Providers
+    /// that cannot enforce the byte-precise limit must reject the request
+    /// rather than silently treating it as an unbounded filesystem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_storage_bytes: Option<u64>,
+
     /// Box lifetime timeout in seconds (0 = unlimited)
     pub timeout: u64,
 }
@@ -609,6 +619,7 @@ impl Default for ResourceConfig {
             vcpus: DEFAULT_VCPUS,
             memory_mb: 1024,
             disk_mb: 4096,
+            ephemeral_storage_bytes: None,
             timeout: 3600, // 1 hour
         }
     }
@@ -714,6 +725,7 @@ mod tests {
         assert_eq!(config.vcpus, DEFAULT_VCPUS);
         assert_eq!(config.memory_mb, 1024);
         assert_eq!(config.disk_mb, 4096);
+        assert_eq!(config.ephemeral_storage_bytes, None);
         assert_eq!(config.timeout, 3600);
     }
 
@@ -737,12 +749,14 @@ mod tests {
             vcpus: 4,
             memory_mb: 2048,
             disk_mb: 8192,
+            ephemeral_storage_bytes: None,
             timeout: 7200,
         };
 
         assert_eq!(config.vcpus, 4);
         assert_eq!(config.memory_mb, 2048);
         assert_eq!(config.disk_mb, 8192);
+        assert_eq!(config.ephemeral_storage_bytes, None);
         assert_eq!(config.timeout, 7200);
     }
 
@@ -791,6 +805,7 @@ mod tests {
             vcpus: 8,
             memory_mb: 4096,
             disk_mb: 16384,
+            ephemeral_storage_bytes: None,
             timeout: 0,
         };
 
@@ -799,7 +814,30 @@ mod tests {
 
         assert_eq!(parsed.vcpus, 8);
         assert_eq!(parsed.memory_mb, 4096);
+        assert_eq!(parsed.ephemeral_storage_bytes, None);
         assert_eq!(parsed.timeout, 0); // Unlimited
+    }
+
+    #[test]
+    fn test_resource_config_ephemeral_storage_roundtrip_and_legacy_shape() {
+        let config = ResourceConfig {
+            ephemeral_storage_bytes: Some(64 * 1024 * 1024),
+            ..ResourceConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("ephemeral_storage_bytes"));
+        let parsed: ResourceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.ephemeral_storage_bytes,
+            config.ephemeral_storage_bytes
+        );
+
+        let legacy = r#"{"vcpus":1,"memory_mb":128,"disk_mb":512,"timeout":0}"#;
+        let parsed: ResourceConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.ephemeral_storage_bytes, None);
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("ephemeral_storage_bytes"));
     }
 
     #[test]
