@@ -567,8 +567,15 @@ fn apply_security_before_exec(
             }
 
             // 3. Drop capabilities (while still root, before the uid switch).
+            // An explicit non-root user needs CAP_SETUID/CAP_SETGID during the
+            // transition even when the final keep-set is empty. Keep those
+            // bits only until the identity switch, then finalize below.
             if let Some(cap_keep) = &cap_keep {
-                restrict_capabilities_to_keep(cap_keep)?;
+                if let Some(user) = process_user {
+                    restrict_capabilities_to_keep_for_user(cap_keep, user)?;
+                } else {
+                    restrict_capabilities_to_keep(cap_keep)?;
+                }
             } else if should_drop_caps(&cap_drop) {
                 drop_capabilities(&cap_drop)?;
             }
@@ -576,6 +583,9 @@ fn apply_security_before_exec(
             // 4. Drop to the target uid/gid (image USER / --user).
             if let Some(user) = process_user {
                 user.apply()?;
+                if let Some(cap_keep) = &cap_keep {
+                    finalize_capabilities_to_keep(cap_keep)?;
+                }
             }
 
             // 5. Apply seccomp filter (prebuilt before fork)
@@ -827,7 +837,59 @@ fn clear_effective_caps(cap_drop: &[String]) -> Result<(), std::io::Error> {
 /// the post-fork child.
 #[cfg(target_os = "linux")]
 pub(crate) fn restrict_capabilities_to_keep(keep: &[String]) -> Result<(), std::io::Error> {
-    // Resolve the keep names into a 64-bit capability bitmask.
+    let mask = capability_mask(keep);
+    drop_bounding_capabilities_not_in_mask(mask)?;
+    set_capability_sets(mask)?;
+    clear_ambient_and_inheritable_caps()?;
+    Ok(())
+}
+
+/// Prepare a capability keep-set before switching to an explicit container
+/// user. Linux requires `CAP_SETUID`/`CAP_SETGID` while changing identity, even
+/// when the final keep-set intentionally drops both (for example
+/// `cap_drop=ALL`). The transition bits are kept only in the current sets;
+/// they are still removed from the bounding set so the workload cannot regain
+/// them through a later exec. Non-root users retain the final permitted set
+/// long enough for the post-switch finalization, matching OCI capability
+/// semantics without allowing any additional capability to be raised.
+#[cfg(target_os = "linux")]
+pub(crate) fn restrict_capabilities_to_keep_for_user(
+    keep: &[String],
+    user: crate::user::ProcessUser,
+) -> Result<(), std::io::Error> {
+    let mask = capability_mask(keep);
+    drop_bounding_capabilities_not_in_mask(mask)?;
+
+    let transition_mask = capability_mask_for_user(mask, user);
+    if user.uid != 0 {
+        // PR_SET_KEEPCAPS = 8. Keep the permitted set across setuid so the
+        // final capset can apply the exact requested profile for non-root
+        // users. The bit is reset by Linux after the identity transition.
+        let ret = unsafe { libc::prctl(8, 1, 0, 0, 0) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    set_capability_sets(transition_mask)?;
+    clear_ambient_and_inheritable_caps()?;
+    Ok(())
+}
+
+/// Apply the exact keep-set after an explicit user transition. This removes
+/// the temporary identity-transition capabilities for root targets and
+/// finalizes the retained permitted set for non-root targets.
+#[cfg(target_os = "linux")]
+pub(crate) fn finalize_capabilities_to_keep(keep: &[String]) -> Result<(), std::io::Error> {
+    let mask = capability_mask(keep);
+    set_capability_sets(mask)?;
+    clear_ambient_and_inheritable_caps()?;
+    Ok(())
+}
+
+/// Resolve capability names into the two-word Linux capability mask used by
+/// `capset(2)`.
+#[cfg(target_os = "linux")]
+fn capability_mask(keep: &[String]) -> [u32; 2] {
     let mut mask = [0u32; 2];
     for name in keep {
         if let Some(cap) = cap_name_to_number(name) {
@@ -837,9 +899,27 @@ pub(crate) fn restrict_capabilities_to_keep(keep: &[String]) -> Result<(), std::
             }
         }
     }
+    mask
+}
 
-    // Drop every capability not kept from the bounding set so a future execve
-    // cannot regain it.
+/// Add the identity-transition capabilities required before applying a
+/// non-root OCI user. These bits are deliberately temporary and are removed by
+/// [`finalize_capabilities_to_keep`] after `setgid`/`setuid` completes.
+#[cfg(target_os = "linux")]
+fn capability_mask_for_user(mask: [u32; 2], user: crate::user::ProcessUser) -> [u32; 2] {
+    if user.uid == 0 {
+        return mask;
+    }
+    let mut transition_mask = mask;
+    const CAP_SETGID: i32 = 6;
+    const CAP_SETUID: i32 = 7;
+    transition_mask[0] |= (1u32 << CAP_SETGID) | (1u32 << CAP_SETUID);
+    transition_mask
+}
+
+/// Drop every capability not present in `mask` from the bounding set.
+#[cfg(target_os = "linux")]
+fn drop_bounding_capabilities_not_in_mask(mask: [u32; 2]) -> Result<(), std::io::Error> {
     for cap in 0..=40_i32 {
         let word = (cap / 32) as usize;
         let kept = word < mask.len() && (mask[word] & (1u32 << (cap % 32))) != 0;
@@ -847,9 +927,6 @@ pub(crate) fn restrict_capabilities_to_keep(keep: &[String]) -> Result<(), std::
             drop_bounding_capability(cap)?;
         }
     }
-
-    set_capability_sets(mask)?;
-    clear_ambient_and_inheritable_caps()?;
     Ok(())
 }
 
@@ -931,12 +1008,15 @@ fn set_capability_sets(mask: [u32; 2]) -> Result<(), std::io::Error> {
         CapData {
             effective: mask[0],
             permitted: mask[0],
-            inheritable: mask[0],
+            // OCI's inheritable set is intentionally empty. Keeping a
+            // capability inheritable would allow a later execve of a
+            // file-capability binary to reintroduce it despite the keep-set.
+            inheritable: 0,
         },
         CapData {
             effective: mask[1],
             permitted: mask[1],
-            inheritable: mask[1],
+            inheritable: 0,
         },
     ];
 
@@ -1472,6 +1552,40 @@ mod tests {
     fn test_cap_name_to_number_unknown() {
         assert_eq!(cap_name_to_number("NONEXISTENT"), None);
         assert_eq!(cap_name_to_number(""), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn non_root_capability_transition_retains_only_identity_bits() {
+        let mask = capability_mask(&["CHOWN".to_string()]);
+        let transition = capability_mask_for_user(
+            mask,
+            crate::user::ProcessUser {
+                uid: 65532,
+                gid: Some(65532),
+            },
+        );
+
+        assert_ne!(transition[0] & (1u32 << 0), 0);
+        assert_ne!(transition[0] & (1u32 << 6), 0);
+        assert_ne!(transition[0] & (1u32 << 7), 0);
+        assert_eq!(transition[0] & !(1u32 << 0 | 1u32 << 6 | 1u32 << 7), 0);
+        assert_eq!(transition[1], 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn root_capability_transition_does_not_add_identity_bits() {
+        let mask = capability_mask(&["CHOWN".to_string()]);
+        let transition = capability_mask_for_user(
+            mask,
+            crate::user::ProcessUser {
+                uid: 0,
+                gid: Some(0),
+            },
+        );
+
+        assert_eq!(transition, mask);
     }
 
     #[test]

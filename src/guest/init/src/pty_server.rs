@@ -420,7 +420,12 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
             #[cfg(target_os = "linux")]
             {
                 if let Some(ref keep) = sec_cap_keep {
-                    if let Err(error) = crate::namespace::restrict_capabilities_to_keep(keep) {
+                    let result = if let Some(user) = process_user {
+                        crate::namespace::restrict_capabilities_to_keep_for_user(keep, user)
+                    } else {
+                        crate::namespace::restrict_capabilities_to_keep(keep)
+                    };
+                    if let Err(error) = result {
                         eprintln!("Failed to restrict PTY capabilities: {}", error);
                         std::process::exit(127);
                     }
@@ -436,6 +441,13 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
                 if let Err(error) = user.apply() {
                     eprintln!("Failed to apply PTY user: {}", error);
                     std::process::exit(127);
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(ref keep) = sec_cap_keep {
+                    if let Err(error) = crate::namespace::finalize_capabilities_to_keep(keep) {
+                        eprintln!("Failed to finalize PTY capabilities: {}", error);
+                        std::process::exit(127);
+                    }
                 }
             }
 

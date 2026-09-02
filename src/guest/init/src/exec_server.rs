@@ -2768,16 +2768,27 @@ fn configure_child_process(
             // would make a later capset fail (breaking RunAsUser containers). A
             // keep-set (the CRI default for a non-privileged container) reduces
             // to exactly those caps; the legacy drop-list path remains for
-            // explicit-drop-only callers. The default keep-set retains
-            // CAP_SETUID/CAP_SETGID so the subsequent user.apply still works.
+            // explicit-drop-only callers. An explicit user transition gets a
+            // temporary CAP_SETUID/CAP_SETGID pair, finalized after setuid.
             #[cfg(target_os = "linux")]
             if let Some(cap_keep) = &cap_keep {
-                crate::namespace::restrict_capabilities_to_keep(cap_keep)?;
+                if let Some(process_user) = user {
+                    crate::namespace::restrict_capabilities_to_keep_for_user(
+                        cap_keep,
+                        process_user,
+                    )?;
+                } else {
+                    crate::namespace::restrict_capabilities_to_keep(cap_keep)?;
+                }
             } else if !cap_drop.is_empty() {
                 crate::namespace::drop_capabilities(&cap_drop)?;
             }
             if let Some(user) = user {
                 user.apply()?;
+                #[cfg(target_os = "linux")]
+                if let Some(cap_keep) = &cap_keep {
+                    crate::namespace::finalize_capabilities_to_keep(cap_keep)?;
+                }
             }
             // Set no_new_privs before installing seccomp: a single prctl
             // (async-signal-safe) that prevents any later execve from gaining
