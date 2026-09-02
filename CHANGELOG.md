@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Legacy `VmLocalExecutionBackend` now derives and persists Sandbox image-owned
+  anonymous-volume identities during the durable create reservation. Sandbox
+  launches no longer fail the ownership-drift check when the OCI image declares
+  a `VOLUME` and the migration router is not enabled.
+
 ## [3.2.2] — 2026-09-02
 
 ### Fixed

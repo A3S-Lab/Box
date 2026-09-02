@@ -892,7 +892,11 @@ async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
     let reservation = driver
         .manager
         .create(
-            creation_request(&spec, ExecutionIsolation::Sandbox).unwrap(),
+            // Use the MicroVM path for this metadata-only test so resource
+            // planning does not need to resolve the deliberately synthetic
+            // registry digest. The validation below still asks whether that
+            // record can be treated as a Sandbox execution and must reject it.
+            creation_request(&spec, ExecutionIsolation::Microvm).unwrap(),
             &operation_id,
         )
         .await
@@ -908,7 +912,7 @@ async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
         validate_record_for_spec(
             &record,
             &spec,
-            ExecutionIsolation::Microvm,
+            ExecutionIsolation::Sandbox,
             None,
             &driver.config.secret_root,
         ),
