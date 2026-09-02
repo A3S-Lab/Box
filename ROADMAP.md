@@ -166,7 +166,7 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`7f071e0fe6e3daf48e3878a14640fbe47eb9b5d3` is the exact source for the Rust
+`878f8414cef3b85bef1b51fe6735017b25828252` is the exact source for the Rust
 SDK dependency, CI-built runtime and agent, and release artifacts. It retains
 the matching long-lived, multi-container Native Linux host owner, the
 generation-safe bundle handoff used by the preparation context above, and
