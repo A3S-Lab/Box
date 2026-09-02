@@ -694,26 +694,12 @@ pub(crate) fn drop_capabilities(cap_drop: &[String]) -> Result<(), std::io::Erro
         // Drop all capabilities by clearing the bounding set
         // Iterate through all known capabilities (0..CAP_LAST_CAP)
         for cap in 0..=40_i32 {
-            // PR_CAPBSET_DROP = 24
-            let ret = unsafe { libc::prctl(24, cap, 0, 0, 0) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                // EINVAL means capability doesn't exist, which is fine
-                if err.raw_os_error() != Some(libc::EINVAL) {
-                    return Err(err);
-                }
-            }
+            drop_bounding_capability(cap)?;
         }
     } else {
         for cap_name in cap_drop {
             if let Some(cap_num) = cap_name_to_number(cap_name) {
-                let ret = unsafe { libc::prctl(24, cap_num, 0, 0, 0) };
-                if ret != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::EINVAL) {
-                        return Err(err);
-                    }
-                }
+                drop_bounding_capability(cap_num)?;
             }
         }
     }
@@ -858,19 +844,64 @@ pub(crate) fn restrict_capabilities_to_keep(keep: &[String]) -> Result<(), std::
         let word = (cap / 32) as usize;
         let kept = word < mask.len() && (mask[word] & (1u32 << (cap % 32))) != 0;
         if !kept {
-            let ret = unsafe { libc::prctl(24, cap, 0, 0, 0) }; // PR_CAPBSET_DROP
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EINVAL) {
-                    return Err(err);
-                }
-            }
+            drop_bounding_capability(cap)?;
         }
     }
 
     set_capability_sets(mask)?;
     clear_ambient_and_inheritable_caps()?;
     Ok(())
+}
+
+/// Remove one capability from the Linux bounding set, treating an already
+/// absent bit as success.
+///
+/// `PR_CAPBSET_DROP` is not idempotent when the caller lacks `CAP_SETPCAP`:
+/// Linux returns `EPERM` even if the requested bit is already absent. OCI
+/// runtimes commonly start guest-init with a pre-trimmed bounding set, so
+/// blindly issuing the drop turns a safe no-op into a failed container launch.
+/// Probe first and only issue the mutating syscall when the bit is present.
+/// `EINVAL` denotes a capability number newer than the running kernel and is
+/// also an intentional no-op. Both syscalls are async-signal-safe and use no
+/// heap allocation, which keeps this helper safe in post-fork `pre_exec` code.
+#[cfg(target_os = "linux")]
+fn drop_bounding_capability(capability: i32) -> Result<(), std::io::Error> {
+    // PR_CAPBSET_READ = 23, PR_CAPBSET_DROP = 24. Use the numeric values here
+    // because the musl libc headers used by guest-init do not expose these
+    // prctl operation constants on every supported toolchain.
+    let present = unsafe { libc::prctl(23, capability, 0, 0, 0) };
+    if present == 0 {
+        return Ok(());
+    }
+    if present < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINVAL) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+
+    let dropped = unsafe { libc::prctl(24, capability, 0, 0, 0) };
+    if dropped == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EINVAL) {
+        return Ok(());
+    }
+
+    // Keep the operation fail-closed if a concurrent actor changed the bit
+    // between the read and drop. This is mostly defensive (guest-init's child
+    // setup is single-threaded), but avoids reporting a false failure when the
+    // requested state is already satisfied.
+    let still_present = unsafe { libc::prctl(23, capability, 0, 0, 0) };
+    if still_present == 0
+        || (still_present < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL))
+    {
+        return Ok(());
+    }
+    Err(error)
 }
 
 /// Set the effective/permitted/inheritable capability sets to exactly `mask`
@@ -1454,6 +1485,39 @@ mod tests {
     fn test_should_drop_caps_nonempty() {
         assert!(should_drop_caps(&["ALL".to_string()]));
         assert!(should_drop_caps(&["NET_RAW".to_string()]));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn dropping_an_already_absent_bounding_capability_is_a_noop() {
+        // The test runner may itself have a fully populated bounding set. When
+        // it does not, exercise the exact pre-stripped state that OCI runtimes
+        // hand to guest-init. The helper must not require CAP_SETPCAP merely to
+        // confirm that an absent bit is already in the desired state.
+        let absent = (0..=40_i32).find(|cap| {
+            // SAFETY: PR_CAPBSET_READ only inspects the calling thread's
+            // capability bounding set and does not mutate process state.
+            unsafe { libc::prctl(23, *cap, 0, 0, 0) == 0 }
+        });
+        if let Some(capability) = absent {
+            assert!(drop_bounding_capability(capability).is_ok());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn empty_capability_profile_accepts_a_prestripped_bounding_set() {
+        let has_bounding_capability = (0..=40_i32).any(|cap| {
+            // SAFETY: PR_CAPBSET_READ only inspects the calling thread's
+            // capability bounding set and does not mutate process state.
+            unsafe { libc::prctl(23, cap, 0, 0, 0) == 1 }
+        });
+        if has_bounding_capability {
+            return;
+        }
+
+        restrict_capabilities_to_keep(&[])
+            .expect("an already empty capability profile must remain launchable");
     }
 
     #[test]
