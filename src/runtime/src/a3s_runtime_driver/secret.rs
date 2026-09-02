@@ -17,6 +17,7 @@ use a3s_box_core::secret::{
     validate_environment_variable_name, SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST,
     SECRET_GUEST_ROOT,
 };
+use a3s_box_core::{CreateExecutionRequest, OperationId};
 
 use crate::local_execution::{TransientRegistryAuthBroker, TransientRegistryAuthLease};
 use crate::{BoxRecord, ImagePuller, ImageReference, ImageStore, RegistryAuth, VmManager};
@@ -430,6 +431,15 @@ impl SecretMaterializationOwner {
             }
             return Ok(None);
         };
+        // A Sandbox resource-planning pass may already have resolved the
+        // caller credential before the durable execution ID existed. Reuse
+        // that in-memory handoff instead of resolving the Secret a second
+        // time. The boot path still consumes the broker entry exactly once.
+        if registry_reference.is_some() {
+            if let Some(lease) = broker.lease(&record.id) {
+                return Ok(Some(lease));
+            }
+        }
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {
             RuntimeError::Protocol("Box execution lost managed creation metadata".into())
         })?;
@@ -459,6 +469,63 @@ impl SecretMaterializationOwner {
                 "Box transient registry credential handoff failed: {error}"
             ))
         })
+    }
+
+    /// Resolve a registry Secret before a new execution is reserved.
+    ///
+    /// Sandbox resource planning needs authenticated image metadata in order
+    /// to derive stable anonymous-volume identities. The create operation is
+    /// the only stable key available before Box allocates its internal
+    /// execution ID, so the credential is staged under that key and promoted
+    /// by the lifecycle owner after reservation succeeds.
+    pub(super) async fn prepare_registry_auth_for_create(
+        &self,
+        spec: &RuntimeUnitSpec,
+        request: &CreateExecutionRequest,
+        operation_id: &OperationId,
+        home_dir: &Path,
+        broker: Option<&TransientRegistryAuthBroker>,
+    ) -> RuntimeResult<Option<TransientRegistryAuthLease>> {
+        let registry_reference = registry_reference(spec)?;
+        let Some(reference) = registry_reference else {
+            return Ok(None);
+        };
+        let Some(broker) = broker else {
+            return Err(RuntimeError::UnsupportedCapabilities(vec![
+                "feature:RegistryCredentials".into(),
+            ]));
+        };
+
+        // A cached image can be planned without caller credentials. Keep the
+        // existing lazy-start behavior and avoid resolving a Secret that will
+        // never cross the registry boundary.
+        if image_is_cached(home_dir, &request.config.image).await? {
+            return Ok(None);
+        }
+
+        let registry = ImageReference::parse(&request.config.image)
+            .map_err(|_| {
+                RuntimeError::Protocol(
+                    "Box managed artifact has an invalid registry identity".into(),
+                )
+            })?
+            .registry;
+        let materializer = self.materializer.as_ref().ok_or_else(|| {
+            RuntimeError::UnsupportedCapabilities(vec!["feature:SecretReferences".into()])
+        })?;
+        let credential = materializer
+            .materialize_registry_credential(reference, &registry)
+            .await
+            .map_err(map_materialization_error)?;
+        let auth = RegistryAuth::basic(credential.username(), credential.password());
+        broker
+            .bind(operation_id.as_str(), auth)
+            .map(Some)
+            .map_err(|error| {
+                RuntimeError::ProviderUnavailable(format!(
+                    "Box transient registry credential handoff failed: {error}"
+                ))
+            })
     }
 
     pub(super) async fn cleanup_spec(&self, spec: &RuntimeUnitSpec) -> RuntimeResult<()> {

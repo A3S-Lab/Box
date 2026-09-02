@@ -640,6 +640,17 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         // anonymous-volume identities. The actual VolumeStore claims remain
         // in `start`, after the reservation has durably recorded ownership.
         let mut manager = self.new_manager(record)?;
+        #[cfg(target_os = "linux")]
+        {
+            // A Runtime registry credential is staged under the idempotent
+            // create operation before this pre-reservation pass. Clone it for
+            // the metadata pull, while leaving the broker entry available for
+            // the later boot pull. The credential never enters the durable
+            // BoxRecord.
+            if let Some(broker) = &self.transient_registry_auth {
+                manager.transient_registry_auth = broker.clone_auth(metadata.operation_id.as_str());
+            }
+        }
         let anonymous_volumes = manager
             .plan_image_anonymous_volumes()
             .await

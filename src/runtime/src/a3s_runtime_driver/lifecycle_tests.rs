@@ -93,6 +93,59 @@ fn registry_secret(reference: &str) -> SecretReference {
 }
 
 #[tokio::test]
+async fn uncached_sandbox_registry_credentials_are_staged_before_resource_planning() {
+    let directory = tempfile::tempdir().unwrap();
+    let secret_root = directory.path().join("runtime-secrets");
+    let materializer = Arc::new(DriverFakeSecretMaterializer::default());
+    let reference = "secret://registry/credential/preflight";
+    materializer.insert_registry_credential(reference, "plan-user", "plan-password");
+    let (driver, _backend) =
+        fake_driver_with_secret_materializer(&directory, secret_root, materializer.clone());
+
+    let mut spec = runtime_spec("registry-preflight", 1, RuntimeUnitClass::Service);
+    let digest = format!("sha256:{}", "b".repeat(64));
+    spec.artifact.uri = format!("oci://registry.example/a3s/runtime@{digest}");
+    spec.artifact.digest = digest;
+    spec.secrets.push(registry_secret(reference));
+
+    let request =
+        super::mapping::creation_request(&spec, a3s_box_core::ExecutionIsolation::Sandbox).unwrap();
+    let operation_id = super::mapping::operation(&spec).unwrap();
+    let staged = driver
+        .secret_materialization
+        .prepare_registry_auth_for_create(
+            &spec,
+            &request,
+            &operation_id,
+            &driver.config.home_dir,
+            driver.transient_registry_auth.as_ref(),
+        )
+        .await
+        .unwrap();
+
+    assert!(staged.is_some());
+    assert_eq!(materializer.calls(), 1);
+    let broker = driver.transient_registry_auth.as_ref().unwrap();
+    assert_eq!(
+        broker
+            .clone_auth(operation_id.as_str())
+            .and_then(|auth| auth.basic_credentials()),
+        Some(("plan-user".into(), "plan-password".into()))
+    );
+
+    let execution_lease = broker.promote(operation_id.as_str(), "execution").unwrap();
+    drop(staged);
+    assert_eq!(broker.pending(), 1);
+    assert!(!driver
+        .config
+        .home_dir
+        .join("auth/credentials.json")
+        .exists());
+    drop(execution_lease);
+    assert_eq!(broker.pending(), 0);
+}
+
+#[tokio::test]
 async fn unconfigured_secret_port_rejects_before_provider_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let (driver, backend) = fake_driver(&directory);
