@@ -760,7 +760,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await,
             RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await,
             RuntimeConformanceProfile::Resources => {
-                super::resources_profile::run(self, client).await
+                super::resources_profile::run(self, client, capabilities).await
             }
             RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await,
             RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await,

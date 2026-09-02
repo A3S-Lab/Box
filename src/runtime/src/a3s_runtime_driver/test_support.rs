@@ -545,6 +545,7 @@ where
         None,
         None,
         Some(TransientRegistryAuthBroker::default()),
+        false,
     )
     .unwrap()
     .with_attestation_transport(transport);
@@ -653,6 +654,7 @@ fn configured_driver_with_materializer(
         materializer,
         None,
         Some(TransientRegistryAuthBroker::default()),
+        false,
     )
     .unwrap();
     driver

@@ -112,6 +112,7 @@ pub(super) fn creation_request_for(
             vcpus,
             memory_mb,
             disk_mb: BoxConfig::default().resources.disk_mb,
+            ephemeral_storage_bytes: spec.resources.ephemeral_storage_bytes,
             timeout: task_timeout_secs.unwrap_or(0),
         },
         cmd,
@@ -268,10 +269,19 @@ fn validate_supported_shape(
             "feature:ServiceUdp".into(),
         ]));
     }
-    if spec.resources.ephemeral_storage_bytes.is_some() {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![
-            "resource_control:EphemeralStorage".into(),
-        ]));
+    if let Some(bytes) = spec.resources.ephemeral_storage_bytes {
+        if bytes == 0 {
+            return Err(RuntimeError::InvalidRequest(
+                "Runtime ephemeral storage limit must be greater than zero".into(),
+            ));
+        }
+        if execution_isolation != ExecutionIsolation::Sandbox
+            || !crate::rootfs::writable_layer_quota_supported()
+        {
+            return Err(RuntimeError::UnsupportedCapabilities(vec![
+                "resource_control:EphemeralStorage".into(),
+            ]));
+        }
     }
     match (&spec.class, &spec.restart) {
         (RuntimeUnitClass::Task, RestartPolicy::Never | RestartPolicy::OnFailure { .. })

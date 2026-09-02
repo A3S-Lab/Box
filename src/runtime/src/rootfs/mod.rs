@@ -49,14 +49,43 @@ pub use guest_native_ext4::GuestNativeExt4Provider;
 pub use layout::{GuestLayout, GUEST_WORKDIR};
 pub use provider::{
     default_provider, default_provider_for_box, CopyProvider, OverlayProvider, ResumedRootfs,
-    RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsOciPrepareOptions, RootfsProvider,
-    RootfsResumeOptions,
+    RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsOciPrepareOptions,
+    RootfsPrepareOptions, RootfsProvider, RootfsResumeOptions,
 };
 pub(crate) use provider::{default_provider_for_boot, default_provider_for_box_boot};
 pub(crate) use staging_path::{
     ensure_directory_transport_is_lossless, host_staging_path, logical_path_for_staged_child,
     staging_path_map,
 };
+
+/// Whether the host path is a mount point, including bind mounts.
+///
+/// The overlay module owns the Linux `/proc/self/mountinfo` parser so all
+/// rootfs lifecycle callers use the same mount semantics.
+pub(crate) fn is_mountpoint(path: &Path) -> bool {
+    overlay::is_mountpoint(path)
+}
+
+/// Whether the selected Linux rootfs provider can enforce a real writable
+/// layer byte quota.
+#[allow(dead_code)]
+pub(crate) fn writable_layer_quota_supported() -> bool {
+    overlay::writable_layer_quota_supported()
+}
+
+/// Release any host mounts owned by a bounded Sandbox writable layer before
+/// the execution directory is removed.
+///
+/// Persistent executions intentionally keep their quota tmpfs mounted across a
+/// normal stop so the next start can reuse the same writable generation. The
+/// durable removal path must nevertheless force that state down before it
+/// deletes `box_dir`; otherwise the aliases and tmpfs would outlive the Box
+/// record and leak host mounts.
+pub(crate) fn cleanup_bounded_writable_layer_for_removal(
+    box_dir: &Path,
+) -> a3s_box_core::error::Result<()> {
+    overlay::cleanup_bounded_writable_layer(box_dir, false)
+}
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -453,21 +482,6 @@ pub(crate) fn unmount_box_overlay_for_reuse(merged: &Path) -> a3s_box_core::erro
         )));
     }
     Ok(())
-}
-
-/// True if `path` is a mountpoint (its device id differs from its parent's).
-#[cfg(unix)]
-pub(crate) fn is_mountpoint(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(path), std::fs::metadata(path.join(".."))) {
-        (Ok(here), Ok(parent)) => here.dev() != parent.dev(),
-        _ => false,
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn is_mountpoint(_path: &Path) -> bool {
-    false
 }
 
 /// Unmount a platform-specific writable rootfs mount.

@@ -105,6 +105,16 @@ impl VmManager {
             })?;
 
         let snapshot_requested = super::rootfs_snapshot_requested(&self.config);
+        let rootfs_prepare_options = crate::rootfs::RootfsPrepareOptions {
+            writable_layer_bytes: self.config.resources.ephemeral_storage_bytes,
+        };
+        if rootfs_prepare_options.writable_layer_bytes.is_some()
+            && !self.config.isolation.is_sandbox()
+        {
+            return Err(BoxError::ConfigError(
+                "Ephemeral storage quotas are supported only for Sandbox isolation".into(),
+            ));
+        }
         if !self.config.isolation.is_sandbox() {
             let resume = self.rootfs_provider.resume_for_boot(
                 &box_dir,
@@ -178,7 +188,11 @@ impl VmManager {
                     lower = %lower.display(),
                     "Restoring snapshot via copy-on-write overlay lower"
                 );
-                let rootfs_path = self.rootfs_provider.prepare(&box_dir, &lower)?;
+                let rootfs_path = self.rootfs_provider.prepare_with_options(
+                    &box_dir,
+                    &lower,
+                    rootfs_prepare_options,
+                )?;
                 // Refresh the guest init on the merged view (the write lands in
                 // the per-box upper, never mutating the shared lower) in case the
                 // snapshot carries an older binary than the current runtime.
@@ -245,10 +259,23 @@ impl VmManager {
                 rootfs = %prebuilt_rootfs.display(),
                 "Booting from pre-populated rootfs (snapshot restore)"
             );
+            // A restored snapshot normally boots its populated tree directly.
+            // When a writable-layer quota is requested, put that tree behind a
+            // bounded overlay so snapshot writes receive the same enforcement
+            // as a cold Sandbox boot.
+            let rootfs_path = if rootfs_prepare_options.writable_layer_bytes.is_some() {
+                self.rootfs_provider.prepare_with_options(
+                    &box_dir,
+                    &prebuilt_rootfs,
+                    rootfs_prepare_options,
+                )?
+            } else {
+                prebuilt_rootfs.clone()
+            };
             // Refresh the guest init in case the snapshot carries an older binary
             // than the current runtime.
             if let Ok(guest_init_path) = Self::find_guest_init() {
-                if let Err(e) = OciRootfsBuilder::new(&prebuilt_rootfs)
+                if let Err(e) = OciRootfsBuilder::new(&rootfs_path)
                     .with_guest_init(guest_init_path)
                     .install_guest_init_only()
                 {
@@ -257,7 +284,7 @@ impl VmManager {
             }
             let tee_instance_config = self.generate_tee_config(&box_dir)?;
             return Ok(BoxLayout {
-                rootfs_path: prebuilt_rootfs,
+                rootfs_path,
                 resumed_rootfs: None,
                 exec_socket_path: socket_dir.join("exec.sock"),
                 pty_socket_path: socket_dir.join("pty.sock"),
@@ -292,7 +319,11 @@ impl VmManager {
                 None => None,
             };
             let (cache_key, cached_path) = require_snapshot_restore_rootfs(cache_key, cached_path)?;
-            let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
+            let rootfs_path = self.rootfs_provider.prepare_with_options(
+                &box_dir,
+                &cached_path,
+                rootfs_prepare_options,
+            )?;
             // Record that this box holds `cache_key` as its overlay lower, so a
             // concurrent box's cache prune won't evict it mid-mount (ENOENT).
             self.mark_rootfs_cache_key(&box_dir, cache_key);
@@ -404,95 +435,119 @@ impl VmManager {
 
         // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
         let cache_key = RootfsCache::compute_image_key(reference, &manifest_digest);
-        let (rootfs_path, oci_config, prefer_image_rootfs_metadata) =
-            if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
-                tracing::info!(
-                    cache_key = %&cache_key[..12],
-                    reference = %reference,
-                    provider = self.rootfs_provider.name(),
-                    "Rootfs cache hit"
-                );
-                if let Some(ref prom) = self.prom {
-                    prom.rootfs_cache_hits.inc();
-                }
-                let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
-                // Record that this box holds `cache_key` as its overlay lower, so a
-                // concurrent box's cache prune won't evict it mid-mount (ENOENT).
-                self.mark_rootfs_cache_key(&box_dir, &cache_key);
+        let (rootfs_path, oci_config, prefer_image_rootfs_metadata) = if let Some(cached_path) =
+            self.try_rootfs_cache_path(&cache_key)?
+        {
+            tracing::info!(
+                cache_key = %&cache_key[..12],
+                reference = %reference,
+                provider = self.rootfs_provider.name(),
+                "Rootfs cache hit"
+            );
+            if let Some(ref prom) = self.prom {
+                prom.rootfs_cache_hits.inc();
+            }
+            let rootfs_path = self.rootfs_provider.prepare_with_options(
+                &box_dir,
+                &cached_path,
+                rootfs_prepare_options,
+            )?;
+            // Record that this box holds `cache_key` as its overlay lower, so a
+            // concurrent box's cache prune won't evict it mid-mount (ENOENT).
+            self.mark_rootfs_cache_key(&box_dir, &cache_key);
 
+            if let Ok(guest_init_path) = Self::find_guest_init() {
+                tracing::info!(
+                    guest_init = %guest_init_path.display(),
+                    "Refreshing guest init on cached rootfs"
+                );
+                OciRootfsBuilder::new(&rootfs_path)
+                    .with_guest_init(guest_init_path)
+                    .install_guest_init_only()?;
+            }
+
+            let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
+            (
+                rootfs_path,
+                Some(builder.image_config()?),
+                !has_persistent_rootfs_generation,
+            )
+        } else {
+            tracing::info!(
+                image = %image_path.display(),
+                "Building rootfs from pulled OCI image (cache miss)"
+            );
+            if let Some(ref prom) = self.prom {
+                prom.rootfs_cache_misses.inc();
+            }
+
+            let staged_rootfs_path = self.rootfs_provider.prepare_empty(&box_dir)?;
+            let rootfs_populated = std::fs::read_dir(&staged_rootfs_path)
+                .map(|mut entries| entries.next().is_some())
+                .map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to inspect rootfs {}: {error}",
+                        staged_rootfs_path.display()
+                    ))
+                })?;
+            let mut builder = OciRootfsBuilder::new(&staged_rootfs_path).with_image(&image_path);
+
+            // A persistent copy/APFS provider already contains the prior
+            // terminal rootfs generation. Re-extracting the image would
+            // overwrite guest changes and fails on existing layer
+            // hardlinks. The image config remains immutable OCI metadata,
+            // so read it without rebuilding the filesystem.
+            if rootfs_populated {
+                tracing::info!(
+                    rootfs = %staged_rootfs_path.display(),
+                    "Reusing populated persistent rootfs"
+                );
+                let config = builder.image_config()?;
+                let rootfs_path = if rootfs_prepare_options.writable_layer_bytes.is_some() {
+                    self.rootfs_provider.prepare_with_options(
+                        &box_dir,
+                        &staged_rootfs_path,
+                        rootfs_prepare_options,
+                    )?
+                } else {
+                    staged_rootfs_path
+                };
+                (rootfs_path, Some(config), false)
+            } else {
+                // Install guest init if available (runs as PID 1, mounts virtiofs shares,
+                // then execs the container entrypoint)
                 if let Ok(guest_init_path) = Self::find_guest_init() {
                     tracing::info!(
                         guest_init = %guest_init_path.display(),
-                        "Refreshing guest init on cached rootfs"
+                        "Installing guest init"
                     );
-                    OciRootfsBuilder::new(&rootfs_path)
-                        .with_guest_init(guest_init_path)
-                        .install_guest_init_only()?;
-                }
-
-                let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
-                (
-                    rootfs_path,
-                    Some(builder.image_config()?),
-                    !has_persistent_rootfs_generation,
-                )
-            } else {
-                tracing::info!(
-                    image = %image_path.display(),
-                    "Building rootfs from pulled OCI image (cache miss)"
-                );
-                if let Some(ref prom) = self.prom {
-                    prom.rootfs_cache_misses.inc();
-                }
-
-                let rootfs_path = self.rootfs_provider.prepare_empty(&box_dir)?;
-                let rootfs_populated = std::fs::read_dir(&rootfs_path)
-                    .map(|mut entries| entries.next().is_some())
-                    .map_err(|error| {
-                        BoxError::BuildError(format!(
-                            "Failed to inspect rootfs {}: {error}",
-                            rootfs_path.display()
-                        ))
-                    })?;
-                let mut builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
-
-                // A persistent copy/APFS provider already contains the prior
-                // terminal rootfs generation. Re-extracting the image would
-                // overwrite guest changes and fails on existing layer
-                // hardlinks. The image config remains immutable OCI metadata,
-                // so read it without rebuilding the filesystem.
-                if rootfs_populated {
-                    tracing::info!(
-                        rootfs = %rootfs_path.display(),
-                        "Reusing populated persistent rootfs"
-                    );
-                    let config = builder.image_config()?;
-                    (rootfs_path, Some(config), false)
+                    builder = builder.with_guest_init(guest_init_path);
                 } else {
-                    // Install guest init if available (runs as PID 1, mounts virtiofs shares,
-                    // then execs the container entrypoint)
-                    if let Ok(guest_init_path) = Self::find_guest_init() {
-                        tracing::info!(
-                            guest_init = %guest_init_path.display(),
-                            "Installing guest init"
-                        );
-                        builder = builder.with_guest_init(guest_init_path);
-                    } else {
-                        tracing::warn!(
-                            "Guest init binary not found; container entrypoint will run as PID 1"
-                        );
-                    }
-
-                    builder.build()?;
-                    let config = builder.image_config()?;
-
-                    // Store in cache for next time
-                    self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
-                    self.mark_rootfs_cache_key(&box_dir, &cache_key);
-
-                    (rootfs_path, Some(config), true)
+                    tracing::warn!(
+                        "Guest init binary not found; container entrypoint will run as PID 1"
+                    );
                 }
-            };
+
+                builder.build()?;
+                let config = builder.image_config()?;
+
+                // Store in cache for next time
+                self.store_rootfs_cache(&cache_key, &staged_rootfs_path, reference);
+                self.mark_rootfs_cache_key(&box_dir, &cache_key);
+
+                let rootfs_path = if rootfs_prepare_options.writable_layer_bytes.is_some() {
+                    self.rootfs_provider.prepare_with_options(
+                        &box_dir,
+                        &staged_rootfs_path,
+                        rootfs_prepare_options,
+                    )?
+                } else {
+                    staged_rootfs_path
+                };
+
+                (rootfs_path, Some(config), true)
+            }
+        };
 
         if let Some(config) = oci_config.as_ref() {
             crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
@@ -754,6 +809,9 @@ impl VmManager {
     /// filesystem-only pause without pulling an image or starting a runtime.
     pub(crate) fn prepare_preserved_rootfs(&self) -> Result<PathBuf> {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let rootfs_prepare_options = crate::rootfs::RootfsPrepareOptions {
+            writable_layer_bytes: self.config.resources.ephemeral_storage_bytes,
+        };
         let rootfs = box_dir.join("rootfs");
         let populated_rootfs = std::fs::read_dir(&rootfs)
             .map(|mut entries| entries.next().is_some())
@@ -786,14 +844,19 @@ impl VmManager {
         } else {
             #[cfg(target_os = "macos")]
             if box_dir.join("rootfs-apfs-v2.sparseimage").is_file() {
-                return self.rootfs_provider.prepare(&box_dir, &rootfs);
+                return self.rootfs_provider.prepare_with_options(
+                    &box_dir,
+                    &rootfs,
+                    rootfs_prepare_options,
+                );
             }
             return Err(BoxError::StateError(format!(
                 "Retained rootfs lower is missing for {}",
                 self.box_id
             )));
         };
-        self.rootfs_provider.prepare(&box_dir, &lower)
+        self.rootfs_provider
+            .prepare_with_options(&box_dir, &lower, rootfs_prepare_options)
     }
 
     /// Unmount a rootfs exposed for a quiescent operation while keeping its
