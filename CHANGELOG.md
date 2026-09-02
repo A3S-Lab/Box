@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.3] — 2026-09-02
+
 ### Fixed
 
 - Legacy `VmLocalExecutionBackend` now derives and persists Sandbox image-owned
