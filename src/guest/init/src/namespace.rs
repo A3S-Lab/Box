@@ -902,12 +902,14 @@ fn capability_mask(keep: &[String]) -> [u32; 2] {
     mask
 }
 
-/// Add the identity-transition capabilities required before applying a
-/// non-root OCI user. These bits are deliberately temporary and are removed by
-/// [`finalize_capabilities_to_keep`] after `setgid`/`setuid` completes.
+/// Add the identity-transition capabilities required before applying an
+/// explicit OCI user. These bits are deliberately temporary and are removed by
+/// [`finalize_capabilities_to_keep`] after `setgid`/`setuid` completes. A root
+/// UID with a non-root GID still needs `CAP_SETGID`, so inspect both fields.
 #[cfg(target_os = "linux")]
 fn capability_mask_for_user(mask: [u32; 2], user: crate::user::ProcessUser) -> [u32; 2] {
-    if user.uid == 0 {
+    let needs_identity_transition = user.uid != 0 || user.gid.is_some_and(|gid| gid != 0);
+    if !needs_identity_transition {
         return mask;
     }
     let mut transition_mask = mask;
@@ -1586,6 +1588,22 @@ mod tests {
         );
 
         assert_eq!(transition, mask);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn root_uid_with_non_root_gid_retains_identity_bits() {
+        let mask = capability_mask(&["CHOWN".to_string()]);
+        let transition = capability_mask_for_user(
+            mask,
+            crate::user::ProcessUser {
+                uid: 0,
+                gid: Some(1000),
+            },
+        );
+
+        assert_ne!(transition[0] & (1u32 << 6), 0);
+        assert_ne!(transition[0] & (1u32 << 7), 0);
     }
 
     #[test]
