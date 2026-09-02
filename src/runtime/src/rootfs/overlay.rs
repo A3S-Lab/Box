@@ -835,18 +835,32 @@ fn probe_writable_layer_quota_support() -> bool {
         Err(_) => return false,
     };
     let mount = temp.path().join("quota");
-    if std::fs::create_dir(&mount).is_err() {
+    let lower = temp.path().join("lower");
+    let merged = temp.path().join("merged");
+    if std::fs::create_dir_all(&mount).is_err()
+        || std::fs::create_dir_all(&lower).is_err()
+        || std::fs::create_dir_all(&merged).is_err()
+    {
         return false;
     }
-    // A small probe keeps the operation cheap while exercising the exact
-    // `size=` option used by production. Use a page-aligned value accepted by
-    // old util-linux versions as well.
+    // Exercise the exact layout used by production, not only an isolated
+    // tmpfs mount. OverlayFS requires upperdir and workdir to resolve through
+    // the same mount; this catches kernels that reject a bounded layer before
+    // the provider advertises EphemeralStorage.
     let bytes = 4 * 1024 * 1024;
-    let mounted = mount_tmpfs(&mount, bytes).is_ok();
-    if mounted {
-        let _ = unmount_path(&mount, false);
+    if mount_tmpfs(&mount, bytes).is_err() {
+        return false;
     }
-    mounted && !is_mountpoint(&mount)
+    let upper = mount.join("upper");
+    let work = mount.join("work");
+    let layout_ready =
+        std::fs::create_dir_all(&upper).is_ok() && std::fs::create_dir_all(&work).is_ok();
+    let overlay_mounted = layout_ready && overlay_mount(&lower, &upper, &work, &merged).is_ok();
+    if overlay_mounted {
+        let _ = overlay_unmount(&merged);
+    }
+    let tmpfs_unmounted = unmount_path(&mount, false).is_ok() && !is_mountpoint(&mount);
+    overlay_mounted && tmpfs_unmounted
 }
 
 #[cfg(test)]
