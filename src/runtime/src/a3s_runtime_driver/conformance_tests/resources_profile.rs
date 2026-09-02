@@ -101,7 +101,7 @@ pub(super) async fn run(
                 vec![
                     "/bin/sh".into(),
                     "-c".into(),
-                    "path=/var/lib/.a3s-r17-ephemeral-quota; rm -f \"$path\"; if dd if=/dev/zero of=\"$path\" bs=1048576 count=192 2>/dev/null; then printf 'quota-not-enforced\\n'; exit 71; fi; actual=$(wc -c <\"$path\"); test \"$actual\" -gt 0; test \"$actual\" -lt 201326592; printf 'quota-enforced:%s\\n' \"$actual\"; rm -f \"$path\"".into(),
+                    "path=/tmp/.a3s-r17-ephemeral-quota; rm -f \"$path\"; if dd if=/dev/zero of=\"$path\" bs=1048576 count=192 2>/dev/null; then printf 'quota-not-enforced\\n'; exit 71; fi; actual=$(wc -c <\"$path\"); test \"$actual\" -gt 0; test \"$actual\" -lt 201326592; printf 'quota-enforced:%s\\n' \"$actual\"; rm -f \"$path\"".into(),
                 ],
                 20_000,
             ))
