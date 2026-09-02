@@ -70,7 +70,7 @@ guest executable are not separated from `a3s-box`.
 
 | Behavior | Linux/macOS | Windows |
 | --- | --- | --- |
-| Pin a release | `--version v3.2.1` | `-Version v3.2.1` |
+| Pin a release | `--version v3.2.2` | `-Version v3.2.2` |
 | Choose destination | `--install-dir PATH` | `-InstallDir PATH` |
 | Do not change `PATH` | `--no-modify-path` | `-NoModifyPath` |
 | Replace an unmanaged directory | `--force` | `-Force` |
@@ -81,7 +81,7 @@ Pass Unix options after `sh -s --` when using a pipe:
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
-  sh -s -- --version v3.2.1 --no-modify-path
+  sh -s -- --version v3.2.2 --no-modify-path
 ```
 
 Invoke the downloaded PowerShell text as a script block when options are
@@ -89,7 +89,7 @@ needed:
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
-& ([scriptblock]::Create($installer)) -Version v3.2.1 -NoModifyPath
+& ([scriptblock]::Create($installer)) -Version v3.2.2 -NoModifyPath
 ```
 
 The corresponding environment variables are `A3S_BOX_VERSION`,
@@ -108,8 +108,8 @@ Linux or macOS:
 
 ```bash
 sh ./install.sh \
-  --version v3.2.1 \
-  --archive ./a3s-box-v3.2.1-linux-x86_64.tar.gz \
+  --version v3.2.2 \
+  --archive ./a3s-box-v3.2.2-linux-x86_64.tar.gz \
   --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
@@ -117,8 +117,8 @@ Windows:
 
 ```powershell
 .\install.ps1 `
-  -Version v3.2.1 `
-  -ArchivePath .\a3s-box-v3.2.1-windows-x86_64.zip `
+  -Version v3.2.2 `
+  -ArchivePath .\a3s-box-v3.2.2-windows-x86_64.zip `
   -Sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
