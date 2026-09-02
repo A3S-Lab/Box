@@ -857,7 +857,11 @@ fn probe_writable_layer_quota_support() -> bool {
         std::fs::create_dir_all(&upper).is_ok() && std::fs::create_dir_all(&work).is_ok();
     let overlay_mounted = layout_ready && overlay_mount(&lower, &upper, &work, &merged).is_ok();
     if overlay_mounted {
-        let _ = overlay_unmount(&merged);
+        // The parent tmpfs is torn down immediately below. A lazy detach can
+        // leave the overlay mount alive through an open namespace reference,
+        // making a healthy host look unsupported because the tmpfs is still
+        // busy. Use the same synchronous path required before layer reuse.
+        let _ = overlay_unmount_for_reuse(&merged);
     }
     let tmpfs_unmounted = unmount_path(&mount, false).is_ok() && !is_mountpoint(&mount);
     overlay_mounted && tmpfs_unmounted
