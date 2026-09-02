@@ -325,7 +325,15 @@ impl RootfsProvider for OverlayProvider {
         let lower = Self::lower_dir(box_dir, cache_dir)?;
         let (upper, work) = if let Some(bytes) = options.writable_layer_bytes {
             let layer = super::overlay::prepare_bounded_writable_layer(box_dir, bytes)?;
-            (layer.upper, layer.work)
+            // OverlayFS requires the upperdir and workdir paths to resolve
+            // through the same mount (not merely the same superblock). The
+            // bounded layer keeps historical bind-mounted aliases at
+            // `box_dir/upper` and `box_dir/work`, but those aliases are two
+            // distinct mounts and are rejected by the kernel with EINVAL.
+            // Pass the source directories below the single quota tmpfs
+            // instead; the aliases remain available to lifecycle and
+            // inspection code.
+            (layer.mount.join("upper"), layer.mount.join("work"))
         } else {
             (box_dir.join("upper"), box_dir.join("work"))
         };

@@ -296,13 +296,9 @@ fn overlay_unmount_with_mode(merged: &Path, lazy: bool) -> Result<()> {
     }
 }
 
-/// Host-side paths for a bounded writable layer.
+/// Host-side mount for a bounded writable layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedWritableLayer {
-    /// The historical Box path consumed by overlayfs as `upperdir`.
-    pub upper: PathBuf,
-    /// The historical Box path consumed by overlayfs as `workdir`.
-    pub work: PathBuf,
     /// The private tmpfs mount which owns both directories.
     pub mount: PathBuf,
 }
@@ -392,7 +388,7 @@ pub(crate) fn prepare_bounded_writable_layer(
     // quota before touching the mount. Write it only after all mounts succeed.
     write_quota_marker(&marker, bytes)?;
 
-    Ok(BoundedWritableLayer { upper, work, mount })
+    Ok(BoundedWritableLayer { mount })
 }
 
 /// Release a bounded writable layer. Persistent boxes retain the tmpfs and
