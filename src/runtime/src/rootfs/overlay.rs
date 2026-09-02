@@ -856,15 +856,27 @@ fn probe_writable_layer_quota_support() -> bool {
     let layout_ready =
         std::fs::create_dir_all(&upper).is_ok() && std::fs::create_dir_all(&work).is_ok();
     let overlay_mounted = layout_ready && overlay_mount(&lower, &upper, &work, &merged).is_ok();
-    if overlay_mounted {
+    let overlay_sync_ok = if overlay_mounted {
         // The parent tmpfs is torn down immediately below. A lazy detach can
         // leave the overlay mount alive through an open namespace reference,
         // making a healthy host look unsupported because the tmpfs is still
         // busy. Use the same synchronous path required before layer reuse.
-        let _ = overlay_unmount_for_reuse(&merged);
+        let sync_ok = overlay_unmount_for_reuse(&merged).is_ok();
+        if !sync_ok {
+            // Do not leave a probe mount behind if the strict cleanup path
+            // fails. The result remains false so callers fail closed.
+            let _ = overlay_unmount(&merged);
+        }
+        sync_ok && !is_mountpoint(&merged)
+    } else {
+        false
+    };
+    let tmpfs_sync_ok = unmount_path(&mount, false).is_ok();
+    if !tmpfs_sync_ok {
+        let _ = unmount_path(&mount, true);
     }
-    let tmpfs_unmounted = unmount_path(&mount, false).is_ok() && !is_mountpoint(&mount);
-    overlay_mounted && tmpfs_unmounted
+    let tmpfs_unmounted = !is_mountpoint(&mount);
+    overlay_mounted && overlay_sync_ok && tmpfs_sync_ok && tmpfs_unmounted
 }
 
 #[cfg(test)]
