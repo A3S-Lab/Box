@@ -10,6 +10,11 @@ All notable changes to A3S Box will be documented in this file.
   anonymous-volume identities during the durable create reservation. Sandbox
   launches no longer fail the ownership-drift check when the OCI image declares
   a `VOLUME` and the migration router is not enabled.
+- Sandbox image planning now receives request-scoped registry credentials before
+  the durable reservation, then transfers the zeroizing in-memory handoff to
+  the execution boot. Private-registry images with anonymous volumes no longer
+  fail during pre-reservation metadata resolution, and credentials are still
+  resolved exactly once without entering persistent state.
 
 ## [3.2.2] — 2026-09-02
 
