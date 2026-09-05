@@ -21,7 +21,9 @@ All notable changes to A3S Box will be documented in this file.
   acquisition, eviction, rollback, and VM destruction.
 - Image accounting counts shared content once, refreshes read paths from the
   authoritative index, and rejects unsafe cache entries; CLI prune reports
-  the actual content bytes reclaimed.
+  the actual content bytes reclaimed. Per-digest publication/removal locks
+  prevent concurrent pulls and tag removal from leaving a dangling index
+  entry.
 - Volume data cleanup is serialized with metadata removal, and corrupt JSON
   store snapshots use collision-resistant, no-overwrite quarantine copies.
 

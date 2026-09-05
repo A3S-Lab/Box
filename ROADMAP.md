@@ -446,9 +446,10 @@ The production provider accepts explicit bind/named/tmpfs mounts and now plans
 image-declared anonymous volumes without creating execution artifacts. Bundle
 preparation must reproduce the exact persisted plan before Runtime mutation;
 name collisions, ownership drift, duplicate destinations, and unsafe identities
-fail closed. Image content accounting, cross-process index refresh, cache-key
-confinement, and volume cleanup are now covered by focused race and recovery
-tests. The complete B3 storage/network qualification gate remains open.
+fail closed. Image content accounting, cross-process index refresh, per-digest
+content publication/removal locking, cache-key confinement, and volume cleanup
+are now covered by focused race and recovery tests. The complete B3
+storage/network qualification gate remains open.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or
