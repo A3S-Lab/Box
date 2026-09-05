@@ -103,6 +103,10 @@ Current notes:
 - Compose scalar interpolation now supports unset-versus-empty default and
   replacement operators. The project `.env` is loaded first, the invoking
   shell overrides it, and expansion completes before typed port validation.
+- Compose CLI bind mounts now resolve explicit relative sources against the
+  project file's directory before hashing and persistence. Cross-directory
+  `-f` deployments preserve single-file mounts instead of creating empty
+  source directories under the caller's working directory.
 - Detached health checks now run in one generation-fenced child worker per box
   instead of a Tokio task owned by the short-lived creating CLI. Compose and
   `start`/`restart` use the same worker; the long-running monitor skips a box

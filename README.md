@@ -405,6 +405,9 @@ a3s-box compose -f compose.acl config
 a3s-box compose -f compose.acl up -d
 ```
 
+Compose resolves relative bind mounts from the Compose file's directory, so
+`-f /path/to/compose.yaml` can be invoked from another working directory.
+
 Compose can project caller-owned process environment values without placing
 their bytes in ACL, `.env`, `BoxConfig`, labels, or state records:
 

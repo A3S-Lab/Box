@@ -103,6 +103,14 @@ cleanup; Cloud can reuse normalized interpretation without importing those
 orchestration internals. Compose input is never Cloud's persisted desired-state
 model.
 
+For local CLI convergence, relative bind sources such as
+`./config/app.conf:/etc/app.conf:ro` are resolved against the Compose file's
+directory, including when `-f` points outside the current working directory.
+The effective host paths participate in the service configuration digest and
+are persisted for later `start` and `restart`. Named volumes retain their
+VolumeStore identities; absolute and Windows drive/UNC bind paths are not
+rebased.
+
 Secret files use the same tmpfs validation, atomic materialization, guest
 manifest, and cleanup lifecycle as the A3S Runtime provider. Compose adds only
 reference projection and local convergence ownership; it does not introduce a
