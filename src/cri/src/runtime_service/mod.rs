@@ -50,8 +50,9 @@ use convert::{
     container_state_to_cri, container_summary, container_user_from_linux_config,
     ensure_container_image_available, ensure_container_running, ensure_sandbox_ready,
     ensure_vm_ready, merge_env, resolve_command_and_args, resolve_container_mounts,
-    sandbox_state_label, sandbox_summary, sanitize_path_component, stop_container_timeout_ms,
-    stop_container_wait_duration, ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
+    resource_update_from_cri, sandbox_state_label, sandbox_summary, sanitize_path_component,
+    stop_container_timeout_ms, stop_container_wait_duration, ContainerRootfsPaths,
+    ResolvedContainerImage, ANN_POD_IP,
 };
 #[cfg(test)]
 use log_writer::CriLogWriter;
@@ -2785,41 +2786,10 @@ impl RuntimeService for BoxRuntimeService {
         };
         ensure_container_running(&container, "UpdateContainerResources")?;
 
-        // Build a ResourceUpdate from the CRI request.
-        // memory_limit_in_bytes maps to Tier 1 (immutable) — reject if set.
-        // cpu_quota, cpu_period, cpu_shares map to Tier 2 (cgroup) — apply via exec.
-        let mut update = a3s_box_runtime::resize::ResourceUpdate::default();
-
-        // Tier 1: memory_limit is a hard VM limit, cannot change after boot
-        if linux.memory_limit_in_bytes > 0 {
-            return Err(Status::unimplemented(
-                "Cannot change provisioned memory on a running Box. Recreate the pod with \
-                 the desired memory size.",
-            ));
-        }
-
-        // Tier 2: cgroup-based limits — apply through the selected backend's
-        // single resource-update mechanism.
-        if linux.cpu_quota != 0 {
-            update.limits.cpu_quota = Some(linux.cpu_quota);
-        }
-        if linux.cpu_period != 0 {
-            update.limits.cpu_period = Some(linux.cpu_period as u64);
-        }
-        if linux.cpu_shares != 0 {
-            update.limits.cpu_shares = Some(linux.cpu_shares as u64);
-        }
-        if !linux.cpuset_cpus.is_empty() {
-            update.limits.cpuset_cpus = Some(linux.cpuset_cpus.clone());
-        }
-        if !linux.cpuset_mems.is_empty() {
-            // cpuset_mems is not directly supported, log and ignore
-            tracing::info!(
-                container_id = %container_id,
-                cpuset_mems = %linux.cpuset_mems,
-                "CRI cpuset_mems ignored (not supported in microVM)"
-            );
-        }
+        // Convert and validate before looking up a VM or sending any guest
+        // mutation. Unsupported CRI fields must fail closed rather than being
+        // acknowledged as if they had taken effect.
+        let update = resource_update_from_cri(linux)?;
 
         if !update.has_tier2_changes() {
             tracing::info!(
@@ -2859,11 +2829,16 @@ impl RuntimeService for BoxRuntimeService {
                 .iter()
                 .map(|(cmd, reason)| format!("{}: {}", cmd, reason))
                 .collect();
-            tracing::warn!(
+            tracing::error!(
                 container_id = %container_id,
                 failures = ?failures,
-                "Some cgroup updates failed inside guest"
+                "CRI UpdateContainerResources failed to apply cgroup updates"
             );
+            return Err(Status::internal(format!(
+                "Failed to apply resource update inside container {}: {}",
+                container_id,
+                failures.join("; ")
+            )));
         }
 
         Ok(Response::new(UpdateContainerResourcesResponse {}))

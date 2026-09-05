@@ -8,7 +8,9 @@ use std::path::Path;
 
 use tonic::Status;
 
+use a3s_box_core::config::ResourceLimits;
 use a3s_box_runtime::oci::OciImageConfig;
+use a3s_box_runtime::resize::ResourceUpdate;
 use a3s_box_runtime::vm::VmManager;
 
 use crate::container::{Container, ContainerMount, ContainerState};
@@ -222,6 +224,95 @@ pub(super) fn resolve_command_and_args(
     };
 
     (command, args)
+}
+
+/// Convert a CRI live-resource request into the resource contract understood by
+/// the selected Box backend.
+///
+/// CRI carries more fields than a microVM workload can currently enforce. It is
+/// important to reject those fields explicitly: dropping them while returning
+/// success makes kubelet persist a resource state that the workload never got.
+/// The conversion also validates signed CRI integers before narrowing them to
+/// the unsigned types used by the internal contract.
+pub(super) fn resource_update_from_cri(
+    linux: &LinuxContainerResources,
+) -> Result<ResourceUpdate, Status> {
+    if linux.memory_limit_in_bytes < 0 {
+        return Err(Status::invalid_argument(
+            "UpdateContainerResources memory_limit_in_bytes must not be negative",
+        ));
+    }
+    if linux.cpu_period < 0 {
+        return Err(Status::invalid_argument(
+            "UpdateContainerResources cpu_period must not be negative",
+        ));
+    }
+    if linux.cpu_shares < 0 {
+        return Err(Status::invalid_argument(
+            "UpdateContainerResources cpu_shares must not be negative",
+        ));
+    }
+    if linux.cpu_quota < -1 {
+        return Err(Status::invalid_argument(
+            "UpdateContainerResources cpu_quota must be zero, -1, or positive",
+        ));
+    }
+
+    // Tier 1: VM memory cannot be resized after boot.
+    if linux.memory_limit_in_bytes > 0 {
+        return Err(Status::unimplemented(
+            "Cannot change provisioned memory on a running Box. Recreate the pod with the desired memory size.",
+        ));
+    }
+
+    // These CRI controls have no faithful mapping to the current guest cgroup
+    // contract. Do not silently acknowledge them.
+    if linux.oom_score_adj != 0 {
+        return Err(Status::unimplemented(
+            "UpdateContainerResources oom_score_adj is not supported by the microVM backend",
+        ));
+    }
+    if linux.memory_swap_limit_in_bytes != 0 {
+        return Err(Status::unimplemented(
+            "UpdateContainerResources memory_swap_limit_in_bytes is not supported by the microVM backend",
+        ));
+    }
+    if !linux.cpuset_mems.is_empty() {
+        return Err(Status::unimplemented(
+            "UpdateContainerResources cpuset_mems is not supported by the microVM backend",
+        ));
+    }
+    if !linux.hugepage_limits.is_empty() {
+        return Err(Status::unimplemented(
+            "UpdateContainerResources hugepage_limits are not supported by the microVM backend",
+        ));
+    }
+    if !linux.unified.is_empty() {
+        return Err(Status::unimplemented(
+            "UpdateContainerResources unified cgroup settings are not supported by the microVM backend",
+        ));
+    }
+
+    let mut update = ResourceUpdate {
+        limits: ResourceLimits::default(),
+        ..Default::default()
+    };
+    if linux.cpu_quota != 0 {
+        update.limits.cpu_quota = Some(linux.cpu_quota);
+    }
+    if linux.cpu_period != 0 {
+        update.limits.cpu_period = Some(linux.cpu_period as u64);
+    }
+    if linux.cpu_shares != 0 {
+        update.limits.cpu_shares = Some(linux.cpu_shares as u64);
+    }
+    if !linux.cpuset_cpus.is_empty() {
+        update.limits.cpuset_cpus = Some(linux.cpuset_cpus.clone());
+    }
+
+    a3s_box_runtime::resize::validate_update_values(&update)
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
+    Ok(update)
 }
 
 pub(super) fn container_exit_reason(exit_code: i32, oom_killed: bool) -> (&'static str, String) {
@@ -892,6 +983,117 @@ mod tests {
         // Non-OOM exits keep Completed / Error.
         assert_eq!(container_exit_reason(0, false).0, "Completed");
         assert_eq!(container_exit_reason(1, false).0, "Error");
+    }
+
+    #[test]
+    fn test_resource_update_maps_supported_fields() {
+        let update = resource_update_from_cri(&LinuxContainerResources {
+            cpu_quota: -1,
+            cpu_period: 100_000,
+            cpu_shares: 512,
+            cpuset_cpus: "0-3".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(update.limits.cpu_quota, Some(-1));
+        assert_eq!(update.limits.cpu_period, Some(100_000));
+        assert_eq!(update.limits.cpu_shares, Some(512));
+        assert_eq!(update.limits.cpuset_cpus.as_deref(), Some("0-3"));
+    }
+
+    #[test]
+    fn test_resource_update_rejects_invalid_signed_values() {
+        for (field, resources) in [
+            (
+                "cpu_period",
+                LinuxContainerResources {
+                    cpu_period: -1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "cpu_shares",
+                LinuxContainerResources {
+                    cpu_shares: -1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "cpu_quota",
+                LinuxContainerResources {
+                    cpu_quota: -2,
+                    ..Default::default()
+                },
+            ),
+            (
+                "memory_limit_in_bytes",
+                LinuxContainerResources {
+                    memory_limit_in_bytes: -1,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = resource_update_from_cri(&resources).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{field}");
+            assert!(
+                error.message().contains(field),
+                "{field}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn test_resource_update_rejects_unrepresentable_fields() {
+        for (field, resources) in [
+            (
+                "oom_score_adj",
+                LinuxContainerResources {
+                    oom_score_adj: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "memory_swap_limit_in_bytes",
+                LinuxContainerResources {
+                    memory_swap_limit_in_bytes: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "cpuset_mems",
+                LinuxContainerResources {
+                    cpuset_mems: "0".to_string(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hugepage_limits",
+                LinuxContainerResources {
+                    hugepage_limits: vec![HugepageLimit {
+                        page_size: "2MB".to_string(),
+                        limit: 1,
+                    }],
+                    ..Default::default()
+                },
+            ),
+            (
+                "unified",
+                LinuxContainerResources {
+                    unified: HashMap::from([("memory.high".to_string(), "1".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = resource_update_from_cri(&resources).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unimplemented, "{field}");
+            assert!(
+                error.message().contains(field),
+                "{field}: {}",
+                error.message()
+            );
+        }
     }
 
     fn ns(network: NamespaceMode, pid: NamespaceMode, ipc: NamespaceMode) -> NamespaceOption {
