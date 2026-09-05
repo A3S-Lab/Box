@@ -164,9 +164,18 @@ fn test_prepare_windows_guest_unlinks_stream_reparse_without_touching_target() {
     let host_target = temp.path().join("host-target.txt");
     fs::write(&host_target, b"host secret").unwrap();
     let stream = rootfs.join(WINDOWS_GUEST_STDOUT);
+    let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+    let assigned_privilege_enabled = guard.assigned_privilege_enabled();
     match std::os::windows::fs::symlink_file(&host_target, &stream) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error)
+            if a3s_box_core::windows_symlink::is_capability_denial(
+                &error,
+                assigned_privilege_enabled,
+            ) =>
+        {
+            return
+        }
         Err(error) => panic!("failed to create stream symlink: {error}"),
     }
 
