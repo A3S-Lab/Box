@@ -341,6 +341,12 @@ impl ImageStore {
 
     /// List all stored images.
     pub async fn list(&self) -> Vec<StoredImage> {
+        if let Err(error) = self.refresh_index().await {
+            tracing::warn!(
+                %error,
+                "Failed to refresh the authoritative image store index before listing"
+            );
+        }
         let index = self.index.read().await;
         index.values().cloned().collect()
     }
@@ -377,6 +383,12 @@ impl ImageStore {
 
     /// Get total size of all stored images in bytes.
     pub async fn total_size(&self) -> u64 {
+        if let Err(error) = self.refresh_index().await {
+            tracing::warn!(
+                %error,
+                "Failed to refresh the authoritative image store index before sizing"
+            );
+        }
         let index = self.index.read().await;
         // Multiple tags (and digest-pinned aliases) can point at the same
         // content-addressed directory.  Count each digest once; summing index
@@ -394,6 +406,35 @@ impl ImageStore {
     fn load_index(&mut self) -> Result<()> {
         // Construction-time load; reuse the shared disk reader.
         self.index = Arc::new(RwLock::new(self.read_index_from_disk()?));
+        Ok(())
+    }
+
+    /// Refresh the in-memory index from disk under the cross-process lock.
+    ///
+    /// Read-only callers such as ListImages and ImageFsInfo must observe pulls
+    /// and removals made by another Box process.  They must not use the stale
+    /// constructor snapshot, but also must not rewrite the index merely to
+    /// perform a read.
+    async fn refresh_index(&self) -> Result<()> {
+        let index_path = self.store_dir.join("index.json");
+        let lock_path = index_path.clone();
+        let _lock =
+            tokio::task::spawn_blocking(move || crate::file_lock::FileLock::acquire(&lock_path))
+                .await
+                .map_err(|error| {
+                    BoxError::OciImageError(format!("index refresh lock task failed: {error}"))
+                })?
+                .map_err(|error| {
+                    BoxError::OciImageError(format!(
+                        "failed to lock image index {} for refresh: {error}. {}",
+                        index_path.display(),
+                        state_dir_hint()
+                    ))
+                })?;
+
+        let fresh = self.read_index_from_disk()?;
+        let mut index = self.index.write().await;
+        *index = fresh;
         Ok(())
     }
 
@@ -1372,6 +1413,29 @@ mod tests {
 
         let reopened = ImageStore::new(&store_dir, u64::MAX).unwrap();
         assert!(reopened.get("img:fresh").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cross_instance_list_refreshes_the_authoritative_index() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let writer = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        let reader = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        writer
+            .put(
+                "img:list",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        let images = reader.list().await;
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].reference, "img:list");
     }
 
     #[tokio::test]
