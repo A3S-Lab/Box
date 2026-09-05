@@ -491,6 +491,7 @@ where
 }
 
 /// Read one pool frame with a bounded wait for the length prefix and payload.
+#[cfg(not(windows))]
 pub async fn read_frame_with_timeout<R>(
     r: &mut R,
     timeout: std::time::Duration,
