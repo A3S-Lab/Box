@@ -145,7 +145,7 @@ mod tests {
     fn symlink_file_or_skip(target: &Path, link: &Path) -> bool {
         match std::os::windows::fs::symlink_file(target, link) {
             Ok(()) => true,
-            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => false,
             Err(error) => panic!("failed to create test symlink: {error}"),
         }
     }

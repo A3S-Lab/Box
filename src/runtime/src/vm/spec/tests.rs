@@ -24,7 +24,7 @@ fn create_file_symlink(target: &Path, link: &Path) -> bool {
 fn create_file_symlink(target: &Path, link: &Path) -> bool {
     match std::os::windows::fs::symlink_file(target, link) {
         Ok(()) => true,
-        Err(error) if error.raw_os_error() == Some(1314) => false,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => false,
         Err(error) => panic!("failed to create Windows test symlink: {error}"),
     }
 }
@@ -33,7 +33,7 @@ fn create_file_symlink(target: &Path, link: &Path) -> bool {
 fn create_dir_symlink(target: &Path, link: &Path) -> bool {
     match std::os::windows::fs::symlink_dir(target, link) {
         Ok(()) => true,
-        Err(error) if error.raw_os_error() == Some(1314) => false,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => false,
         Err(error) => panic!("failed to create Windows test symlink: {error}"),
     }
 }

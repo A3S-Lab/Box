@@ -129,7 +129,7 @@ fn test_collect_windows_guest_result_replaces_marker_symlink_without_touching_ta
     let marker = rootfs.join(WINDOWS_GUEST_RESULT_MARKER);
     match std::os::windows::fs::symlink_file(&host_target, &marker) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => return,
         Err(error) => panic!("failed to create marker symlink: {error}"),
     }
 
@@ -160,7 +160,7 @@ fn test_collect_windows_guest_result_refuses_stream_symlink() {
     std::fs::write(&host_secret, "must not be logged\n").unwrap();
     match std::os::windows::fs::symlink_file(&host_secret, rootfs.join(WINDOWS_GUEST_STDOUT)) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => return,
         Err(error) => panic!("failed to create stream symlink: {error}"),
     }
     std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "").unwrap();

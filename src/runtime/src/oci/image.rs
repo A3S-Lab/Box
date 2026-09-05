@@ -1081,7 +1081,7 @@ mod tests {
     fn windows_symlink_for_test(create: impl FnOnce() -> std::io::Result<()>) -> bool {
         match create() {
             Ok(()) => true,
-            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => false,
             Err(error) => panic!("failed to create Windows test symlink: {error}"),
         }
     }

@@ -1862,7 +1862,7 @@ mod tests {
         std::fs::write(&host_file, b"secret").unwrap();
         match std::os::windows::fs::symlink_file(&host_file, &link) {
             Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => return,
             Err(error) => panic!("failed to create Windows test symlink: {error}"),
         }
         let store = ImageStore::new(&store_dir, u64::MAX).unwrap();

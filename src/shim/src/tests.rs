@@ -166,7 +166,7 @@ fn test_prepare_windows_guest_unlinks_stream_reparse_without_touching_target() {
     let stream = rootfs.join(WINDOWS_GUEST_STDOUT);
     match std::os::windows::fs::symlink_file(&host_target, &stream) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1314)) => return,
         Err(error) => panic!("failed to create stream symlink: {error}"),
     }
 
