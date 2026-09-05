@@ -81,6 +81,7 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
     if images_dir.exists() {
         if let Ok(store) = super::open_image_store() {
             let all_images = store.list().await;
+            let image_size_before = store.total_size().await;
 
             for image in &all_images {
                 if image_usage::is_prunable_reference(
@@ -89,11 +90,14 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
                     prune_mode,
                 ) && store.remove(&image.reference).await.is_ok()
                 {
-                    space_freed += image.size_bytes;
                     images_removed += 1;
                     println!("Removed image: {}", image.reference);
                 }
             }
+            // Multiple references can share one content directory.  Account
+            // for the actual content delta, not one image size per tag.
+            space_freed = space_freed
+                .saturating_add(image_size_before.saturating_sub(store.total_size().await));
         }
     }
 

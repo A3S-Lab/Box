@@ -57,14 +57,13 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    let mut freed: u64 = 0;
     let mut count: usize = 0;
     let mut errors: Vec<String> = Vec::new();
+    let size_before = store.total_size().await;
 
     for img in &to_remove {
         match store.remove(&img.reference).await {
             Ok(()) => {
-                freed += img.size_bytes;
                 count += 1;
             }
             Err(e) => {
@@ -72,6 +71,10 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
             }
         }
     }
+    // A digest may have several references.  Only the final reference removes
+    // its content directory, so calculate reclaimed bytes from the content
+    // usage delta rather than adding one size per tag.
+    let freed = size_before.saturating_sub(store.total_size().await);
 
     println!(
         "Removed {} image(s), freed {}",

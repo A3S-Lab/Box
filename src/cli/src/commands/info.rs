@@ -63,7 +63,10 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
         match super::open_image_store() {
             Ok(store) => {
                 let images = store.list().await;
-                let total_size: u64 = images.iter().map(|i| i.size_bytes).sum();
+                // Tags and digest-pinned aliases share one content directory;
+                // use the store's content-level total instead of summing index
+                // rows and reporting the same bytes multiple times.
+                let total_size = store.total_size().await;
                 println!(
                     "Images: {} cached ({})",
                     images.len(),
