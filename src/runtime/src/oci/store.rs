@@ -167,100 +167,22 @@ impl ImageStore {
         })?;
         let target_dir = digest_root.join(digest_hex);
 
-        // Copy source to target if not already present. Stage into a unique temp
-        // dir then atomically rename into place, so a concurrent put() for the
-        // same digest — or a copy that fails partway — can never leave a
-        // half-populated content-addressed dir that a later caller mistakes for a
-        // complete image (the bare check-then-copy raced on both counts).
-        if !real_directory_exists(&target_dir).map_err(|error| {
-            BoxError::OciImageError(format!(
-                "Unsafe existing image directory {}: {error}",
-                target_dir.display()
-            ))
-        })? {
-            // Reserve the staging directory atomically. Never remove a guessed
-            // path first: a local reparse point at that name must not turn
-            // cleanup into traversal outside the store.
-            let staging = loop {
-                let seq = PUT_SEQ.fetch_add(1, Ordering::Relaxed);
-                let candidate = digest_root.join(format!(
-                    ".staging-{}-{}-{}",
-                    digest_hex,
-                    std::process::id(),
-                    seq
-                ));
-                match std::fs::create_dir(&candidate) {
-                    Ok(()) => break candidate,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => {
-                        return Err(BoxError::OciImageError(format!(
-                            "Failed to reserve image staging directory {}: {error}",
-                            candidate.display()
-                        )))
-                    }
-                }
-            };
-            copy_dir_contents_no_follow(source_dir, &staging).map_err(|e| {
-                let _ = std::fs::remove_dir_all(&staging);
-                BoxError::OciImageError(format!("Failed to copy image to store: {}", e))
-            })?;
-            if let Err(e) = std::fs::rename(&staging, &target_dir) {
-                let _ = std::fs::remove_dir_all(&staging);
-                // A concurrent put() may have populated target_dir first (rename
-                // onto a non-empty dir fails); that's fine — only propagate if the
-                // image still isn't there.
-                if !real_directory_exists(&target_dir).map_err(|error| {
-                    BoxError::OciImageError(format!(
-                        "Unsafe concurrently published image directory {}: {error}",
-                        target_dir.display()
-                    ))
-                })? {
-                    return Err(BoxError::OciImageError(format!(
-                        "Failed to publish image to store: {}",
-                        e
-                    )));
-                }
-            }
-        }
-
-        let size_bytes = dir_size(&target_dir);
-        let now = Utc::now();
-
-        let stored = StoredImage {
-            reference: reference.to_string(),
-            digest: digest.to_string(),
-            size_bytes,
-            pulled_at: now,
-            last_used: now,
-            path: target_dir,
-        };
-
-        self.with_index_lock(|index| {
-            // Docker parity: if this reference already points at a DIFFERENT
-            // digest and that old digest is about to lose its last reference,
-            // keep the displaced image as a dangling entry (keyed by its digest)
-            // instead of dropping it. This makes a rebuilt/re-tagged image show
-            // up as `<none>` in `images`, be removable by `image prune`, and
-            // prevents silently orphaning its on-disk layout.
-            if let Some(old) = index.get(reference).cloned() {
-                if old.digest != digest {
-                    let still_referenced = index
-                        .iter()
-                        .any(|(key, img)| key.as_str() != reference && img.digest == old.digest);
-                    if !still_referenced && !index.contains_key(&old.digest) {
-                        let mut dangling = old.clone();
-                        dangling.reference = old.digest.clone();
-                        index.insert(old.digest.clone(), dangling);
-                    }
-                }
-            }
-
-            index.insert(reference.to_string(), stored.clone());
-            Ok(())
-        })
-        .await?;
-
-        Ok(stored)
+        // Content publication and index mutation must be one cross-process
+        // critical section. Publishing the directory first and locking only
+        // the index leaves a remove() window: remove can delete the last
+        // reference (and the content directory), after which put() inserts an
+        // index entry pointing at missing content. `put_with_digest_lock` keeps
+        // the blocking copy on a worker thread while fencing both operations;
+        // different digests retain parallel pull throughput.
+        self.put_with_digest_lock(
+            reference.to_string(),
+            digest.to_string(),
+            digest_root,
+            digest_hex.to_string(),
+            target_dir,
+            source_dir.to_path_buf(),
+        )
+        .await
     }
 
     /// Remove an image by reference or by image ID (digest).
@@ -271,72 +193,95 @@ impl ImageStore {
     /// fall back to removing every reference that points at the matching
     /// digest.
     pub async fn remove(&self, image: &str) -> Result<()> {
-        let store_dir = self.store_dir.clone();
-        self.with_index_lock(move |index| {
-            // Resolve the reference keys to remove: the exact reference if it is
-            // a known key, otherwise every key sharing the requested digest.
-            let keys: Vec<String> = if index.contains_key(image) {
-                vec![image.to_string()]
-            } else {
-                index
-                    .values()
-                    .filter(|img| img.digest == image)
-                    .map(|img| img.reference.clone())
-                    .collect()
-            };
+        // Both put and remove acquire content → index.  The initial index read
+        // only discovers which digest locks are needed; the locked pass below
+        // re-reads and retries when a concurrent tag update introduces another
+        // digest, so no content directory can be deleted while a put is about
+        // to publish a reference to it.
+        let mut locked_digests = self.remove_candidate_digests(image).await?;
+        loop {
+            let mut content_locks = Vec::with_capacity(locked_digests.len());
+            for digest_hex in &locked_digests {
+                content_locks.push(self.acquire_content_lock(digest_hex).await?);
+            }
 
+            let index_lock = self.acquire_index_lock("remove").await?;
+            let fresh = self.read_index_from_disk()?;
+            let keys = image_keys_for_request(&fresh, image);
             if keys.is_empty() {
                 return Err(BoxError::OciImageError(format!(
                     "Image not found: {}",
                     image
                 )));
             }
-
-            // Stored paths are persisted data. Re-derive every deletion target
-            // from a validated digest instead of trusting a serialized path.
-            for key in &keys {
-                let img = index.get(key).ok_or_else(|| {
-                    BoxError::OciImageError(format!("Image index entry disappeared: {key}"))
-                })?;
-                let digest_hex = super::registry::validated_digest_hex(&img.digest)?;
-                let expected = store_dir.join("sha256").join(digest_hex);
-                if img.path != expected {
-                    return Err(BoxError::OciImageError(format!(
-                        "Refusing unsafe image path {} for digest {} (expected {})",
-                        img.path.display(),
-                        img.digest,
-                        expected.display()
-                    )));
-                }
+            let current_digests = image_digests_for_keys(&fresh, &keys)?;
+            if current_digests
+                .iter()
+                .any(|digest_hex| !locked_digests.contains(digest_hex))
+            {
+                // Release both lock classes before acquiring the newly needed
+                // digest lock; all writers use the same content → index order.
+                drop(index_lock);
+                drop(content_locks);
+                locked_digests = current_digests;
+                continue;
             }
 
-            let removed: Vec<StoredImage> = keys.iter().filter_map(|k| index.remove(k)).collect();
+            let store_dir = self.store_dir.clone();
+            {
+                let mut index = self.index.write().await;
+                *index = fresh;
 
-            // Delete each image's on-disk layout once no remaining reference
-            // points at the same digest. References sharing a digest share the
-            // same directory, so the `path.exists()` guard makes this idempotent.
-            for img in removed {
-                let digest_still_used = index.values().any(|other| other.digest == img.digest);
-                if !digest_still_used
-                    && real_directory_exists(&img.path).map_err(|error| {
-                        BoxError::OciImageError(format!(
-                            "Refusing unsafe image directory {}: {error}",
-                            img.path.display()
-                        ))
-                    })?
-                {
-                    std::fs::remove_dir_all(&img.path).map_err(|e| {
-                        BoxError::OciImageError(format!(
-                            "Failed to remove image directory {}: {}",
-                            img.path.display(),
-                            e
-                        ))
+                // Stored paths are persisted data. Re-derive every deletion
+                // target from a validated digest instead of trusting a
+                // serialized path.
+                for key in &keys {
+                    let img = index.get(key).ok_or_else(|| {
+                        BoxError::OciImageError(format!("Image index entry disappeared: {key}"))
                     })?;
+                    let digest_hex = super::registry::validated_digest_hex(&img.digest)?;
+                    let expected = store_dir.join("sha256").join(digest_hex);
+                    if img.path != expected {
+                        return Err(BoxError::OciImageError(format!(
+                            "Refusing unsafe image path {} for digest {} (expected {})",
+                            img.path.display(),
+                            img.digest,
+                            expected.display()
+                        )));
+                    }
+                }
+
+                let removed: Vec<StoredImage> =
+                    keys.iter().filter_map(|key| index.remove(key)).collect();
+
+                // Delete each image's on-disk layout once no remaining
+                // reference points at the same digest. References sharing a
+                // digest share the same directory, and the digest lock fences
+                // concurrent puts for that content.
+                for img in removed {
+                    let digest_still_used = index.values().any(|other| other.digest == img.digest);
+                    if !digest_still_used
+                        && real_directory_exists(&img.path).map_err(|error| {
+                            BoxError::OciImageError(format!(
+                                "Refusing unsafe image directory {}: {error}",
+                                img.path.display()
+                            ))
+                        })?
+                    {
+                        std::fs::remove_dir_all(&img.path).map_err(|error| {
+                            BoxError::OciImageError(format!(
+                                "Failed to remove image directory {}: {error}",
+                                img.path.display()
+                            ))
+                        })?;
+                    }
                 }
             }
-            Ok(())
-        })
-        .await
+            self.save_index_inner().await?;
+            drop(index_lock);
+            drop(content_locks);
+            return Ok(());
+        }
     }
 
     /// List all stored images.
@@ -409,6 +354,78 @@ impl ImageStore {
         Ok(())
     }
 
+    /// Publish image content and its index entry while holding its digest lock.
+    ///
+    /// Keeping a digest-specific content lock across the worker-thread copy and
+    /// the short index transaction closes the only interval in which `remove` could
+    /// observe the old index, delete a shared content directory, and leave the
+    /// new `put` entry pointing at a missing path. Read-only index operations do
+    /// not take this lock and can continue while a pull copies content.
+    async fn put_with_digest_lock(
+        &self,
+        reference: String,
+        digest: String,
+        digest_root: PathBuf,
+        digest_hex: String,
+        target_dir: PathBuf,
+        source_dir: PathBuf,
+    ) -> Result<StoredImage> {
+        let _content_lock = self.acquire_content_lock(&digest_hex).await?;
+
+        let target_for_worker = target_dir.clone();
+        let digest_root_for_worker = digest_root;
+        let digest_hex_for_worker = digest_hex;
+        let size_bytes = tokio::task::spawn_blocking(move || {
+            publish_image_content_if_missing(
+                &digest_root_for_worker,
+                &digest_hex_for_worker,
+                &target_for_worker,
+                &source_dir,
+            )?;
+            Ok::<u64, BoxError>(dir_size(&target_for_worker))
+        })
+        .await
+        .map_err(|error| {
+            BoxError::OciImageError(format!("Image content publication task failed: {error}"))
+        })??;
+
+        let now = Utc::now();
+        let stored = StoredImage {
+            reference: reference.clone(),
+            digest: digest.clone(),
+            size_bytes,
+            pulled_at: now,
+            last_used: now,
+            path: target_dir,
+        };
+
+        self.with_index_lock(|index| {
+            // Docker parity: if this reference already points at a DIFFERENT
+            // digest and that old digest is about to lose its last reference,
+            // keep the displaced image as a dangling entry (keyed by its
+            // digest) instead of dropping it. This makes a rebuilt/re-tagged
+            // image show up as `<none>` in `images`, be removable by
+            // `image prune`, and prevents silently orphaning its layout.
+            if let Some(old) = index.get(&reference).cloned() {
+                if old.digest != digest {
+                    let still_referenced = index.iter().any(|(key, image)| {
+                        key.as_str() != reference && image.digest == old.digest
+                    });
+                    if !still_referenced && !index.contains_key(&old.digest) {
+                        let mut dangling = old.clone();
+                        dangling.reference = old.digest.clone();
+                        index.insert(old.digest.clone(), dangling);
+                    }
+                }
+            }
+
+            index.insert(reference, stored.clone());
+            Ok(())
+        })
+        .await?;
+        Ok(stored)
+    }
+
     /// Refresh the in-memory index from disk under the cross-process lock.
     ///
     /// Read-only callers such as ListImages and ImageFsInfo must observe pulls
@@ -416,26 +433,75 @@ impl ImageStore {
     /// constructor snapshot, but also must not rewrite the index merely to
     /// perform a read.
     async fn refresh_index(&self) -> Result<()> {
-        let index_path = self.store_dir.join("index.json");
-        let lock_path = index_path.clone();
-        let _lock =
-            tokio::task::spawn_blocking(move || crate::file_lock::FileLock::acquire(&lock_path))
-                .await
-                .map_err(|error| {
-                    BoxError::OciImageError(format!("index refresh lock task failed: {error}"))
-                })?
-                .map_err(|error| {
-                    BoxError::OciImageError(format!(
-                        "failed to lock image index {} for refresh: {error}. {}",
-                        index_path.display(),
-                        state_dir_hint()
-                    ))
-                })?;
+        let _lock = self.acquire_index_lock("refresh").await?;
 
         let fresh = self.read_index_from_disk()?;
         let mut index = self.index.write().await;
         *index = fresh;
         Ok(())
+    }
+
+    /// Acquire the image-index lock without blocking a Tokio worker thread.
+    async fn acquire_index_lock(&self, operation: &str) -> Result<crate::file_lock::FileLock> {
+        let index_path = self.store_dir.join("index.json");
+        let lock_path = index_path.clone();
+        tokio::task::spawn_blocking(move || crate::file_lock::FileLock::acquire(&lock_path))
+            .await
+            .map_err(|error| {
+                BoxError::OciImageError(format!("index {operation} lock task failed: {error}"))
+            })?
+            .map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "failed to lock image index {} for {operation}: {error}. {}",
+                    index_path.display(),
+                    state_dir_hint()
+                ))
+            })
+    }
+
+    /// Read the authoritative index once to discover the digest lock(s) needed
+    /// by a remove request. The locked removal pass rechecks this snapshot
+    /// before mutating anything, so this lookup is only a lock-planning step.
+    async fn remove_candidate_digests(&self, image: &str) -> Result<Vec<String>> {
+        let _lock = self.acquire_index_lock("remove lookup").await?;
+        let fresh = self.read_index_from_disk()?;
+        let keys = image_keys_for_request(&fresh, image);
+        if keys.is_empty() {
+            return Err(BoxError::OciImageError(format!(
+                "Image not found: {}",
+                image
+            )));
+        }
+        image_digests_for_keys(&fresh, &keys)
+    }
+
+    /// Acquire one digest's content lock without blocking a Tokio worker.
+    ///
+    /// The lock file lives beside the content-addressed directories and is
+    /// keyed only by a validated digest component. `put` and `remove` both
+    /// acquire digest lock(s) before the index lock, allowing unrelated image
+    /// digests to be copied concurrently without reopening the publication /
+    /// deletion race.
+    async fn acquire_content_lock(&self, digest_hex: &str) -> Result<crate::file_lock::FileLock> {
+        let digest_root = self.store_dir.join("sha256");
+        let target = digest_root.join(format!(".content-{digest_hex}"));
+        let lock_target = target.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&digest_root)?;
+            require_real_directory(&digest_root)?;
+            crate::file_lock::FileLock::acquire(&lock_target)
+        })
+        .await
+        .map_err(|error| {
+            BoxError::OciImageError(format!("image content lock task failed: {error}"))
+        })?
+        .map_err(|error| {
+            BoxError::OciImageError(format!(
+                "failed to lock image content {}: {error}. {}",
+                target.display(),
+                state_dir_hint()
+            ))
+        })
     }
 
     /// Read and parse `index.json` from disk into a fresh map (entries whose
@@ -544,20 +610,7 @@ impl ImageStore {
     where
         F: FnOnce(&mut HashMap<String, StoredImage>) -> Result<R>,
     {
-        let index_path = self.store_dir.join("index.json");
-        let _lock = {
-            let p = index_path.clone();
-            tokio::task::spawn_blocking(move || crate::file_lock::FileLock::acquire(&p))
-                .await
-                .map_err(|e| BoxError::OciImageError(format!("index lock task failed: {e}")))?
-                .map_err(|e| {
-                    BoxError::OciImageError(format!(
-                        "failed to lock image index {}: {e}. {}",
-                        index_path.display(),
-                        state_dir_hint()
-                    ))
-                })?
-        };
+        let _lock = self.acquire_index_lock("write").await?;
         // Sync the in-memory index with disk (pick up other processes' writes).
         let fresh = self.read_index_from_disk()?;
         let result = {
@@ -764,6 +817,129 @@ fn copy_dir_contents_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Publish one content-addressed image directory if it is not already present.
+///
+/// The caller holds the digest-specific content lock for the complete
+/// publication. The lock is deliberately separate from the image-index lock so
+/// that the potentially large copy does not serialize unrelated digests.
+fn publish_image_content_if_missing(
+    digest_root: &Path,
+    digest_hex: &str,
+    target_dir: &Path,
+    source_dir: &Path,
+) -> Result<()> {
+    require_real_directory(digest_root).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Unsafe image content directory {}: {error}",
+            digest_root.display()
+        ))
+    })?;
+    if real_directory_exists(target_dir).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Unsafe existing image directory {}: {error}",
+            target_dir.display()
+        ))
+    })? {
+        return Ok(());
+    }
+
+    // Reserve the staging directory atomically. Never remove a guessed path
+    // first: a local reparse point at that name must not turn cleanup into
+    // traversal outside the store.
+    let staging = loop {
+        let seq = PUT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = digest_root.join(format!(
+            ".staging-{}-{}-{}",
+            digest_hex,
+            std::process::id(),
+            seq
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(BoxError::OciImageError(format!(
+                    "Failed to reserve image staging directory {}: {error}",
+                    candidate.display()
+                )))
+            }
+        }
+    };
+
+    if let Err(error) = copy_dir_contents_no_follow(source_dir, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(BoxError::OciImageError(format!(
+            "Failed to copy image to store: {error}"
+        )));
+    }
+
+    if let Err(error) = std::fs::rename(&staging, target_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        // A legacy/concurrent writer may have populated target_dir first. Keep
+        // the winner only when it is a real directory; never accept a link or
+        // another unsafe entry as a successful publication.
+        if !real_directory_exists(target_dir).map_err(|check_error| {
+            BoxError::OciImageError(format!(
+                "Unsafe concurrently published image directory {}: {check_error}",
+                target_dir.display()
+            ))
+        })? {
+            return Err(BoxError::OciImageError(format!(
+                "Failed to publish image to store: {error}"
+            )));
+        }
+    }
+
+    if !real_directory_exists(target_dir).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Unsafe published image directory {}: {error}",
+            target_dir.display()
+        ))
+    })? {
+        return Err(BoxError::OciImageError(format!(
+            "Image content directory {} is missing after publication",
+            target_dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve an image removal request against an already-loaded index.
+fn image_keys_for_request(index: &HashMap<String, StoredImage>, image: &str) -> Vec<String> {
+    if index.contains_key(image) {
+        vec![image.to_string()]
+    } else {
+        index
+            .values()
+            .filter(|entry| entry.digest == image)
+            .map(|entry| entry.reference.clone())
+            .collect()
+    }
+}
+
+/// Return sorted, de-duplicated validated digest components for index entries.
+fn image_digests_for_keys(
+    index: &HashMap<String, StoredImage>,
+    keys: &[String],
+) -> Result<Vec<String>> {
+    let mut digests: Vec<String> = keys
+        .iter()
+        .map(|key| {
+            index
+                .get(key)
+                .ok_or_else(|| {
+                    BoxError::OciImageError(format!("Image index entry disappeared: {key}"))
+                })
+                .and_then(|entry| {
+                    super::registry::validated_digest_hex(&entry.digest).map(str::to_owned)
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    digests.sort_unstable();
+    digests.dedup();
+    Ok(digests)
 }
 
 /// Recursively copy a directory into a newly created destination.
@@ -1382,6 +1558,62 @@ mod tests {
         let refs: HashSet<String> = s3.list().await.into_iter().map(|i| i.reference).collect();
         assert!(refs.contains("img:a"), "img:a lost: {refs:?}");
         assert!(refs.contains("img:b"), "img:b lost: {refs:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_put_and_remove_keep_published_content() {
+        use std::sync::Arc;
+
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let writer = Arc::new(ImageStore::new(&store_dir, u64::MAX).unwrap());
+        let remover = Arc::new(ImageStore::new(&store_dir, u64::MAX).unwrap());
+
+        // Each iteration removes the old tag while publishing a second tag for
+        // the same content.  The content lock must linearize those operations;
+        // after either ordering the surviving tag must have a real directory,
+        // never an index entry whose content was deleted by the remover.
+        for i in 0..16u64 {
+            let digest = format!("sha256:{:064x}", i + 1000);
+            let old_reference = format!("app:old-{i}");
+            let new_reference = format!("app:new-{i}");
+            writer
+                .put(&old_reference, &digest, &source_dir)
+                .await
+                .unwrap();
+
+            let put_writer = Arc::clone(&writer);
+            let put_source = source_dir.clone();
+            let put_digest = digest.clone();
+            let put_reference = new_reference.clone();
+            let put_task = tokio::spawn(async move {
+                put_writer
+                    .put(&put_reference, &put_digest, &put_source)
+                    .await
+            });
+
+            let remove_remover = Arc::clone(&remover);
+            let remove_reference = old_reference.clone();
+            let remove_task =
+                tokio::spawn(async move { remove_remover.remove(&remove_reference).await });
+
+            put_task.await.unwrap().unwrap();
+            remove_task.await.unwrap().unwrap();
+
+            let fresh = ImageStore::new(&store_dir, u64::MAX).unwrap();
+            let image = fresh
+                .get(&new_reference)
+                .await
+                .expect("new tag must survive the concurrent removal");
+            assert!(
+                image.path.is_dir(),
+                "surviving index entry must point at published content: {}",
+                image.path.display()
+            );
+        }
     }
 
     #[tokio::test]
