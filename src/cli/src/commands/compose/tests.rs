@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn compose_bind_sources_are_relative_to_the_compose_file() {
+    let base = std::path::Path::new("/project/deploy");
+    assert_eq!(
+        resolve_compose_bind_path("./config/app.conf:/etc/app.conf:ro", base),
+        "/project/deploy/./config/app.conf:/etc/app.conf:ro"
+    );
+    assert_eq!(
+        resolve_compose_bind_path("../data:/data", base),
+        "/project/deploy/../data:/data"
+    );
+    assert_eq!(
+        resolve_compose_bind_path(".:/workspace:rw", base),
+        "/project/deploy/.:/workspace:rw"
+    );
+}
+
+#[test]
+fn compose_bind_resolution_preserves_absolute_and_named_sources() {
+    let base = std::path::Path::new("/project/deploy");
+    for spec in [
+        "/host/config:/etc/app.conf:ro",
+        "data:/data",
+        r"C:\work\config:/etc/app.conf:ro",
+        r"\\server\share:/data",
+    ] {
+        assert_eq!(resolve_compose_bind_path(spec, base), spec);
+    }
+}
+
+#[test]
 fn service_config_hash_is_stable_across_environment_order() {
     let service = ServiceConfig::default();
     let first = a3s_box_core::BoxConfig {
