@@ -370,9 +370,18 @@ mod tests {
 
     #[cfg(windows)]
     fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+        let assigned_privilege_enabled = guard.assigned_privilege_enabled();
         match std::os::windows::fs::symlink_dir(target, link) {
             Ok(()) => true,
-            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error)
+                if a3s_box_core::windows_symlink::is_capability_denial(
+                    &error,
+                    assigned_privilege_enabled,
+                ) =>
+            {
+                false
+            }
             Err(error) => panic!("failed to create Windows test symlink: {error}"),
         }
     }

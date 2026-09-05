@@ -1860,9 +1860,18 @@ mod tests {
         let link = source_dir.join("extra-blob");
         create_test_oci_layout(&source_dir);
         std::fs::write(&host_file, b"secret").unwrap();
+        let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+        let assigned_privilege_enabled = guard.assigned_privilege_enabled();
         match std::os::windows::fs::symlink_file(&host_file, &link) {
             Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error)
+                if a3s_box_core::windows_symlink::is_capability_denial(
+                    &error,
+                    assigned_privilege_enabled,
+                ) =>
+            {
+                return
+            }
             Err(error) => panic!("failed to create Windows test symlink: {error}"),
         }
         let store = ImageStore::new(&store_dir, u64::MAX).unwrap();

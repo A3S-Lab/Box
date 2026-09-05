@@ -69,6 +69,22 @@ pub fn denial_diagnostic(assigned_privilege_enabled: bool) -> &'static str {
     }
 }
 
+/// Returns whether a failed link creation means that this process simply lacks
+/// the Windows capability required to create OCI links.
+///
+/// `ERROR_ACCESS_DENIED` is only treated as an expected capability denial when
+/// the token does not contain an assigned symbolic-link privilege. If the
+/// privilege was assigned and enabled, access denied is preserved as a real
+/// ACL or endpoint-security failure instead of being hidden by a test skip.
+#[doc(hidden)]
+pub fn is_capability_denial(error: &std::io::Error, assigned_privilege_enabled: bool) -> bool {
+    match error.raw_os_error() {
+        Some(1314) => true,
+        Some(5) => !assigned_privilege_enabled,
+        _ => false,
+    }
+}
+
 struct WindowsTokenPrivilegeGuard {
     token: windows_sys::Win32::Foundation::HANDLE,
     previous: windows_sys::Win32::Security::TOKEN_PRIVILEGES,
@@ -202,6 +218,22 @@ mod tests {
         let unavailable = denial_diagnostic(false);
         assert!(unavailable.contains("enable Windows Developer Mode"));
         assert!(unavailable.contains("grant SeCreateSymbolicLinkPrivilege"));
+    }
+
+    #[test]
+    fn capability_denial_does_not_hide_acl_errors_when_privilege_is_enabled() {
+        assert!(is_capability_denial(
+            &std::io::Error::from_raw_os_error(1314),
+            true
+        ));
+        assert!(is_capability_denial(
+            &std::io::Error::from_raw_os_error(5),
+            false
+        ));
+        assert!(!is_capability_denial(
+            &std::io::Error::from_raw_os_error(5),
+            true
+        ));
     }
 
     #[test]

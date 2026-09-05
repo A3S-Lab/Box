@@ -127,9 +127,18 @@ fn test_collect_windows_guest_result_replaces_marker_symlink_without_touching_ta
     let host_target = tmp.path().join("host-target.txt");
     std::fs::write(&host_target, "host secret").unwrap();
     let marker = rootfs.join(WINDOWS_GUEST_RESULT_MARKER);
+    let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+    let assigned_privilege_enabled = guard.assigned_privilege_enabled();
     match std::os::windows::fs::symlink_file(&host_target, &marker) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error)
+            if a3s_box_core::windows_symlink::is_capability_denial(
+                &error,
+                assigned_privilege_enabled,
+            ) =>
+        {
+            return
+        }
         Err(error) => panic!("failed to create marker symlink: {error}"),
     }
 
@@ -158,9 +167,18 @@ fn test_collect_windows_guest_result_refuses_stream_symlink() {
     std::fs::create_dir_all(&rootfs).unwrap();
     let host_secret = tmp.path().join("host-secret.txt");
     std::fs::write(&host_secret, "must not be logged\n").unwrap();
+    let guard = a3s_box_core::windows_symlink::WindowsSymlinkPrivilegeGuard::acquire();
+    let assigned_privilege_enabled = guard.assigned_privilege_enabled();
     match std::os::windows::fs::symlink_file(&host_secret, rootfs.join(WINDOWS_GUEST_STDOUT)) {
         Ok(()) => {}
-        Err(error) if error.raw_os_error() == Some(1314) => return,
+        Err(error)
+            if a3s_box_core::windows_symlink::is_capability_denial(
+                &error,
+                assigned_privilege_enabled,
+            ) =>
+        {
+            return
+        }
         Err(error) => panic!("failed to create stream symlink: {error}"),
     }
     std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "").unwrap();
