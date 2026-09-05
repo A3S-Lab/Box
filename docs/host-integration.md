@@ -364,6 +364,12 @@ raise it only after measuring host CPU and memory headroom.
 boots, so a sizing typo cannot leave a partially pre-warmed deployment running
 or consume resources before startup fails.
 
+`compose up` prefetches unique service images before creating networks or
+starting VMs. At most two registry pulls run concurrently; cached images remain
+cache-first, and a failed pull aborts before any Compose resources are created.
+This overlaps Dify's independent image downloads while keeping disk and CPU
+pressure bounded.
+
 Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image
 or resource shapes can initialize concurrently.

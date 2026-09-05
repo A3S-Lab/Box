@@ -135,6 +135,34 @@ fn test_compose_files_constant() {
 }
 
 #[test]
+fn test_compose_image_references_deduplicates_and_skips_build_only_services() {
+    let mut services = HashMap::new();
+    services.insert(
+        "web".to_string(),
+        ServiceConfig {
+            image: Some("web:latest".to_string()),
+            ..Default::default()
+        },
+    );
+    services.insert(
+        "worker".to_string(),
+        ServiceConfig {
+            image: Some("web:latest".to_string()),
+            ..Default::default()
+        },
+    );
+    services.insert("build-only".to_string(), ServiceConfig::default());
+    let config = ComposeConfig {
+        version: None,
+        services,
+        volumes: HashMap::new(),
+        networks: HashMap::new(),
+    };
+
+    assert_eq!(compose_image_references(&config), vec!["web:latest"]);
+}
+
+#[test]
 fn test_default_discovery_prefers_compose_acl() {
     let directory = tempfile::TempDir::new().unwrap();
     let acl_path = directory.path().join("compose.acl");

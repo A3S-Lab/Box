@@ -25,6 +25,9 @@ All notable changes to A3S Box will be documented in this file.
   startup work after a sizing typo.
 - Warm-pool metrics now expose initial-fill duration, including first-ready
   latency for lazy pools, so deployment startup regressions can be measured.
+- Compose startup now prefetches unique service images with a bounded
+  concurrency of two before creating networks or VMs, reducing serialized
+  registry latency while failing cleanly before partial deployment state.
 
 ### Fixed
 

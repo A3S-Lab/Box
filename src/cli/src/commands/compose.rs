@@ -14,6 +14,7 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use a3s_box_core::compose::{normalize_compose, ComposeConfig, ComposeSourceFormat, ServiceConfig};
 use a3s_box_core::config::DEFAULT_VCPUS;
@@ -42,6 +43,10 @@ const LABEL_CONFIG_HASH: &str = "com.a3s.compose.config-hash";
 /// Label key for the non-sensitive transient Secret-set identity.
 pub(crate) const LABEL_SECRET_ID: &str = "com.a3s.compose.secret-identity";
 type ExistingService = (ServiceBox, Option<String>);
+
+/// Limit concurrent Compose image pulls so a multi-service deployment can
+/// overlap network I/O without creating an unbounded disk/CPU burst.
+const COMPOSE_PULL_CONCURRENCY: usize = 2;
 
 /// Default compose file names to search for.
 const COMPOSE_FILES: &[&str] = &[
@@ -349,6 +354,11 @@ async fn execute_up(
     // starting a VM. Metadata resolution may populate the image cache.
     validate_compose_health_support(&project).await?;
     secrets::preflight(&project.config).await?;
+    // Resolve all image content before creating networks or service records.
+    // Pulls are cache-first and bounded, so Dify-like multi-service projects
+    // avoid serial image-download latency without leaving partial resources on
+    // a failed registry operation.
+    prefetch_compose_images(&project.config).await?;
     if isolation.is_sandbox() {
         let default_network = project.default_network_name();
         for service_name in &project.service_order {
@@ -878,6 +888,68 @@ async fn execute_up(
     }
 
     Ok(())
+}
+
+/// Return unique image references in deterministic order for a Compose project.
+fn compose_image_references(config: &ComposeConfig) -> Vec<String> {
+    config
+        .services
+        .values()
+        .filter_map(|service| service.image.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Pull all declared Compose images concurrently with a small global bound.
+///
+/// Every task is allowed to finish even after another pull fails. Cancelling a
+/// pull future midway could strand its temporary layer directory, whereas the
+/// ImagePuller cleanup path runs when a pull reaches its normal error result.
+async fn prefetch_compose_images(config: &ComposeConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let images = compose_image_references(config);
+    if images.is_empty() {
+        return Ok(());
+    }
+
+    let store = Arc::new(super::open_image_store()?);
+    let limiter = Arc::new(tokio::sync::Semaphore::new(COMPOSE_PULL_CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for image in images {
+        let permit = limiter.clone().acquire_owned().await?;
+        let store = store.clone();
+        tasks.spawn(async move {
+            let _permit = permit;
+            let reference = a3s_box_runtime::ImageReference::parse(&image)
+                .map_err(|error| format!("invalid image '{image}': {error}"))?;
+            let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
+            let puller = a3s_box_runtime::ImagePuller::with_platform(store, auth, None);
+            puller
+                .pull(&image)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("failed to pull Compose image '{image}': {error}"))
+        });
+    }
+
+    let mut first_error = None;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
+            Ok(Err(_)) => {}
+            Err(error) if first_error.is_none() => {
+                first_error = Some(format!("Compose image pull task failed: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
 }
 
 fn service_config_hash(
