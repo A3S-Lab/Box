@@ -37,6 +37,7 @@ const DEFAULT_POOL_VCPUS: u32 = 2;
 const DEFAULT_POOL_MEMORY: &str = "512m";
 const DEFAULT_POOL_MEMORY_MB: u32 = 512;
 const DEFAULT_POOL_LEASE_TTL_SECS: u64 = 3600;
+const DEFAULT_POOL_BOOT_CONCURRENCY: usize = 2;
 pub(crate) const DEFAULT_AUTOSTART_POOL_SIZE: usize = 1;
 pub(crate) const DEFAULT_AUTOSTART_POOL_MAX: usize = 8;
 
@@ -206,6 +207,10 @@ pub struct PoolStartArgs {
     /// Maximum pool capacity
     #[arg(long, default_value = "8")]
     pub max: usize,
+
+    /// Maximum number of VM boots that may run concurrently while filling pools
+    #[arg(long, default_value_t = DEFAULT_POOL_BOOT_CONCURRENCY)]
+    pub boot_concurrency: usize,
 
     /// Idle TTL in seconds before evicting a pre-booted VM (0 = unlimited)
     #[arg(long, default_value = "300")]
@@ -523,6 +528,8 @@ struct PoolRegistry {
     ksm: bool,
     /// Fill the pool by snapshot-fork (one template, restore the rest).
     snapshot_fork: bool,
+    /// Maximum number of VM boots in flight for every lazily-created pool.
+    boot_concurrency: usize,
     /// Optional Prometheus metrics shared across every pool this registry
     /// creates, so warm_pool hit/miss + vm_boot/cache numbers are scrapeable
     /// from the long-lived daemon (the one process where they matter most).
@@ -548,6 +555,7 @@ impl PoolRegistry {
             enabled: true,
             min_idle: size,
             max_size,
+            max_concurrent_boots: self.boot_concurrency,
             idle_ttl_secs: self.ttl,
             snapshot_fork: self.snapshot_fork,
             ..Default::default()
@@ -802,6 +810,9 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
     if args.size > args.max {
         return Err(format!("--size ({}) cannot exceed --max ({})", args.size, args.max).into());
     }
+    if args.boot_concurrency == 0 {
+        return Err("--boot-concurrency must be greater than 0".into());
+    }
 
     // Optional Prometheus metrics for the long-lived daemon. One shared registry
     // is handed to every pool (set_metrics) and to the /metrics server; cloning a
@@ -821,6 +832,7 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         default_image: args.image.clone(),
         size: args.size,
         max: args.max,
+        boot_concurrency: args.boot_concurrency,
         ttl: args.ttl,
         #[cfg(not(windows))]
         lease_ttl: args.lease_ttl,
@@ -1604,6 +1616,7 @@ mod tests {
             deferred: false,
             ksm: false,
             snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics: None,
         })
     }
@@ -1821,6 +1834,7 @@ mod tests {
             deferred: false,
             ksm: false,
             snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics_addr: None,
             json: false,
         };
@@ -1842,6 +1856,7 @@ mod tests {
             deferred: false,
             ksm: false,
             snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics_addr: None,
             json: false,
         };
@@ -1851,6 +1866,30 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("cannot exceed --max"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_start_zero_boot_concurrency_fails_before_startup() {
+        let args = PoolStartArgs {
+            image: None,
+            size: 1,
+            max: 1,
+            boot_concurrency: 0,
+            ttl: 300,
+            lease_ttl: DEFAULT_POOL_LEASE_TTL_SECS,
+            socket: DEFAULT_SOCKET.to_string(),
+            warm: vec![],
+            deferred: false,
+            ksm: false,
+            snapshot_fork: false,
+            metrics_addr: None,
+            json: false,
+        };
+        let result = execute_start(args).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("--boot-concurrency must be greater than 0"));
     }
 
     #[cfg(not(windows))]
@@ -1882,6 +1921,7 @@ mod tests {
             deferred: false,
             ksm: false,
             snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics: None,
         });
 

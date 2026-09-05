@@ -131,6 +131,12 @@ pub struct PoolConfig {
     #[serde(default = "default_max_pool_size")]
     pub max_size: usize,
 
+    /// Maximum number of VM boots that may run concurrently during pool fill.
+    /// A bounded value prevents a large warm pool from exhausting host CPU and
+    /// memory while retaining parallel startup for independent VMs.
+    #[serde(default = "default_max_concurrent_boots")]
+    pub max_concurrent_boots: usize,
+
     /// Time-to-live for idle VMs in seconds (0 = unlimited)
     #[serde(default = "default_idle_ttl")]
     pub idle_ttl_secs: u64,
@@ -215,6 +221,10 @@ fn default_max_pool_size() -> usize {
     5
 }
 
+fn default_max_concurrent_boots() -> usize {
+    2
+}
+
 fn default_idle_ttl() -> u64 {
     300 // 5 minutes
 }
@@ -225,6 +235,7 @@ impl Default for PoolConfig {
             enabled: false,
             min_idle: 1,
             max_size: 5,
+            max_concurrent_boots: 2,
             idle_ttl_secs: 300,
             scaling: ScalingPolicy::default(),
             snapshot_fork: false,
@@ -1053,6 +1064,7 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.min_idle, 1);
         assert_eq!(config.max_size, 5);
+        assert_eq!(config.max_concurrent_boots, 2);
         assert_eq!(config.idle_ttl_secs, 300);
     }
 
@@ -1062,6 +1074,7 @@ mod tests {
             enabled: true,
             min_idle: 3,
             max_size: 10,
+            max_concurrent_boots: 4,
             idle_ttl_secs: 600,
             ..Default::default()
         };
@@ -1072,6 +1085,7 @@ mod tests {
         assert!(parsed.enabled);
         assert_eq!(parsed.min_idle, 3);
         assert_eq!(parsed.max_size, 10);
+        assert_eq!(parsed.max_concurrent_boots, 4);
         assert_eq!(parsed.idle_ttl_secs, 600);
     }
 
@@ -1083,6 +1097,7 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.min_idle, 1);
         assert_eq!(config.max_size, 5);
+        assert_eq!(config.max_concurrent_boots, 2);
         assert_eq!(config.idle_ttl_secs, 300);
     }
 
@@ -1134,6 +1149,7 @@ mod tests {
         assert!(parsed.pool.enabled);
         assert_eq!(parsed.pool.min_idle, 2);
         assert_eq!(parsed.pool.max_size, 8);
+        assert_eq!(parsed.pool.max_concurrent_boots, 2);
         assert_eq!(parsed.pool.idle_ttl_secs, 120);
     }
 

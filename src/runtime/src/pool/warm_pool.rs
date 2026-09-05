@@ -156,6 +156,11 @@ impl WarmPool {
                 config.min_idle, config.max_size
             )));
         }
+        if config.max_concurrent_boots == 0 {
+            return Err(BoxError::PoolError(
+                "Pool max_concurrent_boots must be greater than 0".to_string(),
+            ));
+        }
 
         let idle = Arc::new(Mutex::new(Vec::with_capacity(config.max_size)));
         let stats = Arc::new(Mutex::new(PoolStats {
@@ -557,6 +562,55 @@ impl WarmPool {
         })
     }
 
+    /// Boot a bounded batch of VMs and return results in completion order.
+    ///
+    /// VM boot is expensive in both host CPU and memory. A JoinSet without a
+    /// concurrency limit turns a large min_idle or autoscaler step into a
+    /// resource burst, so only `max_concurrent_boots` tasks are in flight at
+    /// once. Each task owns cloned inputs, allowing the set to remain
+    /// `'static` while the caller retains its pool state.
+    async fn boot_batch(
+        snapshot_fork: bool,
+        box_config: &BoxConfig,
+        event_emitter: &EventEmitter,
+        template: &Arc<Mutex<TemplateState>>,
+        needed: usize,
+        max_concurrent_boots: usize,
+    ) -> Vec<Result<VmManager>> {
+        if needed == 0 {
+            return Vec::new();
+        }
+
+        let limit = bounded_boot_limit(needed, max_concurrent_boots);
+        let mut set = tokio::task::JoinSet::new();
+        let mut launched = 0usize;
+        let mut results = Vec::with_capacity(needed);
+
+        while launched < needed || !set.is_empty() {
+            while launched < needed && set.len() < limit {
+                let config = box_config.clone();
+                let emitter = event_emitter.clone();
+                let shared_template = Arc::clone(template);
+                set.spawn(async move {
+                    WarmPool::boot_or_restore(snapshot_fork, &config, &emitter, &shared_template)
+                        .await
+                });
+                launched += 1;
+            }
+
+            if let Some(result) = set.join_next().await {
+                results.push(match result {
+                    Ok(result) => result,
+                    Err(error) => Err(BoxError::PoolError(format!(
+                        "Warm-pool boot task failed: {error}"
+                    ))),
+                });
+            }
+        }
+
+        results
+    }
+
     /// Get the snapshot-fork template, building it once lazily. Concurrent callers
     /// wait on the lock and reuse the first result — a built template OR a cached
     /// `Unavailable` verdict, so a failed build (native VM snapshot unsupported on
@@ -759,9 +813,19 @@ impl WarmPool {
 
         // Track VMs added in this fill attempt so we can clean up on failure.
         let mut added_ids: Vec<String> = Vec::new();
+        let mut failed = false;
+        let results = Self::boot_batch(
+            self.config.snapshot_fork,
+            &self.box_config,
+            &self.event_emitter,
+            &self.template,
+            needed,
+            self.config.max_concurrent_boots,
+        )
+        .await;
 
-        for _ in 0..needed {
-            match self.boot_new_vm().await {
+        for result in results {
+            match result {
                 Ok(vm) => {
                     let box_id = vm.box_id().to_string();
                     let mut idle = self.idle.lock().await;
@@ -771,24 +835,29 @@ impl WarmPool {
                     });
                     Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
                     let mut stats = self.stats.lock().await;
+                    stats.total_created += 1;
                     stats.idle_count = idle.len();
                     added_ids.push(box_id.clone());
 
+                    self.event_emitter.emit(BoxEvent::with_string(
+                        "pool.vm.created",
+                        format!("Booted new VM {box_id}"),
+                    ));
                     tracing::debug!(box_id = %box_id, "Added VM to warm pool");
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to boot VM for warm pool");
-                    // Clean up any VMs that were successfully added before this failure.
-                    if !added_ids.is_empty() {
-                        tracing::info!(
-                            count = added_ids.len(),
-                            "Cleaning up VMs added before fill_to_min failed"
-                        );
-                        self.remove_idle_vms(&added_ids).await;
-                    }
-                    break;
+                Err(error) => {
+                    failed = true;
+                    tracing::warn!(error = %error, "Failed to boot VM for warm pool");
                 }
             }
+        }
+
+        if failed && !added_ids.is_empty() {
+            tracing::info!(
+                count = added_ids.len(),
+                "Cleaning up VMs added before fill_to_min failed"
+            );
+            self.remove_idle_vms(&added_ids).await;
         }
 
         self.event_emitter.emit(BoxEvent::empty("pool.replenish"));
@@ -873,25 +942,20 @@ impl WarmPool {
                             let needed = effective_min_idle - current;
                             tracing::debug!(current, needed, min_idle = effective_min_idle, "Replenishing warm pool");
 
-                            // Fill the `needed` slots CONCURRENTLY rather than one
-                            // boot at a time — a snapshot-fork restore (or even a cold
-                            // boot) overlaps its readiness wait, so a batch fills in
-                            // roughly one boot's time instead of N×. For snapshot-fork
-                            // the first task builds the template under ensure_template's
-                            // lock; the rest wait then restore in parallel.
-                            let mut set = tokio::task::JoinSet::new();
-                            for _ in 0..needed {
-                                let sf = config.snapshot_fork;
-                                let bc = box_config.clone();
-                                let ee = event_emitter.clone();
-                                let tpl = Arc::clone(&template);
-                                set.spawn(async move {
-                                    WarmPool::boot_or_restore(sf, &bc, &ee, &tpl).await
-                                });
-                            }
-                            while let Some(joined) = set.join_next().await {
-                                match joined {
-                                    Ok(Ok(mut vm)) => {
+                            // Overlap readiness waits while keeping the number of
+                            // expensive VM boots bounded by configuration.
+                            let results = Self::boot_batch(
+                                config.snapshot_fork,
+                                &box_config,
+                                &event_emitter,
+                                &template,
+                                needed,
+                                config.max_concurrent_boots,
+                            )
+                            .await;
+                            for result in results {
+                                match result {
+                                    Ok(mut vm) => {
                                         let box_id = vm.box_id().to_string();
                                         // If shutdown landed while this batch was
                                         // booting, drain_idle has already cleared
@@ -929,11 +993,8 @@ impl WarmPool {
                                             format!("Replenished VM {}", box_id),
                                         ));
                                     }
-                                    Ok(Err(e)) => {
-                                        tracing::warn!(error = %e, "Failed to replenish warm pool");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Replenish task join error");
+                                    Err(error) => {
+                                        tracing::warn!(error = %error, "Failed to replenish warm pool");
                                     }
                                 }
                             }
@@ -989,6 +1050,15 @@ impl WarmPool {
             ));
         }
     }
+}
+
+/// Return the number of boot tasks that may be in flight for one batch.
+///
+/// Configuration validation rejects zero for normal pool construction. The
+/// defensive `max(1)` keeps this scheduler total for internal callers and
+/// prevents a zero limit from deadlocking the JoinSet loop.
+fn bounded_boot_limit(needed: usize, max_concurrent_boots: usize) -> usize {
+    needed.min(max_concurrent_boots.max(1))
 }
 
 #[cfg(test)]
@@ -1060,6 +1130,25 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("cannot exceed max_size")),
             Ok(_) => panic!("Expected error for min_idle > max_size"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_pool_rejects_zero_max_concurrent_boots() {
+        let mut config = test_pool_config(0, 1);
+        config.max_concurrent_boots = 0;
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        match result {
+            Err(error) => assert!(error.to_string().contains("max_concurrent_boots")),
+            Ok(_) => panic!("Expected error for zero max_concurrent_boots"),
+        }
+    }
+
+    #[test]
+    fn boot_batch_limit_is_bounded_and_never_deadlocks() {
+        assert_eq!(bounded_boot_limit(0, 2), 0);
+        assert_eq!(bounded_boot_limit(8, 2), 2);
+        assert_eq!(bounded_boot_limit(2, 8), 2);
+        assert_eq!(bounded_boot_limit(8, 0), 1);
     }
 
     // --- PoolStats tests ---
