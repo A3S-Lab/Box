@@ -448,8 +448,11 @@ preparation must reproduce the exact persisted plan before Runtime mutation;
 name collisions, ownership drift, duplicate destinations, and unsafe identities
 fail closed. Image content accounting, cross-process index refresh, per-digest
 content publication/removal locking, cache-key confinement, and volume cleanup
-are now covered by focused race and recovery tests. The complete B3
-storage/network qualification gate remains open.
+are now covered by focused race and recovery tests. Warm-pool initial fill and
+replenishment share a configurable `max_concurrent_boots` limit (default `2`),
+so startup parallelism has an explicit host resource budget. The complete B3
+storage/network qualification gate remains open, and production CPU and
+tail-latency measurements remain an open gate.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or

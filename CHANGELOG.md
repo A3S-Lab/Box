@@ -19,6 +19,8 @@ All notable changes to A3S Box will be documented in this file.
   removed only after an identity-checked probe.
 - Warm-pool idle gauges and per-VM resource gauges now stay synchronized with
   acquisition, eviction, rollback, and VM destruction.
+- Warm-pool initial fill and replenishment now use a configurable bounded boot
+  concurrency (default `2`) to avoid host CPU and memory bursts.
 - Image accounting counts shared content once, refreshes read paths from the
   authoritative index, and rejects unsafe cache entries; CLI prune reports
   the actual content bytes reclaimed. Per-digest publication/removal locks

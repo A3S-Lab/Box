@@ -318,6 +318,7 @@ daemon automatically:
 
 ```bash
 a3s-box pool start --image node:24-bookworm --size 2 --max 4 \
+  --boot-concurrency 2 \
   --socket /tmp/a3s-node-pool.sock
 
 export A3S_BOX_RUN_POOL_SOCKET=/tmp/a3s-node-pool.sock
@@ -345,6 +346,10 @@ bounded `capability`, `layout`, `spec`, `rootfs`, `prepare`, `launch`, and
 `readiness` phases (only phases used by a selected backend emit samples). The
 phase label is deliberately stable, so it is safe to aggregate in Prometheus
 without introducing image or box-id cardinality.
+
+`--boot-concurrency` bounds simultaneous VM boots during initial fill and
+background replenishment. The default is `2`; lower it on CPU-constrained
+hosts, or raise it only after measuring host CPU and memory headroom.
 
 For an explicit one-command local loop, `a3s-box run --pool-autostart --rm ...`
 starts a daemon on `--pool-socket` if none is already running. Foreground
