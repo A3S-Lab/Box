@@ -457,7 +457,12 @@ initialization is serialized per exact image/resource shape, while
 different shapes may initialize concurrently; shutdown fencing prevents a
 late initializer from publishing a pool after drain begins. Lazy first-use
 creation waits for one ready VM and fills the remaining idle target in the
-background. The complete
+background. Compose startup prefetches unique service images with a bounded
+two-way pull fan-out before creating networks or VMs, so independent Dify image
+downloads do not add serial registry latency while a failed pull leaves no
+partial project resources. The `a3s_box_warm_pool_initial_fill_duration_seconds`
+histogram records first-ready latency for lazy pools and complete fill time for
+eager pools. The complete
 B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 
