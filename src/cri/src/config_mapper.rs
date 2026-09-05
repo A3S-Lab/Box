@@ -47,6 +47,12 @@ pub fn pod_sandbox_config_to_box_config(
         network,
         hostname,
         sysctls: parse_sysctls(config),
+        // A CRI pod sandbox is the long-lived VM that owns the pod's
+        // containers. Boot it idle so StartContainer can launch each
+        // workload explicitly; otherwise the agent image's OCI CMD may run
+        // as PID 1 during RunPodSandbox and exit before the first container
+        // is created.
+        deferred_main: true,
         ..Default::default()
     })
 }
@@ -281,6 +287,14 @@ mod tests {
         let config = make_config(HashMap::new());
         let box_config = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE).unwrap();
         assert_eq!(box_config.image, DEFAULT_AGENT_IMAGE);
+    }
+
+    #[test]
+    fn test_pod_sandbox_defers_container_main_until_start_container() {
+        let config = make_config(HashMap::new());
+        let box_config = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE).unwrap();
+
+        assert!(box_config.deferred_main);
     }
 
     #[test]
