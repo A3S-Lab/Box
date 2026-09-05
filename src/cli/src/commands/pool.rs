@@ -40,6 +40,7 @@ const DEFAULT_POOL_MEMORY: &str = "512m";
 const DEFAULT_POOL_MEMORY_MB: u32 = 512;
 const DEFAULT_POOL_LEASE_TTL_SECS: u64 = 3600;
 const DEFAULT_POOL_BOOT_CONCURRENCY: usize = 2;
+const POOL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const DEFAULT_AUTOSTART_POOL_SIZE: usize = 1;
 pub(crate) const DEFAULT_AUTOSTART_POOL_MAX: usize = 8;
 
@@ -487,6 +488,19 @@ struct LeaseExecGuard {
     active_execs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct PoolRequestGuard {
+    inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Drop for PoolRequestGuard {
+    fn drop(&mut self) {
+        self.inflight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+}
+
 #[cfg(not(windows))]
 impl LeaseExecGuard {
     fn new(leased: &LeasedVm) -> Self {
@@ -522,6 +536,10 @@ struct PoolRegistry {
     /// Set before shutdown drains pools so a concurrent lazy initializer cannot
     /// publish a newly booted pool after the daemon has begun teardown.
     draining: std::sync::atomic::AtomicBool,
+    /// Number of socket handlers still running. Shutdown waits for these
+    /// handlers so their acquired VMs can be destroyed before the process exits.
+    inflight_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    inflight_notify: std::sync::Arc<tokio::sync::Notify>,
     #[cfg(not(windows))]
     leases: tokio::sync::Mutex<std::collections::HashMap<String, LeasedVm>>,
     #[cfg(not(windows))]
@@ -549,6 +567,36 @@ struct PoolRegistry {
 }
 
 impl PoolRegistry {
+    fn request_guard(&self) -> PoolRequestGuard {
+        self.inflight_requests
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        PoolRequestGuard {
+            inflight: self.inflight_requests.clone(),
+            notify: self.inflight_notify.clone(),
+        }
+    }
+
+    async fn wait_for_requests(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.inflight_notify.notified();
+            if self
+                .inflight_requests
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0
+            {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
+                return self
+                    .inflight_requests
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == 0;
+            }
+        }
+    }
+
     async fn pool_creation_lock(&self, key: &PoolKey) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut initializers = self.pool_initializers.lock().await;
         initializers.retain(|_, lock| lock.strong_count() > 0);
@@ -892,6 +940,8 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         draining: std::sync::atomic::AtomicBool::new(false),
+        inflight_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        inflight_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         #[cfg(not(windows))]
         leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         #[cfg(not(windows))]
@@ -1116,6 +1166,7 @@ async fn serve(
                 let registry = registry.clone();
                 let shutdown_tx = shutdown_tx.clone();
                 tokio::spawn(async move {
+                    let _request_guard = registry.request_guard();
                     if let Err(e) = handle_conn(&registry, &shutdown_tx, &mut stream).await {
                         tracing::warn!(error = %e, "pool connection failed");
                     }
@@ -1127,6 +1178,9 @@ async fn serve(
                     println!("Draining warm pools...");
                 }
                 registry.drain_all().await;
+                if !registry.wait_for_requests(POOL_DRAIN_TIMEOUT).await && !json {
+                    eprintln!("Timed out waiting for in-flight pool requests to finish");
+                }
                 break;
             }
             _ = tokio::signal::ctrl_c() => {
@@ -1135,6 +1189,9 @@ async fn serve(
                     println!("Draining warm pools...");
                 }
                 registry.drain_all().await;
+                if !registry.wait_for_requests(POOL_DRAIN_TIMEOUT).await && !json {
+                    eprintln!("Timed out waiting for in-flight pool requests to finish");
+                }
                 break;
             }
         }
@@ -1684,6 +1741,8 @@ mod tests {
             pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             draining: std::sync::atomic::AtomicBool::new(false),
+            inflight_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             default_image: Some("alpine:latest".to_string()),
             size: 1,
@@ -1744,6 +1803,32 @@ mod tests {
         assert!(registry.draining.load(std::sync::atomic::Ordering::Acquire));
         assert!(registry.leases.lock().await.is_empty());
         assert!(registry.pools.lock().await.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_request_guard_waits_for_inflight_handlers() {
+        let registry = test_registry_with_lease_ttl(0);
+        let guard = registry.request_guard();
+
+        assert_eq!(
+            registry
+                .inflight_requests
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert!(
+            !registry
+                .wait_for_requests(std::time::Duration::from_millis(10))
+                .await
+        );
+
+        drop(guard);
+        assert!(
+            registry
+                .wait_for_requests(std::time::Duration::from_secs(1))
+                .await
+        );
     }
 
     #[cfg(not(windows))]
@@ -2039,6 +2124,8 @@ mod tests {
             pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             draining: std::sync::atomic::AtomicBool::new(false),
+            inflight_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             default_image: None,
             size: 1,
