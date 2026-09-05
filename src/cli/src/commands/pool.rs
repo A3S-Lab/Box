@@ -568,15 +568,14 @@ impl PoolRegistry {
             ksm: self.ksm,
             ..Default::default()
         };
-        let mut pool = WarmPool::start(pool_config, box_config, EventEmitter::new(256))
-            .await
-            .map_err(|e| e.to_string())?;
-        // Record this pool's hit/miss/boot/phase/cache metrics into the shared registry
-        // (set before Arc-wrapping — set_metrics needs &mut). All pools share one
-        // RuntimeMetrics registry, so the daemon's /metrics endpoint aggregates them.
-        if let Some(metrics) = &self.metrics {
-            pool.set_metrics(metrics.clone());
-        }
+        let pool = WarmPool::start_with_metrics(
+            pool_config,
+            box_config,
+            EventEmitter::new(256),
+            self.metrics.clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         let pool = std::sync::Arc::new(pool);
         let entry = PoolEntry {
             pool,

@@ -131,6 +131,20 @@ impl WarmPool {
         box_config: BoxConfig,
         event_emitter: EventEmitter,
     ) -> Result<Self> {
+        Self::start_with_metrics(config, box_config, event_emitter, None).await
+    }
+
+    /// Create and start the warm pool with an optional shared metrics sink.
+    ///
+    /// The sink is installed before the initial fill so the first pre-warmed
+    /// VMs contribute boot, cache, and pool metrics. [`Self::start`] remains
+    /// the compatibility entry point for callers that do not need metrics.
+    pub async fn start_with_metrics(
+        config: PoolConfig,
+        box_config: BoxConfig,
+        event_emitter: EventEmitter,
+        metrics: Option<crate::prom::RuntimeMetrics>,
+    ) -> Result<Self> {
         if config.max_size == 0 {
             return Err(BoxError::PoolError(
                 "Pool max_size must be greater than 0".to_string(),
@@ -173,9 +187,13 @@ impl WarmPool {
             shutdown_tx,
             shutdown_rx,
             scaler,
-            metrics: None,
+            metrics,
             template: Arc::new(Mutex::new(TemplateState::Unbuilt)),
         };
+
+        if let Some(metrics) = &pool.metrics {
+            metrics.warm_pool_capacity.set(pool.config.max_size as i64);
+        }
 
         // Initial fill
         pool.fill_to_min().await;
@@ -1328,6 +1346,31 @@ mod tests {
             }
             Err(_) => {
                 // Boot failure is acceptable in unit test environment
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_start_with_metrics_installs_sink_before_fill() {
+        let config = test_pool_config(0, 5);
+        let metrics = crate::prom::RuntimeMetrics::new();
+        let result = WarmPool::start_with_metrics(
+            config,
+            BoxConfig::default(),
+            test_event_emitter(),
+            Some(metrics.clone()),
+        )
+        .await;
+
+        match result {
+            Ok(mut pool) => {
+                assert!(pool.metrics.is_some());
+                assert_eq!(metrics.warm_pool_capacity.get(), 5);
+                let _ = pool.drain().await;
+            }
+            Err(_) => {
+                // Boot failure is acceptable in unit test environments without
+                // a usable VM provider; min_idle=0 normally avoids this path.
             }
         }
     }
