@@ -33,7 +33,7 @@ pub fn pod_sandbox_config_to_box_config(
     let annotations = &config.annotations;
     let image = resolve_agent_image(annotations, default_agent_image)?;
 
-    let resources = parse_resources(annotations);
+    let resources = parse_resources(annotations)?;
     let tee = parse_tee_config(annotations)?;
     let port_map = parse_port_mappings(config)?;
     let network = parse_network_mode(annotations)?;
@@ -126,33 +126,46 @@ fn resolve_agent_image(
     Ok(default_agent_image.to_string())
 }
 
+/// Parse one positive resource annotation.
+///
+/// A missing annotation uses the supplied default. Once an annotation is
+/// present, malformed, zero, and out-of-range values are configuration errors;
+/// silently substituting a different resource request makes a successful CRI
+/// response misleading and can over- or under-provision a pod.
+fn parse_positive_resource(
+    annotations: &HashMap<String, String>,
+    key: &str,
+    default: u32,
+) -> Result<u32> {
+    let Some(raw) = annotations.get(key) else {
+        return Ok(default);
+    };
+    let value = raw.trim().parse::<u32>().map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Invalid CRI resource annotation {key:?}: expected a positive integer, got {raw:?}"
+        ))
+    })?;
+    if value == 0 {
+        return Err(BoxError::ConfigError(format!(
+            "Invalid CRI resource annotation {key:?}: value must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
+
 /// Parse resource configuration from annotations.
-fn parse_resources(annotations: &HashMap<String, String>) -> ResourceConfig {
-    // Clamp to the VM spec's valid vCPU range. Downstream the count narrows to a
-    // u8, so an out-of-range annotation (e.g. 256) would wrap to 0 vCPUs and
-    // silently fail to boot; clamp to 1..=255 instead.
-    let vcpus = annotations
-        .get(ANN_VCPUS)
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(2)
-        .clamp(1, 255);
+fn parse_resources(annotations: &HashMap<String, String>) -> Result<ResourceConfig> {
+    let vcpus = parse_positive_resource(annotations, ANN_VCPUS, 2)?;
+    a3s_box_core::config::validate_vcpu_count(vcpus).map_err(BoxError::ConfigError)?;
+    let memory_mb = parse_positive_resource(annotations, ANN_MEMORY_MB, 1024)?;
+    let disk_mb = parse_positive_resource(annotations, ANN_DISK_MB, 4096)?;
 
-    let memory_mb = annotations
-        .get(ANN_MEMORY_MB)
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(1024);
-
-    let disk_mb = annotations
-        .get(ANN_DISK_MB)
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(4096);
-
-    ResourceConfig {
+    Ok(ResourceConfig {
         vcpus,
         memory_mb,
         disk_mb,
         ..Default::default()
-    }
+    })
 }
 
 /// Parse TEE configuration from annotations.
@@ -473,6 +486,31 @@ mod tests {
 
         assert_eq!(box_config.resources.vcpus, 4);
         assert_eq!(box_config.resources.memory_mb, 2048);
+    }
+
+    #[test]
+    fn test_invalid_resource_annotation_is_rejected_instead_of_defaulting() {
+        for (key, value, expected) in [
+            (ANN_VCPUS, "not-a-number", "expected a positive integer"),
+            (ANN_MEMORY_MB, "0", "greater than zero"),
+            (ANN_DISK_MB, "-1", "expected a positive integer"),
+        ] {
+            let config = make_config(HashMap::from([(key.to_string(), value.to_string())]));
+            let error = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE)
+                .expect_err("invalid resource annotations must fail closed");
+            assert!(
+                error.to_string().contains(expected),
+                "{key}={value} should mention {expected}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_out_of_range_vcpu_annotation_is_rejected() {
+        let config = make_config(HashMap::from([(ANN_VCPUS.to_string(), "256".to_string())]));
+        let error = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE)
+            .expect_err("vCPU values outside the VM contract must fail closed");
+        assert!(error.to_string().contains("exceeds the maximum"));
     }
 
     #[test]
