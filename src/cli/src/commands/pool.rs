@@ -986,28 +986,51 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         })
     };
 
-    // Pre-warm the default image, if one was given.
-    let default_stats = if let Some(ref image) = args.image {
-        let entry = registry
-            .get_or_create(PoolKey::default_for_image(image.clone()))
-            .await?;
-        Some((image.clone(), entry.pool.stats().await))
-    } else {
-        None
-    };
+    let prewarm_result = async {
+        // Pre-warm the default image, if one was given.
+        let default_stats = if let Some(ref image) = args.image {
+            let entry = registry
+                .get_or_create(PoolKey::default_for_image(image.clone()))
+                .await?;
+            Some((image.clone(), entry.pool.stats().await))
+        } else {
+            None
+        };
 
-    // Pre-warm any extra images requested via --warm.
-    let mut warmed_extra: Vec<(String, usize)> = Vec::new();
-    for entry in &args.warm {
-        let (image, count) = parse_warm_spec(entry, args.size)?;
-        if count == 0 {
-            return Err(format!("--warm count must be > 0 (in '{entry}')").into());
+        // Pre-warm any extra images requested via --warm.
+        let mut warmed_extra: Vec<(String, usize)> = Vec::new();
+        for entry in &args.warm {
+            let (image, count) = parse_warm_spec(entry, args.size)?;
+            if count == 0 {
+                return Err(format!("--warm count must be > 0 (in '{entry}')").into());
+            }
+            registry
+                .get_or_create_with_size(PoolKey::default_for_image(&image), count)
+                .await?;
+            warmed_extra.push((image, count));
         }
-        registry
-            .get_or_create_with_size(PoolKey::default_for_image(&image), count)
-            .await?;
-        warmed_extra.push((image, count));
+
+        Ok::<_, Box<dyn std::error::Error>>((default_stats, warmed_extra))
     }
+    .await;
+
+    let (default_stats, warmed_extra) = match prewarm_result {
+        Ok(result) => result,
+        Err(error) => {
+            // The socket is already bound so clients can observe startup
+            // progress. If pre-warming fails, tear down every background task
+            // and pool created so far before returning the error; otherwise a
+            // partial Dify deployment can leave a live socket and orphan VMs.
+            #[cfg(not(windows))]
+            {
+                registry.drain_all().await;
+                serve_task.abort();
+                let _ = serve_task.await;
+                let _ = std::fs::remove_file(&args.socket);
+            }
+            return Err(error);
+        }
+    };
 
     if args.json {
         match &default_stats {
@@ -2100,6 +2123,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("--boot-concurrency must be greater than 0"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_execute_start_prewarm_failure_cleans_up_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("failed-pool.sock");
+        let args = PoolStartArgs {
+            image: None,
+            size: 1,
+            max: 1,
+            ttl: 300,
+            lease_ttl: DEFAULT_POOL_LEASE_TTL_SECS,
+            socket: socket.display().to_string(),
+            warm: vec!["alpine=not-a-count".to_string()],
+            deferred: false,
+            ksm: false,
+            snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
+            metrics_addr: None,
+            json: true,
+        };
+
+        let result = execute_start(args).await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid warm count"));
+        assert!(!socket.exists(), "failed startup must remove its socket");
     }
 
     #[cfg(not(windows))]

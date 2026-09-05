@@ -28,6 +28,8 @@ All notable changes to A3S Box will be documented in this file.
   allocation or permanently occupied connection tasks.
 - Pool daemon shutdown now tracks socket handlers and waits up to one minute for
   in-flight requests to finish after draining idle pools.
+- Failed multi-image pool startup now rolls back already-created pools, stops
+  the temporary socket server, and removes its socket before returning an error.
 - Warm-pool shutdown now detaches pooled and leased VMs before asynchronous
   teardown, so registry and pool locks are not held for the full destroy time.
 - CRI PodSandbox startup now defers the agent workload until

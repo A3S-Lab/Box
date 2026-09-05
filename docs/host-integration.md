@@ -363,6 +363,9 @@ Pool socket frames are capped at 16 MiB and incomplete request frames time out
 after 15 seconds; payloads larger than this are rejected.
 On shutdown, the daemon drains idle pools and waits up to one minute for
 in-flight socket requests to finish before exiting.
+If one of several explicitly pre-warmed images fails during startup, the daemon
+cleans up earlier pools and removes the temporary socket before reporting the
+failure.
 
 `a3s_box_warm_pool_boots_inflight` exposes the current aggregate boot pressure,
 while `a3s_box_warm_pool_boot_failures_total` counts failed warm-pool and
