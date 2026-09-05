@@ -51,11 +51,12 @@ impl LayerCache {
     ///
     /// Returns `None` if the layer is not cached or the cache entry is invalid.
     pub fn get(&self, digest: &str) -> Result<Option<PathBuf>> {
+        super::validate_cache_key(digest, "layer digest")?;
         let safe_name = Self::digest_to_dirname(digest);
         let layer_dir = self.cache_dir.join(&safe_name);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", safe_name));
 
-        if !layer_dir.is_dir() || !meta_path.is_file() {
+        if !super::is_real_directory(&layer_dir) || !super::is_regular_file(&meta_path) {
             return Ok(None);
         }
 
@@ -79,13 +80,14 @@ impl LayerCache {
     /// Copies the contents of `source_dir` into the cache keyed by `digest`.
     /// Returns the path to the cached layer directory.
     pub fn put(&self, digest: &str, source_dir: &Path) -> Result<PathBuf> {
+        super::validate_cache_key(digest, "layer digest")?;
         let safe_name = Self::digest_to_dirname(digest);
         let layer_dir = self.cache_dir.join(&safe_name);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", safe_name));
 
         // Already fully cached (content-addressed ⇒ identical): nothing to do.
         // Returning early also makes concurrent puts of the same layer idempotent.
-        if layer_dir.is_dir() && meta_path.is_file() {
+        if super::is_real_directory(&layer_dir) && super::is_regular_file(&meta_path) {
             return Ok(layer_dir);
         }
 
@@ -119,28 +121,13 @@ impl LayerCache {
 
     /// Remove a cached layer by digest.
     pub fn invalidate(&self, digest: &str) -> Result<()> {
+        super::validate_cache_key(digest, "layer digest")?;
         let safe_name = Self::digest_to_dirname(digest);
         let layer_dir = self.cache_dir.join(&safe_name);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", safe_name));
 
-        if layer_dir.exists() {
-            std::fs::remove_dir_all(&layer_dir).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to remove cached layer {}: {}",
-                    layer_dir.display(),
-                    e
-                ))
-            })?;
-        }
-        if meta_path.exists() {
-            std::fs::remove_file(&meta_path).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to remove layer metadata {}: {}",
-                    meta_path.display(),
-                    e
-                ))
-            })?;
-        }
+        super::remove_path_no_follow(&layer_dir)?;
+        super::remove_path_no_follow(&meta_path)?;
 
         Ok(())
     }
@@ -507,8 +494,23 @@ pub(crate) fn publish_dir_atomically(
     dest_dir: &Path,
     staging_parent: &Path,
 ) -> Result<bool> {
-    if dest_dir.exists() {
-        return Ok(false);
+    match std::fs::symlink_metadata(dest_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            return Ok(false)
+        }
+        Ok(_) => {
+            return Err(BoxError::CacheError(format!(
+                "Cache destination is not a real directory: {}",
+                dest_dir.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BoxError::CacheError(format!(
+                "Failed to inspect cache destination {}: {error}",
+                dest_dir.display()
+            )))
+        }
     }
     let staging = tempfile::Builder::new()
         .prefix(".staging-")
@@ -523,7 +525,7 @@ pub(crate) fn publish_dir_atomically(
         Ok(()) => Ok(true),
         // Lost the race: a concurrent put populated dest_dir first. Same key ⇒
         // identical content, so keep the winner (staging auto-removes on drop).
-        Err(_) if dest_dir.exists() => Ok(false),
+        Err(_) if super::is_real_directory(dest_dir) => Ok(false),
         Err(e) => Err(BoxError::CacheError(format!(
             "Failed to publish cache entry {}: {e}",
             dest_dir.display()
@@ -1252,6 +1254,41 @@ mod tests {
         let nonexistent = tmp.path().join("does_not_exist");
         let result = cache.put("sha256:bad_source", &nonexistent);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_layer_cache_rejects_path_traversal_keys() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("file", "content")]);
+
+        for digest in ["../outside", "nested/layer", "nested\\layer", "..", ""] {
+            assert!(cache.get(digest).is_err(), "digest={digest:?}");
+            assert!(cache.put(digest, &source).is_err(), "digest={digest:?}");
+            assert!(cache.invalidate(digest).is_err(), "digest={digest:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_layer_cache_does_not_follow_symlink_entries() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let outside = tmp.path().join("outside");
+        create_test_layer(&outside, &[("host-data", "must survive")]);
+        let digest = "sha256:linked";
+        let link = tmp.path().join(LayerCache::digest_to_dirname(digest));
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(cache.get(digest).unwrap().is_none());
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("file", "content")]);
+        assert!(cache.put(digest, &source).is_err());
+
+        cache.invalidate(digest).unwrap();
+        assert!(outside.join("host-data").is_file());
+        assert!(!link.exists());
     }
 
     #[test]

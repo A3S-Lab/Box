@@ -121,10 +121,11 @@ impl RootfsCache {
     ///
     /// Returns `None` if the rootfs is not cached or the cache entry is invalid.
     pub fn get(&self, key: &str) -> Result<Option<PathBuf>> {
+        super::validate_cache_key(key, "rootfs")?;
         let rootfs_dir = self.cache_dir.join(key);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", key));
 
-        if !rootfs_dir.is_dir() || !meta_path.is_file() {
+        if !super::is_real_directory(&rootfs_dir) || !super::is_regular_file(&meta_path) {
             return Ok(None);
         }
 
@@ -149,6 +150,7 @@ impl RootfsCache {
     /// Copies the contents of `source_rootfs` into the cache keyed by `key`.
     /// Returns the path to the cached rootfs directory.
     pub fn put(&self, key: &str, source_rootfs: &Path, description: &str) -> Result<PathBuf> {
+        super::validate_cache_key(key, "rootfs")?;
         let rootfs_dir = self.cache_dir.join(key);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", key));
 
@@ -156,7 +158,7 @@ impl RootfsCache {
         // cache MISS, so the only way an entry already exists here is a
         // concurrent miss of the SAME image — identical content — which makes
         // the skip correct and the two pulls idempotent.
-        if rootfs_dir.is_dir() && meta_path.is_file() {
+        if super::is_real_directory(&rootfs_dir) && super::is_regular_file(&meta_path) {
             return Ok(rootfs_dir);
         }
 
@@ -195,27 +197,12 @@ impl RootfsCache {
 
     /// Remove a cached rootfs by key.
     pub fn invalidate(&self, key: &str) -> Result<()> {
+        super::validate_cache_key(key, "rootfs")?;
         let rootfs_dir = self.cache_dir.join(key);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", key));
 
-        if rootfs_dir.exists() {
-            std::fs::remove_dir_all(&rootfs_dir).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to remove cached rootfs {}: {}",
-                    rootfs_dir.display(),
-                    e
-                ))
-            })?;
-        }
-        if meta_path.exists() {
-            std::fs::remove_file(&meta_path).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to remove rootfs metadata {}: {}",
-                    meta_path.display(),
-                    e
-                ))
-            })?;
-        }
+        super::remove_path_no_follow(&rootfs_dir)?;
+        super::remove_path_no_follow(&meta_path)?;
 
         Ok(())
     }
@@ -324,7 +311,7 @@ impl RootfsCache {
                 let Some(size) = removable_path_size(&path)? else {
                     continue;
                 };
-                remove_path_no_follow(&path)?;
+                super::remove_path_no_follow(&path)?;
                 result.bytes_freed = result.bytes_freed.saturating_add(size);
                 removed = true;
             }
@@ -414,7 +401,7 @@ pub fn prune_apfs_rootfs_cache_all(
         let Some(size) = removable_path_size(&path)? else {
             continue;
         };
-        remove_path_no_follow(&path)?;
+        super::remove_path_no_follow(&path)?;
         result.entries_removed = result.entries_removed.saturating_add(1);
         result.bytes_freed = result.bytes_freed.saturating_add(size);
     }
@@ -434,32 +421,6 @@ fn removable_path_size(path: &Path) -> Result<Option<u64>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(BoxError::CacheError(format!(
             "Failed to inspect cached path {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn remove_path_no_follow(path: &Path) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(BoxError::CacheError(format!(
-                "Failed to inspect cached path {}: {error}",
-                path.display()
-            )))
-        }
-    };
-    let removed = if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
-    match removed {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(BoxError::CacheError(format!(
-            "Failed to remove cached path {}: {error}",
             path.display()
         ))),
     }
@@ -1007,6 +968,41 @@ mod tests {
         let nonexistent = tmp.path().join("does_not_exist");
         let result = cache.put("bad_key", &nonexistent, "bad source");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rootfs_cache_rejects_path_traversal_keys() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("file", "content")]);
+
+        for key in ["../outside", "nested/rootfs", "nested\\rootfs", "..", ""] {
+            assert!(cache.get(key).is_err(), "key={key:?}");
+            assert!(cache.put(key, &source, "test").is_err(), "key={key:?}");
+            assert!(cache.invalidate(key).is_err(), "key={key:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rootfs_cache_does_not_follow_symlink_entries() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let outside = tmp.path().join("outside");
+        create_test_rootfs(&outside, &[("host-data", "must survive")]);
+        let key = "linked";
+        let link = tmp.path().join(key);
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(cache.get(key).unwrap().is_none());
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("file", "content")]);
+        assert!(cache.put(key, &source, "test").is_err());
+
+        cache.invalidate(key).unwrap();
+        assert!(outside.join("host-data").is_file());
+        assert!(!link.exists());
     }
 
     #[test]
