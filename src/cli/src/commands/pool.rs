@@ -18,7 +18,9 @@ use clap::{Parser, Subcommand};
 use a3s_box_core::config::{BoxConfig, PoolConfig, ResourceConfig};
 use a3s_box_core::event::EventEmitter;
 #[cfg(not(windows))]
-use a3s_box_runtime::pool::client::{read_frame, run_client, stop_client, write_frame};
+use a3s_box_runtime::pool::client::{
+    read_frame, read_frame_with_timeout, run_client, stop_client, write_frame, FRAME_READ_TIMEOUT,
+};
 #[cfg(not(windows))]
 use a3s_box_runtime::pool::{
     PoolClientRun, PoolLeaseReleaseRequest, PoolLeaseReleaseResponse, PoolLeaseResponse,
@@ -1164,8 +1166,9 @@ async fn handle_conn(
     // 60s exec cap — generous for a sandbox command.
     const EXEC_TIMEOUT_NS: u64 = 60_000_000_000;
 
-    let req: PoolRequest = serde_json::from_slice(&read_frame(stream).await?)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let req: PoolRequest =
+        serde_json::from_slice(&read_frame_with_timeout(stream, FRAME_READ_TIMEOUT).await?)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let run = match req {
         PoolRequest::Status => {
@@ -1390,7 +1393,8 @@ async fn execute_status(args: PoolStatusArgs) -> Result<(), Box<dyn std::error::
     };
 
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Status)?).await?;
-    let resp: PoolStatusResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolStatusResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
 
     if args.json {
         println!("{}", serde_json::to_string(&resp.images)?);
