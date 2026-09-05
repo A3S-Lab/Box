@@ -11,8 +11,7 @@ use std::time::{Duration, Instant};
 use a3s_box_core::config::{BoxConfig, PoolConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
-use tokio::sync::watch;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::pool::scaler::PoolScaler;
@@ -49,6 +48,26 @@ impl Drop for BootMetricGuard {
             metrics.warm_pool_boots_inflight.dec();
         }
     }
+}
+
+/// Acquire the per-pool and optional daemon-wide permits in one consistent
+/// order. Keeping the order identical for eager and on-demand boots avoids a
+/// cross-pool semaphore cycle while a daemon is filling multiple images.
+async fn acquire_boot_permits(
+    boot_limiter: Arc<Semaphore>,
+    global_boot_limiter: Option<Arc<Semaphore>>,
+) -> Result<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)> {
+    let pool_permit = boot_limiter
+        .acquire_owned()
+        .await
+        .map_err(|_| BoxError::PoolError("Warm-pool boot limiter closed".to_string()))?;
+    let global_permit = match global_boot_limiter {
+        Some(limiter) => Some(limiter.acquire_owned().await.map_err(|_| {
+            BoxError::PoolError("Warm-pool global boot limiter closed".to_string())
+        })?),
+        None => None,
+    };
+    Ok((pool_permit, global_permit))
 }
 
 /// Statistics about the warm pool.
@@ -102,6 +121,10 @@ pub struct WarmPool {
     scaler: Option<Arc<Mutex<PoolScaler>>>,
     /// Prometheus metrics (optional).
     metrics: Option<crate::prom::RuntimeMetrics>,
+    /// Per-pool boot limiter shared by eager fill and on-demand misses.
+    boot_limiter: Arc<Semaphore>,
+    /// Optional daemon-wide boot limiter shared by all image pools.
+    global_boot_limiter: Option<Arc<Semaphore>>,
     /// Snapshot-fork template state (built lazily on first fill when
     /// `config.snapshot_fork`): the file-backed RAM image + state file every other
     /// pool VM restores from. Caches an `Unavailable` verdict so a build failure
@@ -168,6 +191,23 @@ impl WarmPool {
         event_emitter: EventEmitter,
         metrics: Option<crate::prom::RuntimeMetrics>,
     ) -> Result<Self> {
+        Self::start_with_metrics_and_boot_limiter(config, box_config, event_emitter, metrics, None)
+            .await
+    }
+
+    /// Create and start the warm pool with optional metrics and a shared
+    /// daemon-wide boot limiter.
+    ///
+    /// `max_concurrent_boots` still limits each pool independently. When a
+    /// shared limiter is supplied, it additionally caps aggregate boots across
+    /// all pools that use it (for example, a multi-image pool daemon).
+    pub async fn start_with_metrics_and_boot_limiter(
+        config: PoolConfig,
+        box_config: BoxConfig,
+        event_emitter: EventEmitter,
+        metrics: Option<crate::prom::RuntimeMetrics>,
+        global_boot_limiter: Option<Arc<Semaphore>>,
+    ) -> Result<Self> {
         if config.max_size == 0 {
             return Err(BoxError::PoolError(
                 "Pool max_size must be greater than 0".to_string(),
@@ -205,6 +245,7 @@ impl WarmPool {
             None
         };
 
+        let boot_limiter = Arc::new(Semaphore::new(config.max_concurrent_boots));
         let mut pool = Self {
             config,
             box_config,
@@ -216,6 +257,8 @@ impl WarmPool {
             shutdown_rx,
             scaler,
             metrics,
+            boot_limiter,
+            global_boot_limiter,
             template: Arc::new(Mutex::new(TemplateState::Unbuilt)),
         };
 
@@ -510,6 +553,9 @@ impl WarmPool {
 
     /// Boot a new VM using the pool's template config.
     async fn boot_new_vm(&self) -> Result<VmManager> {
+        let _boot_permits =
+            acquire_boot_permits(self.boot_limiter.clone(), self.global_boot_limiter.clone())
+                .await?;
         let _boot_guard = BootMetricGuard::new(self.metrics.clone());
         let result = Self::boot_or_restore(
             self.config.snapshot_fork,
@@ -607,6 +653,8 @@ impl WarmPool {
         needed: usize,
         max_concurrent_boots: usize,
         metrics: Option<crate::prom::RuntimeMetrics>,
+        boot_limiter: Arc<Semaphore>,
+        global_boot_limiter: Option<Arc<Semaphore>>,
     ) -> Vec<Result<VmManager>> {
         if needed == 0 {
             return Vec::new();
@@ -623,7 +671,11 @@ impl WarmPool {
                 let emitter = event_emitter.clone();
                 let shared_template = Arc::clone(template);
                 let boot_metrics = metrics.clone();
+                let pool_boot_limiter = boot_limiter.clone();
+                let daemon_boot_limiter = global_boot_limiter.clone();
                 set.spawn(async move {
+                    let _boot_permits =
+                        acquire_boot_permits(pool_boot_limiter, daemon_boot_limiter).await?;
                     let _boot_guard = BootMetricGuard::new(boot_metrics);
                     WarmPool::boot_or_restore(snapshot_fork, &config, &emitter, &shared_template)
                         .await
@@ -861,6 +913,8 @@ impl WarmPool {
             needed,
             self.config.max_concurrent_boots,
             self.metrics.clone(),
+            self.boot_limiter.clone(),
+            self.global_boot_limiter.clone(),
         )
         .await;
 
@@ -919,6 +973,8 @@ impl WarmPool {
         let scaler = self.scaler.clone();
         let template = Arc::clone(&self.template);
         let metrics = self.metrics.clone();
+        let boot_limiter = self.boot_limiter.clone();
+        let global_boot_limiter = self.global_boot_limiter.clone();
 
         tokio::spawn(async move {
             let check_interval = std::time::Duration::from_secs(
@@ -997,6 +1053,8 @@ impl WarmPool {
                                 needed,
                                 config.max_concurrent_boots,
                                 metrics.clone(),
+                                boot_limiter.clone(),
+                                global_boot_limiter.clone(),
                             )
                             .await;
                             let mut batch_failed = false;
@@ -1223,6 +1281,21 @@ mod tests {
             Err(error) => assert!(error.to_string().contains("max_concurrent_boots")),
             Ok(_) => panic!("Expected error for zero max_concurrent_boots"),
         }
+    }
+
+    #[tokio::test]
+    async fn acquire_boot_permits_releases_both_scopes() {
+        let pool_limiter = Arc::new(Semaphore::new(1));
+        let global_limiter = Arc::new(Semaphore::new(1));
+        let (pool_permit, global_permit) =
+            acquire_boot_permits(pool_limiter.clone(), Some(global_limiter.clone()))
+                .await
+                .expect("both boot limiters should grant a permit");
+        assert_eq!(pool_limiter.available_permits(), 0);
+        assert_eq!(global_limiter.available_permits(), 0);
+        drop((pool_permit, global_permit));
+        assert_eq!(pool_limiter.available_permits(), 1);
+        assert_eq!(global_limiter.available_permits(), 1);
     }
 
     #[test]

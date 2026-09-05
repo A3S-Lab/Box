@@ -530,6 +530,8 @@ struct PoolRegistry {
     snapshot_fork: bool,
     /// Maximum number of VM boots in flight for every lazily-created pool.
     boot_concurrency: usize,
+    /// Daemon-wide boot limiter shared by every image pool.
+    boot_limiter: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional Prometheus metrics shared across every pool this registry
     /// creates, so warm_pool hit/miss + vm_boot/cache numbers are scrapeable
     /// from the long-lived daemon (the one process where they matter most).
@@ -576,11 +578,12 @@ impl PoolRegistry {
             ksm: self.ksm,
             ..Default::default()
         };
-        let pool = WarmPool::start_with_metrics(
+        let pool = WarmPool::start_with_metrics_and_boot_limiter(
             pool_config,
             box_config,
             EventEmitter::new(256),
             self.metrics.clone(),
+            Some(self.boot_limiter.clone()),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -840,6 +843,7 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         ksm: args.ksm,
         snapshot_fork: args.snapshot_fork,
         metrics: metrics.clone(),
+        boot_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(args.boot_concurrency)),
     });
 
     // Serve /metrics alongside the pool socket, if requested.
@@ -910,6 +914,10 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
             println!("  pre-warmed: {image} (size {count})");
         }
         println!("  max:      {}", args.max);
+        println!(
+            "  boot concurrency: {} (daemon-wide)",
+            args.boot_concurrency
+        );
         println!("  ttl:      {}s", args.ttl);
         println!("  lease ttl: {}s", args.lease_ttl);
         println!("  socket:   {}", args.socket);
@@ -1618,6 +1626,9 @@ mod tests {
             snapshot_fork: false,
             boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics: None,
+            boot_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_POOL_BOOT_CONCURRENCY,
+            )),
         })
     }
 
@@ -1923,6 +1934,9 @@ mod tests {
             snapshot_fork: false,
             boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
             metrics: None,
+            boot_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_POOL_BOOT_CONCURRENCY,
+            )),
         });
 
         let server = tokio::spawn(async move {
