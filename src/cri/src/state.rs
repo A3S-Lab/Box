@@ -79,17 +79,9 @@ impl StateStore for JsonStateStore {
                 // letting the next save() silently overwrite (and destroy) it: its
                 // records name the previous run's sandboxes/containers and are
                 // needed to recover their leaked microVMs. Start from empty state.
-                let secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let backup = self.path.with_extension(format!("json.corrupt-{secs}"));
-                let preserved = match std::fs::rename(&self.path, &backup) {
-                    Ok(()) => backup.display().to_string(),
-                    Err(_) => std::fs::copy(&self.path, &backup)
-                        .map(|_| backup.display().to_string())
-                        .unwrap_or_else(|_| "<backup failed>".to_string()),
-                };
+                let preserved = a3s_box_core::fs_atomic::quarantine_corrupt(&self.path)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<backup failed>".to_string());
                 tracing::warn!(
                     error = %e,
                     preserved = %preserved,

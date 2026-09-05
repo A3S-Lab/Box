@@ -8,23 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// Move a corrupt store file aside to a timestamped `*.corrupt-<unix-secs>`
-/// sibling so the next save cannot overwrite it (the original is preserved for
-/// recovery). Falls back to a copy if rename fails (e.g. cross-device). Returns
-/// the backup path on success, `None` if even the copy failed.
+/// Move a corrupt store file aside to a unique `*.corrupt-*` sibling so the
+/// next save cannot overwrite it (the original is preserved for recovery).
+/// Falls back to a copy if rename fails (e.g. cross-device). Returns the backup
+/// path on success, `None` if even the copy failed.
 pub(crate) fn quarantine_corrupt(path: &Path) -> Option<PathBuf> {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let backup = path.with_extension(format!("json.corrupt-{secs}"));
-    if std::fs::rename(path, &backup).is_ok() {
-        return Some(backup);
-    }
-    match std::fs::copy(path, &backup) {
-        Ok(_) => Some(backup),
-        Err(_) => None,
-    }
+    a3s_box_core::fs_atomic::quarantine_corrupt(path)
 }
 
 /// Render the backup path from [`quarantine_corrupt`] for a log message.
@@ -34,7 +23,7 @@ pub(crate) fn quarantine_label(path: &Path) -> String {
         .unwrap_or_else(|| "<backup failed>".to_string())
 }
 
-/// Copy a store file aside to a timestamped `*.corrupt-<unix-secs>` sibling
+/// Copy a store file aside to a unique `*.corrupt-*` sibling
 /// WITHOUT removing the original.
 ///
 /// Unlike [`quarantine_corrupt`] (whole-file unreadable → move aside), this is
@@ -45,12 +34,7 @@ pub(crate) fn quarantine_label(path: &Path) -> String {
 /// recovery while leaving the live catalog untouched. Returns the backup path,
 /// `None` if the copy failed.
 pub(crate) fn quarantine_copy(path: &Path) -> Option<PathBuf> {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let backup = path.with_extension(format!("json.corrupt-{secs}"));
-    std::fs::copy(path, &backup).ok().map(|_| backup)
+    a3s_box_core::fs_atomic::quarantine_copy(path)
 }
 
 #[cfg(test)]
