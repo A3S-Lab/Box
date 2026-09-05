@@ -422,6 +422,12 @@ share that exact route. The init-log worker starts before runtime start,
 retains an exact endpoint and generation, reconnects after runtime-service
 owner replacement, and must publish final drain evidence before deletion.
 
+The standalone CRI adapter now reconciles persisted sandboxes to `NotReady`
+after a service restart, marks containers without a live VM exited, reclaims
+their bridge-network endpoints, and removes leaked CRI rootfs trees. This is
+resource-safe restart reconciliation, not process-session reattachment; the
+real native-driver recovery gate below remains open.
+
 ### B3 - Storage And Networking Attachments
 
 - [ ] Keep image distribution, builds, named volumes, snapshots, and commits in
@@ -440,7 +446,9 @@ The production provider accepts explicit bind/named/tmpfs mounts and now plans
 image-declared anonymous volumes without creating execution artifacts. Bundle
 preparation must reproduce the exact persisted plan before Runtime mutation;
 name collisions, ownership drift, duplicate destinations, and unsafe identities
-fail closed. The complete B3 storage/network qualification gate remains open.
+fail closed. Image content accounting, cross-process index refresh, cache-key
+confinement, and volume cleanup are now covered by focused race and recovery
+tests. The complete B3 storage/network qualification gate remains open.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or
@@ -460,6 +468,11 @@ guest endpoint.
 Exit gate: Compose and the supported CRI profiles use the same runtime path as
 the CLI and SDK, with no duplicate lifecycle store or runtime subprocess
 adapter.
+
+The current optional CRI adapter additionally owns its Unix-socket takeover
+check and explicitly stops its streaming listener during shutdown. These
+hardening steps reduce split-brain and port-leak failures, but do not satisfy
+the unified-adapter or OCI Runtime-owned shim gates.
 
 ### B5 - Legacy Runtime Removal
 

@@ -4,6 +4,27 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- VM boot observability now records bounded layout, specification, rootfs,
+  launch, and readiness phase histograms, including warm-pool fills.
+
+### Fixed
+
+- CRI PodSandbox startup now defers the agent workload until
+  `StartContainer`, validates resource annotations and resource updates
+  fail-closed, reclaims stale bridge endpoints after a runtime restart, and
+  tears down the streaming listener on shutdown.
+- CRI socket startup refuses to replace a live endpoint; stale sockets are
+  removed only after an identity-checked probe.
+- Warm-pool idle gauges and per-VM resource gauges now stay synchronized with
+  acquisition, eviction, rollback, and VM destruction.
+- Image accounting counts shared content once, refreshes read paths from the
+  authoritative index, and rejects unsafe cache entries; CLI prune reports
+  the actual content bytes reclaimed.
+- Volume data cleanup is serialized with metadata removal, and corrupt JSON
+  store snapshots use collision-resistant, no-overwrite quarantine copies.
+
 ## [3.2.3] — 2026-09-02
 
 ### Fixed
