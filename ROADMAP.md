@@ -462,7 +462,8 @@ two-way pull fan-out before creating networks or VMs, so independent Dify image
 downloads do not add serial registry latency while a failed pull leaves no
 partial project resources. The `a3s_box_warm_pool_initial_fill_duration_seconds`
 histogram records first-ready latency for lazy pools and complete fill time for
-eager pools. The complete
+eager pools. Compose health-dependency convergence polls at 500ms while leaving
+the health worker cadence and caller timeout unchanged. The complete
 B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 

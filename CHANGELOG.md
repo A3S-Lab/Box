@@ -28,6 +28,9 @@ All notable changes to A3S Box will be documented in this file.
 - Compose startup now prefetches unique service images with a bounded
   concurrency of two before creating networks or VMs, reducing serialized
   registry latency while failing cleanly before partial deployment state.
+- Compose health-dependency convergence now polls at 500ms instead of 2s,
+  reducing avoidable startup delay without changing probe cadence or timeout
+  behavior.
 
 ### Fixed
 

@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Bound the delay between a dependency becoming healthy and the next Compose
+/// convergence check. The health worker still controls probe cadence; this only
+/// avoids adding a multi-second scheduling gap to dependent service startup.
+const HEALTH_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub(super) async fn wait_for_healthy(
     project_name: &str,
     service_names: &[String],
@@ -34,7 +39,20 @@ pub(super) async fn wait_for_healthy(
             return Ok(());
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(HEALTH_WAIT_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HEALTH_WAIT_POLL_INTERVAL;
+
+    #[test]
+    fn health_wait_poll_interval_is_subsecond() {
+        assert_eq!(
+            HEALTH_WAIT_POLL_INTERVAL,
+            std::time::Duration::from_millis(500)
+        );
     }
 }
 

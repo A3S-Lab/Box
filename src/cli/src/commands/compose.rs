@@ -1010,7 +1010,7 @@ fn resolve_service_volumes(
 
 /// Wait for all named services to reach "healthy" status in the state file.
 ///
-/// Polls the state file every 2 seconds until all services are healthy or timeout.
+/// Polls the state file every 500ms until all services are healthy or timeout.
 mod wait;
 
 use wait::{validate_compose_up_platform_support, wait_for_completed, wait_for_healthy};

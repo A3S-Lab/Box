@@ -370,6 +370,11 @@ cache-first, and a failed pull aborts before any Compose resources are created.
 This overlaps Dify's independent image downloads while keeping disk and CPU
 pressure bounded.
 
+When a service waits on `condition: service_healthy`, Compose checks the state
+file every 500ms. The health worker's own probe interval and the user-supplied
+convergence timeout are unchanged; this only removes an avoidable polling gap
+before dependent Dify services start.
+
 Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image
 or resource shapes can initialize concurrently.
