@@ -1838,6 +1838,21 @@ mod tests {
 
     #[cfg(not(windows))]
     #[tokio::test]
+    async fn test_registry_rejects_pool_size_above_max_without_booting() {
+        let registry = test_registry_with_lease_ttl(0);
+        let result = registry
+            .get_or_create_with_size(PoolKey::default_for_image("alpine:latest"), 5)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("requested pool size") && error.contains("--max")
+        ));
+        assert!(registry.pools.lock().await.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
     async fn test_drain_all_marks_registry_draining_and_clears_empty_state() {
         let registry = test_registry_with_lease_ttl(0);
 
