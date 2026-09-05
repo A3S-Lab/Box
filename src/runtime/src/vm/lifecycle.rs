@@ -417,6 +417,7 @@ impl VmManager {
         if let Some(ref prom) = self.prom {
             prom.vm_destroyed_total.inc();
             prom.vm_count.with_label_values(&["ready"]).dec();
+            prom.remove_vm_resource_metrics(&self.box_id);
         }
 
         // Emit stopped event

@@ -242,6 +242,20 @@ impl RuntimeMetrics {
             .observe(duration_secs);
     }
 
+    /// Remove resource gauges for a VM that no longer exists.
+    ///
+    /// The gauges are labelled by box ID for point-in-time inspection. Keeping
+    /// every historical ID in a long-lived daemon would make the registry grow
+    /// without bound, so lifecycle teardown must delete both label sets.
+    pub fn remove_vm_resource_metrics(&self, box_id: &str) {
+        if let Err(error) = self.vm_cpu_percent.remove_label_values(&[box_id]) {
+            tracing::debug!(%box_id, %error, "VM CPU metric labels were already absent");
+        }
+        if let Err(error) = self.vm_memory_bytes.remove_label_values(&[box_id]) {
+            tracing::debug!(%box_id, %error, "VM memory metric labels were already absent");
+        }
+    }
+
     /// Encode all metrics in Prometheus text exposition format.
     pub fn encode(&self) -> String {
         use prometheus::Encoder;
@@ -419,6 +433,22 @@ mod tests {
             .with_label_values(&["box-123"])
             .set(256.0 * 1024.0 * 1024.0);
         assert_eq!(m.vm_cpu_percent.with_label_values(&["box-123"]).get(), 45.5);
+    }
+
+    #[test]
+    fn test_remove_vm_resource_metrics_drops_dynamic_labels() {
+        let m = RuntimeMetrics::new();
+        m.vm_cpu_percent
+            .with_label_values(&["box-ephemeral"])
+            .set(1.0);
+        m.vm_memory_bytes
+            .with_label_values(&["box-ephemeral"])
+            .set(2.0);
+
+        m.remove_vm_resource_metrics("box-ephemeral");
+
+        let encoded = m.encode();
+        assert!(!encoded.contains("box-ephemeral"));
     }
 
     #[test]
