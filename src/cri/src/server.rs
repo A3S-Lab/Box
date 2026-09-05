@@ -155,7 +155,7 @@ impl CriServer {
         let uds = UnixListener::bind(&self.socket_path)?;
         let uds_stream = UnixListenerStream::new(uds);
 
-        tokio::spawn(async move {
+        let streaming_task = tokio::spawn(async move {
             if let Err(e) = streaming_server.serve().await {
                 tracing::error!(error = %e, "CRI streaming server failed");
             }
@@ -190,6 +190,18 @@ impl CriServer {
         // orphan across restarts, then surface any server error.
         tracing::info!("CRI server stopping — reaping sandbox VMs");
         shutdown_service.shutdown_all_sandboxes().await;
+        // The streaming listener is an independent task and does not observe
+        // the gRPC shutdown future.  Abort and join it before returning so the
+        // TCP port is released and a replacement CRI server can start without
+        // inheriting a hidden accept loop.  Existing per-connection tasks are
+        // allowed to finish independently; they own their sockets and do not
+        // retain the listener.
+        streaming_task.abort();
+        if let Err(error) = streaming_task.await {
+            if !error.is_cancelled() {
+                tracing::warn!(%error, "CRI streaming server task ended unexpectedly");
+            }
+        }
         result?;
 
         Ok(())
