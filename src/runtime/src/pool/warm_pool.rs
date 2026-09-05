@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use a3s_box_core::config::{BoxConfig, PoolConfig};
 use a3s_box_core::error::{BoxError, Result};
@@ -932,6 +932,11 @@ impl WarmPool {
 
             // Dynamic min_idle starts from config, adjusted by scaler
             let mut effective_min_idle = config.min_idle;
+            // A provider failure should not cause the maintenance loop to
+            // repeatedly launch expensive doomed boots. Back off retries while
+            // keeping the normal maintenance/eviction cadence unchanged.
+            let mut replenish_failures = 0u32;
+            let mut next_replenish_at = Instant::now();
 
             loop {
                 tokio::select! {
@@ -978,7 +983,7 @@ impl WarmPool {
 
                         // Replenish if below effective min_idle
                         let current = idle.lock().await.len();
-                        if current < effective_min_idle {
+                        if current < effective_min_idle && Instant::now() >= next_replenish_at {
                             let needed = effective_min_idle - current;
                             tracing::debug!(current, needed, min_idle = effective_min_idle, "Replenishing warm pool");
 
@@ -994,6 +999,7 @@ impl WarmPool {
                                 metrics.clone(),
                             )
                             .await;
+                            let mut batch_failed = false;
                             for result in results {
                                 match result {
                                     Ok(mut vm) => {
@@ -1035,9 +1041,27 @@ impl WarmPool {
                                         ));
                                     }
                                     Err(error) => {
+                                        batch_failed = true;
                                         tracing::warn!(error = %error, "Failed to replenish warm pool");
                                     }
                                 }
+                            }
+
+                            if batch_failed {
+                                replenish_failures = replenish_failures.saturating_add(1);
+                                let delay = replenish_backoff_delay(
+                                    replenish_failures,
+                                    check_interval,
+                                );
+                                next_replenish_at = Instant::now() + delay;
+                                tracing::warn!(
+                                    failures = replenish_failures,
+                                    retry_in_secs = delay.as_secs(),
+                                    "Backing off warm-pool replenishment after boot failure"
+                                );
+                            } else {
+                                replenish_failures = 0;
+                                next_replenish_at = Instant::now();
                             }
 
                             event_emitter.emit(BoxEvent::empty("pool.replenish"));
@@ -1100,6 +1124,23 @@ impl WarmPool {
 /// prevents a zero limit from deadlocking the JoinSet loop.
 fn bounded_boot_limit(needed: usize, max_concurrent_boots: usize) -> usize {
     needed.min(max_concurrent_boots.max(1))
+}
+
+/// Calculate the retry delay after a failed background replenishment batch.
+///
+/// The regular maintenance tick remains responsible for eviction and scaling,
+/// while only replenishment is delayed. Capping the delay keeps a transient
+/// provider outage recoverable without allowing a permanently unavailable
+/// backend to churn the host indefinitely.
+fn replenish_backoff_delay(failures: u32, check_interval: Duration) -> Duration {
+    let exponent = failures.saturating_sub(1).min(8);
+    let multiplier = 1u64 << exponent;
+    let delay_secs = check_interval
+        .as_secs()
+        .max(1)
+        .saturating_mul(multiplier)
+        .min(300);
+    Duration::from_secs(delay_secs)
 }
 
 #[cfg(test)]
@@ -1190,6 +1231,16 @@ mod tests {
         assert_eq!(bounded_boot_limit(8, 2), 2);
         assert_eq!(bounded_boot_limit(2, 8), 2);
         assert_eq!(bounded_boot_limit(8, 0), 1);
+    }
+
+    #[test]
+    fn replenish_backoff_is_exponential_and_capped() {
+        let base = Duration::from_secs(5);
+        assert_eq!(replenish_backoff_delay(0, base), Duration::from_secs(5));
+        assert_eq!(replenish_backoff_delay(1, base), Duration::from_secs(5));
+        assert_eq!(replenish_backoff_delay(2, base), Duration::from_secs(10));
+        assert_eq!(replenish_backoff_delay(7, base), Duration::from_secs(300));
+        assert_eq!(replenish_backoff_delay(20, base), Duration::from_secs(300));
     }
 
     #[test]

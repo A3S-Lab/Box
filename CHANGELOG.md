@@ -10,6 +10,8 @@ All notable changes to A3S Box will be documented in this file.
   launch, and readiness phase histograms, including warm-pool fills.
 - Warm-pool boot pressure now exposes an in-flight gauge and a failure counter
   so operators can correlate host CPU saturation with concurrent boot work.
+- Failed background warm-pool replenishment now backs off exponentially (up to
+  five minutes) to avoid retry storms during provider outages.
 
 ### Fixed
 
