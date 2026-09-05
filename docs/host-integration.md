@@ -352,6 +352,11 @@ background replenishment, and on-demand misses. The same limit is shared by
 all image pools in one daemon, so a multi-image `--warm` setup cannot multiply
 the host boot burst. The default is `2`; lower it on CPU-constrained hosts, or
 raise it only after measuring host CPU and memory headroom.
+
+Lazy pool initialization is serialized per exact image/resource shape, so
+requests for the same pool cannot race duplicate startup while unrelated image
+or resource shapes can initialize concurrently.
+
 `a3s_box_warm_pool_boots_inflight` exposes the current aggregate boot pressure,
 while `a3s_box_warm_pool_boot_failures_total` counts failed warm-pool and
 on-demand pool-miss boots. Use these alongside the boot phase histograms when

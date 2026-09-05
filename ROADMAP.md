@@ -452,7 +452,10 @@ are now covered by focused race and recovery tests. Warm-pool initial fill and
 replenishment share a configurable `max_concurrent_boots` limit (default `2`),
 so startup parallelism has an explicit host resource budget; the pool daemon
 shares that limiter across image pools and on-demand misses, and failed
-background replenishment retries use capped exponential backoff. The complete
+background replenishment retries use capped exponential backoff. B3 lazy pool
+initialization is serialized per exact image/resource shape, while
+different shapes may initialize concurrently; shutdown fencing prevents a
+late initializer from publishing a pool after drain begins. The complete
 B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 

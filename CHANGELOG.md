@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Lazy warm-pool initialization is now serialized per exact image/resource
+  shape, allowing unrelated pools to start concurrently while shutdown fencing
+  prevents a pool that finishes initializing during drain from being published.
 - VM boot observability now records bounded layout, specification, rootfs,
   launch, and readiness phase histograms, including warm-pool fills.
 - Warm-pool boot pressure now exposes an in-flight gauge and a failure counter
