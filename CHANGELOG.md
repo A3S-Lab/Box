@@ -20,6 +20,9 @@ All notable changes to A3S Box will be documented in this file.
   five minutes) to avoid retry storms during provider outages.
 - The pool daemon now shares its boot limiter across image pools and on-demand
   misses, preventing multi-image workloads from multiplying host boot bursts.
+- Explicit `--warm image=count` entries are now validated against `--max` before
+  any VM boots, keeping the per-image pool capacity bounded and avoiding wasted
+  startup work after a sizing typo.
 
 ### Fixed
 

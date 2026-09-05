@@ -353,6 +353,11 @@ all image pools in one daemon, so a multi-image `--warm` setup cannot multiply
 the host boot burst. The default is `2`; lower it on CPU-constrained hosts, or
 raise it only after measuring host CPU and memory headroom.
 
+`--max` is a hard capacity limit for each image/resource pool. Explicit
+`--warm image=count` entries must not exceed it and are validated before any VM
+boots, so a sizing typo cannot leave a partially pre-warmed deployment running
+or consume resources before startup fails.
+
 Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image
 or resource shapes can initialize concurrently.

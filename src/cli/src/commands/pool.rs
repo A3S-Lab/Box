@@ -618,6 +618,13 @@ impl PoolRegistry {
         key: PoolKey,
         size: usize,
     ) -> Result<PoolEntry, String> {
+        if size > self.max {
+            return Err(format!(
+                "requested pool size ({size}) cannot exceed daemon --max ({})",
+                self.max
+            ));
+        }
+
         let creation_lock = self.pool_creation_lock(&key).await;
         let _creation_guard = creation_lock.lock().await;
 
@@ -987,6 +994,25 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
     };
 
     let prewarm_result = async {
+        // Validate all explicit warm sizes before booting the default image.
+        // This avoids wasting VM boots when a multi-image deployment contains
+        // a capacity typo, and keeps --max a hard per-image resource bound.
+        let mut warm_specs: Vec<(String, usize)> = Vec::with_capacity(args.warm.len());
+        for entry in &args.warm {
+            let (image, count) = parse_warm_spec(entry, args.size)?;
+            if count == 0 {
+                return Err(format!("--warm count must be > 0 (in '{entry}')").into());
+            }
+            if count > args.max {
+                return Err(format!(
+                    "--warm count ({count}) cannot exceed --max ({}) (in '{entry}')",
+                    args.max
+                )
+                .into());
+            }
+            warm_specs.push((image, count));
+        }
+
         // Pre-warm the default image, if one was given.
         let default_stats = if let Some(ref image) = args.image {
             let entry = registry
@@ -998,19 +1024,13 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         };
 
         // Pre-warm any extra images requested via --warm.
-        let mut warmed_extra: Vec<(String, usize)> = Vec::new();
-        for entry in &args.warm {
-            let (image, count) = parse_warm_spec(entry, args.size)?;
-            if count == 0 {
-                return Err(format!("--warm count must be > 0 (in '{entry}')").into());
-            }
+        for (image, count) in &warm_specs {
             registry
-                .get_or_create_with_size(PoolKey::default_for_image(&image), count)
+                .get_or_create_with_size(PoolKey::default_for_image(image), *count)
                 .await?;
-            warmed_extra.push((image, count));
         }
 
-        Ok::<_, Box<dyn std::error::Error>>((default_stats, warmed_extra))
+        Ok::<_, Box<dyn std::error::Error>>((default_stats, warm_specs))
     }
     .await;
 
@@ -2152,6 +2172,34 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid warm count"));
+        assert!(!socket.exists(), "failed startup must remove its socket");
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_execute_start_warm_count_exceeding_max_fails_before_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("oversized-pool.sock");
+        let args = PoolStartArgs {
+            image: Some("alpine:latest".to_string()),
+            size: 1,
+            max: 1,
+            ttl: 300,
+            lease_ttl: DEFAULT_POOL_LEASE_TTL_SECS,
+            socket: socket.display().to_string(),
+            warm: vec!["busybox:latest=2".to_string()],
+            deferred: false,
+            ksm: false,
+            snapshot_fork: false,
+            boot_concurrency: DEFAULT_POOL_BOOT_CONCURRENCY,
+            metrics_addr: None,
+            json: true,
+        };
+
+        let result = execute_start(args).await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("cannot exceed --max"));
         assert!(!socket.exists(), "failed startup must remove its socket");
     }
 
