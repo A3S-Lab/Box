@@ -450,9 +450,10 @@ fail closed. Image content accounting, cross-process index refresh, per-digest
 content publication/removal locking, cache-key confinement, and volume cleanup
 are now covered by focused race and recovery tests. Warm-pool initial fill and
 replenishment share a configurable `max_concurrent_boots` limit (default `2`),
-so startup parallelism has an explicit host resource budget; failed background
-replenishment retries use capped exponential backoff. The complete B3
-storage/network qualification gate remains open, and production CPU and
+so startup parallelism has an explicit host resource budget; the pool daemon
+shares that limiter across image pools and on-demand misses, and failed
+background replenishment retries use capped exponential backoff. The complete
+B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,

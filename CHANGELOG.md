@@ -12,6 +12,8 @@ All notable changes to A3S Box will be documented in this file.
   so operators can correlate host CPU saturation with concurrent boot work.
 - Failed background warm-pool replenishment now backs off exponentially (up to
   five minutes) to avoid retry storms during provider outages.
+- The pool daemon now shares its boot limiter across image pools and on-demand
+  misses, preventing multi-image workloads from multiplying host boot bursts.
 
 ### Fixed
 

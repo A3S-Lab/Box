@@ -347,9 +347,11 @@ bounded `capability`, `layout`, `spec`, `rootfs`, `prepare`, `launch`, and
 phase label is deliberately stable, so it is safe to aggregate in Prometheus
 without introducing image or box-id cardinality.
 
-`--boot-concurrency` bounds simultaneous VM boots during initial fill and
-background replenishment. The default is `2`; lower it on CPU-constrained
-hosts, or raise it only after measuring host CPU and memory headroom.
+`--boot-concurrency` bounds simultaneous VM boots during initial fill,
+background replenishment, and on-demand misses. The same limit is shared by
+all image pools in one daemon, so a multi-image `--warm` setup cannot multiply
+the host boot burst. The default is `2`; lower it on CPU-constrained hosts, or
+raise it only after measuring host CPU and memory headroom.
 `a3s_box_warm_pool_boots_inflight` exposes the current aggregate boot pressure,
 while `a3s_box_warm_pool_boot_failures_total` counts failed warm-pool and
 on-demand pool-miss boots. Use these alongside the boot phase histograms when
