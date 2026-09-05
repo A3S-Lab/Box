@@ -350,6 +350,10 @@ without introducing image or box-id cardinality.
 `--boot-concurrency` bounds simultaneous VM boots during initial fill and
 background replenishment. The default is `2`; lower it on CPU-constrained
 hosts, or raise it only after measuring host CPU and memory headroom.
+`a3s_box_warm_pool_boots_inflight` exposes the current aggregate boot pressure,
+while `a3s_box_warm_pool_boot_failures_total` counts failed warm-pool and
+on-demand pool-miss boots. Use these alongside the boot phase histograms when
+diagnosing host CPU saturation or replenishment churn.
 
 For an explicit one-command local loop, `a3s-box run --pool-autostart --rm ...`
 starts a daemon on `--pool-socket` if none is already running. Foreground

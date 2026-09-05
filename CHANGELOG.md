@@ -8,6 +8,8 @@ All notable changes to A3S Box will be documented in this file.
 
 - VM boot observability now records bounded layout, specification, rootfs,
   launch, and readiness phase histograms, including warm-pool fills.
+- Warm-pool boot pressure now exposes an in-flight gauge and a failure counter
+  so operators can correlate host CPU saturation with concurrent boot work.
 
 ### Fixed
 
