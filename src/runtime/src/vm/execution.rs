@@ -170,6 +170,16 @@ impl VmManager {
         self.prom = Some(metrics);
     }
 
+    /// Start a drop-based timer for one stable VM boot phase.
+    ///
+    /// Cloning the optional metrics handle keeps the timer independent from the
+    /// manager borrow, so callers can hold it across asynchronous preparation
+    /// and launch operations. A missing metrics sink is deliberately cheap and
+    /// preserves the runtime's opt-in instrumentation behavior.
+    pub(crate) fn boot_phase_timer(&self, phase: &'static str) -> crate::prom::BootPhaseTimer {
+        crate::prom::BootPhaseTimer::new(self.prom.clone(), phase)
+    }
+
     /// Set the logging driver config. Threaded into the InstanceSpec so the shim
     /// runs the log processor for the box's lifetime.
     pub fn set_log_config(&mut self, log_config: a3s_box_core::log::LogConfig) {

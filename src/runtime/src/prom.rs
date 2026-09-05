@@ -14,8 +14,8 @@
 //! ```
 
 use prometheus::{
-    Error as PrometheusError, GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge,
-    IntGaugeVec, Opts, Registry,
+    Error as PrometheusError, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter,
+    IntGauge, IntGaugeVec, Opts, Registry,
 };
 
 /// Pre-registered Prometheus metrics for the Box runtime.
@@ -27,6 +27,12 @@ pub struct RuntimeMetrics {
     // -- VM lifecycle --
     /// VM boot duration in seconds.
     pub vm_boot_duration: Histogram,
+    /// VM boot duration split by a stable lifecycle phase.
+    ///
+    /// The `phase` label is intentionally bounded to runtime-owned values such
+    /// as `layout`, `prepare`, `launch`, and `readiness`; callers must not use
+    /// box IDs, image references, or other unbounded values as labels.
+    pub vm_boot_phase_duration: HistogramVec,
     /// Number of VMs by state (created, ready, busy, compacting, stopped).
     pub vm_count: IntGaugeVec,
     /// Total VMs created since process start.
@@ -98,6 +104,17 @@ impl RuntimeMetrics {
                 "VM boot duration in seconds",
             )
             .buckets(vec![0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0, 10.0]),
+        )?;
+
+        let vm_boot_phase_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "a3s_box_vm_boot_phase_duration_seconds",
+                "VM boot duration in seconds by lifecycle phase",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
+            ]),
+            &["phase"],
         )?;
 
         let vm_count = IntGaugeVec::new(
@@ -175,6 +192,7 @@ impl RuntimeMetrics {
 
         // Register all metrics
         registry.register(Box::new(vm_boot_duration.clone()))?;
+        registry.register(Box::new(vm_boot_phase_duration.clone()))?;
         registry.register(Box::new(vm_count.clone()))?;
         registry.register(Box::new(vm_created_total.clone()))?;
         registry.register(Box::new(vm_destroyed_total.clone()))?;
@@ -196,6 +214,7 @@ impl RuntimeMetrics {
         Ok(Self {
             registry,
             vm_boot_duration,
+            vm_boot_phase_duration,
             vm_count,
             vm_created_total,
             vm_destroyed_total,
@@ -216,6 +235,13 @@ impl RuntimeMetrics {
         })
     }
 
+    /// Record one bounded VM boot phase in seconds.
+    pub fn record_vm_boot_phase(&self, phase: &str, duration_secs: f64) {
+        self.vm_boot_phase_duration
+            .with_label_values(&[phase])
+            .observe(duration_secs);
+    }
+
     /// Encode all metrics in Prometheus text exposition format.
     pub fn encode(&self) -> String {
         use prometheus::Encoder;
@@ -226,6 +252,33 @@ impl RuntimeMetrics {
             .encode(&metric_families, &mut buffer)
             .expect("encode");
         String::from_utf8(buffer).expect("utf8")
+    }
+}
+
+/// Drop-based timer for recording a boot phase even when the phase returns an
+/// error. The metrics handle is cloned so the timer never borrows a
+/// [`VmManager`] across an await point.
+pub(crate) struct BootPhaseTimer {
+    metrics: Option<RuntimeMetrics>,
+    phase: &'static str,
+    started: std::time::Instant,
+}
+
+impl BootPhaseTimer {
+    pub(crate) fn new(metrics: Option<RuntimeMetrics>, phase: &'static str) -> Self {
+        Self {
+            metrics,
+            phase,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for BootPhaseTimer {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_vm_boot_phase(self.phase, self.started.elapsed().as_secs_f64());
+        }
     }
 }
 
@@ -298,6 +351,44 @@ mod tests {
         m.vm_boot_duration.observe(0.195);
         m.vm_boot_duration.observe(0.210);
         assert_eq!(m.vm_boot_duration.get_sample_count(), 2);
+    }
+
+    #[test]
+    fn test_vm_boot_phase_duration_observe_and_encode() {
+        let m = RuntimeMetrics::new();
+        m.record_vm_boot_phase("layout", 0.012);
+        m.record_vm_boot_phase("layout", 0.018);
+        m.record_vm_boot_phase("readiness", 0.125);
+
+        assert_eq!(
+            m.vm_boot_phase_duration
+                .with_label_values(&["layout"])
+                .get_sample_count(),
+            2
+        );
+        assert_eq!(
+            m.vm_boot_phase_duration
+                .with_label_values(&["readiness"])
+                .get_sample_count(),
+            1
+        );
+        let output = m.encode();
+        assert!(output.contains("a3s_box_vm_boot_phase_duration_seconds"));
+        assert!(output.contains("phase=\"layout\""));
+    }
+
+    #[test]
+    fn test_boot_phase_timer_records_on_drop() {
+        let m = RuntimeMetrics::new();
+        {
+            let _timer = BootPhaseTimer::new(Some(m.clone()), "launch");
+        }
+        assert_eq!(
+            m.vm_boot_phase_duration
+                .with_label_values(&["launch"])
+                .get_sample_count(),
+            1
+        );
     }
 
     #[test]

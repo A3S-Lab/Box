@@ -32,12 +32,15 @@ impl VmManager {
 
         tracing::info!(parent: &boot_span, box_id = %self.box_id, "Booting VM");
 
-        // 1. Prepare filesystem layout
-        let layout = match self
-            .prepare_layout()
-            .instrument(tracing::info_span!(parent: &boot_span, "prepare_layout"))
-            .await
-        {
+        // 1. Prepare filesystem layout. Keep the timer scoped to the layout
+        // operation itself so failed-boot cleanup is not charged to startup.
+        let layout_result = {
+            let _phase = self.boot_phase_timer("layout");
+            self.prepare_layout()
+                .instrument(tracing::info_span!(parent: &boot_span, "prepare_layout"))
+                .await
+        };
+        let layout = match layout_result {
             Ok(layout) => layout,
             Err(error) => {
                 self.cleanup_boot_failure().await;
@@ -61,7 +64,11 @@ impl VmManager {
         }
 
         // 2. Build InstanceSpec
-        let mut spec = match self.build_microvm_instance_spec(&layout) {
+        let spec_result = {
+            let _phase = self.boot_phase_timer("spec");
+            self.build_microvm_instance_spec(&layout)
+        };
+        let mut spec = match spec_result {
             Ok(s) => s,
             Err(e) => {
                 self.cleanup_boot_failure().await;
@@ -219,26 +226,30 @@ impl VmManager {
         // and the root filesystem presented to the guest. Providers may keep
         // the directory transport, or atomically publish a guest-native block
         // artifact after every host-side mutation is complete.
-        if let Some(resumed) = layout.resumed_rootfs.as_ref() {
-            spec.rootfs = resumed.source.clone();
-        } else {
-            spec.rootfs = match self.rootfs_provider.finalize_for_boot(
-                &box_dir,
-                &layout.rootfs_path,
-                crate::rootfs::RootfsFinalizeOptions {
-                    disk_mib: self.config.resources.disk_mb,
-                    persistent: self.config.persistent,
-                    snapshot: super::rootfs_snapshot_requested(&self.config),
-                    artifact_cache,
-                },
-            ) {
-                Ok(rootfs) => rootfs,
-                Err(error) => {
-                    self.cleanup_boot_failure().await;
-                    return Err(error);
-                }
-            };
-        }
+        let rootfs_result = {
+            let _phase = self.boot_phase_timer("rootfs");
+            if let Some(resumed) = layout.resumed_rootfs.as_ref() {
+                Ok(resumed.source.clone())
+            } else {
+                self.rootfs_provider.finalize_for_boot(
+                    &box_dir,
+                    &layout.rootfs_path,
+                    crate::rootfs::RootfsFinalizeOptions {
+                        disk_mib: self.config.resources.disk_mb,
+                        persistent: self.config.persistent,
+                        snapshot: super::rootfs_snapshot_requested(&self.config),
+                        artifact_cache,
+                    },
+                )
+            }
+        };
+        spec.rootfs = match rootfs_result {
+            Ok(rootfs) => rootfs,
+            Err(error) => {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        };
 
         // 3. Initialize VMM provider (use injected provider or default to VmController)
         if self.provider.is_none() {
@@ -260,7 +271,8 @@ impl VmManager {
         }
 
         // 4. Start VM via provider
-        let handler = {
+        let handler_result = {
+            let _phase = self.boot_phase_timer("launch");
             let provider = self
                 .provider
                 .as_ref()
@@ -269,15 +281,15 @@ impl VmManager {
                     hint: Some("Ensure VmManager has a provider set before boot".to_string()),
                 })?;
             let vm_start_span = tracing::info_span!(parent: &boot_span, "vm_start");
-            match async { provider.start(&spec).await }
+            async { provider.start(&spec).await }
                 .instrument(vm_start_span)
                 .await
-            {
-                Ok(h) => h,
-                Err(e) => {
-                    self.cleanup_boot_failure().await;
-                    return Err(e);
-                }
+        };
+        let handler = match handler_result {
+            Ok(handler) => handler,
+            Err(error) => {
+                self.cleanup_boot_failure().await;
+                return Err(error);
             }
         };
 
@@ -285,9 +297,10 @@ impl VmManager {
         *self.handler.write().await = Some(handler);
 
         // 5. Wait for guest ready
-        {
+        let readiness_result = {
+            let _phase = self.boot_phase_timer("readiness");
             let wait_span = tracing::info_span!(parent: &boot_span, "wait_for_ready");
-            if let Err(e) = async {
+            async {
                 self.wait_for_vm_running().await?;
 
                 // 5b. Become ready. A snapshot-restore boot resumes an already-booted
@@ -306,10 +319,10 @@ impl VmManager {
             }
             .instrument(wait_span)
             .await
-            {
-                self.cleanup_boot_failure().await;
-                return Err(e);
-            }
+        };
+        if let Err(error) = readiness_result {
+            self.cleanup_boot_failure().await;
+            return Err(error);
         }
 
         if self.rootfs_provider.guest_owns_diff_baseline() {

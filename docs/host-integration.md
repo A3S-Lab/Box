@@ -331,6 +331,21 @@ a3s-box run --rm --cpus 4 --memory 8g \
 a3s-box pool stop --socket /tmp/a3s-node-pool.sock
 ```
 
+To inspect cold-start cost, expose the pool daemon's optional metrics endpoint:
+
+```bash
+a3s-box pool start --image node:24-bookworm --size 2 \
+  --metrics-addr 127.0.0.1:9101
+curl -s http://127.0.0.1:9101/metrics
+```
+
+`a3s_box_vm_boot_duration_seconds` reports the end-to-end boot histogram and
+`a3s_box_vm_boot_phase_duration_seconds{phase=...}` breaks it down into the
+bounded `capability`, `layout`, `spec`, `rootfs`, `prepare`, `launch`, and
+`readiness` phases (only phases used by a selected backend emit samples). The
+phase label is deliberately stable, so it is safe to aggregate in Prometheus
+without introducing image or box-id cardinality.
+
 For an explicit one-command local loop, `a3s-box run --pool-autostart --rm ...`
 starts a daemon on `--pool-socket` if none is already running. Foreground
 `--timeout` is passed through to the warm-pool exec request.

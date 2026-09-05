@@ -55,8 +55,12 @@ impl VmManager {
         // This probe is deliberately before image pulls, rootfs mounts, volume
         // creation, or bundle writes. Every mandatory control is fail-closed.
         let capability_start = std::time::Instant::now();
-        let capabilities = probe_sandbox_capabilities_for(execution_plan.backend, None, None);
-        capabilities.require_ready()?;
+        let capabilities = {
+            let _phase = self.boot_phase_timer("capability");
+            let capabilities = probe_sandbox_capabilities_for(execution_plan.backend, None, None);
+            capabilities.require_ready()?;
+            capabilities
+        };
         // Sandbox logging is hosted by the packaged shim in a dedicated worker
         // mode so it survives detached CLI clients. Resolve it before image or
         // rootfs preparation to keep a missing artifact side-effect free.
@@ -100,7 +104,11 @@ impl VmManager {
         );
 
         let layout_start = std::time::Instant::now();
-        let layout = match self.prepare_layout().await {
+        let layout_result = {
+            let _phase = self.boot_phase_timer("layout");
+            self.prepare_layout().await
+        };
+        let layout = match layout_result {
             Ok(layout) => layout,
             Err(error) => {
                 self.cleanup_boot_failure().await;
@@ -113,6 +121,7 @@ impl VmManager {
         );
         self.image_config = layout.oci_config.clone();
 
+        let prepare_start = std::time::Instant::now();
         let prepare = (|| -> Result<_> {
             // Snapshot-backed rootfs overlays are mounted by `prepare_layout`.
             // Stage through the exact merged root before ownership planning or
@@ -234,6 +243,9 @@ impl VmManager {
 
             Ok((instance_spec, bundle_spec))
         })();
+        if let Some(ref prom) = self.prom {
+            prom.record_vm_boot_phase("prepare", prepare_start.elapsed().as_secs_f64());
+        }
 
         let (instance_spec, _bundle_spec) = match prepare {
             Ok(value) => value,
@@ -269,7 +281,11 @@ impl VmManager {
         };
         let launch_start = std::time::Instant::now();
         let controller = A3sOciController::new(runtime);
-        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match controller.start(launch).await {
+        let handler_result = {
+            let _phase = self.boot_phase_timer("launch");
+            controller.start(launch).await
+        };
+        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match handler_result {
             Ok(handler) => Box::new(handler),
             Err(error) => {
                 self.cleanup_boot_failure().await;
@@ -283,18 +299,21 @@ impl VmManager {
         *self.handler.write().await = Some(handler);
 
         let readiness_start = std::time::Instant::now();
-        if let Err(error) = async {
-            // The selected controller returns only after the exact runtime
-            // reports this exact generation as running. The generic VM grace
-            // period would merely recheck process liveness for a fixed 250 ms;
-            // the heartbeat path below already checks liveness on every
-            // attempt and returns immediately for a naturally exited one-shot.
-            #[cfg(unix)]
-            self.wait_for_exec_ready(&layout.exec_socket_path).await?;
-            Ok(())
-        }
-        .await
-        {
+        let readiness_result = {
+            let _phase = self.boot_phase_timer("readiness");
+            async {
+                // The selected controller returns only after the exact runtime
+                // reports this exact generation as running. The generic VM grace
+                // period would merely recheck process liveness for a fixed 250 ms;
+                // the heartbeat path below already checks liveness on every
+                // attempt and returns immediately for a naturally exited one-shot.
+                #[cfg(unix)]
+                self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+                Ok(())
+            }
+            .await
+        };
+        if let Err(error) = readiness_result {
             self.cleanup_boot_failure().await;
             return Err(error);
         }

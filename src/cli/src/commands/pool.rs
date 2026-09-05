@@ -243,8 +243,9 @@ pub struct PoolStartArgs {
     #[arg(long)]
     pub snapshot_fork: bool,
 
-    /// Serve Prometheus metrics (warm-pool hit/miss, VM boot, cache) on this
-    /// address (e.g. `127.0.0.1:9101`). Off when unset. Bind loopback — no auth.
+    /// Serve Prometheus metrics (warm-pool hit/miss, VM boot, boot phases, and
+    /// cache) on this address (e.g. `127.0.0.1:9101`). Off when unset. Bind
+    /// loopback — no auth.
     #[arg(long)]
     pub metrics_addr: Option<String>,
 
@@ -570,7 +571,7 @@ impl PoolRegistry {
         let mut pool = WarmPool::start(pool_config, box_config, EventEmitter::new(256))
             .await
             .map_err(|e| e.to_string())?;
-        // Record this pool's hit/miss/boot/cache metrics into the shared registry
+        // Record this pool's hit/miss/boot/phase/cache metrics into the shared registry
         // (set before Arc-wrapping — set_metrics needs &mut). All pools share one
         // RuntimeMetrics registry, so the daemon's /metrics endpoint aggregates them.
         if let Some(metrics) = &self.metrics {
@@ -806,7 +807,7 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
     // Optional Prometheus metrics for the long-lived daemon. One shared registry
     // is handed to every pool (set_metrics) and to the /metrics server; cloning a
     // RuntimeMetrics shares the underlying registry, so the server scrapes what the
-    // pools record (warm_pool hit/miss, vm_boot, cache).
+    // pools record (warm_pool hit/miss, vm_boot, boot phases, cache).
     let metrics = if args.metrics_addr.is_some() {
         a3s_box_runtime::RuntimeMetrics::try_new().ok()
     } else {
@@ -965,7 +966,7 @@ async fn reap_expired_leases_task(registry: std::sync::Arc<PoolRegistry>, lease_
 }
 
 /// Serve a Prometheus `/metrics` endpoint exposing the pool daemon's runtime
-/// metrics (warm_pool hit/miss, vm_boot, cache). Minimal raw-HTTP server,
+/// metrics (warm_pool hit/miss, vm_boot, boot phases, cache). Minimal raw-HTTP server,
 /// mirroring the monitor's metrics endpoint.
 async fn serve_pool_metrics(addr: String, metrics: a3s_box_runtime::RuntimeMetrics) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
