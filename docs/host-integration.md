@@ -357,6 +357,9 @@ Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image
 or resource shapes can initialize concurrently.
 
+Pool socket frames are capped at 16 MiB and incomplete frames time out after
+15 seconds; payloads larger than this are rejected.
+
 `a3s_box_warm_pool_boots_inflight` exposes the current aggregate boot pressure,
 while `a3s_box_warm_pool_boot_failures_total` counts failed warm-pool and
 on-demand pool-miss boots. Use these alongside the boot phase histograms when

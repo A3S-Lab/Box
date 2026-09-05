@@ -3,6 +3,18 @@
 use a3s_box_core::error::{BoxError, Result};
 use serde::{Deserialize, Serialize};
 
+/// Maximum encoded payload accepted by the pool socket protocol.
+///
+/// Pool responses can contain command output, so the limit is intentionally
+/// larger than a typical request while still preventing an untrusted peer from
+/// forcing an arbitrary allocation from the length prefix.
+pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+/// Bound how long a pool socket read may wait for a complete frame. VM boot and
+/// command execution happen after the request frame has been read, so a peer
+/// that connects and sends only a partial frame cannot pin a task indefinitely.
+pub const FRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Wire protocol for the `pool` Unix socket.
 ///
 /// Client→daemon request: run a one-shot command, query status, stop the
@@ -266,7 +278,8 @@ pub async fn run_client(req: PoolClientRun) -> Result<PoolClientOutput> {
         }))?,
     )
     .await?;
-    let resp: PoolRunResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolRunResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
 
     if let Some(err) = resp.error {
         return Err(BoxError::PoolError(err));
@@ -294,7 +307,9 @@ pub async fn status_client(socket: &str) -> Result<PoolStatusResponse> {
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Status)?).await?;
-    Ok(serde_json::from_slice(&read_frame(&mut stream).await?)?)
+    Ok(serde_json::from_slice(
+        &read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?,
+    )?)
 }
 
 #[cfg(not(windows))]
@@ -305,7 +320,8 @@ pub async fn stop_client(socket: &str) -> Result<()> {
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Stop)?).await?;
-    let resp: PoolStopResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolStopResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }
@@ -339,7 +355,8 @@ async fn lease_client(req: &PoolClientLease) -> Result<PoolLeaseResponse> {
         }))?,
     )
     .await?;
-    let resp: PoolLeaseResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolLeaseResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
     if let Some(error) = resp.error.as_ref() {
         return Err(BoxError::PoolError(error.clone()));
     }
@@ -361,7 +378,8 @@ async fn lease_exec_client(socket: &str, req: PoolLeaseExecRequest) -> Result<Po
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Exec(req))?).await?;
-    let resp: PoolRunResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolRunResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }
@@ -393,7 +411,8 @@ async fn release_client(socket: &str, lease_id: &str) -> Result<()> {
         }))?,
     )
     .await?;
-    let resp: PoolLeaseReleaseResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
+    let resp: PoolLeaseReleaseResponse =
+        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }
@@ -439,6 +458,16 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
+    if data.len() > MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "pool frame is {} bytes; maximum is {} bytes",
+                data.len(),
+                MAX_FRAME_SIZE
+            ),
+        ));
+    }
     w.write_all(&(data.len() as u32).to_le_bytes()).await?;
     w.write_all(data).await?;
     w.flush().await
@@ -453,13 +482,81 @@ where
 
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
-    let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+    let frame_len = u32::from_le_bytes(len) as usize;
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "pool frame is {} bytes; maximum is {} bytes",
+                frame_len, MAX_FRAME_SIZE
+            ),
+        ));
+    }
+    let mut buf = vec![0u8; frame_len];
     r.read_exact(&mut buf).await?;
     Ok(buf)
 }
 
+/// Read one pool frame with a bounded wait for the length prefix and payload.
+pub async fn read_frame_with_timeout<R>(
+    r: &mut R,
+    timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    tokio::time::timeout(timeout, read_frame(r))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for pool frame",
+            )
+        })?
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use super::{read_frame, read_frame_with_timeout, write_frame, MAX_FRAME_SIZE};
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_allocation() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer
+            .write_all(&((MAX_FRAME_SIZE as u32) + 1).to_le_bytes())
+            .await
+            .unwrap();
+
+        let error = read_frame(&mut reader).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_write() {
+        let (mut writer, _) = tokio::io::duplex(64);
+        let payload = vec![0u8; MAX_FRAME_SIZE + 1];
+
+        let error = write_frame(&mut writer, &payload).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn frame_read_timeout_returns_a_timed_out_error() {
+        let (_writer, mut reader) = tokio::io::duplex(64);
+
+        let error = read_frame_with_timeout(&mut reader, std::time::Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn lease_drop_releases_synchronously() {

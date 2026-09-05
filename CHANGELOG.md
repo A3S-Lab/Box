@@ -20,6 +20,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Pool socket framing now rejects payloads above 16 MiB and times out partial
+  reads, preventing malformed local clients from causing unbounded allocation or
+  permanently occupied connection tasks.
 - Warm-pool shutdown now detaches pooled and leased VMs before asynchronous
   teardown, so registry and pool locks are not held for the full destroy time.
 - CRI PodSandbox startup now defers the agent workload until
