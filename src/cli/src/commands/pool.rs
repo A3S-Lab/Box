@@ -670,15 +670,29 @@ impl PoolRegistry {
     async fn drain_all(&self) {
         self.draining
             .store(true, std::sync::atomic::Ordering::Release);
-        let mut leases = self.leases.lock().await;
-        for (_, leased) in leases.drain() {
+        // Remove leases from the registry before awaiting VM destruction so
+        // concurrent lease requests cannot be blocked by a slow teardown.
+        let leases = {
+            let mut leases = self.leases.lock().await;
+            leases.drain().map(|(_, leased)| leased).collect::<Vec<_>>()
+        };
+        for leased in leases {
             let _ = leased.vm.lock().await.destroy().await;
         }
 
-        let pools = self.pools.lock().await;
-        for entry in pools.values() {
-            entry.pool.signal_shutdown();
-            let _ = entry.pool.drain_idle().await;
+        // Snapshot pool handles and release the map lock before draining. Each
+        // pool detaches its idle VMs before awaiting their destruction, so other
+        // registry operations are not serialized behind the full shutdown.
+        let pools = {
+            let pools = self.pools.lock().await;
+            pools
+                .values()
+                .map(|entry| entry.pool.clone())
+                .collect::<Vec<_>>()
+        };
+        for pool in pools {
+            pool.signal_shutdown();
+            let _ = pool.drain_idle().await;
         }
     }
 
@@ -1711,6 +1725,18 @@ mod tests {
             result,
             Err(error) if error == "warm-pool daemon is shutting down"
         ));
+        assert!(registry.pools.lock().await.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_drain_all_marks_registry_draining_and_clears_empty_state() {
+        let registry = test_registry_with_lease_ttl(0);
+
+        registry.drain_all().await;
+
+        assert!(registry.draining.load(std::sync::atomic::Ordering::Acquire));
+        assert!(registry.leases.lock().await.is_empty());
         assert!(registry.pools.lock().await.is_empty());
     }
 

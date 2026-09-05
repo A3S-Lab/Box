@@ -445,11 +445,18 @@ impl WarmPool {
             let _ = handle.await;
         }
 
-        // Destroy all idle VMs
-        let mut idle = self.idle.lock().await;
-        let count = idle.len();
+        // Detach idle VMs before destroying them. VM teardown is asynchronous
+        // and must not hold the pool lock, otherwise acquire/release and the
+        // maintenance loop can be blocked for the entire drain duration.
+        let idle_vms = {
+            let mut idle = self.idle.lock().await;
+            let idle_vms = idle.drain(..).collect::<Vec<_>>();
+            Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
+            idle_vms
+        };
+        let count = idle_vms.len();
 
-        for warm_vm in idle.drain(..) {
+        for warm_vm in idle_vms {
             let mut vm = warm_vm.vm;
             if let Err(e) = vm.destroy().await {
                 tracing::warn!(
@@ -459,7 +466,6 @@ impl WarmPool {
                 );
             }
         }
-        Self::sync_idle_metric(self.metrics.as_ref(), 0);
 
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
@@ -476,9 +482,17 @@ impl WarmPool {
     /// Pair with [`Self::signal_shutdown`] first to stop the background replenisher;
     /// its task then exits on its own (it watches the shutdown channel).
     pub async fn drain_idle(&self) -> Result<()> {
-        let mut idle = self.idle.lock().await;
-        let count = idle.len();
-        for warm_vm in idle.drain(..) {
+        // Detach idle VMs before destroying them. Keeping `idle` locked while
+        // awaiting VM teardown blocks concurrent acquire/release operations and
+        // widens the shutdown race window for a replenishment batch.
+        let idle_vms = {
+            let mut idle = self.idle.lock().await;
+            let idle_vms = idle.drain(..).collect::<Vec<_>>();
+            Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
+            idle_vms
+        };
+        let count = idle_vms.len();
+        for warm_vm in idle_vms {
             let mut vm = warm_vm.vm;
             if let Err(e) = vm.destroy().await {
                 tracing::warn!(
@@ -488,7 +502,6 @@ impl WarmPool {
                 );
             }
         }
-        Self::sync_idle_metric(self.metrics.as_ref(), 0);
         self.stats.lock().await.idle_count = 0;
         tracing::info!(destroyed = count, "Warm pool idle VMs drained");
         Ok(())

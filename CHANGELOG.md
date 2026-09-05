@@ -20,6 +20,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Warm-pool shutdown now detaches pooled and leased VMs before asynchronous
+  teardown, so registry and pool locks are not held for the full destroy time.
 - CRI PodSandbox startup now defers the agent workload until
   `StartContainer`, validates resource annotations and resource updates
   fail-closed, reclaims stale bridge endpoints after a runtime restart, and
