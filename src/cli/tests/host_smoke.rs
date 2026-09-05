@@ -777,6 +777,10 @@ fn test_real_pool_warm_run() {
     // A second image (retag of the first) the daemon pre-warms at startup via --warm.
     let second = format!("coverage-pool-second:{}", unique_tag("img2"));
     cli.ok(&["tag", &image, &second]);
+    // A third image is intentionally not listed in --warm so its pool exercises
+    // the first-ready lazy initialization path on the first request.
+    let lazy = format!("coverage-pool-lazy:{}", unique_tag("lazy"));
+    cli.ok(&["tag", &image, &lazy]);
     let warm_spec = format!("{second}=2");
     let socket = cli
         .home_path()
@@ -916,12 +920,33 @@ fn test_real_pool_warm_run() {
     );
     assert!(out2.contains("multiimg-ok"), "unexpected output: {out2:?}");
 
+    // Lazy multi-image pool: the first VM serves immediately while the
+    // configured min_idle capacity continues filling in the background.
+    let (out3, err3, ok3) = cli.output(&[
+        "pool",
+        "run",
+        "--socket",
+        socket.as_str(),
+        "--image",
+        lazy.as_str(),
+        "--",
+        "echo",
+        "lazy-init-ok",
+    ]);
+    assert!(
+        ok3,
+        "lazy pool run failed.\nstdout:\n{out3}\nstderr:\n{err3}"
+    );
+    assert!(out3.contains("lazy-init-ok"), "unexpected output: {out3:?}");
+
     // Status: the daemon reports its per-image pools over the socket.
     let status = cli.ok(&["pool", "status", "--socket", socket.as_str()]);
     assert!(status.contains("IDLE"), "status header missing:\n{status}");
     assert!(
-        status.contains(image.as_str()) && status.contains(second.as_str()),
-        "status should list both warmed images:\n{status}"
+        status.contains(image.as_str())
+            && status.contains(second.as_str())
+            && status.contains(lazy.as_str()),
+        "status should list all pool images:\n{status}"
     );
 
     daemon.interrupt();

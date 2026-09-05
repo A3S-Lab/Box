@@ -278,8 +278,7 @@ pub async fn run_client(req: PoolClientRun) -> Result<PoolClientOutput> {
         }))?,
     )
     .await?;
-    let resp: PoolRunResponse =
-        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
+    let resp: PoolRunResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
 
     if let Some(err) = resp.error {
         return Err(BoxError::PoolError(err));
@@ -307,9 +306,7 @@ pub async fn status_client(socket: &str) -> Result<PoolStatusResponse> {
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Status)?).await?;
-    Ok(serde_json::from_slice(
-        &read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?,
-    )?)
+    Ok(serde_json::from_slice(&read_frame(&mut stream).await?)?)
 }
 
 #[cfg(not(windows))]
@@ -320,8 +317,7 @@ pub async fn stop_client(socket: &str) -> Result<()> {
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Stop)?).await?;
-    let resp: PoolStopResponse =
-        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
+    let resp: PoolStopResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }
@@ -355,8 +351,7 @@ async fn lease_client(req: &PoolClientLease) -> Result<PoolLeaseResponse> {
         }))?,
     )
     .await?;
-    let resp: PoolLeaseResponse =
-        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
+    let resp: PoolLeaseResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
     if let Some(error) = resp.error.as_ref() {
         return Err(BoxError::PoolError(error.clone()));
     }
@@ -378,8 +373,7 @@ async fn lease_exec_client(socket: &str, req: PoolLeaseExecRequest) -> Result<Po
         BoxError::PoolError(format!("Failed to connect to pool daemon at {socket}: {e}"))
     })?;
     write_frame(&mut stream, &serde_json::to_vec(&PoolRequest::Exec(req))?).await?;
-    let resp: PoolRunResponse =
-        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
+    let resp: PoolRunResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }
@@ -411,8 +405,7 @@ async fn release_client(socket: &str, lease_id: &str) -> Result<()> {
         }))?,
     )
     .await?;
-    let resp: PoolLeaseReleaseResponse =
-        serde_json::from_slice(&read_frame_with_timeout(&mut stream, FRAME_READ_TIMEOUT).await?)?;
+    let resp: PoolLeaseReleaseResponse = serde_json::from_slice(&read_frame(&mut stream).await?)?;
     if let Some(error) = resp.error {
         return Err(BoxError::PoolError(error));
     }

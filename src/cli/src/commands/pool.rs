@@ -19,7 +19,7 @@ use a3s_box_core::config::{BoxConfig, PoolConfig, ResourceConfig};
 use a3s_box_core::event::EventEmitter;
 #[cfg(not(windows))]
 use a3s_box_runtime::pool::client::{
-    read_frame, read_frame_with_timeout, run_client, stop_client, write_frame, FRAME_READ_TIMEOUT,
+    read_frame_with_timeout, run_client, stop_client, write_frame, FRAME_READ_TIMEOUT,
 };
 #[cfg(not(windows))]
 use a3s_box_runtime::pool::{
@@ -609,7 +609,7 @@ impl PoolRegistry {
             ksm: self.ksm,
             ..Default::default()
         };
-        let pool = WarmPool::start_with_metrics_and_boot_limiter(
+        let pool = WarmPool::start_with_metrics_and_boot_limiter_first_ready(
             pool_config,
             box_config,
             EventEmitter::new(256),
@@ -1450,6 +1450,8 @@ fn format_stats_json(image: &str, stats: &PoolStats) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
+    use a3s_box_runtime::pool::client::read_frame;
     use a3s_box_runtime::pool::PoolStats;
 
     fn sample_stats() -> PoolStats {

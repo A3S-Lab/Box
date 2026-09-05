@@ -167,6 +167,14 @@ enum TemplateState {
     Unavailable,
 }
 
+#[derive(Clone, Copy)]
+enum InitialFill {
+    /// Boot the configured `min_idle` count before returning from `start`.
+    Eager,
+    /// Boot one ready VM before returning and let maintenance fill the rest.
+    FirstReady,
+}
+
 impl WarmPool {
     /// Create and start the warm pool.
     ///
@@ -207,6 +215,50 @@ impl WarmPool {
         event_emitter: EventEmitter,
         metrics: Option<crate::prom::RuntimeMetrics>,
         global_boot_limiter: Option<Arc<Semaphore>>,
+    ) -> Result<Self> {
+        Self::start_with_metrics_and_boot_limiter_with_fill(
+            config,
+            box_config,
+            event_emitter,
+            metrics,
+            global_boot_limiter,
+            InitialFill::Eager,
+        )
+        .await
+    }
+
+    /// Create a warm pool with one ready VM on the critical path.
+    ///
+    /// This is intended for lazy, multi-image daemons: the first request for a
+    /// new pool can run as soon as one VM is ready while the maintenance loop
+    /// fills the remaining `min_idle` capacity in the background. The regular
+    /// [`Self::start_with_metrics_and_boot_limiter`] API keeps its eager-fill
+    /// behavior for explicit pool startup.
+    pub async fn start_with_metrics_and_boot_limiter_first_ready(
+        config: PoolConfig,
+        box_config: BoxConfig,
+        event_emitter: EventEmitter,
+        metrics: Option<crate::prom::RuntimeMetrics>,
+        global_boot_limiter: Option<Arc<Semaphore>>,
+    ) -> Result<Self> {
+        Self::start_with_metrics_and_boot_limiter_with_fill(
+            config,
+            box_config,
+            event_emitter,
+            metrics,
+            global_boot_limiter,
+            InitialFill::FirstReady,
+        )
+        .await
+    }
+
+    async fn start_with_metrics_and_boot_limiter_with_fill(
+        config: PoolConfig,
+        box_config: BoxConfig,
+        event_emitter: EventEmitter,
+        metrics: Option<crate::prom::RuntimeMetrics>,
+        global_boot_limiter: Option<Arc<Semaphore>>,
+        initial_fill: InitialFill,
     ) -> Result<Self> {
         if config.max_size == 0 {
             return Err(BoxError::PoolError(
@@ -266,8 +318,13 @@ impl WarmPool {
             metrics.warm_pool_capacity.set(pool.config.max_size as i64);
         }
 
-        // Initial fill
-        pool.fill_to_min().await;
+        // Initial fill. Lazy pools only wait for the first ready VM; the
+        // maintenance loop immediately schedules the remaining capacity.
+        let initial_target = match initial_fill {
+            InitialFill::Eager => pool.config.min_idle,
+            InitialFill::FirstReady => pool.config.min_idle.min(1),
+        };
+        pool.fill_to_target(initial_target).await;
 
         // Start background maintenance loop
         let handle = pool.spawn_maintenance_loop();
@@ -509,7 +566,7 @@ impl WarmPool {
 
     /// Remove and destroy specific idle VMs by their box IDs.
     ///
-    /// Used when `fill_to_min` partially fails and needs to rollback
+    /// Used when a fill partially fails and needs to roll back
     /// successfully added VMs.
     async fn remove_idle_vms(&self, box_ids: &[String]) {
         // First pass: collect indices of VMs to remove
@@ -556,10 +613,10 @@ impl WarmPool {
                 tracing::warn!(
                     box_id = %box_id,
                     error = %e,
-                    "Failed to destroy VM during fill_to_min rollback"
+                    "Failed to destroy VM during pool fill rollback"
                 );
             } else {
-                tracing::debug!(box_id = %box_id, "Destroyed VM during fill_to_min rollback");
+                tracing::debug!(box_id = %box_id, "Destroyed VM during pool fill rollback");
             }
         }
     }
@@ -899,21 +956,16 @@ impl WarmPool {
         ))
     }
 
-    /// Fill the pool to the minimum idle count.
-    async fn fill_to_min(&self) {
+    /// Fill the pool to a specific idle target.
+    async fn fill_to_target(&self, target: usize) {
         let current = self.idle.lock().await.len();
-        let needed = self.config.min_idle.saturating_sub(current);
+        let needed = target.saturating_sub(current);
 
         if needed == 0 {
             return;
         }
 
-        tracing::debug!(
-            current,
-            needed,
-            min_idle = self.config.min_idle,
-            "Replenishing warm pool"
-        );
+        tracing::debug!(current, needed, target, "Replenishing warm pool");
 
         // Track VMs added in this fill attempt so we can clean up on failure.
         let mut added_ids: Vec<String> = Vec::new();
@@ -962,7 +1014,7 @@ impl WarmPool {
         if failed && !added_ids.is_empty() {
             tracing::info!(
                 count = added_ids.len(),
-                "Cleaning up VMs added before fill_to_min failed"
+                "Cleaning up VMs added before pool fill failed"
             );
             self.remove_idle_vms(&added_ids).await;
         }
@@ -998,6 +1050,10 @@ impl WarmPool {
                     30
                 },
             );
+            let mut maintenance = tokio::time::interval(check_interval);
+            // The first tick is immediate, which lets a first-ready lazy pool
+            // continue filling without waiting for the full maintenance period.
+            maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             // Dynamic min_idle starts from config, adjusted by scaler
             let mut effective_min_idle = config.min_idle;
@@ -1015,7 +1071,7 @@ impl WarmPool {
                             break;
                         }
                     }
-                    _ = tokio::time::sleep(check_interval) => {
+                    _ = maintenance.tick() => {
                         // Evict expired VMs
                         if config.idle_ttl_secs > 0 {
                             Self::evict_expired_static(

@@ -455,7 +455,9 @@ shares that limiter across image pools and on-demand misses, and failed
 background replenishment retries use capped exponential backoff. B3 lazy pool
 initialization is serialized per exact image/resource shape, while
 different shapes may initialize concurrently; shutdown fencing prevents a
-late initializer from publishing a pool after drain begins. The complete
+late initializer from publishing a pool after drain begins. Lazy first-use
+creation waits for one ready VM and fills the remaining idle target in the
+background. The complete
 B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 
