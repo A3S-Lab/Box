@@ -215,7 +215,19 @@ impl WarmPool {
     /// Attach Prometheus metrics to this pool.
     pub fn set_metrics(&mut self, metrics: crate::prom::RuntimeMetrics) {
         metrics.warm_pool_capacity.set(self.config.max_size as i64);
+        metrics.warm_pool_size.set(
+            self.idle
+                .try_lock()
+                .map(|idle| idle.len() as i64)
+                .unwrap_or_default(),
+        );
         self.metrics = Some(metrics);
+    }
+
+    fn sync_idle_metric(metrics: Option<&crate::prom::RuntimeMetrics>, idle_count: usize) {
+        if let Some(metrics) = metrics {
+            metrics.warm_pool_size.set(idle_count as i64);
+        }
     }
 
     /// Acquire a ready VM from the pool.
@@ -376,6 +388,7 @@ impl WarmPool {
                 );
             }
         }
+        Self::sync_idle_metric(self.metrics.as_ref(), 0);
 
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
@@ -404,6 +417,7 @@ impl WarmPool {
                 );
             }
         }
+        Self::sync_idle_metric(self.metrics.as_ref(), 0);
         self.stats.lock().await.idle_count = 0;
         tracing::info!(destroyed = count, "Warm pool idle VMs drained");
         Ok(())
@@ -447,6 +461,7 @@ impl WarmPool {
             if let Ok(mut stats) = self.stats.try_lock() {
                 stats.idle_count = idle_count;
             }
+            Self::sync_idle_metric(self.metrics.as_ref(), idle_count);
         }
 
         // Destroy collected VMs (outside of pool lock)
@@ -754,6 +769,7 @@ impl WarmPool {
                         vm,
                         created_at: Instant::now(),
                     });
+                    Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
                     let mut stats = self.stats.lock().await;
                     stats.idle_count = idle.len();
                     added_ids.push(box_id.clone());
@@ -793,6 +809,7 @@ impl WarmPool {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let scaler = self.scaler.clone();
         let template = Arc::clone(&self.template);
+        let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             let check_interval = std::time::Duration::from_secs(
@@ -822,6 +839,7 @@ impl WarmPool {
                                 &idle,
                                 &stats,
                                 &event_emitter,
+                                metrics.as_ref(),
                                 config.idle_ttl_secs,
                             ).await;
                         }
@@ -899,6 +917,7 @@ impl WarmPool {
                                             vm,
                                             created_at: Instant::now(),
                                         });
+                                        Self::sync_idle_metric(metrics.as_ref(), pool.len());
                                         let mut s = stats.lock().await;
                                         s.total_created += 1;
                                         s.idle_count = pool.len();
@@ -932,6 +951,7 @@ impl WarmPool {
         idle: &Arc<Mutex<Vec<WarmVm>>>,
         stats: &Arc<Mutex<PoolStats>>,
         event_emitter: &EventEmitter,
+        metrics: Option<&crate::prom::RuntimeMetrics>,
         idle_ttl_secs: u64,
     ) {
         let ttl = std::time::Duration::from_secs(idle_ttl_secs);
@@ -952,6 +972,7 @@ impl WarmPool {
         drop(pool);
 
         let evicted_count = expired.len();
+        Self::sync_idle_metric(metrics, after_count);
         for warm_vm in expired {
             let mut vm = warm_vm.vm;
             let _ = vm.destroy().await;
