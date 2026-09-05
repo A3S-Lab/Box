@@ -347,6 +347,12 @@ bounded `capability`, `layout`, `spec`, `rootfs`, `prepare`, `launch`, and
 phase label is deliberately stable, so it is safe to aggregate in Prometheus
 without introducing image or box-id cardinality.
 
+`a3s_box_warm_pool_initial_fill_duration_seconds` records the time before a pool
+is published. For lazy pools this is the first-ready latency; for explicit eager
+startup it covers the configured initial fill. Use its p95 together with the VM
+boot histogram to compare Dify deployment startup choices without adding image
+labels or unbounded cardinality.
+
 `--boot-concurrency` bounds simultaneous VM boots during initial fill,
 background replenishment, and on-demand misses. The same limit is shared by
 all image pools in one daemon, so a multi-image `--warm` setup cannot multiply

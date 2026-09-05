@@ -324,7 +324,13 @@ impl WarmPool {
             InitialFill::Eager => pool.config.min_idle,
             InitialFill::FirstReady => pool.config.min_idle.min(1),
         };
+        let initial_fill_started = Instant::now();
         pool.fill_to_target(initial_target).await;
+        if let Some(metrics) = &pool.metrics {
+            metrics
+                .warm_pool_initial_fill_duration
+                .observe(initial_fill_started.elapsed().as_secs_f64());
+        }
 
         // Start background maintenance loop
         let handle = pool.spawn_maintenance_loop();
@@ -1720,6 +1726,10 @@ mod tests {
             Ok(mut pool) => {
                 assert!(pool.metrics.is_some());
                 assert_eq!(metrics.warm_pool_capacity.get(), 5);
+                assert_eq!(
+                    metrics.warm_pool_initial_fill_duration.get_sample_count(),
+                    1
+                );
                 let _ = pool.drain().await;
             }
             Err(_) => {

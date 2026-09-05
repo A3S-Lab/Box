@@ -23,6 +23,8 @@ All notable changes to A3S Box will be documented in this file.
 - Explicit `--warm image=count` entries are now validated against `--max` before
   any VM boots, keeping the per-image pool capacity bounded and avoiding wasted
   startup work after a sizing typo.
+- Warm-pool metrics now expose initial-fill duration, including first-ready
+  latency for lazy pools, so deployment startup regressions can be measured.
 
 ### Fixed
 

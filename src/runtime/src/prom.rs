@@ -79,6 +79,12 @@ pub struct RuntimeMetrics {
     pub warm_pool_boots_inflight: IntGauge,
     /// Total warm-pool VM boot failures, including failed replenishment attempts.
     pub warm_pool_boot_failures_total: IntCounter,
+    /// Time spent on the initial warm-pool fill before the pool is published.
+    ///
+    /// For lazy pools this is the time until the first ready VM (the remaining
+    /// idle target is filled asynchronously); eager pools report the complete
+    /// configured initial fill.
+    pub warm_pool_initial_fill_duration: Histogram,
 }
 
 impl RuntimeMetrics {
@@ -204,6 +210,16 @@ impl RuntimeMetrics {
             "Warm-pool VM boot failures",
         )?;
 
+        let warm_pool_initial_fill_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "a3s_box_warm_pool_initial_fill_duration_seconds",
+                "Warm-pool initial fill duration in seconds",
+            )
+            .buckets(vec![
+                0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0,
+            ]),
+        )?;
+
         // Register all metrics
         registry.register(Box::new(vm_boot_duration.clone()))?;
         registry.register(Box::new(vm_boot_phase_duration.clone()))?;
@@ -226,6 +242,7 @@ impl RuntimeMetrics {
         registry.register(Box::new(warm_pool_misses.clone()))?;
         registry.register(Box::new(warm_pool_boots_inflight.clone()))?;
         registry.register(Box::new(warm_pool_boot_failures_total.clone()))?;
+        registry.register(Box::new(warm_pool_initial_fill_duration.clone()))?;
 
         Ok(Self {
             registry,
@@ -250,6 +267,7 @@ impl RuntimeMetrics {
             warm_pool_misses,
             warm_pool_boots_inflight,
             warm_pool_boot_failures_total,
+            warm_pool_initial_fill_duration,
         })
     }
 
@@ -503,12 +521,14 @@ mod tests {
         m.warm_pool_misses.inc();
         m.warm_pool_boots_inflight.inc();
         m.warm_pool_boot_failures_total.inc();
+        m.warm_pool_initial_fill_duration.observe(1.25);
         assert_eq!(m.warm_pool_capacity.get(), 10);
         assert_eq!(m.warm_pool_size.get(), 5);
         assert_eq!(m.warm_pool_hits.get(), 1);
         assert_eq!(m.warm_pool_misses.get(), 1);
         assert_eq!(m.warm_pool_boots_inflight.get(), 1);
         assert_eq!(m.warm_pool_boot_failures_total.get(), 1);
+        assert_eq!(m.warm_pool_initial_fill_duration.get_sample_count(), 1);
     }
 
     #[test]
