@@ -198,10 +198,15 @@ fn resolve_compose_path(
     search_directory: &std::path::Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(p) = explicit_path {
-        if !p.exists() {
-            return Err(format!("Compose file not found: {}", p.display()).into());
+        let path = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            search_directory.join(p)
+        };
+        if !path.exists() {
+            return Err(format!("Compose file not found: {}", path.display()).into());
         }
-        Ok(p.to_path_buf())
+        Ok(path)
     } else {
         match COMPOSE_FILES
             .iter()
@@ -450,23 +455,15 @@ async fn execute_up(
         })?;
         let mut desired_box_config = project.build_box_config(svc_name, Some(&default_net))?;
         desired_box_config.isolation = isolation;
-        let (resolved_volumes, volume_names) =
-            match resolve_service_volumes(&desired_box_config.volumes, &project.base_dir) {
-                Ok(volumes) => volumes,
-                Err(error) => {
-                    return rollback_compose_up(
-                        &mut state,
-                        &started_services,
-                        &created_networks,
-                        error,
-                    )
-                    .await;
-                }
-            };
         // Hash the effective host paths so a Compose file is independent of
         // the caller's current working directory and stale generations are
-        // recreated after this normalization is introduced.
-        desired_box_config.volumes = resolved_volumes.clone();
+        // recreated after this normalization is introduced. Named-volume and
+        // Secret materialization remain after the unchanged-service check.
+        desired_box_config.volumes = desired_box_config
+            .volumes
+            .iter()
+            .map(|spec| resolve_compose_bind_path(spec, &project.base_dir))
+            .collect();
         let config_hash = service_config_hash(service, &desired_box_config)?;
         let existing = find_existing_service(project_name, svc_name)?;
         if let Some((existing, existing_hash)) = existing.as_ref() {
@@ -552,6 +549,18 @@ async fn execute_up(
             println!(" ✓");
         }
 
+        let (resolved_volumes, volume_names) = match resolve_service_volumes(&box_config.volumes) {
+            Ok(volumes) => volumes,
+            Err(error) => {
+                return rollback_compose_up(
+                    &mut state,
+                    &started_services,
+                    &created_networks,
+                    error,
+                )
+                .await;
+            }
+        };
         box_config.volumes = resolved_volumes.clone();
         let image = box_config.image.clone();
         let record_env: HashMap<String, String> = box_config.extra_env.iter().cloned().collect();
@@ -998,7 +1007,6 @@ fn find_existing_service(
 
 fn resolve_service_volumes(
     volume_specs: &[String],
-    base_dir: &std::path::Path,
 ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     let mut resolved = Vec::new();
     let mut names = Vec::new();
@@ -1008,7 +1016,7 @@ fn resolve_service_volumes(
         if let Some(name) = volume_name {
             names.push(name);
         }
-        resolved.push(resolve_compose_bind_path(&resolved_spec, base_dir));
+        resolved.push(resolved_spec);
     }
 
     Ok((resolved, names))
@@ -1017,8 +1025,7 @@ fn resolve_service_volumes(
 /// Resolve an explicitly relative bind source against the Compose file's
 /// directory. Docker Compose treats `./config:/etc/app/config` as relative to
 /// the project file, not to the caller's current working directory. Named
-/// volumes have already been replaced with absolute VolumeStore paths by
-/// `resolve_named_volume`, so they pass through unchanged.
+/// volumes pass through unchanged for later VolumeStore resolution.
 fn resolve_compose_bind_path(volume_spec: &str, base_dir: &std::path::Path) -> String {
     let (mount, mode) = match volume_spec.rsplit_once(':') {
         Some((mount, candidate)) if candidate == "ro" || candidate == "rw" => {

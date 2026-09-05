@@ -5,15 +5,18 @@ fn compose_bind_sources_are_relative_to_the_compose_file() {
     let base = std::path::Path::new("/project/deploy");
     assert_eq!(
         resolve_compose_bind_path("./config/app.conf:/etc/app.conf:ro", base),
-        "/project/deploy/./config/app.conf:/etc/app.conf:ro"
+        format!(
+            "{}:/etc/app.conf:ro",
+            base.join("./config/app.conf").display()
+        )
     );
     assert_eq!(
         resolve_compose_bind_path("../data:/data", base),
-        "/project/deploy/../data:/data"
+        format!("{}:/data", base.join("../data").display())
     );
     assert_eq!(
         resolve_compose_bind_path(".:/workspace:rw", base),
-        "/project/deploy/.:/workspace:rw"
+        format!("{}:/workspace:rw", base.join(".").display())
     );
 }
 
@@ -28,6 +31,26 @@ fn compose_bind_resolution_preserves_absolute_and_named_sources() {
     ] {
         assert_eq!(resolve_compose_bind_path(spec, base), spec);
     }
+}
+
+#[test]
+fn explicit_relative_compose_file_uses_an_absolute_project_base() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let deploy = directory.path().join("deploy");
+    std::fs::create_dir(&deploy).unwrap();
+    std::fs::write(deploy.join("compose.yaml"), "services: {}\n").unwrap();
+
+    let selected = resolve_compose_path(
+        Some(std::path::Path::new("deploy/compose.yaml")),
+        directory.path(),
+    )
+    .unwrap();
+    assert!(selected.is_absolute());
+    assert_eq!(selected, deploy.join("compose.yaml"));
+    assert_eq!(
+        resolve_compose_bind_path("./config:/config:ro", selected.parent().unwrap()),
+        format!("{}:/config:ro", deploy.join("./config").display())
+    );
 }
 
 #[test]
