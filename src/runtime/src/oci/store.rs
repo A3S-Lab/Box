@@ -4,7 +4,7 @@
 //! a persistent `index.json` file. Supports LRU eviction when the store
 //! exceeds a configured maximum size.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -378,7 +378,16 @@ impl ImageStore {
     /// Get total size of all stored images in bytes.
     pub async fn total_size(&self) -> u64 {
         let index = self.index.read().await;
-        index.values().map(|img| img.size_bytes).sum()
+        // Multiple tags (and digest-pinned aliases) can point at the same
+        // content-addressed directory.  Count each digest once; summing index
+        // entries reports a fictitious disk usage and makes LRU eviction fire
+        // early as soon as an image has more than one reference.
+        let mut seen_digests = HashSet::new();
+        index
+            .values()
+            .filter(|image| seen_digests.insert(image.digest.as_str()))
+            .map(|image| image.size_bytes)
+            .sum()
     }
 
     /// Load index from disk.
@@ -899,6 +908,38 @@ mod tests {
 
         store.remove("img:latest").await.unwrap();
         assert!(!path.exists(), "layout should be removed after final tag");
+    }
+
+    #[tokio::test]
+    async fn test_total_size_counts_shared_digest_once() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
+        let first = store
+            .put(
+                "img:v1",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                "img:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.total_size().await,
+            first.size_bytes,
+            "shared content must contribute one directory to disk usage"
+        );
     }
 
     #[tokio::test]
