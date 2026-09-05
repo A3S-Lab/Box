@@ -260,31 +260,36 @@ impl VolumeStore {
 
     /// Remove a volume by name. Returns error if in use.
     pub fn remove(&self, name: &str, force: bool) -> Result<VolumeConfig> {
-        let config = self.with_write_lock(|volumes| {
+        self.with_write_lock(|volumes| {
             let config = volumes
-                .remove(name)
+                .get(name)
+                .cloned()
                 .ok_or_else(|| BoxError::ConfigError(format!("volume '{}' not found", name)))?;
 
             if config.is_in_use() && !force {
-                // Put it back
-                volumes.insert(name.to_string(), config.clone());
                 return Err(BoxError::ConfigError(format!(
                     "volume '{}' is in use by {} box(es); use --force to remove",
                     name,
                     config.in_use_by.len()
                 )));
             }
+
+            // Keep the directory removal under the same lock as the metadata
+            // mutation. If this happened after the lock were released, a
+            // concurrent get_or_create could materialize a new volume with the
+            // same name and this stale cleanup would delete its data.
+            let vol_dir = self.volumes_dir.join(name);
+            remove_managed_volume_path(&vol_dir).map_err(|error| {
+                BoxError::ConfigError(format!(
+                    "failed to remove volume '{}' data directory {}: {error}",
+                    name,
+                    vol_dir.display()
+                ))
+            })?;
+
+            volumes.remove(name);
             Ok(config)
-        })?;
-
-        // Remove the data directory outside the lock; it is keyed by name and
-        // the removal is idempotent.
-        let vol_dir = self.volumes_dir.join(name);
-        if vol_dir.exists() {
-            std::fs::remove_dir_all(&vol_dir).ok();
-        }
-
-        Ok(config)
+        })
     }
 
     /// List all volumes.
