@@ -196,6 +196,55 @@ fn test_disconnect_sandbox_from_network_store_is_idempotent() {
 }
 
 #[tokio::test]
+async fn test_load_state_reclaims_stale_network_endpoint() {
+    // A CRI restart keeps the sandbox record for kubelet status, but its VM
+    // manager is gone.  The bridge endpoint must be released at the same time;
+    // otherwise every restart leaks one IP from the persistent NetworkStore.
+    let state_dir = tempfile::tempdir().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    let network_dir = tempfile::tempdir().unwrap();
+    let network_store = NetworkStore::new(network_dir.path().join("networks.json"));
+    network_store
+        .create(a3s_box_core::NetworkConfig::new("cri-net", "10.244.0.0/24").unwrap())
+        .unwrap();
+
+    let mut sandbox = test_networked_sandbox("stale-restart-sandbox");
+    let allocation =
+        connect_sandbox_to_network_store(&network_store, "cri-net", &sandbox.id, &sandbox.name)
+            .unwrap();
+    sandbox.network_ip = allocation.ip;
+
+    let state_store = Arc::new(JsonStateStore::new(&state_path));
+    state_store
+        .save(&crate::state::PersistedState {
+            sandboxes: vec![sandbox.clone()],
+            containers: vec![],
+        })
+        .unwrap();
+
+    let mut service = make_test_service();
+    service.store = Arc::new(PersistentCriStore::new(state_store));
+    service.network_store = Arc::new(network_store);
+    service.load_state().await;
+
+    let network = service.network_store.get("cri-net").unwrap().unwrap();
+    assert!(
+        !network.endpoints.contains_key(&sandbox.id),
+        "restart reconciliation must release the stale sandbox endpoint"
+    );
+    assert_eq!(
+        service
+            .store
+            .sandboxes
+            .get(&sandbox.id)
+            .await
+            .unwrap()
+            .state,
+        SandboxState::NotReady
+    );
+}
+
+#[tokio::test]
 async fn test_run_pod_sandbox_cleans_network_endpoint_on_pod_ip_mismatch() {
     let svc = make_test_service();
     svc.network_store

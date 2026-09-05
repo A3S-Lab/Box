@@ -504,6 +504,15 @@ impl BoxRuntimeService {
                 self.store
                     .update_sandbox_state(&sandbox.id, SandboxState::NotReady)
                     .await;
+                // A bridge endpoint is persisted independently in
+                // `NetworkStore`.  The CRI process has no VM manager for a
+                // sandbox loaded after restart, so its endpoint is stale even
+                // when the sandbox record is retained for kubelet status.  If
+                // it is left behind, every restart consumes another address
+                // and a recreated pod can eventually fail with IP exhaustion.
+                // Disconnect it while the persisted sandbox still carries the
+                // network annotation that identifies the owning network.
+                self.disconnect_sandbox_network(&sandbox).await;
                 // Crash recovery: a graceful shutdown already destroyed the VMs,
                 // but a crash (SIGKILL/OOM) leaves the shim microVM, its overlay
                 // mount, and the rootfs dirs orphaned. Reap them so they do not
