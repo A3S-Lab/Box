@@ -801,7 +801,7 @@ fn test_real_pool_warm_run() {
         socket.as_str(),
     ]);
 
-    // The daemon binds the socket once WarmPool::start returns; wait for it.
+    // The daemon binds the socket before pre-warming; wait for it.
     let sock_path = cli.home_path().join("pool.sock");
     let start = std::time::Instant::now();
     while !sock_path.exists() {

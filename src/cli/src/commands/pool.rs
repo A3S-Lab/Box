@@ -512,6 +512,14 @@ impl Drop for LeaseExecGuard {
 /// daemon can serve sandboxes of different images.
 struct PoolRegistry {
     pools: tokio::sync::Mutex<std::collections::HashMap<PoolKey, PoolEntry>>,
+    /// Per-key initialization locks. Weak values avoid retaining image keys
+    /// after all callers have finished creating or using a pool.
+    pool_initializers: tokio::sync::Mutex<
+        std::collections::HashMap<PoolKey, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
+    /// Set before shutdown drains pools so a concurrent lazy initializer cannot
+    /// publish a newly booted pool after the daemon has begun teardown.
+    draining: std::sync::atomic::AtomicBool,
     #[cfg(not(windows))]
     leases: tokio::sync::Mutex<std::collections::HashMap<String, LeasedVm>>,
     #[cfg(not(windows))]
@@ -539,19 +547,40 @@ struct PoolRegistry {
 }
 
 impl PoolRegistry {
+    async fn pool_creation_lock(&self, key: &PoolKey) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut initializers = self.pool_initializers.lock().await;
+        initializers.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = initializers.get(key).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        initializers.insert(key.clone(), std::sync::Arc::downgrade(&lock));
+        lock
+    }
+
     /// The pool entry for `image`, lazily started (and pre-warmed in the background)
-    /// on first use, with `min_idle = size`. `WarmPool::start` returns once the
-    /// replenisher is spawned, so holding the map lock across it is brief. The
-    /// concurrency semaphore is sized to the pool's `max_size`.
+    /// on first use, with `min_idle = size`. Initialization is serialized only
+    /// for the exact pool key; unrelated image/resource shapes can initialize
+    /// concurrently and are still bounded by the daemon-wide boot limiter.
     async fn get_or_create_with_size(
         &self,
         key: PoolKey,
         size: usize,
     ) -> Result<PoolEntry, String> {
-        let mut pools = self.pools.lock().await;
-        if let Some(entry) = pools.get(&key) {
-            return Ok(entry.clone());
+        let creation_lock = self.pool_creation_lock(&key).await;
+        let _creation_guard = creation_lock.lock().await;
+
+        if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("warm-pool daemon is shutting down".to_string());
         }
+        {
+            let pools = self.pools.lock().await;
+            if let Some(entry) = pools.get(&key) {
+                return Ok(entry.clone());
+            }
+        }
+
         let max_size = self.max.max(size);
         let pool_config = PoolConfig {
             enabled: true,
@@ -589,13 +618,27 @@ impl PoolRegistry {
         .map_err(|e| e.to_string())?;
         let pool = std::sync::Arc::new(pool);
         let entry = PoolEntry {
-            pool,
+            pool: pool.clone(),
             #[cfg(not(windows))]
             sem: std::sync::Arc::new(tokio::sync::Semaphore::new(max_size)),
             #[cfg(not(windows))]
             max_size,
         };
-        pools.insert(key, entry.clone());
+
+        let publish = {
+            let mut pools = self.pools.lock().await;
+            if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+                false
+            } else {
+                pools.insert(key, entry.clone());
+                true
+            }
+        };
+        if !publish {
+            pool.signal_shutdown();
+            let _ = pool.drain_idle().await;
+            return Err("warm-pool daemon is shutting down".to_string());
+        }
         Ok(entry)
     }
 
@@ -625,6 +668,8 @@ impl PoolRegistry {
     /// Stop replenishment and destroy idle VMs across all pools (shutdown).
     #[cfg(not(windows))]
     async fn drain_all(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
         let mut leases = self.leases.lock().await;
         for (_, leased) in leases.drain() {
             let _ = leased.vm.lock().await.destroy().await;
@@ -829,6 +874,8 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
 
     let registry = std::sync::Arc::new(PoolRegistry {
         pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        draining: std::sync::atomic::AtomicBool::new(false),
         #[cfg(not(windows))]
         leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         #[cfg(not(windows))]
@@ -1615,6 +1662,8 @@ mod tests {
     fn test_registry_with_lease_ttl(lease_ttl: u64) -> std::sync::Arc<PoolRegistry> {
         std::sync::Arc::new(PoolRegistry {
             pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            draining: std::sync::atomic::AtomicBool::new(false),
             leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             default_image: Some("alpine:latest".to_string()),
             size: 1,
@@ -1630,6 +1679,39 @@ mod tests {
                 DEFAULT_POOL_BOOT_CONCURRENCY,
             )),
         })
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_pool_creation_lock_is_key_scoped() {
+        let registry = test_registry_with_lease_ttl(0);
+        let first_key = PoolKey::default_for_image("alpine:latest");
+        let second_key = PoolKey::default_for_image("busybox:latest");
+        let first = registry.pool_creation_lock(&first_key).await;
+        let first_again = registry.pool_creation_lock(&first_key).await;
+        let second = registry.pool_creation_lock(&second_key).await;
+
+        assert!(std::sync::Arc::ptr_eq(&first, &first_again));
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_draining_registry_rejects_lazy_pool_creation() {
+        let registry = test_registry_with_lease_ttl(0);
+        registry
+            .draining
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let result = registry
+            .get_or_create(PoolKey::default_for_image("alpine:latest"))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "warm-pool daemon is shutting down"
+        ));
+        assert!(registry.pools.lock().await.is_empty());
     }
 
     #[cfg(not(windows))]
@@ -1923,6 +2005,8 @@ mod tests {
         let server_socket = socket_arg.clone();
         let registry = std::sync::Arc::new(PoolRegistry {
             pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            draining: std::sync::atomic::AtomicBool::new(false),
             leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             default_image: None,
             size: 1,
