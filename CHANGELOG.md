@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.4] — 2026-09-05
+
 ### Added
 
 - Lazy pool creation now waits only for its first ready VM; remaining `min_idle`
