@@ -28,6 +28,29 @@ struct WarmVm {
 
 type BootVmFuture<'a> = Pin<Box<dyn Future<Output = Result<VmManager>> + Send + 'a>>;
 
+/// Keeps the in-flight warm-pool boot gauge balanced even when a boot task is
+/// cancelled or panics while its JoinSet is being drained.
+struct BootMetricGuard {
+    metrics: Option<crate::prom::RuntimeMetrics>,
+}
+
+impl BootMetricGuard {
+    fn new(metrics: Option<crate::prom::RuntimeMetrics>) -> Self {
+        if let Some(metrics) = &metrics {
+            metrics.warm_pool_boots_inflight.inc();
+        }
+        Self { metrics }
+    }
+}
+
+impl Drop for BootMetricGuard {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.warm_pool_boots_inflight.dec();
+        }
+    }
+}
+
 /// Statistics about the warm pool.
 #[derive(Debug, Clone)]
 pub struct PoolStats {
@@ -487,13 +510,20 @@ impl WarmPool {
 
     /// Boot a new VM using the pool's template config.
     async fn boot_new_vm(&self) -> Result<VmManager> {
-        let vm = Self::boot_or_restore(
+        let _boot_guard = BootMetricGuard::new(self.metrics.clone());
+        let result = Self::boot_or_restore(
             self.config.snapshot_fork,
             &self.box_config,
             &self.event_emitter,
             &self.template,
         )
-        .await?;
+        .await;
+        if result.is_err() {
+            if let Some(metrics) = &self.metrics {
+                metrics.warm_pool_boot_failures_total.inc();
+            }
+        }
+        let vm = result?;
 
         let mut stats = self.stats.lock().await;
         stats.total_created += 1;
@@ -576,6 +606,7 @@ impl WarmPool {
         template: &Arc<Mutex<TemplateState>>,
         needed: usize,
         max_concurrent_boots: usize,
+        metrics: Option<crate::prom::RuntimeMetrics>,
     ) -> Vec<Result<VmManager>> {
         if needed == 0 {
             return Vec::new();
@@ -591,7 +622,9 @@ impl WarmPool {
                 let config = box_config.clone();
                 let emitter = event_emitter.clone();
                 let shared_template = Arc::clone(template);
+                let boot_metrics = metrics.clone();
                 set.spawn(async move {
+                    let _boot_guard = BootMetricGuard::new(boot_metrics);
                     WarmPool::boot_or_restore(snapshot_fork, &config, &emitter, &shared_template)
                         .await
                 });
@@ -599,12 +632,18 @@ impl WarmPool {
             }
 
             if let Some(result) = set.join_next().await {
-                results.push(match result {
+                let result = match result {
                     Ok(result) => result,
                     Err(error) => Err(BoxError::PoolError(format!(
                         "Warm-pool boot task failed: {error}"
                     ))),
-                });
+                };
+                if result.is_err() {
+                    if let Some(metrics) = &metrics {
+                        metrics.warm_pool_boot_failures_total.inc();
+                    }
+                }
+                results.push(result);
             }
         }
 
@@ -821,6 +860,7 @@ impl WarmPool {
             &self.template,
             needed,
             self.config.max_concurrent_boots,
+            self.metrics.clone(),
         )
         .await;
 
@@ -951,6 +991,7 @@ impl WarmPool {
                                 &template,
                                 needed,
                                 config.max_concurrent_boots,
+                                metrics.clone(),
                             )
                             .await;
                             for result in results {
@@ -1149,6 +1190,16 @@ mod tests {
         assert_eq!(bounded_boot_limit(8, 2), 2);
         assert_eq!(bounded_boot_limit(2, 8), 2);
         assert_eq!(bounded_boot_limit(8, 0), 1);
+    }
+
+    #[test]
+    fn boot_metric_guard_balances_inflight_gauge() {
+        let metrics = crate::prom::RuntimeMetrics::new();
+        {
+            let _guard = BootMetricGuard::new(Some(metrics.clone()));
+            assert_eq!(metrics.warm_pool_boots_inflight.get(), 1);
+        }
+        assert_eq!(metrics.warm_pool_boots_inflight.get(), 0);
     }
 
     // --- PoolStats tests ---

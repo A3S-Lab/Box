@@ -75,6 +75,10 @@ pub struct RuntimeMetrics {
     pub warm_pool_hits: IntCounter,
     /// Total VMs created fresh (warm pool miss).
     pub warm_pool_misses: IntCounter,
+    /// Number of VM boots currently in flight across warm pools.
+    pub warm_pool_boots_inflight: IntGauge,
+    /// Total warm-pool VM boot failures, including failed replenishment attempts.
+    pub warm_pool_boot_failures_total: IntCounter,
 }
 
 impl RuntimeMetrics {
@@ -190,6 +194,16 @@ impl RuntimeMetrics {
             "VMs created fresh (warm pool miss)",
         )?;
 
+        let warm_pool_boots_inflight = IntGauge::new(
+            "a3s_box_warm_pool_boots_inflight",
+            "VM boots currently in flight across warm pools",
+        )?;
+
+        let warm_pool_boot_failures_total = IntCounter::new(
+            "a3s_box_warm_pool_boot_failures_total",
+            "Warm-pool VM boot failures",
+        )?;
+
         // Register all metrics
         registry.register(Box::new(vm_boot_duration.clone()))?;
         registry.register(Box::new(vm_boot_phase_duration.clone()))?;
@@ -210,6 +224,8 @@ impl RuntimeMetrics {
         registry.register(Box::new(warm_pool_capacity.clone()))?;
         registry.register(Box::new(warm_pool_hits.clone()))?;
         registry.register(Box::new(warm_pool_misses.clone()))?;
+        registry.register(Box::new(warm_pool_boots_inflight.clone()))?;
+        registry.register(Box::new(warm_pool_boot_failures_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -232,6 +248,8 @@ impl RuntimeMetrics {
             warm_pool_capacity,
             warm_pool_hits,
             warm_pool_misses,
+            warm_pool_boots_inflight,
+            warm_pool_boot_failures_total,
         })
     }
 
@@ -483,10 +501,14 @@ mod tests {
         m.warm_pool_size.set(5);
         m.warm_pool_hits.inc();
         m.warm_pool_misses.inc();
+        m.warm_pool_boots_inflight.inc();
+        m.warm_pool_boot_failures_total.inc();
         assert_eq!(m.warm_pool_capacity.get(), 10);
         assert_eq!(m.warm_pool_size.get(), 5);
         assert_eq!(m.warm_pool_hits.get(), 1);
         assert_eq!(m.warm_pool_misses.get(), 1);
+        assert_eq!(m.warm_pool_boots_inflight.get(), 1);
+        assert_eq!(m.warm_pool_boot_failures_total.get(), 1);
     }
 
     #[test]
