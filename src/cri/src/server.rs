@@ -3,11 +3,13 @@
 //! Listens on a Unix domain socket for CRI RuntimeService and ImageService RPCs.
 //! Also starts an HTTP streaming server for exec/attach/port-forward.
 
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
@@ -35,6 +37,78 @@ pub struct CriServer {
 
 /// Default streaming server bind address.
 const DEFAULT_STREAMING_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 18800);
+/// A stale Unix socket can be removed, but a live socket must never be
+/// replaced: doing so lets a second CRI server steal the pathname while the
+/// first one continues writing state and managing the same sandboxes.
+const SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Prepare a CRI Unix-socket pathname for binding.
+///
+/// Unix sockets survive an ungraceful process exit as filesystem entries, so a
+/// stale entry is normal.  The old implementation unconditionally removed the
+/// pathname, which made a second `a3s-box-cri` silently take over a live
+/// server's endpoint.  Probe a socket first and fail closed when it is live,
+/// unresponsive, or has been replaced while we were probing.  Never remove a
+/// regular file or symlink at the configured path.
+async fn prepare_socket_path(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "CRI socket path {} exists but is not a Unix socket; refusing to remove it",
+                path.display()
+            ),
+        ));
+    }
+
+    match tokio::time::timeout(SOCKET_PROBE_TIMEOUT, UnixStream::connect(path)).await {
+        Ok(Ok(_stream)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("CRI socket {} is already in use", path.display()),
+            ));
+        }
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out probing CRI socket {}; refusing to remove a possibly live endpoint",
+                    path.display()
+                ),
+            ));
+        }
+    }
+
+    // Do not unlink a pathname that changed between the probe and cleanup.
+    let current = std::fs::symlink_metadata(path)?;
+    if !current.file_type().is_socket()
+        || current.dev() != metadata.dev()
+        || current.ino() != metadata.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "CRI socket path {} changed while probing; refusing to remove it",
+                path.display()
+            ),
+        ));
+    }
+
+    std::fs::remove_file(path)
+}
 
 impl CriServer {
     /// Create a new CRI server.
@@ -62,19 +136,24 @@ impl CriServer {
 
     /// Start serving CRI RPCs on the Unix socket.
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Remove existing socket file if present
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path)?;
-        }
-
         // Ensure parent directory exists
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Start streaming server
+        // A previous process may have left a stale socket after a crash.  Do
+        // this check before binding either endpoint, and never replace a live
+        // server's pathname.
+        prepare_socket_path(&self.socket_path).await?;
+
+        // Bind the TCP streaming endpoint before the UDS.  If either endpoint
+        // is unavailable, no background streaming task or CRI socket is left
+        // behind for a later process to mistake for a healthy server.
         let streaming_server = StreamingServer::new(self.streaming_addr).bind().await?;
         let streaming_handle = streaming_server.handle();
+
+        let uds = UnixListener::bind(&self.socket_path)?;
+        let uds_stream = UnixListenerStream::new(uds);
 
         tokio::spawn(async move {
             if let Err(e) = streaming_server.serve().await {
@@ -90,9 +169,6 @@ impl CriServer {
         .with_runtime_options(self.runtime_options.clone());
         runtime_service.load_state().await;
         let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone());
-
-        let uds = UnixListener::bind(&self.socket_path)?;
-        let uds_stream = UnixListenerStream::new(uds);
 
         tracing::info!(
             socket = %self.socket_path.display(),
@@ -117,6 +193,49 @@ impl CriServer {
         result?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_socket_is_removed_before_bind() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cri.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        drop(listener);
+        assert!(path.exists());
+
+        prepare_socket_path(&path).await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn live_socket_is_not_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cri.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+
+        let error = prepare_socket_path(&path)
+            .await
+            .expect_err("a live listener must block takeover");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn regular_file_at_socket_path_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cri.sock");
+        std::fs::write(&path, b"keep me").unwrap();
+
+        let error = prepare_socket_path(&path)
+            .await
+            .expect_err("a regular file must not be unlinked");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
     }
 }
 
