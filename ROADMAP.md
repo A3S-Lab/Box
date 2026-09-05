@@ -463,7 +463,9 @@ downloads do not add serial registry latency while a failed pull leaves no
 partial project resources. The `a3s_box_warm_pool_initial_fill_duration_seconds`
 histogram records first-ready latency for lazy pools and complete fill time for
 eager pools. Compose health-dependency convergence polls at 500ms while leaving
-the health worker cadence and caller timeout unchanged. The complete
+the health worker cadence and caller timeout unchanged; detached workers also
+probe immediately after `start_period` rather than waiting an extra interval.
+The complete
 B3 storage/network qualification gate remains open, and production CPU and
 tail-latency measurements remain an open gate.
 

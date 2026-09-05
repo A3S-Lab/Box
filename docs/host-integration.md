@@ -373,7 +373,9 @@ pressure bounded.
 When a service waits on `condition: service_healthy`, Compose checks the state
 file every 500ms. The health worker's own probe interval and the user-supplied
 convergence timeout are unchanged; this only removes an avoidable polling gap
-before dependent Dify services start.
+before dependent Dify services start. The first health probe runs as soon as
+the configured `start_period` ends, and subsequent probes keep the configured
+interval.
 
 Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image

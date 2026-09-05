@@ -31,6 +31,8 @@ All notable changes to A3S Box will be documented in this file.
 - Compose health-dependency convergence now polls at 500ms instead of 2s,
   reducing avoidable startup delay without changing probe cadence or timeout
   behavior.
+- Detached health workers now run their first probe when `start_period` ends,
+  instead of adding a full `interval` delay before the first probe.
 
 ### Fixed
 

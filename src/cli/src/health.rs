@@ -206,18 +206,14 @@ async fn run_health_loop(
     hc: HealthCheck,
     expected_generation: Option<i64>,
 ) {
-    use std::time::Duration;
-
-    // Honour start_period before the first probe
-    if hc.start_period_secs > 0 {
-        tokio::time::sleep(Duration::from_secs(hc.start_period_secs)).await;
-    }
-
-    let interval = Duration::from_secs(hc.interval_secs.max(1));
+    // Schedule the first probe at the end of start_period instead of waiting
+    // for an additional interval. This matches the runtime health scheduler
+    // and removes an avoidable interval from Compose dependency convergence.
+    let mut probe_schedule = health_probe_schedule(&hc);
     let timeout_ns = probe_timeout_ns(&hc);
 
     loop {
-        tokio::time::sleep(interval).await;
+        probe_schedule.tick().await;
 
         if !health_worker_is_current(&box_id, expected_generation) {
             break;
@@ -246,6 +242,23 @@ async fn run_health_loop(
             Err(_) => continue,
         }
     }
+}
+
+#[cfg(not(windows))]
+fn health_probe_schedule(hc: &HealthCheck) -> tokio::time::Interval {
+    let (first_probe_delay, interval) = health_probe_timing(hc);
+    let first_probe_at = tokio::time::Instant::now() + first_probe_delay;
+    let mut schedule = tokio::time::interval_at(first_probe_at, interval);
+    schedule.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    schedule
+}
+
+#[cfg(not(windows))]
+fn health_probe_timing(hc: &HealthCheck) -> (std::time::Duration, std::time::Duration) {
+    (
+        std::time::Duration::from_secs(hc.start_period_secs),
+        std::time::Duration::from_secs(hc.interval_secs.max(1)),
+    )
 }
 
 #[cfg(not(windows))]
@@ -367,6 +380,25 @@ mod tests {
         };
         let interval = std::time::Duration::from_secs(hc.interval_secs.max(1));
         assert_eq!(interval, std::time::Duration::from_secs(1));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_health_probe_timing_avoids_extra_interval() {
+        let hc = HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 7,
+        };
+        assert_eq!(
+            health_probe_timing(&hc),
+            (
+                std::time::Duration::from_secs(7),
+                std::time::Duration::from_secs(30)
+            )
+        );
     }
 
     #[test]
