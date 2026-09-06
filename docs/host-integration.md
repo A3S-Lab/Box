@@ -33,6 +33,14 @@ be safe on developer laptops and CI workers. Host-backed `--core` and `--host`
 runs require an OCI archive by default; set `A3S_BOX_ALLOW_REGISTRY_PULL=1` only
 when you intentionally want live registry pulls.
 
+The host soak runner takes start, phase, final, and independent periodic
+resource samples. Set `--soak-sample-interval SECS` (or
+`A3S_BOX_SOAK_SAMPLE_INTERVAL_SECS`) to control the periodic cadence; the
+default is 300 seconds. The TSV includes Box shim counts, Box-process RSS bytes,
+and aggregate open-file descriptors when `lsof` is available. These counters
+are host-wide observations and are intended for leak-slope verification, not
+per-service Dify attribution.
+
 ## macOS core smoke
 
 Use Apple Silicon. Intel macOS is not a supported runtime target.
