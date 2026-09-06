@@ -43,19 +43,6 @@ pub(super) async fn wait_for_healthy(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::HEALTH_WAIT_POLL_INTERVAL;
-
-    #[test]
-    fn health_wait_poll_interval_is_subsecond() {
-        assert_eq!(
-            HEALTH_WAIT_POLL_INTERVAL,
-            std::time::Duration::from_millis(500)
-        );
-    }
-}
-
 pub(super) fn validate_compose_up_platform_support() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
@@ -144,5 +131,18 @@ pub(super) async fn wait_for_completed(
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HEALTH_WAIT_POLL_INTERVAL;
+
+    #[test]
+    fn health_wait_poll_interval_is_subsecond() {
+        assert_eq!(
+            HEALTH_WAIT_POLL_INTERVAL,
+            std::time::Duration::from_millis(500)
+        );
     }
 }
