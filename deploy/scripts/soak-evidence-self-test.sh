@@ -830,6 +830,26 @@ EOF
 expect_failure host-resource-metrics-bad 'host resource sample counters must be non-negative integers' \
     "$VERIFY_SCRIPT" --kind host "$host_resource_metrics_bad"
 
+log "Verifying versioned host capability results"
+host_capability_results_missing="$TMP_ROOT/host-capability-results-missing"
+make_host_bundle "$host_capability_results_missing"
+printf 'host_capability_results_version=1\n' >>"$host_capability_results_missing/metadata.txt"
+expect_failure host-capability-results-missing 'missing required file: .*capability-results.tsv' \
+    "$VERIFY_SCRIPT" --kind host "$host_capability_results_missing"
+
+host_capability_results_bad="$TMP_ROOT/host-capability-results-bad"
+make_host_bundle "$host_capability_results_bad"
+printf 'host_capability_results_version=1\n' >>"$host_capability_results_bad/metadata.txt"
+cat >"$host_capability_results_bad/capability-results.tsv" <<'EOF'
+iteration	capability	started_at	finished_at	duration_secs	result	exit_code
+1	bench-leak	2026-06-29T00:00:00Z	2026-06-29T00:00:01Z	1	pass	0
+1	bench-race	2026-06-29T00:00:02Z	2026-06-29T00:00:01Z	1	pass	0
+2	bench-leak	2026-06-29T00:00:03Z	2026-06-29T00:00:04Z	1	pass	0
+2	bench-race	2026-06-29T00:00:05Z	2026-06-29T00:00:06Z	1	pass	0
+EOF
+expect_failure host-capability-results-bad 'host capability result finishes before it starts' \
+    "$VERIFY_SCRIPT" --kind host "$host_capability_results_bad"
+
 log "Verifying host soak runner rehearsal summary"
 host_runner_dir="$TMP_ROOT/host-runner"
 "$HOST_INTEGRATION" --no-pure --linux-run --soak --soak-no-bench \
@@ -838,8 +858,12 @@ host_runner_dir="$TMP_ROOT/host-runner"
 require_grep '^result=pass$' "$host_runner_dir/summary.txt"
 require_grep '^duration_secs=[0-9]+$' "$host_runner_dir/summary.txt"
 require_grep '^host_resource_metrics_version=1$' "$host_runner_dir/metadata.txt"
+require_grep '^host_capability_results_version=1$' "$host_runner_dir/metadata.txt"
 require_grep '^timestamp	phase	shims	mounts	box_dirs	socket_dirs	a3s_home_bytes	process_rss_bytes	process_fd_count$' \
     "$host_runner_dir/resource-samples.tsv"
+require_grep '^iteration	capability	started_at	finished_at	duration_secs	result	exit_code$' \
+    "$host_runner_dir/capability-results.tsv"
+require_grep '^1	linux-run	.*	pass	0$' "$host_runner_dir/capability-results.tsv"
 require_grep 'PASS: host soak evidence verified' "$host_runner_dir/verify.out"
 "$VERIFY_SCRIPT" --kind host "$host_runner_dir" >"$host_runner_dir.verify.out"
 require_grep 'PASS: host soak evidence verified' "$host_runner_dir.verify.out"
