@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.5] — 2026-09-06
+
+### Added
+
+- Soak evidence now records per-capability results and versioned host-resource
+  samples, making long-running runtime checks easier to compare across hosts.
+
 ### Fixed
 
 - Warm-pool shutdown joins in-progress replenishment before draining idle VMs,
@@ -14,6 +21,14 @@ All notable changes to A3S Box will be documented in this file.
 - macOS shim builds stage the fully versioned runtime dylibs and aliases
   without rewriting their already-signed install names. Packaging preserves
   valid code signatures instead of producing libraries rejected by the loader.
+- CRI `RunPodSandbox` smoke requests now use a bounded 120-second
+  cancellation deadline so cold MicroVM boot and guest-native rootfs assembly
+  are not cancelled by a short client default.
+- OCI-only runtime builds keep cleanup and socket-layout support without pulling
+  hypervisor modules into the build; optional scale and Compose test features
+  remain correctly wired.
+- Orphan-sweep integration checks require `/proc` liveness evidence before
+  reclaiming a process, while non-Linux hosts use the safe unit contract.
 
 ## [3.2.4] — 2026-09-05
 

@@ -56,6 +56,27 @@ unchanged. Windows x86_64 also has an explicit qualification-only
 `microvm`/`all` composition for the externally launched OCI Runtime WHPX
 service; it is not enabled by default and is not yet a production claim.
 
+> **Looking for a lightweight Agent sandbox?** See [`a3s-sandbox`](https://github.com/A3S-Lab/Sandbox).
+> That project focuses on lightweight cross-platform command sandboxing;
+> **A3S Box** focuses on local OCI workloads, Docker-like lifecycle
+> management, and explicit MicroVM or shared-kernel isolation boundaries.
+
+## Current release line
+
+The `3.2.5` release line keeps the public SDK contract stable while packaging
+the latest runtime and integration fixes from `main`:
+
+| Area | Latest behavior |
+| --- | --- |
+| Warm pools | Shutdown joins replenishment and tears down owned VMs with bounded concurrency, preventing orphaned shims and sockets. |
+| CRI | PodSandbox creation defers the agent workload until `StartContainer`, with fail-closed resource validation and a bounded cold-boot smoke deadline. |
+| Runtime builds | OCI-only builds retain durable cleanup and socket handling without hypervisor dependencies. |
+| Evidence | Soak runs record per-capability results and versioned host-resource samples for reproducible comparisons. |
+
+Installers, native binaries, and the Rust, Python, TypeScript, and Go SDK
+artifacts are published from the same versioned release tag. See the
+[Changelog](CHANGELOG.md) for the complete patch history.
+
 > [!NOTE]
 > The current SDK-only Sandbox adapter now covers five exact-generation rails:
 >
