@@ -812,6 +812,24 @@ rm "$host_missing_declared_log/iteration-2-bench-race.log"
 expect_failure host-missing-declared-log 'missing required file: .*iteration-2-bench-race.log' \
     "$VERIFY_SCRIPT" --kind host "$host_missing_declared_log"
 
+log "Verifying versioned host resource metrics"
+host_resource_metrics_missing="$TMP_ROOT/host-resource-metrics-missing"
+make_host_bundle "$host_resource_metrics_missing"
+printf 'host_resource_metrics_version=1\n' >>"$host_resource_metrics_missing/metadata.txt"
+expect_failure host-resource-metrics-missing 'missing required column' \
+    "$VERIFY_SCRIPT" --kind host "$host_resource_metrics_missing"
+
+host_resource_metrics_bad="$TMP_ROOT/host-resource-metrics-bad"
+make_host_bundle "$host_resource_metrics_bad"
+printf 'host_resource_metrics_version=1\n' >>"$host_resource_metrics_bad/metadata.txt"
+cat >"$host_resource_metrics_bad/resource-samples.tsv" <<'EOF'
+timestamp	phase	shims	mounts	box_dirs	socket_dirs	a3s_home_bytes	process_rss_bytes	process_fd_count
+2026-06-29T00:00:00Z	start	1	1	1	1	100	oops	3
+2026-06-29T00:01:00Z	final	1	1	1	1	100	200	3
+EOF
+expect_failure host-resource-metrics-bad 'host resource sample counters must be non-negative integers' \
+    "$VERIFY_SCRIPT" --kind host "$host_resource_metrics_bad"
+
 log "Verifying host soak runner rehearsal summary"
 host_runner_dir="$TMP_ROOT/host-runner"
 "$HOST_INTEGRATION" --no-pure --linux-run --soak --soak-no-bench \
@@ -819,6 +837,9 @@ host_runner_dir="$TMP_ROOT/host-runner"
     >"$host_runner_dir.out"
 require_grep '^result=pass$' "$host_runner_dir/summary.txt"
 require_grep '^duration_secs=[0-9]+$' "$host_runner_dir/summary.txt"
+require_grep '^host_resource_metrics_version=1$' "$host_runner_dir/metadata.txt"
+require_grep '^timestamp	phase	shims	mounts	box_dirs	socket_dirs	a3s_home_bytes	process_rss_bytes	process_fd_count$' \
+    "$host_runner_dir/resource-samples.tsv"
 require_grep 'PASS: host soak evidence verified' "$host_runner_dir/verify.out"
 "$VERIFY_SCRIPT" --kind host "$host_runner_dir" >"$host_runner_dir.verify.out"
 require_grep 'PASS: host soak evidence verified' "$host_runner_dir.verify.out"

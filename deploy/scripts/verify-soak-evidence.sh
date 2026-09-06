@@ -1467,6 +1467,18 @@ verify_host() {
     require_kv_non_negative_int "$metadata" soak_duration_secs "host" >/dev/null
     require_kv_non_negative_int "$metadata" soak_iterations "host" >/dev/null
     require_kv_non_negative_int "$metadata" soak_interval_secs "host" >/dev/null
+    local resource_metrics_version
+    resource_metrics_version="$(kv_get "$metadata" host_resource_metrics_version)"
+    if [ -n "$resource_metrics_version" ]; then
+        is_non_negative_int "$resource_metrics_version" ||
+            fail "host metadata host_resource_metrics_version is not a non-negative integer: $resource_metrics_version"
+        [ "$resource_metrics_version" -eq 1 ] ||
+            fail "host metadata host_resource_metrics_version is unsupported: $resource_metrics_version"
+    else
+        # Bundles created before process-level resource metrics were added are
+        # still readable. New runners always emit version 1 below.
+        resource_metrics_version=0
+    fi
     apply_metadata_verifier_gates \
         "$metadata" \
         "host" \
@@ -1475,8 +1487,19 @@ verify_host() {
         soak_verify_min_sample_span_secs \
         soak_verify_max_sample_gap_secs
     require_nonempty_file "$samples"
-    tsv_require_columns "$samples" timestamp phase shims mounts box_dirs socket_dirs
-    tsv_require_non_negative_int_columns "$samples" "host" shims mounts box_dirs socket_dirs
+    if [ "$resource_metrics_version" -ge 1 ]; then
+        tsv_require_columns \
+            "$samples" \
+            timestamp phase shims mounts box_dirs socket_dirs \
+            a3s_home_bytes process_rss_bytes process_fd_count
+        tsv_require_non_negative_int_columns \
+            "$samples" \
+            "host" \
+            shims mounts box_dirs socket_dirs a3s_home_bytes process_rss_bytes process_fd_count
+    else
+        tsv_require_columns "$samples" timestamp phase shims mounts box_dirs socket_dirs
+        tsv_require_non_negative_int_columns "$samples" "host" shims mounts box_dirs socket_dirs
+    fi
     tsv_require_monotonic_timestamps "$samples" "host"
     tsv_require_phase_count "$samples" start 1 "host"
     tsv_require_phase_count "$samples" final 1 "host"
