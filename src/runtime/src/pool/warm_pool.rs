@@ -175,6 +175,23 @@ enum InitialFill {
     FirstReady,
 }
 
+/// Inputs for one bounded warm-pool boot batch.
+///
+/// Keeping the batch request together makes the concurrency boundary explicit
+/// and avoids a long parameter list that is easy to get out of sync when new
+/// pool-wide controls are added.
+struct BootBatch<'a> {
+    snapshot_fork: bool,
+    box_config: &'a BoxConfig,
+    event_emitter: &'a EventEmitter,
+    template: &'a Arc<Mutex<TemplateState>>,
+    needed: usize,
+    max_concurrent_boots: usize,
+    metrics: Option<crate::prom::RuntimeMetrics>,
+    boot_limiter: Arc<Semaphore>,
+    global_boot_limiter: Option<Arc<Semaphore>>,
+}
+
 impl WarmPool {
     /// Create and start the warm pool.
     ///
@@ -721,34 +738,25 @@ impl WarmPool {
     /// resource burst, so only `max_concurrent_boots` tasks are in flight at
     /// once. Each task owns cloned inputs, allowing the set to remain
     /// `'static` while the caller retains its pool state.
-    async fn boot_batch(
-        snapshot_fork: bool,
-        box_config: &BoxConfig,
-        event_emitter: &EventEmitter,
-        template: &Arc<Mutex<TemplateState>>,
-        needed: usize,
-        max_concurrent_boots: usize,
-        metrics: Option<crate::prom::RuntimeMetrics>,
-        boot_limiter: Arc<Semaphore>,
-        global_boot_limiter: Option<Arc<Semaphore>>,
-    ) -> Vec<Result<VmManager>> {
-        if needed == 0 {
+    async fn boot_batch(batch: BootBatch<'_>) -> Vec<Result<VmManager>> {
+        if batch.needed == 0 {
             return Vec::new();
         }
 
-        let limit = bounded_boot_limit(needed, max_concurrent_boots);
+        let limit = bounded_boot_limit(batch.needed, batch.max_concurrent_boots);
         let mut set = tokio::task::JoinSet::new();
         let mut launched = 0usize;
-        let mut results = Vec::with_capacity(needed);
+        let mut results = Vec::with_capacity(batch.needed);
 
-        while launched < needed || !set.is_empty() {
-            while launched < needed && set.len() < limit {
-                let config = box_config.clone();
-                let emitter = event_emitter.clone();
-                let shared_template = Arc::clone(template);
-                let boot_metrics = metrics.clone();
-                let pool_boot_limiter = boot_limiter.clone();
-                let daemon_boot_limiter = global_boot_limiter.clone();
+        while launched < batch.needed || !set.is_empty() {
+            while launched < batch.needed && set.len() < limit {
+                let config = batch.box_config.clone();
+                let emitter = batch.event_emitter.clone();
+                let shared_template = Arc::clone(batch.template);
+                let boot_metrics = batch.metrics.clone();
+                let pool_boot_limiter = batch.boot_limiter.clone();
+                let daemon_boot_limiter = batch.global_boot_limiter.clone();
+                let snapshot_fork = batch.snapshot_fork;
                 set.spawn(async move {
                     let _boot_permits =
                         acquire_boot_permits(pool_boot_limiter, daemon_boot_limiter).await?;
@@ -767,7 +775,7 @@ impl WarmPool {
                     ))),
                 };
                 if result.is_err() {
-                    if let Some(metrics) = &metrics {
+                    if let Some(metrics) = &batch.metrics {
                         metrics.warm_pool_boot_failures_total.inc();
                     }
                 }
@@ -976,17 +984,17 @@ impl WarmPool {
         // Track VMs added in this fill attempt so we can clean up on failure.
         let mut added_ids: Vec<String> = Vec::new();
         let mut failed = false;
-        let results = Self::boot_batch(
-            self.config.snapshot_fork,
-            &self.box_config,
-            &self.event_emitter,
-            &self.template,
+        let results = Self::boot_batch(BootBatch {
+            snapshot_fork: self.config.snapshot_fork,
+            box_config: &self.box_config,
+            event_emitter: &self.event_emitter,
+            template: &self.template,
             needed,
-            self.config.max_concurrent_boots,
-            self.metrics.clone(),
-            self.boot_limiter.clone(),
-            self.global_boot_limiter.clone(),
-        )
+            max_concurrent_boots: self.config.max_concurrent_boots,
+            metrics: self.metrics.clone(),
+            boot_limiter: self.boot_limiter.clone(),
+            global_boot_limiter: self.global_boot_limiter.clone(),
+        })
         .await;
 
         for result in results {
@@ -1120,17 +1128,17 @@ impl WarmPool {
 
                             // Overlap readiness waits while keeping the number of
                             // expensive VM boots bounded by configuration.
-                            let results = Self::boot_batch(
-                                config.snapshot_fork,
-                                &box_config,
-                                &event_emitter,
-                                &template,
+                            let results = Self::boot_batch(BootBatch {
+                                snapshot_fork: config.snapshot_fork,
+                                box_config: &box_config,
+                                event_emitter: &event_emitter,
+                                template: &template,
                                 needed,
-                                config.max_concurrent_boots,
-                                metrics.clone(),
-                                boot_limiter.clone(),
-                                global_boot_limiter.clone(),
-                            )
+                                max_concurrent_boots: config.max_concurrent_boots,
+                                metrics: metrics.clone(),
+                                boot_limiter: boot_limiter.clone(),
+                                global_boot_limiter: global_boot_limiter.clone(),
+                            })
                             .await;
                             let mut batch_failed = false;
                             for result in results {

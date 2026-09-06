@@ -208,6 +208,35 @@ impl CriServer {
     }
 }
 
+/// Resolves when the process receives a termination signal, driving a graceful
+/// gRPC server shutdown so the CRI can reap its sandbox VMs.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(mut sigterm), Ok(mut sigint)) => {
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down CRI"),
+                    _ = sigint.recv() => tracing::info!("Received SIGINT, shutting down CRI"),
+                }
+            }
+            _ => {
+                tracing::error!("Failed to install signal handlers; graceful shutdown disabled");
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Received Ctrl-C, shutting down CRI");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,34 +277,5 @@ mod tests {
             .expect_err("a regular file must not be unlinked");
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
-    }
-}
-
-/// Resolves when the process receives a termination signal, driving a graceful
-/// gRPC server shutdown so the CRI can reap its sandbox VMs.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::interrupt()),
-        ) {
-            (Ok(mut sigterm), Ok(mut sigint)) => {
-                tokio::select! {
-                    _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down CRI"),
-                    _ = sigint.recv() => tracing::info!("Received SIGINT, shutting down CRI"),
-                }
-            }
-            _ => {
-                tracing::error!("Failed to install signal handlers; graceful shutdown disabled");
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("Received Ctrl-C, shutting down CRI");
     }
 }

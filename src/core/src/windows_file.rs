@@ -141,11 +141,14 @@ pub fn replace_regular_file(path: &Path, contents: &[u8]) -> io::Result<WindowsF
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::windows_symlink::{is_capability_denial, WindowsSymlinkPrivilegeGuard};
 
     fn symlink_file_or_skip(target: &Path, link: &Path) -> bool {
+        let guard = WindowsSymlinkPrivilegeGuard::acquire();
+        let assigned_privilege_enabled = guard.assigned_privilege_enabled();
         match std::os::windows::fs::symlink_file(target, link) {
             Ok(()) => true,
-            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) if is_capability_denial(&error, assigned_privilege_enabled) => false,
             Err(error) => panic!("failed to create test symlink: {error}"),
         }
     }
