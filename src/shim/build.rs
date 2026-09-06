@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+#[path = "build_support/macos.rs"]
+mod macos;
+
 fn main() {
     // Read libkrun library paths from libkrun-sys build metadata.
     // Cargo derives the DEP_* prefix from `links = "a3s_krun"` in
@@ -15,13 +19,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     copy_runtime_dylibs(&libkrun_dir, &libkrunfw_dir);
 
-    // On macOS, use @executable_path so the binary finds libkrun next to itself.
+    // On macOS, use an rpath rooted at the installed binary's sibling `lib`
+    // directory. The runtime launcher also exports that directory through
+    // DYLD_LIBRARY_PATH for libkrunfw's lazily loaded dependency.
     // On Linux, emit rpath to the build directory (runtime discovery is handled differently).
     #[cfg(target_os = "macos")]
     {
-        // Use @executable_path/../lib to find libkrun in the same directory as the binary.
-        // At runtime, libkrun.1.dylib and libkrun.dylib must be copied next to the binary.
-        // This is handled by the SDK's ensure_shim() function.
+        // Use @executable_path/../lib to find libkrun in the installed package.
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../lib");
     }
     #[cfg(all(not(target_os = "macos"), not(windows)))]
@@ -40,66 +44,22 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
-fn copy_runtime_dylibs(libkrun_dir: &str, _libkrunfw_dir: &str) {
+fn copy_runtime_dylibs(libkrun_dir: &str, libkrunfw_dir: &str) {
     use std::path::{Path, PathBuf};
-
-    fn copy_if_present(src_dir: &str, file_name: &str, bin_dir: &Path) {
-        if src_dir.is_empty() || src_dir == "/nonexistent" {
-            return;
-        }
-
-        let src = PathBuf::from(src_dir).join(file_name);
-        if !src.exists() {
-            println!("cargo:warning={} not found at {}", file_name, src.display());
-            return;
-        }
-
-        let dst = bin_dir.join(file_name);
-        use std::os::unix::fs::MetadataExt;
-        let same_file = src == dst
-            || std::fs::metadata(&dst).is_ok_and(|destination| {
-                std::fs::metadata(&src).is_ok_and(|source| {
-                    source.dev() == destination.dev() && source.ino() == destination.ino()
-                })
-            });
-        if same_file {
-            println!(
-                "cargo:warning={} is already staged at {}",
-                file_name,
-                dst.display()
-            );
-        } else {
-            std::fs::copy(&src, &dst)
-                .unwrap_or_else(|e| panic!("failed to copy {}: {}", file_name, e));
-            println!(
-                "cargo:warning=copied {} -> {}",
-                src.display(),
-                dst.display()
-            );
-        }
-        println!("cargo:rerun-if-changed={}", src.display());
-
-        // Also fix the install name to use @executable_path
-        let install_name = format!("@executable_path/{}", file_name);
-        let status = std::process::Command::new("install_name_tool")
-            .args(["-id", &install_name, dst.to_str().unwrap()])
-            .status();
-        if let Ok(s) = status {
-            if s.success() {
-                println!("cargo:warning=fixed install name to {}", install_name);
-            }
-        }
-    }
-
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let bin_dir = out_dir
         .ancestors()
         .nth(3)
         .expect("unexpected OUT_DIR depth");
 
-    // Copy libkrun and its alias
-    copy_if_present(libkrun_dir, "libkrun.1.dylib", bin_dir);
-    copy_if_present(libkrun_dir, "libkrun.dylib", bin_dir);
+    for source in [libkrun_dir, libkrunfw_dir] {
+        if source.is_empty() || source == "/nonexistent" {
+            continue;
+        }
+        macos::stage_runtime_dylibs(Path::new(source), bin_dir).unwrap_or_else(|error| {
+            panic!("failed to stage runtime dylibs from {source}: {error}")
+        });
+    }
 }
 
 #[cfg(windows)]

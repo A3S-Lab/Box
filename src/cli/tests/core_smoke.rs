@@ -2307,11 +2307,9 @@ fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
 #[test]
 #[ignore]
 fn real_core_snapshot_cow_isolation_and_rm_guard() {
-    // Copy-on-write snapshot restore: forks share the snapshot's rootfs as a
-    // read-only overlay lower, each writing to its own upper. Verifies (1) fork
-    // isolation — a write in one fork is invisible to another, (2) the shared
-    // lower stays pristine, and (3) `snapshot rm` refuses while a fork still
-    // references the snapshot, then succeeds once the forks are gone.
+    // Directory restores share an immutable lower; guest-native ext4 restores
+    // own independent writable clones. Both must preserve fork isolation.
+    // Deletion is fenced only while a restore depends on the snapshot store.
     let smoke = CoreSmoke::new();
     let image = smoke_image();
     let base = format!("{}-cow-base", smoke.name);
@@ -2368,9 +2366,14 @@ fn real_core_snapshot_cow_isolation_and_rm_guard() {
         "snapshot id: {snapshot_id}"
     );
     snapshot_cleanup.id = Some(snapshot_id.clone());
+    let store = a3s_box_runtime::SnapshotStore::new(&smoke.home_path().join("snapshots"))
+        .expect("open snapshot store");
+    let rootfs_format = store
+        .rootfs_format(&snapshot_id)
+        .expect("validate snapshot rootfs format");
     smoke.ok(&["rm", &base]);
 
-    // Fork A: sees the warmed state, then writes to its own upper.
+    // Fork A sees the warmed state, then mutates its private writable state.
     smoke.ok(&["snapshot", "restore", &snapshot_id, "--name", &fork_a]);
     smoke.ok(&["start", &fork_a]);
     smoke.wait_for_named_running(&fork_a);
@@ -2395,18 +2398,8 @@ fn real_core_snapshot_cow_isolation_and_rm_guard() {
         "printf A-WROTE >>/tmp/cow-shared.txt",
     ]);
 
-    // rm guard: the snapshot is still referenced by fork A -> must be refused.
-    let guarded = smoke.output(&["snapshot", "rm", &snapshot_id]);
-    assert!(
-        !guarded.success,
-        "snapshot rm must be refused while a fork references it\nstdout:\n{}\nstderr:\n{}",
-        guarded.stdout, guarded.stderr
-    );
-    assert_contains(&guarded.stderr, "still used", "rm guard message");
-    smoke.ok(&["snapshot", "inspect", &snapshot_id]); // still present
-
     // Fork B from the SAME snapshot must NOT see fork A's write (isolation +
-    // pristine shared lower).
+    // pristine snapshot source).
     smoke.ok(&["snapshot", "restore", &snapshot_id, "--name", &fork_b]);
     smoke.ok(&["start", &fork_b]);
     smoke.wait_for_named_running(&fork_b);
@@ -2423,13 +2416,57 @@ fn real_core_snapshot_cow_isolation_and_rm_guard() {
         "fork B must not see fork A's write (CoW isolation)"
     );
 
-    // Remove the forks, then `snapshot rm` succeeds (guard clears).
+    match rootfs_format {
+        a3s_box_runtime::SnapshotRootfsFormat::Directory => {
+            let guarded = smoke.output(&["snapshot", "rm", &snapshot_id]);
+            assert!(
+                !guarded.success,
+                "snapshot rm must be refused while forks reference its lower\nstdout:\n{}\nstderr:\n{}",
+                guarded.stdout, guarded.stderr
+            );
+            assert_contains(&guarded.stderr, "still used", "rm guard message");
+            smoke.ok(&["snapshot", "inspect", &snapshot_id]);
+        }
+        a3s_box_runtime::SnapshotRootfsFormat::GuestNativeExt4 => {
+            smoke.ok(&["snapshot", "rm", &snapshot_id]);
+            snapshot_cleanup.id = None;
+            assert!(
+                !smoke
+                    .home_path()
+                    .join("snapshots")
+                    .join(&snapshot_id)
+                    .exists(),
+                "independent raw-ext4 forks must not retain the source snapshot"
+            );
+            // A restart proves independence beyond an already-open disk handle.
+            smoke.ok(&["restart", &fork_a]);
+            smoke.wait_for_named_running(&fork_a);
+            for (fork, expected) in [(&fork_a, "BASEA-WROTE"), (&fork_b, "BASE")] {
+                assert_eq!(
+                    smoke.ok(&[
+                        "exec",
+                        fork,
+                        "--",
+                        "/bin/sh",
+                        "-c",
+                        "cat /tmp/cow-shared.txt"
+                    ]),
+                    expected,
+                    "fork state must survive source snapshot deletion"
+                );
+            }
+        }
+    }
+
+    // Removing the forks releases any directory snapshot's shared-lower guard.
     smoke.ok(&["stop", &fork_a]);
     smoke.ok(&["rm", &fork_a]);
     smoke.ok(&["stop", &fork_b]);
     smoke.ok(&["rm", &fork_b]);
-    smoke.ok(&["snapshot", "rm", &snapshot_id]);
-    snapshot_cleanup.id = None;
+    if snapshot_cleanup.id.is_some() {
+        smoke.ok(&["snapshot", "rm", &snapshot_id]);
+        snapshot_cleanup.id = None;
+    }
 }
 
 #[cfg(unix)]
@@ -2500,6 +2537,8 @@ fn real_core_restart_policy_monitor_recovers_dead_box() {
 #[test]
 #[ignore]
 fn real_core_detached_health_worker_survives_run_cli_exit() {
+    use std::os::unix::process::CommandExt;
+
     let smoke = CoreSmoke::new();
     let image = smoke_image();
     seed_smoke_image(&smoke, &image);
@@ -2508,13 +2547,13 @@ fn real_core_detached_health_worker_survives_run_cli_exit() {
         name: smoke.name.clone(),
     };
 
-    smoke.ok(&[
+    let mut launcher = smoke.command(&[
         "run",
         "--detach",
         "--name",
         &smoke.name,
         "--health-cmd",
-        "true",
+        "test -f /tmp/health-ready",
         "--health-interval",
         "1s",
         "--health-timeout",
@@ -2527,6 +2566,44 @@ fn real_core_detached_health_worker_survives_run_cli_exit() {
         "-c",
         "sleep 300",
     ]);
+    let mut child = launcher
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn detached-run launcher in its own process group");
+    let launcher_group = child.id() as libc::pid_t;
+    let deadline = Instant::now() + smoke.timeout;
+    while child
+        .try_wait()
+        .expect("poll detached-run launcher")
+        .is_none()
+    {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("detached-run launcher timed out");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child
+        .wait_with_output()
+        .expect("collect detached-run output");
+    assert!(
+        output.status.success(),
+        "detached-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Simulate a terminal/job supervisor cleaning up the finished launcher's
+    // process group. Only the isolated group created above is signalled.
+    // SAFETY: the negative PID addresses that specific child process group.
+    let signal_result = unsafe { libc::kill(-launcher_group, libc::SIGTERM) };
+    assert!(
+        signal_result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+        "failed to signal detached-run process group"
+    );
+    smoke.ok(&["exec", &smoke.name, "--", "touch", "/tmp/health-ready"]);
 
     let healthy = smoke.wait_for_named_health(&smoke.name, "healthy");
     assert_eq!(json_string_field(&healthy, "health_status"), "healthy");

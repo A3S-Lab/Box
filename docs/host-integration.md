@@ -9,6 +9,10 @@ capability scenarios and `R0`, `G2`, `R24`, or `E72` profile a change requires.
 This guide supplies host commands; it does not by itself prove that every
 capability scenario has soak coverage.
 
+The [2026-09-06 local Dify validation](local-dify-validation-2026-09-06.md)
+records measured convergence, CPU, memory, and health persistence, together
+with the limits of that local evidence.
+
 ## Validation ladder
 
 | Level | Host requirements | Command |
@@ -70,6 +74,15 @@ Linux it is normally a dynamically linked host ELF. Neither is accepted as a
 guest PID 1 artifact. The runner builds and selects
 `src/target/<linux-musl-target>/debug/a3s-box-guest-init` from the current
 checkout.
+
+macOS runtime libraries are staged byte-for-byte from the signed libkrun-sys
+artifacts, including the fully versioned dylib and aliases. Do not rewrite their
+install names after signing. Validate source-package staging with:
+
+```bash
+cd src
+cargo test -p a3s-box-shim --bin a3s-box-shim macos_runtime_assets
+```
 
 ## Linux core smoke
 
@@ -376,6 +389,10 @@ convergence timeout are unchanged; this only removes an avoidable polling gap
 before dependent Dify services start. The first health probe runs as soon as
 the configured `start_period` ends, and subsequent probes keep the configured
 interval.
+Detached CLI health workers own separate Unix sessions and process groups.
+The core health-worker smoke signals the finished launcher's process group,
+then changes guest readiness and requires a fresh successful probe; cached
+`healthy` state alone cannot satisfy this regression.
 
 Lazy pool initialization is serialized per exact image/resource shape, so
 requests for the same pool cannot race duplicate startup while unrelated image
@@ -387,6 +404,11 @@ Pool socket frames are capped at 16 MiB and incomplete request frames time out
 after 15 seconds; payloads larger than this are rejected.
 On shutdown, the daemon drains idle pools and waits up to one minute for
 in-flight socket requests to finish before exiting.
+Pool cleanup first stops and joins replenishment so a late boot cannot publish
+a VM after the idle list was drained. Destruction has bounded fan-out (four
+VMs per batch), and persistent pools retain the normal graceful-stop deadline.
+The host smoke allows 90 seconds for daemon shutdown and asserts that no new
+host socket directory remains afterward.
 If one of several explicitly pre-warmed images fails during startup, the daemon
 cleans up earlier pools and removes the temporary socket before reporting the
 failure.

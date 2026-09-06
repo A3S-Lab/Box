@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+mod macos_runtime_assets;
+
 #[cfg(not(target_os = "windows"))]
 mod raw_disk_ownership;
 

@@ -47,6 +47,30 @@ fn rejects_reserved_or_repeated_auxiliary_raw_disks() {
 #[cfg(unix)]
 #[test]
 fn raw_disk_ownership_lock_rejects_a_second_a3s_owner() {
+    const CHILD_ENV: &str = "A3S_BOX_TEST_RAW_DISK_RELEASE_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // Concurrent process spawns in other tests can briefly inherit our
+        // flock descriptor before exec closes it. Check immediate release in
+        // an isolated process so those unrelated children cannot extend the
+        // descriptor's lifetime after the owner is dropped.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::raw_disk_ownership::raw_disk_ownership_lock_rejects_a_second_a3s_owner",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("spawn isolated raw-disk lock release check");
+        assert!(
+            output.status.success(),
+            "isolated raw-disk lock release check failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let temp = tempfile::tempdir().unwrap();
     let rootfs = temp.path().join("rootfs");
     let disk = temp.path().join("data.ext4");
