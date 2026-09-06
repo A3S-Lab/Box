@@ -1009,6 +1009,121 @@ require_host_declared_suite_logs() {
     done
 }
 
+require_host_capability_results() {
+    local path="$1"
+    local suites="$2"
+    local iterations="$3"
+
+    require_nonempty_file "$path"
+    tsv_require_columns \
+        "$path" \
+        iteration capability started_at finished_at duration_secs result exit_code
+
+    awk -F '\t' -v suites="$suites" -v iterations="$iterations" '
+        BEGIN {
+            selected_count = split(suites, selected_tokens, " ")
+            for (i = 1; i <= selected_count; i++) {
+                split(selected_tokens[i], pair, "=")
+                selected[pair[1]] = pair[2]
+            }
+            expected_caps = ""
+            if (selected["core"] == "1") {
+                expected_caps = expected_caps "core "
+            }
+            if (selected["host"] == "1") {
+                expected_caps = expected_caps "host "
+            }
+            if (selected["linux_run"] == "1") {
+                expected_caps = expected_caps "linux-run "
+            }
+            if (selected["cri"] == "1") {
+                expected_caps = expected_caps "cri "
+            }
+            if (selected["bench"] == "1") {
+                expected_caps = expected_caps "bench-leak bench-race "
+            }
+            expected_count = split(expected_caps, expected, " ")
+            # split() counts the trailing empty token on some awk versions.
+            if (expected[expected_count] == "") {
+                expected_count--
+            }
+        }
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                index_by_name[$i] = i
+            }
+            next
+        }
+        NF > 0 {
+            row_iteration = $(index_by_name["iteration"])
+            capability = $(index_by_name["capability"])
+            result = $(index_by_name["result"])
+            exit_code = $(index_by_name["exit_code"])
+            duration = $(index_by_name["duration_secs"])
+            if (row_iteration !~ /^[1-9][0-9]*$/ || row_iteration + 0 > iterations) {
+                printf "capability result has invalid iteration: %s\n", row_iteration > "/dev/stderr"
+                bad = 1
+            }
+            allowed = 0
+            for (i = 1; i <= expected_count; i++) {
+                if (capability == expected[i]) {
+                    allowed = 1
+                    break
+                }
+            }
+            if (!allowed) {
+                printf "capability result has unexpected capability: %s\n", capability > "/dev/stderr"
+                bad = 1
+            }
+            key = row_iteration SUBSEP capability
+            if (seen[key]) {
+                printf "capability result is duplicated: iteration=%s capability=%s\n", row_iteration, capability > "/dev/stderr"
+                bad = 1
+            }
+            seen[key] = 1
+            if (duration !~ /^[0-9]+$/) {
+                printf "capability result duration is not a non-negative integer: %s\n", duration > "/dev/stderr"
+                bad = 1
+            }
+            if (result != "pass") {
+                printf "capability result is not pass: iteration=%s capability=%s result=%s\n", row_iteration, capability, result > "/dev/stderr"
+                bad = 1
+            }
+            if (exit_code != "0") {
+                printf "capability result exit code is not zero: iteration=%s capability=%s exit_code=%s\n", row_iteration, capability, exit_code > "/dev/stderr"
+                bad = 1
+            }
+            rows++
+        }
+        END {
+            for (iteration = 1; iteration <= iterations; iteration++) {
+                for (i = 1; i <= expected_count; i++) {
+                    key = iteration SUBSEP expected[i]
+                    if (!seen[key]) {
+                        printf "capability result missing: iteration=%d capability=%s\n", iteration, expected[i] > "/dev/stderr"
+                        bad = 1
+                    }
+                }
+            }
+            if (rows == 0 || bad) {
+                exit 1
+            }
+        }
+    ' "$path" ||
+        fail "host capability results must contain one passing row for every selected suite and iteration"
+
+    local iteration capability started finished started_epoch finished_epoch
+    while IFS=$'\t' read -r iteration capability started finished _ _ _; do
+        [ "$iteration" = "iteration" ] && continue
+        started_epoch="$(iso_to_epoch "$started")" ||
+            fail "host capability result start timestamp is not parseable: $started"
+        finished_epoch="$(iso_to_epoch "$finished")" ||
+            fail "host capability result finish timestamp is not parseable: $finished"
+        [ "$finished_epoch" -ge "$started_epoch" ] ||
+            fail "host capability result finishes before it starts: iteration=$iteration capability=$capability"
+    done <"$path"
+}
+
 tsv_value() {
     local file="$1"
     local phase="$2"
@@ -1479,6 +1594,17 @@ verify_host() {
         # still readable. New runners always emit version 1 below.
         resource_metrics_version=0
     fi
+    local capability_results_version
+    capability_results_version="$(kv_get "$metadata" host_capability_results_version)"
+    if [ -n "$capability_results_version" ]; then
+        is_non_negative_int "$capability_results_version" ||
+            fail "host metadata host_capability_results_version is not a non-negative integer: $capability_results_version"
+        [ "$capability_results_version" -eq 1 ] ||
+            fail "host metadata host_capability_results_version is unsupported: $capability_results_version"
+    else
+        # Pre-version bundles have no per-capability result artifact.
+        capability_results_version=0
+    fi
     apply_metadata_verifier_gates \
         "$metadata" \
         "host" \
@@ -1527,6 +1653,12 @@ verify_host() {
         require_nonempty_file "$EVIDENCE_DIR/iteration-${iteration}-cli-snapshot.txt"
     done
     require_host_declared_suite_logs "$selected_suites" "$iterations"
+    if [ "$capability_results_version" -ge 1 ]; then
+        require_host_capability_results \
+            "$EVIDENCE_DIR/capability-results.tsv" \
+            "$selected_suites" \
+            "$iterations"
+    fi
 
     local metric start final
     for metric in shims mounts box_dirs socket_dirs; do

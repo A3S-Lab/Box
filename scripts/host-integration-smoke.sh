@@ -611,6 +611,30 @@ write_resource_sample() {
         "$(a3s_process_fd_count)" >>"$file"
 }
 
+write_capability_results_header() {
+    printf 'iteration\tcapability\tstarted_at\tfinished_at\tduration_secs\tresult\texit_code\n' \
+        >"$SOAK_EVIDENCE_DIR/capability-results.tsv"
+}
+
+append_capability_result() {
+    local iteration="$1"
+    local capability="$2"
+    local started_at="$3"
+    local finished_at="$4"
+    local duration_secs="$5"
+    local result="$6"
+    local exit_code="$7"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$iteration" \
+        "$capability" \
+        "$started_at" \
+        "$finished_at" \
+        "$duration_secs" \
+        "$result" \
+        "$exit_code" >>"$SOAK_EVIDENCE_DIR/capability-results.tsv"
+}
+
 start_periodic_soak_sampler() {
     if [ "$SOAK_SAMPLE_INTERVAL_SECS" -eq 0 ]; then
         return
@@ -659,6 +683,7 @@ write_soak_metadata() {
         # process-level metrics emitted by current runners while retaining
         # compatibility with older evidence bundles.
         echo "host_resource_metrics_version=1"
+        echo "host_capability_results_version=1"
         echo "soak_verify_min_duration_secs=$SOAK_VERIFY_MIN_DURATION_SECS"
         echo "soak_verify_min_samples=$SOAK_VERIFY_MIN_SAMPLES"
         echo "soak_verify_min_sample_span_secs=$SOAK_VERIFY_MIN_SAMPLE_SPAN_SECS"
@@ -734,12 +759,31 @@ run_soak_step() {
     shift 2
 
     local log_file="$SOAK_EVIDENCE_DIR/iteration-${iteration}-${name}.log"
+    local started_epoch started_at finished_epoch finished_at duration_secs result
+    started_epoch="$(date +%s)"
+    started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     log "Soak iteration $iteration: $name (log: $log_file)"
 
     set +e
     ( "$@" ) >"$log_file" 2>&1
     local rc=$?
     set -e
+    finished_epoch="$(date +%s)"
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    duration_secs=$((finished_epoch - started_epoch))
+    if [ "$rc" -eq 0 ]; then
+        result="pass"
+    else
+        result="fail"
+    fi
+    append_capability_result \
+        "$iteration" \
+        "$name" \
+        "$started_at" \
+        "$finished_at" \
+        "$duration_secs" \
+        "$result" \
+        "$rc"
 
     if [ "$rc" -eq 0 ]; then
         echo "  PASS: $name"
@@ -906,6 +950,7 @@ run_soak_suite() {
 
     log "Writing soak evidence to $SOAK_EVIDENCE_DIR"
     write_soak_metadata
+    write_capability_results_header
     write_resource_sample "start"
     capture_cli_snapshot "start"
     start_periodic_soak_sampler

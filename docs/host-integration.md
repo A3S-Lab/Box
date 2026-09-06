@@ -534,8 +534,9 @@ scripts/host-integration-smoke.sh \
   --soak-duration 0
 ```
 
-The evidence directory contains `metadata.txt`, `resource-samples.tsv`, per-step
-iteration logs, CLI state snapshots, `summary.txt`, and `verify.out`. Keep the
+The evidence directory contains `metadata.txt`, `resource-samples.tsv`,
+`capability-results.tsv`, per-step iteration logs, CLI state snapshots,
+`summary.txt`, and `verify.out`. Keep the
 directory with the release candidate when the soak is used as a gate. The runner
 verifies the bundle before returning success, including resource counters and
 required snapshot/log files. `metadata.txt` must include parseable `started_at`,
@@ -553,7 +554,11 @@ does not repeat every `--min-*` option.
 Current host bundles set `host_resource_metrics_version=1` and include
 `a3s_home_bytes`, `process_rss_bytes`, and `process_fd_count` in every resource
 sample. The verifier validates these process-level counters as non-negative
-integers; older bundles without the version key remain readable for migration.
+integers. They also set `host_capability_results_version=1` and write
+`capability-results.tsv`, one row per selected suite and iteration, with start
+and finish timestamps, elapsed seconds, result, and exit code. The verifier
+requires every current row to be a passing, non-overlapping result; older
+bundles without either version key remain readable for migration.
 Failed host soaks write `result=fail` plus the failed
 iteration count and, when available, `exit_code`, `failed_at`, and
 `failed_command`; to re-check a saved bundle, run:
