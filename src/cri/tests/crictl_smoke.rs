@@ -32,6 +32,7 @@ const IMAGE_DIR_ENV: &str = "A3S_BOX_CRI_SMOKE_IMAGE_DIR";
 const SKIP_PULL_ENV: &str = "A3S_BOX_CRI_SMOKE_SKIP_PULL";
 const DEFAULT_WORKLOAD_IMAGE: &str = "busybox:latest";
 const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/a3s-box/code:v0.1.0";
+const RUN_POD_SANDBOX_CANCEL_TIMEOUT: &str = "120s";
 const LOG_MARKER_ONE: &str = "a3s-cri-smoke-one-ready";
 const LOG_MARKER_TWO: &str = "a3s-cri-smoke-two-ready";
 
@@ -262,13 +263,26 @@ fn wait_for_cri(crictl: &str, socket_path: &Path, timeout: Duration) -> Result<(
 
 fn run_crictl(crictl: &str, socket_path: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
     let endpoint = format!("unix://{}", socket_path.display());
-    let output = Command::new(crictl)
+    let mut command = Command::new(crictl);
+    command
         .arg("--runtime-endpoint")
         .arg(&endpoint)
         .arg("--image-endpoint")
-        .arg(&endpoint)
-        .args(args.iter().map(OsStr::new))
-        .output()?;
+        .arg(&endpoint);
+    if let Some((&"runp", remaining)) = args.split_first() {
+        // Recent crictl versions cancel RunPodSandbox after their short
+        // default request deadline. A cold microVM boot can legitimately take
+        // longer, especially while assembling a guest-native ext4 rootfs on
+        // macOS, so give this opt-in host smoke an explicit bounded deadline.
+        command
+            .arg("runp")
+            .arg("--cancel-timeout")
+            .arg(RUN_POD_SANDBOX_CANCEL_TIMEOUT)
+            .args(remaining.iter().map(OsStr::new));
+    } else {
+        command.args(args.iter().map(OsStr::new));
+    }
+    let output = command.output()?;
 
     if !output.status.success() {
         return Err(format!(

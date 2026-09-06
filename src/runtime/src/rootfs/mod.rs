@@ -52,6 +52,7 @@ pub use provider::{
     RootfsArtifactCacheOptions, RootfsFinalizeOptions, RootfsOciPrepareOptions,
     RootfsPrepareOptions, RootfsProvider, RootfsResumeOptions,
 };
+#[cfg(feature = "vm")]
 pub(crate) use provider::{default_provider_for_boot, default_provider_for_box_boot};
 pub(crate) use staging_path::{
     ensure_directory_transport_is_lossless, host_staging_path, logical_path_for_staged_child,

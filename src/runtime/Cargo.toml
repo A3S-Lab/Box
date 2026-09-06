@@ -25,7 +25,7 @@ required-features = ["vm"]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []
 pool = ["vm"]
-scale = ["dep:axum"]
+scale = ["dep:axum", "compose"]
 compose = ["vm"]
 operator = []
 build = ["dep:a3s-acl"]
@@ -152,3 +152,6 @@ a3s-runtime = { workspace = true }
 rand = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
+# Registry fixture tests use an in-process HTTP server even when the optional
+# `scale` feature (the production axum consumer) is disabled.
+axum = { workspace = true }

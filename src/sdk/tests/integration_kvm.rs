@@ -189,6 +189,14 @@ fn sweep_reclaims_dead_pid_orphan_but_spares_live() {
         eprintln!("SKIP sweep_reclaims_dead_pid_orphan_but_spares_live: no A3S_BOX/KVM");
         return;
     }
+    // The sweep deliberately fails closed when host process liveness cannot
+    // be proven.  Linux exposes the required `/proc/<pid>` evidence; macOS
+    // (including its HVF backend) does not, so there is no safe orphan to
+    // reclaim here.  The non-Linux behaviour is covered by the unit contract.
+    if !std::path::Path::new("/proc").is_dir() {
+        eprintln!("SKIP sweep_reclaims_dead_pid_orphan_but_spares_live: /proc is unavailable");
+        return;
+    }
     // A live base (owned by THIS pid) must survive the sweep.
     let base = warm_base(WarmBase::new(image(), "true")).expect("warm_base");
 

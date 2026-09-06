@@ -1,8 +1,6 @@
 //! Durable removal and complete host-resource cleanup for managed executions.
 
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
@@ -12,6 +10,36 @@ use super::record::execution_id;
 use super::store::run_store;
 use super::support::generation;
 use super::{BoxRecord, LocalExecutionManager};
+
+/// Return the short-lived socket directory used by the VM backend.
+///
+/// The VM module owns this layout when the `vm` feature is enabled.  The
+/// lifecycle manager also exists in OCI-only builds, however, so keep the
+/// platform layout available there without pulling the VM module (and its
+/// hypervisor dependencies) into the build.
+#[cfg(feature = "vm")]
+fn runtime_socket_dir(home_dir: &Path, execution_id: &str) -> PathBuf {
+    crate::vm::runtime_socket_dir(home_dir, execution_id)
+}
+
+#[cfg(all(not(feature = "vm"), unix, target_os = "macos"))]
+fn runtime_socket_dir(_home_dir: &Path, execution_id: &str) -> PathBuf {
+    PathBuf::from("/private/tmp")
+        .join("a3s-box-sockets")
+        .join(execution_id)
+}
+
+#[cfg(all(not(feature = "vm"), unix, not(target_os = "macos")))]
+fn runtime_socket_dir(_home_dir: &Path, execution_id: &str) -> PathBuf {
+    PathBuf::from("/tmp")
+        .join("a3s-box-sockets")
+        .join(execution_id)
+}
+
+#[cfg(all(not(feature = "vm"), not(unix)))]
+fn runtime_socket_dir(home_dir: &Path, execution_id: &str) -> PathBuf {
+    home_dir.join("boxes").join(execution_id).join("sockets")
+}
 
 impl LocalExecutionManager {
     /// Load one managed record without reconciling provider state.
@@ -79,6 +107,7 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     validate_owned_paths(home_dir, record)?;
 
     if record.isolation.is_sandbox() {
+        #[cfg(feature = "vm")]
         crate::vm::reap::cleanup_recorded_sandbox_runtime_in(home_dir, &record.box_dir, &record.id)
             .map_err(|error| cleanup_error(record, "delete the recorded Sandbox runtime", error))?;
         crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, &record.id)
@@ -87,7 +116,7 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
 
     remove_anonymous_volumes(home_dir, record)?;
 
-    let socket_dir = crate::vm::runtime_socket_dir(home_dir, &record.id);
+    let socket_dir = runtime_socket_dir(home_dir, &record.id);
     #[cfg(target_os = "linux")]
     crate::network::terminate_passt(&socket_dir);
 
@@ -101,6 +130,7 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     remove_tree_if_present(&socket_dir)
         .map_err(|error| cleanup_error(record, "remove the runtime socket directory", error))?;
 
+    #[cfg(feature = "vm")]
     for runtime_root in [
         crate::vm::sandbox_runtime_root(home_dir, &record.id),
         crate::vm::legacy_sandbox_runtime_root(home_dir, &record.id),
@@ -135,7 +165,7 @@ fn validate_owned_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionManager
     }
 
     let internal_exec = expected_box_dir.join("sockets/exec.sock");
-    let external_exec = crate::vm::runtime_socket_dir(home_dir, &record.id).join("exec.sock");
+    let external_exec = runtime_socket_dir(home_dir, &record.id).join("exec.sock");
     if !record.exec_socket_path.as_os_str().is_empty()
         && record.exec_socket_path != internal_exec
         && record.exec_socket_path != external_exec
@@ -298,8 +328,7 @@ mod tests {
             b"retained until remove\n",
         )
         .unwrap();
-        let socket_dir =
-            crate::vm::runtime_socket_dir(&home_dir, reservation.execution_id.as_str());
+        let socket_dir = runtime_socket_dir(&home_dir, reservation.execution_id.as_str());
         std::fs::create_dir_all(&socket_dir).unwrap();
 
         assert!(manager
