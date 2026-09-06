@@ -655,6 +655,10 @@ write_soak_metadata() {
         echo "soak_iterations=$SOAK_ITERATIONS"
         echo "soak_interval_secs=$SOAK_INTERVAL_SECS"
         echo "soak_sample_interval_secs=$SOAK_SAMPLE_INTERVAL_SECS"
+        # Version the host resource schema so the verifier can enforce the
+        # process-level metrics emitted by current runners while retaining
+        # compatibility with older evidence bundles.
+        echo "host_resource_metrics_version=1"
         echo "soak_verify_min_duration_secs=$SOAK_VERIFY_MIN_DURATION_SECS"
         echo "soak_verify_min_samples=$SOAK_VERIFY_MIN_SAMPLES"
         echo "soak_verify_min_sample_span_secs=$SOAK_VERIFY_MIN_SAMPLE_SPAN_SECS"

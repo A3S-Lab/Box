@@ -550,6 +550,10 @@ runs so the runner also enforces minimum duration, sample span, and sample count
 before returning success. Saved bundles keep those gate values in `metadata.txt`,
 so later verifier runs enforce the recorded gates even when the re-check command
 does not repeat every `--min-*` option.
+Current host bundles set `host_resource_metrics_version=1` and include
+`a3s_home_bytes`, `process_rss_bytes`, and `process_fd_count` in every resource
+sample. The verifier validates these process-level counters as non-negative
+integers; older bundles without the version key remain readable for migration.
 Failed host soaks write `result=fail` plus the failed
 iteration count and, when available, `exit_code`, `failed_at`, and
 `failed_command`; to re-check a saved bundle, run:
