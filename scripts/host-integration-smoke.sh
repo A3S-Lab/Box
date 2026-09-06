@@ -21,6 +21,7 @@ RUN_SOAK=0
 SOAK_DURATION_SECS="${A3S_BOX_SOAK_DURATION_SECS:-7200}"
 SOAK_ITERATIONS="${A3S_BOX_SOAK_ITERATIONS:-0}"
 SOAK_INTERVAL_SECS="${A3S_BOX_SOAK_INTERVAL_SECS:-0}"
+SOAK_SAMPLE_INTERVAL_SECS="${A3S_BOX_SOAK_SAMPLE_INTERVAL_SECS:-300}"
 SOAK_OUTPUT_DIR="${A3S_BOX_SOAK_OUTPUT_DIR:-}"
 SOAK_RUN_BENCH="${A3S_BOX_SOAK_RUN_BENCH:-1}"
 SOAK_VERIFY_MIN_DURATION_SECS="${A3S_BOX_SOAK_VERIFY_MIN_DURATION_SECS:-0}"
@@ -36,6 +37,7 @@ SOAK_SUMMARY_ITERATIONS=0
 SOAK_SUMMARY_FAILURES=0
 SOAK_STARTED_EPOCH=0
 SOAK_FINAL_CAPTURED=0
+SOAK_SAMPLE_PID=""
 
 usage() {
     cat <<'EOF'
@@ -56,6 +58,8 @@ Options:
                  Optional iteration cap for --soak (default: 0 = time based only).
   --soak-interval SECS
                  Sleep between soak iterations (default: 0).
+  --soak-sample-interval SECS
+                 Independent resource-sample cadence (default: 300).
   --soak-output DIR
                  Evidence directory for --soak logs and resource samples.
   --soak-no-bench
@@ -83,6 +87,7 @@ Common environment:
   A3S_BOX_CRI_SMOKE_AGENT_IMAGE=agent:tag            CRI sandbox agent image.
   A3S_BOX_SOAK_DURATION_SECS=7200                   Default --soak duration.
   A3S_BOX_SOAK_ITERATIONS=3                         Optional --soak iteration cap.
+  A3S_BOX_SOAK_SAMPLE_INTERVAL_SECS=300             Independent resource samples.
   A3S_BOX_SOAK_OUTPUT_DIR=target/a3s-box-soak/run   Evidence output directory.
   A3S_BOX_SOAK_VERIFY_MIN_DURATION_SECS=7200        Gate evidence duration.
   A3S_BOX_SOAK_VERIFY_MIN_SAMPLES=4                 Gate evidence sample count.
@@ -150,6 +155,14 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             SOAK_INTERVAL_SECS="$1"
+            ;;
+        --soak-sample-interval)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "--soak-sample-interval requires a value" >&2
+                exit 2
+            fi
+            SOAK_SAMPLE_INTERVAL_SECS="$1"
             ;;
         --soak-output)
             shift
@@ -548,22 +561,76 @@ a3s_home_bytes() {
     du -sk "$home" 2>/dev/null | awk '{print $1 * 1024}' || echo 0
 }
 
+# Sum only the Box CLI/shim processes visible to this host. These values are
+# intentionally host-level counters: they make RSS and descriptor slopes
+# comparable across soak samples without exposing command lines or secrets.
+a3s_process_rss_bytes() {
+    ps -axo rss=,comm= 2>/dev/null | awk '
+        $2 ~ /a3s-box(-shim)?$/ { total += $1 * 1024 }
+        END { print total + 0 }
+    '
+}
+
+a3s_process_fd_count() {
+    if ! have_cmd lsof; then
+        echo 0
+        return
+    fi
+
+    local total=0 pid count
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        count="$(lsof -p "$pid" 2>/dev/null | awk 'NR > 1 { count++ } END { print count + 0 }')"
+        total=$((total + count))
+    done < <(
+        {
+            pgrep -x 'a3s-box' 2>/dev/null || true
+            pgrep -x 'a3s-box-shim' 2>/dev/null || true
+        } | sort -n -u
+    )
+    echo "$total"
+}
+
 write_resource_sample() {
     local phase="$1"
     local file="$SOAK_EVIDENCE_DIR/resource-samples.tsv"
 
     if [ ! -f "$file" ]; then
-        printf 'timestamp\tphase\tshims\tmounts\tbox_dirs\tsocket_dirs\ta3s_home_bytes\n' >"$file"
+        printf 'timestamp\tphase\tshims\tmounts\tbox_dirs\tsocket_dirs\ta3s_home_bytes\tprocess_rss_bytes\tprocess_fd_count\n' >"$file"
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$phase" \
         "$(shim_count)" \
         "$(mount_count)" \
         "$(boxdir_count)" \
         "$(socketdir_count)" \
-        "$(a3s_home_bytes)" >>"$file"
+        "$(a3s_home_bytes)" \
+        "$(a3s_process_rss_bytes)" \
+        "$(a3s_process_fd_count)" >>"$file"
+}
+
+start_periodic_soak_sampler() {
+    if [ "$SOAK_SAMPLE_INTERVAL_SECS" -eq 0 ]; then
+        return
+    fi
+    (
+        while :; do
+            sleep "$SOAK_SAMPLE_INTERVAL_SECS" || exit 0
+            write_resource_sample "periodic"
+        done
+    ) &
+    SOAK_SAMPLE_PID="$!"
+}
+
+stop_periodic_soak_sampler() {
+    if [ -z "$SOAK_SAMPLE_PID" ]; then
+        return
+    fi
+    kill "$SOAK_SAMPLE_PID" 2>/dev/null || true
+    wait "$SOAK_SAMPLE_PID" 2>/dev/null || true
+    SOAK_SAMPLE_PID=""
 }
 
 write_soak_metadata() {
@@ -587,6 +654,7 @@ write_soak_metadata() {
         echo "soak_duration_secs=$SOAK_DURATION_SECS"
         echo "soak_iterations=$SOAK_ITERATIONS"
         echo "soak_interval_secs=$SOAK_INTERVAL_SECS"
+        echo "soak_sample_interval_secs=$SOAK_SAMPLE_INTERVAL_SECS"
         echo "soak_verify_min_duration_secs=$SOAK_VERIFY_MIN_DURATION_SECS"
         echo "soak_verify_min_samples=$SOAK_VERIFY_MIN_SAMPLES"
         echo "soak_verify_min_sample_span_secs=$SOAK_VERIFY_MIN_SAMPLE_SPAN_SECS"
@@ -627,6 +695,7 @@ capture_final_soak_state() {
     # Arm the guard before writing either artifact so an ERR/EXIT trap cannot
     # append a second final sample while handling a partial capture failure.
     SOAK_FINAL_CAPTURED=1
+    stop_periodic_soak_sampler
     write_resource_sample "final"
     capture_cli_snapshot "final"
 }
@@ -796,12 +865,13 @@ run_soak_suite() {
     if ! is_non_negative_int "$SOAK_DURATION_SECS" ||
         ! is_non_negative_int "$SOAK_ITERATIONS" ||
         ! is_non_negative_int "$SOAK_INTERVAL_SECS" ||
+        ! is_non_negative_int "$SOAK_SAMPLE_INTERVAL_SECS" ||
         ! is_non_negative_int "$SOAK_RUN_BENCH" ||
         ! is_non_negative_int "$SOAK_VERIFY_MIN_DURATION_SECS" ||
         ! is_non_negative_int "$SOAK_VERIFY_MIN_SAMPLES" ||
         ! is_non_negative_int "$SOAK_VERIFY_MIN_SAMPLE_SPAN_SECS" ||
         ! is_non_negative_int "$SOAK_VERIFY_MAX_SAMPLE_GAP_SECS"; then
-        echo "soak duration, iterations, interval, bench flag, and verifier gates must be non-negative integers" >&2
+        echo "soak duration, iterations, intervals, bench flag, and verifier gates must be non-negative integers" >&2
         exit 2
     fi
     if [ "$SOAK_DURATION_SECS" -eq 0 ] && [ "$SOAK_ITERATIONS" -eq 0 ]; then
@@ -834,6 +904,7 @@ run_soak_suite() {
     write_soak_metadata
     write_resource_sample "start"
     capture_cli_snapshot "start"
+    start_periodic_soak_sampler
 
     local start end iteration failures
     start="$(date +%s)"

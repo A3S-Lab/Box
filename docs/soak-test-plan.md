@@ -35,7 +35,7 @@ evidence system.
 
 | Entry point | Existing coverage | Current limitation |
 | --- | --- | --- |
-| `scripts/host-integration-smoke.sh --soak` | Repeats real MicroVM core, host command, Dockerfile `RUN`, Compose, CRI, leak, and state-race suites; records host resource counts and verifies evidence | Sampling follows whole-suite iterations; it does not yet report per-capability operation rates, daemon RSS/FD slopes, or independent periodic samples |
+| `scripts/host-integration-smoke.sh --soak` | Repeats real MicroVM core, host command, Dockerfile `RUN`, Compose, CRI, leak, and state-race suites; records host resource counts and verifies evidence | Records independent periodic host samples, including Box-process RSS and FD totals; it still does not report per-capability operation rates |
 | `scripts/local-sdk-smoke.sh` | One real Rust/Python/TypeScript/Go pass for MicroVM or certified Sandbox execution, including builders, lifecycle, resources, diagnostics, and snapshots | Functional smoke only; no duration loop, concurrency mix, cancellation, or longitudinal resource gates |
 | `scripts/macos-fault-soak.sh` | Isolated Apple Silicon/HVF lifecycle churn with CLI/shim termination and resource samples | Covers lifecycle recovery, not the complete image/build/storage/network/SDK surface |
 | `scripts/windows-whpx-soak.ps1` | Repeats the eleven Windows-supported real tests and rejects residual A3S Box processes | Uses a Windows-specific summary and has no shared cross-capability verifier or long-term handle/RSS slope gate |

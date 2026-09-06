@@ -66,6 +66,11 @@ before/after cold-start or memory-reduction percentage is claimed. Roughly
 - Final real-HVF multi-image warm-pool regression passed in 32.73 s. It covers
   direct and routed pool runs, concurrent requests, lazy initialization, and
   shutdown with no new host socket directory left behind.
+- The host soak runner's new independent periodic sampler was exercised during
+  a one-iteration real-HVF host matrix (198 s, 160 periodic samples). Every
+  resource row had the complete nine-column schema; the host evidence verifier
+  passed. It now records Box-process RSS bytes and open-file totals alongside
+  shim, mount, box-directory, socket-directory, and A3S-home counters.
 - Every installed runtime dylib passed `codesign --verify`; the shim's
   hypervisor entitlement signature also verified.
 
