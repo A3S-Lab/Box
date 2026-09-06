@@ -4,6 +4,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Warm-pool shutdown joins in-progress replenishment before draining idle VMs,
+  and destroys owned VMs with bounded concurrency. In-flight request ownership
+  is retained until cleanup completes, preventing orphaned shims and sockets.
+- Detached CLI health workers now own independent Unix sessions, so terminal
+  or job process-group cleanup cannot stop probes for still-running boxes.
+- macOS shim builds stage the fully versioned runtime dylibs and aliases
+  without rewriting their already-signed install names. Packaging preserves
+  valid code signatures instead of producing libraries rejected by the loader.
+
 ## [3.2.4] — 2026-09-05
 
 ### Added

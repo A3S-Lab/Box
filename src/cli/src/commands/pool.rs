@@ -32,6 +32,8 @@ use a3s_box_runtime::pool::{
     PoolRunResponse, PoolStatusResponse,
 };
 use a3s_box_runtime::pool::{PoolStats, WarmPool};
+#[cfg(not(windows))]
+use tokio::task::JoinSet;
 
 /// Default Unix socket the `pool` daemon listens on.
 pub(crate) const DEFAULT_SOCKET: &str = "/tmp/a3s-box-pool.sock";
@@ -41,6 +43,8 @@ const DEFAULT_POOL_MEMORY_MB: u32 = 512;
 const DEFAULT_POOL_LEASE_TTL_SECS: u64 = 3600;
 const DEFAULT_POOL_BOOT_CONCURRENCY: usize = 2;
 const POOL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(not(windows))]
+const POOL_DRAIN_CONCURRENCY: usize = 4;
 pub(crate) const DEFAULT_AUTOSTART_POOL_SIZE: usize = 1;
 pub(crate) const DEFAULT_AUTOSTART_POOL_MAX: usize = 8;
 
@@ -731,10 +735,45 @@ impl PoolRegistry {
         // concurrent lease requests cannot be blocked by a slow teardown.
         let leases = {
             let mut leases = self.leases.lock().await;
-            leases.drain().map(|(_, leased)| leased).collect::<Vec<_>>()
+            leases.drain().collect::<Vec<_>>()
         };
-        for leased in leases {
-            let _ = leased.vm.lock().await.destroy().await;
+
+        // Lease teardown is independent per VM. Keep a small bounded fan-out so
+        // a large lease set does not serialize shutdown or overwhelm the host.
+        let mut pending_leases = leases.into_iter();
+        let mut lease_tasks = JoinSet::new();
+        for _ in 0..POOL_DRAIN_CONCURRENCY {
+            if let Some((lease_id, leased)) = pending_leases.next() {
+                lease_tasks.spawn(async move {
+                    let result = {
+                        let mut vm = leased.vm.lock().await;
+                        vm.destroy().await
+                    };
+                    (lease_id, result)
+                });
+            }
+        }
+        while let Some(result) = lease_tasks.join_next().await {
+            match result {
+                Ok((lease_id, Ok(()))) => {
+                    tracing::debug!(%lease_id, "Destroyed warm-pool lease during shutdown");
+                }
+                Ok((lease_id, Err(error))) => {
+                    tracing::warn!(%lease_id, %error, "Failed to destroy warm-pool lease during shutdown");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Warm-pool lease teardown task failed");
+                }
+            }
+            if let Some((lease_id, leased)) = pending_leases.next() {
+                lease_tasks.spawn(async move {
+                    let result = {
+                        let mut vm = leased.vm.lock().await;
+                        vm.destroy().await
+                    };
+                    (lease_id, result)
+                });
+            }
         }
 
         // Snapshot pool handles and release the map lock before draining. Each
@@ -747,9 +786,33 @@ impl PoolRegistry {
                 .map(|entry| entry.pool.clone())
                 .collect::<Vec<_>>()
         };
-        for pool in pools {
+        // Broadcast the stop signal before awaiting any teardown so every
+        // maintenance loop exits promptly, even when there are more pools than
+        // drain workers.
+        for pool in &pools {
             pool.signal_shutdown();
-            let _ = pool.drain_idle().await;
+        }
+
+        let mut pending_pools = pools.into_iter();
+        let mut pool_tasks = JoinSet::new();
+        for _ in 0..POOL_DRAIN_CONCURRENCY {
+            if let Some(pool) = pending_pools.next() {
+                pool_tasks.spawn(async move { pool.drain_idle().await });
+            }
+        }
+        while let Some(result) = pool_tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Failed to drain warm pool during shutdown");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Warm-pool drain task failed");
+                }
+            }
+            if let Some(pool) = pending_pools.next() {
+                pool_tasks.spawn(async move { pool.drain_idle().await });
+            }
         }
     }
 
@@ -1389,17 +1452,22 @@ async fn handle_conn(
 
     let bytes = serde_json::to_vec(&resp)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    write_frame(stream, &bytes).await?;
 
-    // Tear down the used sandbox in the background so neither the client nor the
-    // daemon's accept loop blocks on it; release the concurrency permit afterwards.
+    // The response is sent before teardown, so the client does not pay for VM
+    // destruction. Keep the teardown in this request task instead of detaching
+    // it: the request guard remains live until the VM and its host resources are
+    // actually gone, allowing daemon shutdown to wait for a complete cleanup.
+    // This task does not block the accept loop because every connection already
+    // runs in its own Tokio task. Perform cleanup even when the client disconnects
+    // while the response is being written.
+    let write_result = write_frame(stream, &bytes).await;
     if let Some((mut vm, permit)) = used {
-        tokio::spawn(async move {
-            let _ = vm.destroy().await;
-            drop(permit);
-        });
+        if let Err(error) = vm.destroy().await {
+            tracing::warn!(%error, "failed to destroy pooled VM after request");
+        }
+        drop(permit);
     }
-    Ok(())
+    write_result
 }
 
 #[cfg(not(windows))]

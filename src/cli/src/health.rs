@@ -60,11 +60,7 @@ pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), St
         .map_err(|error| format!("failed to locate a3s-box for health checker: {error}"))?;
     let arguments = detached_health_worker_args(&record.id, generation);
 
-    std::process::Command::new(executable)
-        .args(arguments)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    detached_health_worker_command(&executable, &arguments)
         .spawn()
         .map(|_| ())
         .map_err(|error| {
@@ -73,6 +69,35 @@ pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), St
                 record.name
             )
         })
+}
+
+#[cfg(not(windows))]
+fn detached_health_worker_command(
+    executable: &Path,
+    arguments: &[String],
+) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new(executable);
+    command
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Detached workloads outlive terminal/job process-group cleanup. Give the
+    // health owner the same independent lifetime as the workload's shim.
+    // SAFETY: only the async-signal-safe setsid syscall runs between fork and
+    // exec; no shared Rust state or allocation is accessed in the child.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    command
 }
 
 #[cfg(any(not(windows), test))]
@@ -513,6 +538,50 @@ mod tests {
                 "--health-generation",
                 "1234",
             ]
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_health_generation_survives_state_round_trip() {
+        let mut record = crate::test_helpers::fixtures::make_record(
+            "health-generation-id",
+            "health-generation",
+            "running",
+            Some(1),
+        );
+        record.started_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-06T00:13:02.508035123Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+
+        let persisted: BoxRecord =
+            serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+        assert_eq!(record.started_at, persisted.started_at);
+        assert_eq!(health_generation(&record), Some(1_788_653_582_508_035_123));
+        assert_eq!(health_generation(&record), health_generation(&persisted));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_detached_health_worker_owns_a_separate_session() {
+        let mut child = detached_health_worker_command(Path::new("/bin/sleep"), &["30".into()])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: these read-only process queries take a live child PID.
+        let session = unsafe { libc::getsid(pid) };
+        let group = unsafe { libc::getpgid(pid) };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            session, pid,
+            "worker must not inherit the launching session"
+        );
+        assert_eq!(
+            group, pid,
+            "worker must not inherit the launching process group"
         );
     }
 

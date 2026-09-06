@@ -153,6 +153,10 @@ Current notes:
   logic. The long-running `monitor` command runs due probes itself, so detached
   boxes no longer depend on short-lived CLI health-check tasks to move from
   `starting` to `healthy`/`unhealthy` and trigger restart policy handling.
+- Detached CLI health workers also own independent Unix sessions. The local
+  regression kills the launcher's process group and requires a new successful
+  guest readiness probe, preventing a stale health snapshot from hiding a
+  prematurely terminated worker.
 - The A3S Runtime provider pins Runtime 0.5.0 and advertises HTTP, TCP, and
   command readiness plus the atomic `ServiceLifecycle` feature. Readiness and
   liveness have independent start periods and success/failure thresholds; HTTP
@@ -735,6 +739,11 @@ Current notes:
   `pool start --lease-ttl <duration>` reclaims idle internal leases whose client
   disappeared before release, while leaving active lease execs alone. The
   default is `1h`; `0` disables lease reclamation.
+- Pool shutdown now joins in-progress maintenance and retains request ownership
+  through VM cleanup. Idle VMs and leases drain with bounded concurrency;
+  persistent VMs retain their normal graceful-stop deadline. The
+  [local Dify qualification](local-dify-validation-2026-09-06.md) records the
+  accompanying health, resource, and no-leftover-socket regressions.
 - Volume-bound build leases are treated as short-lived stage helpers and are
   filled on demand (`min_idle=0`) instead of pre-warming a whole pool for each
   unique stage rootfs mount.
@@ -794,6 +803,9 @@ Acceptance criteria:
 
 Current notes:
 
+- macOS shim staging preserves libkrun-sys's signed dylib bytes, versioned
+  install names, and aliases. Packaging tests verify signatures and guard
+  same-file/hard-link staging against truncation; no version is hard-coded.
 - Windows packaging now chooses the native WHPX path explicitly. The Windows
   release package ships `a3s-box.exe`, `a3s-box-shim.exe`, the Linux
   `a3s-box-guest-init` binary that runs inside the MicroVM, `krun.dll`, and the

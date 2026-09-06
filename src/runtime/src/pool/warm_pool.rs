@@ -12,7 +12,7 @@ use a3s_box_core::config::{BoxConfig, PoolConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::pool::scaler::PoolScaler;
 use crate::vm::VmManager;
@@ -112,7 +112,12 @@ pub struct WarmPool {
     /// Event emitter for pool lifecycle events.
     event_emitter: EventEmitter,
     /// Background replenishment task handle.
-    replenish_handle: Option<JoinHandle<()>>,
+    ///
+    /// The handle is behind a mutex because daemon shutdown owns pools through
+    /// `Arc<WarmPool>`. Taking and awaiting it during `drain_idle` is required:
+    /// dropping a maintenance task while it is booting can leave its newly
+    /// created VM (and shim) detached from the pool's idle list.
+    replenish_handle: Mutex<Option<JoinHandle<()>>>,
     /// Shutdown signal sender.
     shutdown_tx: watch::Sender<bool>,
     /// Shutdown signal receiver (cloned for background task).
@@ -150,6 +155,18 @@ struct PoolTemplate {
 /// the whole pool to cold-boot on a one-off hiccup, while still giving up on a
 /// genuinely-unsupported host after a few attempts.
 const MAX_TEMPLATE_BUILD_FAILURES: u32 = 3;
+
+/// Bound concurrent VM teardown so a large pool does not turn shutdown into a
+/// host-resource spike. Teardown is I/O-heavy and independent per VM, so a
+/// small fixed fan-out shortens the critical path without overwhelming the
+/// hypervisor or filesystem.
+const MAX_DRAIN_CONCURRENCY: usize = 4;
+
+/// Warm-pool VMs are ephemeral (`persistent = false` in the pool daemon). Give
+/// the guest a short graceful window during daemon shutdown, then let the VM
+/// lifecycle's force-stop fallback finish host cleanup. This keeps shutdown
+/// bounded when a keepalive process ignores SIGTERM.
+const EPHEMERAL_DRAIN_TIMEOUT_MS: u64 = 2_000;
 
 /// Cached state of the snapshot-fork template.
 enum TemplateState {
@@ -315,13 +332,13 @@ impl WarmPool {
         };
 
         let boot_limiter = Arc::new(Semaphore::new(config.max_concurrent_boots));
-        let mut pool = Self {
+        let pool = Self {
             config,
             box_config,
             idle,
             stats,
             event_emitter,
-            replenish_handle: None,
+            replenish_handle: Mutex::new(None),
             shutdown_tx,
             shutdown_rx,
             scaler,
@@ -351,7 +368,7 @@ impl WarmPool {
 
         // Start background maintenance loop
         let handle = pool.spawn_maintenance_loop();
-        pool.replenish_handle = Some(handle);
+        *pool.replenish_handle.lock().await = Some(handle);
 
         tracing::info!(
             min_idle = pool.config.min_idle,
@@ -521,7 +538,7 @@ impl WarmPool {
         let _ = self.shutdown_tx.send(true);
 
         // Wait for background task to finish
-        if let Some(handle) = self.replenish_handle.take() {
+        if let Some(handle) = self.replenish_handle.lock().await.take() {
             let _ = handle.await;
         }
 
@@ -536,16 +553,7 @@ impl WarmPool {
         };
         let count = idle_vms.len();
 
-        for warm_vm in idle_vms {
-            let mut vm = warm_vm.vm;
-            if let Err(e) = vm.destroy().await {
-                tracing::warn!(
-                    box_id = %vm.box_id(),
-                    error = %e,
-                    "Failed to destroy pooled VM during drain"
-                );
-            }
-        }
+        Self::destroy_vms(idle_vms, None, "drain").await;
 
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
@@ -559,9 +567,17 @@ impl WarmPool {
 
     /// Destroy all idle VMs without consuming the pool (`&self`), so it can be
     /// shut down from behind an `Arc` (e.g. a daemon serving concurrent requests).
-    /// Pair with [`Self::signal_shutdown`] first to stop the background replenisher;
-    /// its task then exits on its own (it watches the shutdown channel).
+    /// This method signals and joins the background replenisher before taking
+    /// the idle snapshot, then tears down VMs with bounded concurrency.
     pub async fn drain_idle(&self) -> Result<()> {
+        // Stop and join the maintenance loop before taking the idle snapshot.
+        // Otherwise a replenishment batch can finish after this method drains
+        // the vector and publish a VM that no owner remains to destroy.
+        self.signal_shutdown();
+        if let Some(handle) = self.replenish_handle.lock().await.take() {
+            let _ = handle.await;
+        }
+
         // Detach idle VMs before destroying them. Keeping `idle` locked while
         // awaiting VM teardown blocks concurrent acquire/release operations and
         // widens the shutdown race window for a replenishment batch.
@@ -572,19 +588,58 @@ impl WarmPool {
             idle_vms
         };
         let count = idle_vms.len();
-        for warm_vm in idle_vms {
-            let mut vm = warm_vm.vm;
-            if let Err(e) = vm.destroy().await {
-                tracing::warn!(
-                    box_id = %vm.box_id(),
-                    error = %e,
-                    "Failed to destroy pooled VM during drain_idle"
-                );
-            }
-        }
+        let timeout_ms = (!self.box_config.persistent).then_some(EPHEMERAL_DRAIN_TIMEOUT_MS);
+        Self::destroy_vms(idle_vms, timeout_ms, "drain_idle").await;
         self.stats.lock().await.idle_count = 0;
         tracing::info!(destroyed = count, "Warm pool idle VMs drained");
         Ok(())
+    }
+
+    /// Destroy detached VMs in a bounded fan-out. The caller must remove the
+    /// VMs from the pool before invoking this helper so no pool lock is held
+    /// while a hypervisor teardown is in progress.
+    async fn destroy_vms(vms: Vec<WarmVm>, timeout_ms: Option<u64>, operation: &'static str) {
+        if vms.is_empty() {
+            return;
+        }
+
+        let concurrency = vms.len().min(MAX_DRAIN_CONCURRENCY);
+        let mut pending = vms.into_iter();
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..concurrency {
+            if let Some(warm_vm) = pending.next() {
+                tasks.spawn(Self::destroy_one(warm_vm, timeout_ms));
+            }
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((box_id, Ok(()))) => {
+                    tracing::debug!(%box_id, operation, "Destroyed pooled VM");
+                }
+                Ok((box_id, Err(error))) => {
+                    tracing::warn!(%box_id, %error, operation, "Failed to destroy pooled VM");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, operation, "Pooled VM teardown task failed");
+                }
+            }
+
+            if let Some(warm_vm) = pending.next() {
+                tasks.spawn(Self::destroy_one(warm_vm, timeout_ms));
+            }
+        }
+    }
+
+    async fn destroy_one(warm_vm: WarmVm, timeout_ms: Option<u64>) -> (String, Result<()>) {
+        let box_id = warm_vm.vm.box_id().to_string();
+        let mut vm = warm_vm.vm;
+        let result = match timeout_ms {
+            Some(timeout_ms) => vm.destroy_with_timeout(timeout_ms).await,
+            None => vm.destroy().await,
+        };
+        (box_id, result)
     }
 
     /// Remove and destroy specific idle VMs by their box IDs.
@@ -628,20 +683,8 @@ impl WarmPool {
             Self::sync_idle_metric(self.metrics.as_ref(), idle_count);
         }
 
-        // Destroy collected VMs (outside of pool lock)
-        for warm_vm in to_destroy {
-            let box_id = warm_vm.vm.box_id().to_string();
-            let mut vm = warm_vm.vm;
-            if let Err(e) = vm.destroy().await {
-                tracing::warn!(
-                    box_id = %box_id,
-                    error = %e,
-                    "Failed to destroy VM during pool fill rollback"
-                );
-            } else {
-                tracing::debug!(box_id = %box_id, "Destroyed VM during pool fill rollback");
-            }
-        }
+        // Destroy collected VMs (outside of pool lock).
+        Self::destroy_vms(to_destroy, None, "fill rollback").await;
     }
 
     /// Boot a new VM using the pool's template config.
@@ -1240,10 +1283,7 @@ impl WarmPool {
 
         let evicted_count = expired.len();
         Self::sync_idle_metric(metrics, after_count);
-        for warm_vm in expired {
-            let mut vm = warm_vm.vm;
-            let _ = vm.destroy().await;
-        }
+        Self::destroy_vms(expired, None, "eviction").await;
 
         if evicted_count > 0 {
             let mut s = stats.lock().await;
@@ -1283,6 +1323,9 @@ fn replenish_backoff_delay(failures: u32, check_interval: Duration) -> Duration 
         .min(300);
     Duration::from_secs(delay_secs)
 }
+
+#[cfg(test)]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod tests {

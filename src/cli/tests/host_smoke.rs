@@ -773,6 +773,7 @@ volume "data" {{
 fn test_real_pool_warm_run() {
     let cli = CliTest::new();
     let image = host_smoke_image();
+    let socket_dirs_before = host_socket_dirs();
     seed_runnable_alpine_image(&cli, &image);
     // A second image (retag of the first) the daemon pre-warms at startup via --warm.
     let second = format!("coverage-pool-second:{}", unique_tag("img2"));
@@ -950,6 +951,7 @@ fn test_real_pool_warm_run() {
     );
 
     daemon.interrupt();
+    assert_no_new_host_socket_dirs(&socket_dirs_before);
 }
 
 /// Dockerfile RUN over the warm-pool lease path: one build stage keeps a pooled

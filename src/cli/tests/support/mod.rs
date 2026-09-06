@@ -16,6 +16,12 @@ use flate2::Compression;
 use sha2::{Digest, Sha256};
 
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+/// Allow daemon shutdown to finish its documented warm-pool drain window.
+/// Pool teardown can include a final guest boot already in progress; killing
+/// the daemon after a shorter fixed wait leaves its shim orphaned and makes a
+/// resource-leak assertion report a test-harness artifact instead of a daemon
+/// bug.
+const BACKGROUND_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(90);
 pub const HOST_SMOKE_IMAGE_ENV: &str = "A3S_BOX_HOST_SMOKE_IMAGE";
 pub const HOST_SMOKE_TIMEOUT_SECS_ENV: &str = "A3S_BOX_HOST_SMOKE_TIMEOUT_SECS";
 pub const TEST_ALPINE_TAR_ENV: &str = "A3S_BOX_TEST_ALPINE_TAR";
@@ -217,7 +223,7 @@ impl CliTest {
         }
 
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(30) {
+        while start.elapsed() < BACKGROUND_INTERRUPT_TIMEOUT {
             match child.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
