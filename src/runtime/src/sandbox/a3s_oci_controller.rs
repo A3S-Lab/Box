@@ -73,13 +73,15 @@ impl A3sOciController {
         let pty_fd = inherited_pty.as_raw_fd();
         let log_fd = inherited_log.as_raw_fd();
 
-        let mut command = Command::new(&self.runtime.runtime_path);
+        let mut command = Command::new("/usr/local/libexec/a3s-box-sandbox-oci-launcher");
         command
             .arg("native-linux-service")
             .arg("--root")
             .arg(&launch.runtime_root)
             .arg("--agent")
             .arg(&self.runtime.agent_path)
+            .arg("--delegated-cgroup-root")
+            .arg("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/a3s-box-delegated")
             .arg("--container-id")
             .arg(&launch.container_id)
             .arg("--a3s-box-control-fds")
