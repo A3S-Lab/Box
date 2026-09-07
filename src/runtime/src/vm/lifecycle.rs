@@ -181,10 +181,33 @@ impl VmManager {
                 timeout_ms
             };
             #[cfg(unix)]
-            let guest_stop_delivered = if self.boot_mode == VmBootMode::RootfsMaintenance {
-                self.deliver_rootfs_maintenance_shutdown().await
-            } else {
-                self.deliver_guest_stop_signal(signal).await
+            let guest_stop_delivered = {
+                // Finite foreground workloads often exit before destroy runs.
+                // Skip guest-control delivery when the provider already observed
+                // completion so short --rm runs do not WARN on a 1s timeout.
+                let already_exited = match handler.try_wait_exit() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => handler.has_exited(),
+                    Err(error) => {
+                        tracing::debug!(
+                            box_id = %self.box_id,
+                            %error,
+                            "Could not poll provider exit before guest stop delivery"
+                        );
+                        handler.has_exited()
+                    }
+                };
+                if already_exited {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        "Skipping guest stop delivery; workload already exited"
+                    );
+                    true
+                } else if self.boot_mode == VmBootMode::RootfsMaintenance {
+                    self.deliver_rootfs_maintenance_shutdown().await
+                } else {
+                    self.deliver_guest_stop_signal(signal).await
+                }
             };
             #[cfg(unix)]
             let _provider_exited = if guest_stop_delivered {

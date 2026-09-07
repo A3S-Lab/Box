@@ -247,6 +247,49 @@ pub fn probe_sandbox_capabilities_for(
 }
 
 #[cfg(target_os = "linux")]
+const SANDBOX_OCI_LAUNCHER_ENV: &str = "A3S_BOX_SANDBOX_OCI_LAUNCHER";
+#[cfg(target_os = "linux")]
+const SANDBOX_OCI_LAUNCHER_FILENAME: &str = "a3s-box-sandbox-oci-launcher";
+#[cfg(target_os = "linux")]
+const SANDBOX_OCI_LAUNCHER_SYSTEM_PATH: &str =
+    "/usr/local/libexec/a3s-box-sandbox-oci-launcher";
+
+/// Resolve the setuid Sandbox OCI launcher used for native-linux-service owners.
+#[cfg(target_os = "linux")]
+pub(crate) fn resolve_sandbox_oci_launcher(explicit: Option<&Path>) -> Result<PathBuf> {
+    let env_override = std::env::var_os(SANDBOX_OCI_LAUNCHER_ENV).filter(|path| !path.is_empty());
+    if explicit.is_some() || env_override.is_some() {
+        return resolve_packaged_artifact(
+            explicit,
+            SANDBOX_OCI_LAUNCHER_ENV,
+            SANDBOX_OCI_LAUNCHER_FILENAME,
+            "A3S Box Sandbox OCI launcher",
+        );
+    }
+
+    match resolve_packaged_artifact(
+        None,
+        SANDBOX_OCI_LAUNCHER_ENV,
+        SANDBOX_OCI_LAUNCHER_FILENAME,
+        "A3S Box Sandbox OCI launcher",
+    ) {
+        Ok(path) => Ok(path),
+        Err(packaged_error) => {
+            let system = PathBuf::from(SANDBOX_OCI_LAUNCHER_SYSTEM_PATH);
+            if !system.is_file() {
+                return Err(packaged_error);
+            }
+            resolve_packaged_artifact(
+                Some(&system),
+                SANDBOX_OCI_LAUNCHER_ENV,
+                SANDBOX_OCI_LAUNCHER_FILENAME,
+                "A3S Box Sandbox OCI launcher",
+            )
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn resolve_a3s_oci_artifacts(
     runtime_path: Option<&Path>,
     agent_path: Option<&Path>,
@@ -842,6 +885,20 @@ mod tests {
         assert_eq!(artifacts.runtime_sha256.len(), 64);
         assert_eq!(artifacts.agent_sha256.len(), 64);
         assert_ne!(artifacts.runtime_sha256, artifacts.agent_sha256);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolves_sandbox_oci_launcher_from_explicit_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let launcher = temporary.path().join("a3s-box-sandbox-oci-launcher");
+        std::fs::write(&launcher, b"launcher").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let resolved = resolve_sandbox_oci_launcher(Some(&launcher)).unwrap();
+        assert_eq!(resolved, launcher.canonicalize().unwrap());
     }
 
     #[cfg(target_os = "linux")]

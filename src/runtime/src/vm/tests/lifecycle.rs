@@ -30,6 +30,38 @@ async fn test_destroy_runs_host_teardown_even_when_handler_stop_fails() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn destroy_skips_guest_stop_when_workload_already_exited() {
+    use std::time::{Duration, Instant};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-already-exited".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+
+    let socket_dir = vm.socket_dir();
+    std::fs::create_dir_all(&socket_dir).unwrap();
+    let exec_socket = socket_dir.join("exec.sock");
+    // Bind but never accept. Guest stop delivery would wait the full 1s timeout
+    // if the already-exited short-circuit failed.
+    let _listener = tokio::net::UnixListener::bind(&exec_socket).unwrap();
+    vm.exec_socket_path = Some(exec_socket);
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 0 }));
+
+    let started = Instant::now();
+    vm.destroy_with_options(default_stop_signal(), 100).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "already-exited destroy must not wait for guest-stop delivery timeout"
+    );
+    assert!(vm.handler.read().await.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn destroy_uses_guest_stop_and_verifies_raw_rootfs_handoff() {
     use a3s_box_core::guest_exec::{GuestTerminalStatus, GUEST_TERMINAL_STATUS_FILE_NAME};
 

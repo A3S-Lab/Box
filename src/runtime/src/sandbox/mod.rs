@@ -40,6 +40,17 @@ pub(crate) fn linux_sandbox_delegated_cgroup_root() -> String {
     format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/a3s-box-delegated")
 }
 
+/// Resolve the administrator-owned setuid launcher used for Sandbox OCI owners.
+///
+/// Discovery order matches other packaged Sandbox artifacts: explicit override,
+/// environment, then the system libexec install location.
+#[cfg(target_os = "linux")]
+pub(crate) fn resolve_sandbox_oci_launcher(
+    explicit: Option<&std::path::Path>,
+) -> a3s_box_core::error::Result<std::path::PathBuf> {
+    capability::resolve_sandbox_oci_launcher(explicit)
+}
+
 /// Apply a complete resource contract to the exact recorded Sandbox generation.
 ///
 /// The A3S OCI SDK is the only live-update path for a host Sandbox. MicroVM
