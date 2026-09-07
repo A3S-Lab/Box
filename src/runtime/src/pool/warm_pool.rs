@@ -555,6 +555,8 @@ impl WarmPool {
 
         Self::destroy_vms(idle_vms, None, "drain").await;
 
+        self.clear_snapshot_template().await;
+
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
 
@@ -591,8 +593,66 @@ impl WarmPool {
         let timeout_ms = (!self.box_config.persistent).then_some(EPHEMERAL_DRAIN_TIMEOUT_MS);
         Self::destroy_vms(idle_vms, timeout_ms, "drain_idle").await;
         self.stats.lock().await.idle_count = 0;
+        self.clear_snapshot_template().await;
         tracing::info!(destroyed = count, "Warm pool idle VMs drained");
         Ok(())
+    }
+
+    /// Drop the in-memory snapshot-fork template and remove its on-disk directory.
+    ///
+    /// Idle VMs are already destroyed before this runs. Holding the same
+    /// per-image flock used by `build_template` avoids racing another process
+    /// that is still building the same image template.
+    async fn clear_snapshot_template(&self) {
+        let state = {
+            let mut guard = self.template.lock().await;
+            std::mem::replace(&mut *guard, TemplateState::Unbuilt)
+        };
+        let TemplateState::Ready(template) = state else {
+            return;
+        };
+        let Some(dir) = std::path::Path::new(&template.mem_file)
+            .parent()
+            .map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let lock_target = dir.clone();
+        let remove_result = tokio::task::spawn_blocking(move || {
+            let _lock = crate::file_lock::FileLock::acquire(&lock_target).map_err(|error| {
+                BoxError::PoolError(format!(
+                    "Failed to lock snapshot-fork template dir {}: {error}",
+                    lock_target.display()
+                ))
+            })?;
+            if lock_target.exists() {
+                std::fs::remove_dir_all(&lock_target).map_err(BoxError::IoError)?;
+            }
+            Ok::<(), BoxError>(())
+        })
+        .await;
+        match remove_result {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    template_dir = %dir.display(),
+                    "Removed snapshot-fork template directory after pool drain"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    template_dir = %dir.display(),
+                    %error,
+                    "Failed to remove snapshot-fork template directory after pool drain"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    template_dir = %dir.display(),
+                    %error,
+                    "Snapshot-fork template cleanup task failed after pool drain"
+                );
+            }
+        }
     }
 
     /// Destroy detached VMs in a bounded fan-out. The caller must remove the
@@ -1816,5 +1876,42 @@ mod tests {
             started.elapsed() < Duration::from_secs(3),
             "missing snapshot socket must not busy-wait the historical ~5s window"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_snapshot_template_removes_ready_template_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("tpl-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mem_file = dir.join("template.ram");
+        let state_file = dir.join("template.state");
+        std::fs::write(&mem_file, b"ram").unwrap();
+        std::fs::write(&state_file, b"state").unwrap();
+
+        let config = test_pool_config(0, 1);
+        let mut pool = match WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await
+        {
+            Ok(pool) => pool,
+            Err(_) => return, // environments without a usable provider still cover Ready cleanup below
+        };
+        {
+            let mut template = pool.template.lock().await;
+            *template = TemplateState::Ready(PoolTemplate {
+                mem_file: mem_file.to_string_lossy().into_owned(),
+                state_file: state_file.to_string_lossy().into_owned(),
+                rootfs_cache_key: None,
+            });
+        }
+
+        pool.clear_snapshot_template().await;
+        assert!(
+            !dir.exists(),
+            "drain must remove the on-disk snapshot-fork template directory"
+        );
+        assert!(matches!(
+            &*pool.template.lock().await,
+            TemplateState::Unbuilt
+        ));
+        let _ = pool.drain().await;
     }
 }

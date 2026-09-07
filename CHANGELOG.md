@@ -27,6 +27,11 @@ All notable changes to A3S Box will be documented in this file.
   that publish a terminal status before heartbeat still succeed.
 - Warm-pool snapshot-fork template socket polling fails after ~1.5s instead of
   a fixed ~5s busy-wait when the trigger socket never appears.
+- The warm-pool daemon drains on SIGTERM as well as SIGINT/`pool stop`, matching
+  the monitor supervisor, so bench `kill` and service managers no longer leave
+  idle shims/mounts behind.
+- Pool drain removes the on-disk snapshot-fork template directory
+  (`~/.a3s/pool/tpl-*`) after idle VMs are destroyed.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead

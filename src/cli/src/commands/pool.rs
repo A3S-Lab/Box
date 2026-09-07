@@ -1246,9 +1246,47 @@ async fn serve_pool_metrics(addr: String, metrics: a3s_box_runtime::RuntimeMetri
     }
 }
 
-/// Accept `pool run` connections until Ctrl-C, serving each request concurrently
-/// so independent sandboxes don't queue behind one another. On shutdown, stop the
-/// replenisher and destroy idle VMs (in-flight requests keep their own acquired VM).
+/// Resolve when the pool daemon should drain: SIGTERM/SIGINT on Unix, Ctrl-C
+/// elsewhere. Mirrors `monitor_shutdown_signal` so `kill` (SIGTERM) from benches
+/// and supervisors runs the same drain path as Ctrl-C / `pool stop`.
+#[cfg(unix)]
+async fn pool_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) {
+        (Ok(mut sigterm), Ok(mut sigint)) => {
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+        }
+        _ => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+async fn pool_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(not(windows))]
+async fn drain_pool_registry_on_shutdown(registry: &PoolRegistry, socket: &str, json: bool) {
+    let _ = std::fs::remove_file(socket);
+    if !json {
+        println!("Draining warm pools...");
+    }
+    registry.drain_all().await;
+    if !registry.wait_for_requests(POOL_DRAIN_TIMEOUT).await && !json {
+        eprintln!("Timed out waiting for in-flight pool requests to finish");
+    }
+}
+
+/// Accept `pool run` connections until SIGTERM/SIGINT, serving each request
+/// concurrently so independent sandboxes don't queue behind one another. On
+/// shutdown, stop the replenisher and destroy idle VMs (in-flight requests keep
+/// their own acquired VM).
 #[cfg(not(windows))]
 async fn serve(
     registry: std::sync::Arc<PoolRegistry>,
@@ -1260,7 +1298,7 @@ async fn serve(
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
     if !json {
-        println!("Listening on {} (Ctrl-C to drain and stop)", socket);
+        println!("Listening on {} (Ctrl-C or SIGTERM to drain and stop)", socket);
     }
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -1279,25 +1317,11 @@ async fn serve(
                 });
             }
             _ = shutdown_rx.recv() => {
-                let _ = std::fs::remove_file(socket);
-                if !json {
-                    println!("Draining warm pools...");
-                }
-                registry.drain_all().await;
-                if !registry.wait_for_requests(POOL_DRAIN_TIMEOUT).await && !json {
-                    eprintln!("Timed out waiting for in-flight pool requests to finish");
-                }
+                drain_pool_registry_on_shutdown(&registry, socket, json).await;
                 break;
             }
-            _ = tokio::signal::ctrl_c() => {
-                let _ = std::fs::remove_file(socket);
-                if !json {
-                    println!("Draining warm pools...");
-                }
-                registry.drain_all().await;
-                if !registry.wait_for_requests(POOL_DRAIN_TIMEOUT).await && !json {
-                    eprintln!("Timed out waiting for in-flight pool requests to finish");
-                }
+            _ = pool_shutdown_signal() => {
+                drain_pool_registry_on_shutdown(&registry, socket, json).await;
                 break;
             }
         }
