@@ -113,6 +113,21 @@ fn validate_execution_config(config: &a3s_box_core::BoxConfig) -> ExecutionManag
     }
 
     #[cfg(windows)]
+    if config.isolation == a3s_box_core::ExecutionIsolation::Sandbox {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "Sandbox isolation is supported only on Linux; use MicroVM isolation on Windows"
+                .to_string(),
+        ));
+    }
+
+    #[cfg(windows)]
+    if !matches!(config.tee, a3s_box_core::config::TeeConfig::None) {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "TEE configuration is not supported on Windows".to_string(),
+        ));
+    }
+
+    #[cfg(windows)]
     if matches!(config.network, a3s_box_core::NetworkMode::Bridge { .. }) {
         return Err(ExecutionManagerError::InvalidRequest(
             "bridge networking is not supported on Windows".to_string(),

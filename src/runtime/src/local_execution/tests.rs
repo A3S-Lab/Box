@@ -458,6 +458,59 @@ fn managed_record_rejects_bridge_networking_on_windows() {
     ));
 }
 
+#[cfg(windows)]
+#[test]
+fn managed_record_rejects_sandbox_isolation_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("invalid-windows-sandbox").unwrap();
+    let mut request = request("invalid-windows-sandbox");
+    request.config.isolation = ExecutionIsolation::Sandbox;
+
+    let error = build_managed_record(
+        directory.path(),
+        &execution_id,
+        operation("invalid-windows-sandbox"),
+        request,
+        Utc::now(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("Sandbox isolation is supported only on Linux")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_record_rejects_tee_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let execution_id = ExecutionId::new("invalid-windows-tee").unwrap();
+    let mut request = request("invalid-windows-tee");
+    request.config.isolation = ExecutionIsolation::Microvm;
+    request.config.tee = a3s_box_core::config::TeeConfig::SevSnp {
+        workload_id: "demo".to_string(),
+        generation: Default::default(),
+        simulate: true,
+    };
+
+    let error = build_managed_record(
+        directory.path(),
+        &execution_id,
+        operation("invalid-windows-tee"),
+        request,
+        Utc::now(),
+    )
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(
+        message.contains("TEE configuration is not supported on Windows"),
+        "unexpected error: {message}"
+    );
+}
+
 fn persisted(manager: &LocalExecutionManager, execution_id: &ExecutionId) -> BoxRecord {
     ManagedExecutionStore::new(manager.state_path().to_path_buf())
         .get(execution_id)

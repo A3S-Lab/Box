@@ -8,24 +8,33 @@ runtime path.
 
 - x86_64 Windows 10 or Windows 11;
 - hardware virtualization enabled in firmware;
-- Windows Hypervisor Platform enabled;
+- a working WHPX-capable hypervisor stack (see below);
 - Windows Developer Mode enabled, or the A3S Box service identity granted
   `SeCreateSymbolicLinkPrivilege` (A3S Box temporarily enables an assigned but
   disabled privilege only while probing the capability or extracting an OCI
   layer);
 - the A3S Box Windows binaries and their matching runtime DLLs.
 
-Enable WHPX from an elevated PowerShell prompt, then restart Windows if the
-feature manager requests it:
+A3S Box talks to the Windows Hypervisor Platform APIs. Operators commonly
+enable that surface with:
 
 ```powershell
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
-Run `a3s-box info` before starting a workload. It should report both
-`Virtualization: WHPX` and `OCI symlink support: available`. The probe uses the
-same scoped privilege implementation as layer extraction, so an assigned but
-initially disabled service-token privilege is reported accurately.
+Restart Windows if the feature manager requests it. On hosts that already run
+full Microsoft Hyper-V (`Microsoft-Hyper-V` / `Microsoft-Hyper-V-Hypervisor`
+Enabled), WHPX workloads can succeed even when the standalone
+`HypervisorPlatform` optional feature still reports `Disabled`. Treat
+`a3s-box info` as the authoritative preflight: it must report
+`Virtualization: WHPX` (or `VM backend: whpx`) and
+`OCI symlink support: available` before starting workloads. Do not fail a host
+solely because `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform`
+returns `Disabled` when `info` already proves WHPX is available.
+
+The WHPX probe uses the same scoped privilege implementation as layer
+extraction, so an assigned but initially disabled service-token privilege is
+reported accurately.
 
 If the probe reports that `SeCreateSymbolicLinkPrivilege` is enabled but link
 creation is still denied, check the A3S home ACL and endpoint-protection policy.
@@ -106,19 +115,22 @@ the Cargo target directory.
 | Container health checks | Not currently supported; `--health-*` requests and persisted health checks fail before workload start |
 | Bridge networks and Compose service networking | Not currently supported on Windows |
 | Interactive PTY (`attach -it` and `exec -it`) | Not currently supported on Windows; non-interactive `exec` is supported |
-| Memory snapshot-fork, TEE, and CRI | Not supported on Windows |
+| Shared-kernel Sandbox isolation | Not supported on Windows; `--isolation sandbox` fails before box creation |
+| Memory snapshot-fork, TEE, and CRI | Not supported on Windows; `--tee` / `--tee-simulate` fail before box creation |
+| `pause` / `unpause` | Not supported on Windows MicroVM/WHPX; commands fail closed before lifecycle mutation |
 
-Requests such as `--cpus 2` or `--health-cmd ...` fail before image pull with
-an explicit WHPX diagnostic. `--no-healthcheck` remains available to disable an
-image-defined health check. Qualification-mode `run` and `create` also require
+Requests such as `--cpus 2`, `--health-cmd ...`, `--isolation sandbox`, or
+`--tee` fail before image pull / box creation with an explicit WHPX diagnostic.
+`--no-healthcheck` remains available to disable an image-defined health check.
+Qualification-mode `run` and `create` also require
 the configured OCI service to advertise one launch-ready `DedicatedVm` driver
 before named-volume creation or image-cache access.
 
 ## Smoke test
 
 The following paths were validated on July 20–22 and again on August 1, 2026,
-on Windows build 26200 with an AMD Ryzen 7 9800X3D and
-`HypervisorPlatform` enabled:
+on Windows build 26200 with an AMD Ryzen 7 9800X3D and a WHPX-capable
+hypervisor stack (full Hyper-V and/or the HypervisorPlatform optional feature):
 
 ```powershell
 # Success, stdout, and stderr
@@ -159,6 +171,23 @@ WHPX bridge networking is not implemented, Compose workload startup remains
 outside the current Windows support boundary even when a Compose file contains
 only one service. `compose up` rejects this platform combination before image
 resolution, network creation, box-directory creation, or VM startup.
+
+## First-principles acceptance matrix
+
+Release claims for Windows WHPX must cover both the supported positive subset
+and fail-closed negatives. Tracked as Box issues #252, #255, and #257, the
+minimum named rows are:
+
+| Family | Examples |
+| --- | --- |
+| `WIN-HOST-*` | `info` reports WHPX; package DLLs co-located; docs match a host that can actually run |
+| `WIN-POS-*` | foreground/detached run, exec, cp/top/stats, volumes, bind RO, ports, snapshot, commit, rename, wait/kill exit-code honesty |
+| `WIN-NEG-*` | sandbox, tee, health, bridge, compose, PTY/`shell`, pause/unpause, live `container-update`, warm pool |
+| `WIN-SLO-*` | no residual processes after cases; exec-ready / stop-delivery WARNs stay off the happy path |
+
+CLI coverage for several negatives lives in
+`src/cli/tests/command_coverage.rs` (`test_windows_*`). Real WHPX soak remains
+the evidence gate for positives (`scripts/windows-whpx-soak.ps1`).
 
 ## WHPX soak validation
 

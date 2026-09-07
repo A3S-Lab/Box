@@ -427,6 +427,14 @@ fn resolve_auto_host_port(entry: String) -> Result<String, String> {
 /// Reject runtime options that a3s-box cannot enforce yet.
 pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), String> {
     #[cfg(windows)]
+    if matches!(common.isolation, Some(IsolationArg::Sandbox)) {
+        return Err(
+            "Sandbox isolation is supported only on Linux; omit --isolation to use the Windows WHPX MicroVM path"
+                .to_string(),
+        );
+    }
+
+    #[cfg(windows)]
     if common.health_cmd.is_some()
         || common.health_interval != 30
         || common.health_timeout != 5
@@ -782,6 +790,18 @@ mod tests {
         assert!(validate_runtime_options(&args)
             .unwrap_err()
             .contains("WHPX"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_rejects_windows_sandbox_isolation() {
+        let mut args = default_common_args();
+        args.isolation = Some(IsolationArg::Sandbox);
+        let err = validate_runtime_options(&args).unwrap_err();
+        assert!(
+            err.contains("Sandbox isolation is supported only on Linux"),
+            "got: {err}"
+        );
     }
 
     #[test]

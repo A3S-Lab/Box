@@ -4,6 +4,27 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Windows WHPX docs now include a first-principles acceptance matrix index
+  (`WIN-HOST` / `WIN-POS` / `WIN-NEG` / `WIN-SLO`) tied to issues #252, #255,
+  and #257.
+
+### Fixed
+
+- Windows rejects `--isolation sandbox` and `--tee` before box creation /
+  image pull, matching other WHPX fail-closed gates (#249).
+- `pause` / `unpause` fail closed on Windows with a platform diagnostic instead
+  of a misleading “cannot unpause because it is running” path (#253).
+- `wait` keeps polling until an authoritative exit code is recorded, so a
+  `kill` that leaves `inspect` ExitCode 137 no longer prints `0` (#256).
+- Windows stop-delivery and exec-ready progress budgets are raised so healthy
+  WHPX boots and short `--rm` workloads are less likely to emit happy-path
+  WARNs (#251, #254).
+- Windows WHPX docs clarify that `a3s-box info` is authoritative when full
+  Hyper-V is enabled even if the standalone `HypervisorPlatform` optional
+  feature reports Disabled (#250).
+
 ## [3.2.5] — 2026-09-06
 
 ### Added
