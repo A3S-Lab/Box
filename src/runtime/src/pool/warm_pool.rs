@@ -969,14 +969,19 @@ impl WarmPool {
     async fn trigger_snapshot(sock: &std::path::Path, state_file: &std::path::Path) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // The socket is bound by libkrun after the guest starts; poll briefly.
+        // Cap well under the historical 5s busy-wait so a missing template
+        // socket fails fast instead of taxing snapshot-fork fill.
+        const SNAPSHOT_SOCKET_POLL_ATTEMPTS: u32 = 60;
+        const SNAPSHOT_SOCKET_POLL_INTERVAL: std::time::Duration =
+            std::time::Duration::from_millis(25);
         let mut stream = None;
-        for _ in 0..200 {
+        for _ in 0..SNAPSHOT_SOCKET_POLL_ATTEMPTS {
             match tokio::net::UnixStream::connect(sock).await {
                 Ok(s) => {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                Err(_) => tokio::time::sleep(SNAPSHOT_SOCKET_POLL_INTERVAL).await,
             }
         }
         let mut stream = stream.ok_or_else(|| {
@@ -1788,5 +1793,28 @@ mod tests {
                 // a usable VM provider; min_idle=0 normally avoids this path.
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn trigger_snapshot_fails_fast_when_socket_never_appears() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("missing-template.sock");
+        let state = tmp.path().join("template.state");
+
+        let started = Instant::now();
+        let error = WarmPool::trigger_snapshot(&sock, &state)
+            .await
+            .expect_err("missing snapshot socket must fail");
+        assert!(
+            error.to_string().contains("never appeared"),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "missing snapshot socket must not busy-wait the historical ~5s window"
+        );
     }
 }

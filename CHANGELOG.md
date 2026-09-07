@@ -21,6 +21,12 @@ All notable changes to A3S Box will be documented in this file.
   no longer WARN on the 1s delivery timeout.
 - Cold MicroVM boot crash-detection grace is reduced from 250ms to 80ms so
   healthy short workloads are not taxed by a fixed sleep after shim spawn.
+- Unix cold boots fail closed when the guest exec heartbeat never arrives
+  within `A3S_EXEC_READY_TIMEOUT_MS` (default 15s), matching Windows so a live
+  shim without a usable control plane is never marked Ready. Short workloads
+  that publish a terminal status before heartbeat still succeed.
+- Warm-pool snapshot-fork template socket polling fails after ~1.5s instead of
+  a fixed ~5s busy-wait when the trigger socket never appears.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead
