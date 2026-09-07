@@ -404,6 +404,8 @@ async fn test_wait_for_vm_running_returns_error_when_handler_exited() {
 
 #[tokio::test]
 async fn test_wait_for_vm_running_succeeds_when_handler_stays_running() {
+    use std::time::{Duration, Instant};
+
     let config = BoxConfig {
         restore_from: Some("snapshot-path".to_string()),
         ..BoxConfig::default()
@@ -411,7 +413,31 @@ async fn test_wait_for_vm_running_succeeds_when_handler_stays_running() {
     let vm = VmManager::with_box_id(config, EventEmitter::new(16), "box-running".to_string());
     *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: false }));
 
+    let started = Instant::now();
     vm.wait_for_vm_running().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(120),
+        "restore crash-grace must stay near 40ms, not a multi-hundred-ms sleep"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_vm_running_cold_grace_stays_sub_quarter_second() {
+    use std::time::{Duration, Instant};
+
+    let vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-cold-grace".to_string(),
+    );
+    *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: false }));
+
+    let started = Instant::now();
+    vm.wait_for_vm_running().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "cold crash-grace must stay well under 250ms for short --rm workloads"
+    );
 }
 
 #[cfg(not(target_os = "windows"))]

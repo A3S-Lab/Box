@@ -35,15 +35,18 @@ impl VmManager {
         // process is alive the instant the shim is spawned, and we just watch for it
         // exiting immediately. A snapshot-restored VM reaches its run loop in ~20ms
         // (no cold boot), so a short grace catches an immediate restore failure while
-        // saving ~200ms on the fork fast-path; a cold boot keeps the longer grace.
+        // saving cold-path latency on the fork fast-path. Cold boots only need enough
+        // time to observe an immediate shim abort; later failures are caught by
+        // wait_for_exec_ready. Keep the cold window well under a quarter-second so
+        // short --rm workloads are not taxed by a fixed sleep.
         #[cfg(unix)]
         let max_wait_ms: u64 = if super::is_restore_mode(&self.config) {
             40
         } else {
-            250
+            80
         };
         #[cfg(not(unix))]
-        let max_wait_ms: u64 = 250;
+        let max_wait_ms: u64 = 80;
         const POLL_MS: u64 = 10;
 
         tracing::debug!("Confirming VM process started");

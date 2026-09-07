@@ -19,6 +19,8 @@ All notable changes to A3S Box will be documented in this file.
   exited or the guest has published a terminal status (including the MicroVM
   console-handoff window where the shim is still alive), so short `--rm` runs
   no longer WARN on the 1s delivery timeout.
+- Cold MicroVM boot crash-detection grace is reduced from 250ms to 80ms so
+  healthy short workloads are not taxed by a fixed sleep after shim spawn.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead
