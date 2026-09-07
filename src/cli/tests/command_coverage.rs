@@ -228,20 +228,36 @@ fn test_local_state_command_smoke() {
     cli.ok(&["system-prune", "--force"]);
     cli.ok(&["rmi", "--force", "missing:latest"]);
 
-    cli.ok(&[
-        "network",
-        "create",
-        "covnet",
-        "--subnet",
-        "10.123.0.0/24",
-        "--label",
-        "purpose=coverage",
-    ]);
-    let networks = cli.ok(&["network", "ls", "--quiet"]);
-    assert!(networks.contains("covnet"));
-    let network_json = cli.ok(&["network", "inspect", "covnet"]);
-    assert!(network_json.contains("10.123.0.0/24"));
-    cli.ok(&["network", "rm", "covnet"]);
+    #[cfg(target_os = "windows")]
+    cli.fails(
+        &[
+            "network",
+            "create",
+            "covnet",
+            "--subnet",
+            "10.123.0.0/24",
+            "--label",
+            "purpose=coverage",
+        ],
+        "bridge networking is not supported on Windows",
+    );
+    #[cfg(not(target_os = "windows"))]
+    {
+        cli.ok(&[
+            "network",
+            "create",
+            "covnet",
+            "--subnet",
+            "10.123.0.0/24",
+            "--label",
+            "purpose=coverage",
+        ]);
+        let networks = cli.ok(&["network", "ls", "--quiet"]);
+        assert!(networks.contains("covnet"));
+        let network_json = cli.ok(&["network", "inspect", "covnet"]);
+        assert!(network_json.contains("10.123.0.0/24"));
+        cli.ok(&["network", "rm", "covnet"]);
+    }
 
     cli.ok(&["volume", "create", "covvol", "--label", "purpose=coverage"]);
     let volumes = cli.ok(&["volume", "ls", "--quiet"]);
@@ -277,37 +293,40 @@ fn test_local_state_command_smoke() {
     let ports = cli.ok(&["port", "cov-created"]);
     assert!(ports.contains("80/tcp -> 0.0.0.0:18080"));
     cli.ok(&["rename", "cov-created", "cov-renamed"]);
-    cli.ok(&[
-        "network",
-        "create",
-        "covconnect",
-        "--subnet",
-        "10.124.0.0/24",
-    ]);
-    cli.ok(&["network", "connect", "covconnect", "cov-renamed"]);
-    let connected = cli.ok(&["inspect", "cov-renamed"]);
-    let connected = parse_inspect(&connected);
-    assert_eq!(connected["network_name"], "covconnect");
-    assert_eq!(
-        connected["network_mode"],
-        serde_json::json!({"bridge": {"network": "covconnect"}})
-    );
-    let connected_network = cli.ok(&["network", "inspect", "covconnect"]);
-    assert!(connected_network.contains("cov-renamed"));
-    assert!(connected_network.contains("10.124.0.2"));
-    cli.ok(&["network", "disconnect", "covconnect", "cov-renamed"]);
-    let disconnected = cli.ok(&["inspect", "cov-renamed"]);
-    let disconnected = parse_inspect(&disconnected);
-    assert_eq!(disconnected["network_name"], serde_json::Value::Null);
-    assert_eq!(disconnected["network_mode"], serde_json::json!("tsi"));
-    cli.ok(&["network", "rm", "covconnect"]);
-    cli.ok(&["network", "create", "covforce", "--subnet", "10.125.0.0/24"]);
-    cli.ok(&["network", "connect", "covforce", "cov-renamed"]);
-    cli.ok(&["network", "rm", "--force", "covforce"]);
-    let force_disconnected = cli.ok(&["inspect", "cov-renamed"]);
-    let force_disconnected = parse_inspect(&force_disconnected);
-    assert_eq!(force_disconnected["network_name"], serde_json::Value::Null);
-    assert_eq!(force_disconnected["network_mode"], serde_json::json!("tsi"));
+    #[cfg(not(target_os = "windows"))]
+    {
+        cli.ok(&[
+            "network",
+            "create",
+            "covconnect",
+            "--subnet",
+            "10.124.0.0/24",
+        ]);
+        cli.ok(&["network", "connect", "covconnect", "cov-renamed"]);
+        let connected = cli.ok(&["inspect", "cov-renamed"]);
+        let connected = parse_inspect(&connected);
+        assert_eq!(connected["network_name"], "covconnect");
+        assert_eq!(
+            connected["network_mode"],
+            serde_json::json!({"bridge": {"network": "covconnect"}})
+        );
+        let connected_network = cli.ok(&["network", "inspect", "covconnect"]);
+        assert!(connected_network.contains("cov-renamed"));
+        assert!(connected_network.contains("10.124.0.2"));
+        cli.ok(&["network", "disconnect", "covconnect", "cov-renamed"]);
+        let disconnected = cli.ok(&["inspect", "cov-renamed"]);
+        let disconnected = parse_inspect(&disconnected);
+        assert_eq!(disconnected["network_name"], serde_json::Value::Null);
+        assert_eq!(disconnected["network_mode"], serde_json::json!("tsi"));
+        cli.ok(&["network", "rm", "covconnect"]);
+        cli.ok(&["network", "create", "covforce", "--subnet", "10.125.0.0/24"]);
+        cli.ok(&["network", "connect", "covforce", "cov-renamed"]);
+        cli.ok(&["network", "rm", "--force", "covforce"]);
+        let force_disconnected = cli.ok(&["inspect", "cov-renamed"]);
+        let force_disconnected = parse_inspect(&force_disconnected);
+        assert_eq!(force_disconnected["network_name"], serde_json::Value::Null);
+        assert_eq!(force_disconnected["network_mode"], serde_json::json!("tsi"));
+    }
     let formatted = cli.ok(&["ps", "-a", "--format", "{{.Names}} {{.Status}}"]);
     assert!(formatted.contains("cov-renamed created"));
     cli.ok(&["rm", "cov-renamed"]);
@@ -699,6 +718,41 @@ fn test_windows_sandbox_and_tee_fail_before_creating_box() {
         &["unpause", "missing-box"],
         "not supported on windows/amd64: requires MicroVM pause/resume support",
     );
+
+    cli.fails(
+        &["pool", "start"],
+        "`pool start` is not supported on Windows",
+    );
+
+    let (stdout, stderr, success) = cli.output(&[
+        "run",
+        "--rm",
+        "--network",
+        "bridge",
+        "docker.io/library/alpine:latest",
+        "--",
+        "true",
+    ]);
+    assert!(
+        !success,
+        "bridge run unexpectedly succeeded: {stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("bridge networking is not supported on Windows"),
+        "missing bridge fail-closed diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Creating box")
+            && !stdout.contains("Creating box")
+            && !stderr.contains("Pulling")
+            && !stdout.contains("Pulling"),
+        "bridge must fail before pull/Creating box: stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    cli.fails(
+        &["network", "create", "win-bridge-rejected"],
+        "bridge networking is not supported on Windows",
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -878,6 +932,23 @@ fn test_stopped_managed_update_rewrites_the_next_start_request() {
     metadata
         .validate()
         .expect("managed start must accept the updated creation request");
+
+    #[cfg(target_os = "windows")]
+    {
+        cli.ok(&[
+            "create",
+            "--name",
+            "cov-update-cpus",
+            "docker.io/library/alpine:latest",
+        ]);
+        cli.fails(
+            &["container-update", "cov-update-cpus", "--cpus", "2"],
+            "WHPX",
+        );
+        let inspect = parse_inspect(&cli.ok(&["inspect", "cov-update-cpus"]));
+        assert_eq!(inspect["cpus"], 1);
+        cli.ok(&["rm", "cov-update-cpus"]);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1029,10 +1100,27 @@ fn test_noninteractive_boundary_command_smoke() {
         &["network", "create", "bad-driver", "--driver", "overlay"],
         "Unsupported network driver",
     );
+    #[cfg(target_os = "windows")]
+    cli.fails(
+        &["network", "create", "strict-net", "--isolation", "strict"],
+        "bridge networking is not supported on Windows",
+    );
+    #[cfg(not(target_os = "windows"))]
     cli.fails(
         &["network", "create", "strict-net", "--isolation", "strict"],
         "Unsupported network isolation mode",
     );
+    #[cfg(target_os = "windows")]
+    cli.fails(
+        &[
+            "create",
+            "--network",
+            "missing-net",
+            "docker.io/library/alpine:latest",
+        ],
+        "bridge networking is not supported on Windows",
+    );
+    #[cfg(not(target_os = "windows"))]
     cli.fails(
         &[
             "create",

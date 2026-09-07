@@ -489,6 +489,13 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
 
     let network = resolve_network(common.network.as_deref());
+    #[cfg(windows)]
+    if matches!(network, NetworkMode::Bridge { .. }) {
+        return Err(
+            "bridge networking is not supported on Windows; omit --network or use --network none"
+                .to_string(),
+        );
+    }
     let compatibility_config = a3s_box_core::BoxConfig {
         isolation: execution_isolation(common),
         port_map: common.publish.clone(),
@@ -780,6 +787,20 @@ mod tests {
             .contains("cpus"));
         args.cpus = 256;
         assert!(validate_runtime_options(&args).unwrap_err().contains("255"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_rejects_windows_bridge_network() {
+        let mut args = default_common_args();
+        args.network = Some("mynet".to_string());
+        let err = validate_runtime_options(&args).unwrap_err();
+        assert!(
+            err.contains("bridge networking is not supported on Windows"),
+            "got: {err}"
+        );
+        args.network = Some("none".to_string());
+        assert!(validate_runtime_options(&args).is_ok());
     }
 
     #[cfg(target_os = "windows")]

@@ -9,9 +9,17 @@ All notable changes to A3S Box will be documented in this file.
 - Windows WHPX docs now include a first-principles acceptance matrix index
   (`WIN-HOST` / `WIN-POS` / `WIN-NEG` / `WIN-SLO`) tied to issues #252, #255,
   and #257.
+- Windows CLI coverage for bridge/network-create/pool-start/container-update
+  fail-closed negatives (#260).
 
 ### Fixed
 
+- Windows rejects `--network <bridge>` before image pull / Creating box (#259).
+- Windows `network create` fail-closes for unsupported bridge networks (#263).
+- Windows `pool start` exits immediately instead of hanging after an unsupported
+  socket-serving message (#261).
+- `container-update --cpus` applies the same WHPX single-vCPU validation as
+  `run`/`create`, so invalid counts are not persisted (#262).
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead

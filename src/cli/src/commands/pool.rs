@@ -986,171 +986,185 @@ impl PoolRegistry {
 }
 
 async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Error>> {
-    if args.size == 0 {
-        return Err("--size must be greater than 0".into());
-    }
-    if args.size > args.max {
-        return Err(format!("--size ({}) cannot exceed --max ({})", args.size, args.max).into());
-    }
-    if args.boot_concurrency == 0 {
-        return Err("--boot-concurrency must be greater than 0".into());
-    }
-
-    // Optional Prometheus metrics for the long-lived daemon. One shared registry
-    // is handed to every pool (set_metrics) and to the /metrics server; cloning a
-    // RuntimeMetrics shares the underlying registry, so the server scrapes what the
-    // pools record (warm_pool hit/miss, vm_boot, boot phases, cache).
-    let metrics = if args.metrics_addr.is_some() {
-        a3s_box_runtime::RuntimeMetrics::try_new().ok()
-    } else {
-        None
-    };
-
-    let registry = std::sync::Arc::new(PoolRegistry {
-        pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        draining: std::sync::atomic::AtomicBool::new(false),
-        inflight_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        inflight_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-        #[cfg(not(windows))]
-        leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        #[cfg(not(windows))]
-        default_image: args.image.clone(),
-        size: args.size,
-        max: args.max,
-        boot_concurrency: args.boot_concurrency,
-        ttl: args.ttl,
-        #[cfg(not(windows))]
-        lease_ttl: args.lease_ttl,
-        deferred: args.deferred,
-        ksm: args.ksm,
-        snapshot_fork: args.snapshot_fork,
-        metrics: metrics.clone(),
-        boot_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(args.boot_concurrency)),
-    });
-
-    // Serve /metrics alongside the pool socket, if requested.
-    if let (Some(addr), Some(metrics)) = (args.metrics_addr.clone(), metrics) {
-        tokio::spawn(serve_pool_metrics(addr, metrics));
+    #[cfg(windows)]
+    {
+        let _ = args;
+        return Err(
+            "`pool start` is not supported on Windows; the warm pool daemon requires a Unix socket and is unavailable on WHPX"
+                .into(),
+        );
     }
 
     #[cfg(not(windows))]
-    if args.lease_ttl > 0 {
-        tokio::spawn(reap_expired_leases_task(registry.clone(), args.lease_ttl));
-    }
-
-    // Bind the control socket before pre-warming. Large images can take longer
-    // than the autostart client's safety cap to cold boot; keeping the daemon
-    // undiscoverable until that work completed made a healthy startup look like
-    // a timeout. Requests may connect immediately and naturally wait on the
-    // per-pool creation lock until the first VM is truly exec-ready.
-    #[cfg(not(windows))]
-    let serve_task = {
-        let serve_registry = registry.clone();
-        let serve_socket = args.socket.clone();
-        let serve_json = args.json;
-        tokio::spawn(async move {
-            serve(serve_registry, &serve_socket, serve_json)
-                .await
-                .map_err(|error| error.to_string())
-        })
-    };
-
-    let prewarm_result = async {
-        // Validate all explicit warm sizes before booting the default image.
-        // This avoids wasting VM boots when a multi-image deployment contains
-        // a capacity typo, and keeps --max a hard per-image resource bound.
-        let mut warm_specs: Vec<(String, usize)> = Vec::with_capacity(args.warm.len());
-        for entry in &args.warm {
-            let (image, count) = parse_warm_spec(entry, args.size)?;
-            if count == 0 {
-                return Err(format!("--warm count must be > 0 (in '{entry}')").into());
-            }
-            if count > args.max {
-                return Err(format!(
-                    "--warm count ({count}) cannot exceed --max ({}) (in '{entry}')",
-                    args.max
-                )
-                .into());
-            }
-            warm_specs.push((image, count));
+    {
+        if args.size == 0 {
+            return Err("--size must be greater than 0".into());
+        }
+        if args.size > args.max {
+            return Err(
+                format!("--size ({}) cannot exceed --max ({})", args.size, args.max).into(),
+            );
+        }
+        if args.boot_concurrency == 0 {
+            return Err("--boot-concurrency must be greater than 0".into());
         }
 
-        // Pre-warm the default image, if one was given.
-        let default_stats = if let Some(ref image) = args.image {
-            let entry = registry
-                .get_or_create(PoolKey::default_for_image(image.clone()))
-                .await?;
-            Some((image.clone(), entry.pool.stats().await))
+        // Optional Prometheus metrics for the long-lived daemon. One shared registry
+        // is handed to every pool (set_metrics) and to the /metrics server; cloning a
+        // RuntimeMetrics shares the underlying registry, so the server scrapes what the
+        // pools record (warm_pool hit/miss, vm_boot, boot phases, cache).
+        let metrics = if args.metrics_addr.is_some() {
+            a3s_box_runtime::RuntimeMetrics::try_new().ok()
         } else {
             None
         };
 
-        // Pre-warm any extra images requested via --warm.
-        for (image, count) in &warm_specs {
-            registry
-                .get_or_create_with_size(PoolKey::default_for_image(image), *count)
-                .await?;
-        }
-
-        Ok::<_, Box<dyn std::error::Error>>((default_stats, warm_specs))
-    }
-    .await;
-
-    let (default_stats, warmed_extra) = match prewarm_result {
-        Ok(result) => result,
-        Err(error) => {
-            // The socket is already bound so clients can observe startup
-            // progress. If pre-warming fails, tear down every background task
-            // and pool created so far before returning the error; otherwise a
-            // partial Dify deployment can leave a live socket and orphan VMs.
+        let registry = std::sync::Arc::new(PoolRegistry {
+            pools: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pool_initializers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            draining: std::sync::atomic::AtomicBool::new(false),
+            inflight_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             #[cfg(not(windows))]
-            {
-                registry.drain_all().await;
-                serve_task.abort();
-                let _ = serve_task.await;
-                let _ = std::fs::remove_file(&args.socket);
+            leases: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(not(windows))]
+            default_image: args.image.clone(),
+            size: args.size,
+            max: args.max,
+            boot_concurrency: args.boot_concurrency,
+            ttl: args.ttl,
+            #[cfg(not(windows))]
+            lease_ttl: args.lease_ttl,
+            deferred: args.deferred,
+            ksm: args.ksm,
+            snapshot_fork: args.snapshot_fork,
+            metrics: metrics.clone(),
+            boot_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(args.boot_concurrency)),
+        });
+
+        // Serve /metrics alongside the pool socket, if requested.
+        if let (Some(addr), Some(metrics)) = (args.metrics_addr.clone(), metrics) {
+            tokio::spawn(serve_pool_metrics(addr, metrics));
+        }
+
+        #[cfg(not(windows))]
+        if args.lease_ttl > 0 {
+            tokio::spawn(reap_expired_leases_task(registry.clone(), args.lease_ttl));
+        }
+
+        // Bind the control socket before pre-warming. Large images can take longer
+        // than the autostart client's safety cap to cold boot; keeping the daemon
+        // undiscoverable until that work completed made a healthy startup look like
+        // a timeout. Requests may connect immediately and naturally wait on the
+        // per-pool creation lock until the first VM is truly exec-ready.
+        #[cfg(not(windows))]
+        let serve_task = {
+            let serve_registry = registry.clone();
+            let serve_socket = args.socket.clone();
+            let serve_json = args.json;
+            tokio::spawn(async move {
+                serve(serve_registry, &serve_socket, serve_json)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        };
+
+        let prewarm_result = async {
+            // Validate all explicit warm sizes before booting the default image.
+            // This avoids wasting VM boots when a multi-image deployment contains
+            // a capacity typo, and keeps --max a hard per-image resource bound.
+            let mut warm_specs: Vec<(String, usize)> = Vec::with_capacity(args.warm.len());
+            for entry in &args.warm {
+                let (image, count) = parse_warm_spec(entry, args.size)?;
+                if count == 0 {
+                    return Err(format!("--warm count must be > 0 (in '{entry}')").into());
+                }
+                if count > args.max {
+                    return Err(format!(
+                        "--warm count ({count}) cannot exceed --max ({}) (in '{entry}')",
+                        args.max
+                    )
+                    .into());
+                }
+                warm_specs.push((image, count));
             }
-            return Err(error);
-        }
-    };
 
-    if args.json {
-        match &default_stats {
-            Some((image, stats)) => println!("{}", format_stats_json(image, stats)),
-            None => println!(
-                r#"{{"default_image":null,"max":{},"socket":"{}"}}"#,
-                args.max, args.socket
-            ),
-        }
-    } else {
-        println!("Warm pool started");
-        match &args.image {
-            Some(i) => println!("  default image: {i} (pre-warming {})", args.size),
-            None => println!("  default image: (none — `pool run` must pass --image)"),
-        }
-        for (image, count) in &warmed_extra {
-            println!("  pre-warmed: {image} (size {count})");
-        }
-        println!("  max:      {}", args.max);
-        println!(
-            "  boot concurrency: {} (daemon-wide)",
-            args.boot_concurrency
-        );
-        println!("  ttl:      {}s", args.ttl);
-        println!("  lease ttl: {}s", args.lease_ttl);
-        println!("  socket:   {}", args.socket);
-    }
+            // Pre-warm the default image, if one was given.
+            let default_stats = if let Some(ref image) = args.image {
+                let entry = registry
+                    .get_or_create(PoolKey::default_for_image(image.clone()))
+                    .await?;
+                Some((image.clone(), entry.pool.stats().await))
+            } else {
+                None
+            };
 
-    #[cfg(not(windows))]
-    serve_task.await??;
-    #[cfg(windows)]
-    serve(registry, &args.socket, args.json).await?;
+            // Pre-warm any extra images requested via --warm.
+            for (image, count) in &warm_specs {
+                registry
+                    .get_or_create_with_size(PoolKey::default_for_image(image), *count)
+                    .await?;
+            }
 
-    if !args.json {
-        println!("Done.");
-    }
-    Ok(())
+            Ok::<_, Box<dyn std::error::Error>>((default_stats, warm_specs))
+        }
+        .await;
+
+        let (default_stats, warmed_extra) = match prewarm_result {
+            Ok(result) => result,
+            Err(error) => {
+                // The socket is already bound so clients can observe startup
+                // progress. If pre-warming fails, tear down every background task
+                // and pool created so far before returning the error; otherwise a
+                // partial Dify deployment can leave a live socket and orphan VMs.
+                #[cfg(not(windows))]
+                {
+                    registry.drain_all().await;
+                    serve_task.abort();
+                    let _ = serve_task.await;
+                    let _ = std::fs::remove_file(&args.socket);
+                }
+                return Err(error);
+            }
+        };
+
+        if args.json {
+            match &default_stats {
+                Some((image, stats)) => println!("{}", format_stats_json(image, stats)),
+                None => println!(
+                    r#"{{"default_image":null,"max":{},"socket":"{}"}}"#,
+                    args.max, args.socket
+                ),
+            }
+        } else {
+            println!("Warm pool started");
+            match &args.image {
+                Some(i) => println!("  default image: {i} (pre-warming {})", args.size),
+                None => println!("  default image: (none — `pool run` must pass --image)"),
+            }
+            for (image, count) in &warmed_extra {
+                println!("  pre-warmed: {image} (size {count})");
+            }
+            println!("  max:      {}", args.max);
+            println!(
+                "  boot concurrency: {} (daemon-wide)",
+                args.boot_concurrency
+            );
+            println!("  ttl:      {}s", args.ttl);
+            println!("  lease ttl: {}s", args.lease_ttl);
+            println!("  socket:   {}", args.socket);
+        }
+
+        #[cfg(not(windows))]
+        serve_task.await??;
+        #[cfg(windows)]
+        serve(registry, &args.socket, args.json).await?;
+
+        if !args.json {
+            println!("Done.");
+        }
+        Ok(())
+    } // #[cfg(not(windows))]
 }
 
 #[cfg(not(windows))]
@@ -1504,11 +1518,10 @@ async fn serve(
     _socket: &str,
     _json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "pool socket serving is not supported on Windows; pool stays pre-warmed until Ctrl-C."
-    );
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+    Err(
+        "`pool start` is not supported on Windows; the warm pool daemon requires a Unix socket and is unavailable on WHPX"
+            .into(),
+    )
 }
 
 #[cfg(windows)]

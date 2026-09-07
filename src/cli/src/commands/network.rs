@@ -201,6 +201,18 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
 }
 
 async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        // Bridge attach is unsupported on WHPX; refuse to create bridge networks so
+        // operators are not left with objects that only fail later at run/connect.
+        if args.driver == "bridge" || args.driver.is_empty() {
+            return Err(
+                "bridge networking is not supported on Windows; `a3s-box network create` cannot create attachable networks on this platform"
+                    .into(),
+            );
+        }
+    }
+
     let store = NetworkStore::default_path()?;
 
     validate_network_driver(&args.driver)?;
