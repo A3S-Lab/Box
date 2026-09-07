@@ -12,6 +12,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux Sandbox OCI owners resolve the setuid launcher through
+  `A3S_BOX_SANDBOX_OCI_LAUNCHER`, packaged locations, and
+  `/usr/local/libexec/a3s-box-sandbox-oci-launcher` instead of a hardcoded path.
+- Unix VM destroy skips guest-control stop delivery when the workload has
+  already exited, so short `--rm` runs no longer WARN on the 1s delivery
+  timeout.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead
