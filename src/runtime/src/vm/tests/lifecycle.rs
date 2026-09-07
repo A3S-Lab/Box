@@ -62,6 +62,93 @@ async fn destroy_skips_guest_stop_when_workload_already_exited() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn destroy_skips_guest_stop_when_terminal_status_published_but_shim_alive() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use a3s_box_core::guest_exec::{GuestTerminalStatus, GUEST_TERMINAL_STATUS_FILE_NAME};
+
+    struct LiveShimHandler {
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl VmHandler for LiveShimHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            !self.stopped.load(Ordering::SeqCst)
+        }
+
+        fn has_exited(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            self.stopped.load(Ordering::SeqCst).then_some(0)
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            Ok(self.stopped.load(Ordering::SeqCst).then_some(0))
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-terminal-done-shim-alive".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+    let terminal_path = box_dir
+        .join("runtime-control")
+        .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+    std::fs::create_dir_all(terminal_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &terminal_path,
+        serde_json::to_vec(&GuestTerminalStatus::new(0)).unwrap(),
+    )
+    .unwrap();
+
+    let socket_dir = vm.socket_dir();
+    std::fs::create_dir_all(&socket_dir).unwrap();
+    let exec_socket = socket_dir.join("exec.sock");
+    let _listener = tokio::net::UnixListener::bind(&exec_socket).unwrap();
+    vm.exec_socket_path = Some(exec_socket);
+
+    let stopped = Arc::new(AtomicBool::new(false));
+    *vm.handler.write().await = Some(Box::new(LiveShimHandler {
+        stopped: Arc::clone(&stopped),
+    }));
+
+    // Use a long graceful timeout so a mistaken guest-stop wait would fail this
+    // assertion. Workload terminal status must skip delivery and fall through to
+    // handler.stop without waiting out the provider grace window.
+    let started = Instant::now();
+    vm.destroy_with_options(default_stop_signal(), 2_000)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "persisted terminal status must skip guest-stop delivery while shim is alive"
+    );
+    assert!(stopped.load(Ordering::SeqCst));
+    assert!(vm.handler.read().await.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn destroy_uses_guest_stop_and_verifies_raw_rootfs_handoff() {
     use a3s_box_core::guest_exec::{GuestTerminalStatus, GUEST_TERMINAL_STATUS_FILE_NAME};
 

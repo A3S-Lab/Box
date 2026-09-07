@@ -181,28 +181,39 @@ impl VmManager {
                 timeout_ms
             };
             #[cfg(unix)]
-            let guest_stop_delivered = {
-                // Finite foreground workloads often exit before destroy runs.
-                // Skip guest-control delivery when the provider already observed
-                // completion so short --rm runs do not WARN on a 1s timeout.
-                let already_exited = match handler.try_wait_exit() {
-                    Ok(Some(_)) => true,
-                    Ok(None) => handler.has_exited(),
-                    Err(error) => {
-                        tracing::debug!(
-                            box_id = %self.box_id,
-                            %error,
-                            "Could not poll provider exit before guest stop delivery"
-                        );
-                        handler.has_exited()
-                    }
-                };
-                if already_exited {
+            let workload_already_finished =
+                crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
+            #[cfg(unix)]
+            let provider_already_exited = match handler.try_wait_exit() {
+                Ok(Some(_)) => true,
+                Ok(None) => handler.has_exited(),
+                Err(error) => {
                     tracing::debug!(
                         box_id = %self.box_id,
+                        %error,
+                        "Could not poll provider exit before guest stop delivery"
+                    );
+                    handler.has_exited()
+                }
+            };
+            #[cfg(unix)]
+            let guest_stop_delivered = {
+                // Skip guest-control stop when the workload already published a
+                // terminal status or the provider has exited. MicroVM PID 1 can
+                // persist exit and still be in its short console handoff while
+                // the shim is alive; signaling a finished main only WARNs.
+                //
+                // Treat delivery as successful only when the provider is already
+                // gone so destroy does not wait out the graceful timeout for a
+                // still-live shim that only needs handler.stop.
+                if provider_already_exited || workload_already_finished {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        provider_already_exited,
+                        workload_already_finished,
                         "Skipping guest stop delivery; workload already exited"
                     );
-                    true
+                    provider_already_exited
                 } else if self.boot_mode == VmBootMode::RootfsMaintenance {
                     self.deliver_rootfs_maintenance_shutdown().await
                 } else {
@@ -232,6 +243,10 @@ impl VmManager {
                 };
                 if exited {
                     true
+                } else if workload_already_finished {
+                    // Guest already published a terminal result; do not force
+                    // another guest signal. handler.stop tears the shim down.
+                    false
                 } else {
                     let force_delivered = signal == libc::SIGKILL
                         || self.deliver_guest_stop_signal(libc::SIGKILL).await;
