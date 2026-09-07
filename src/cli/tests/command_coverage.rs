@@ -645,6 +645,58 @@ fn test_create_persists_health_options_on_supported_hosts() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn test_windows_sandbox_and_tee_fail_before_creating_box() {
+    let cli = CliTest::new();
+
+    let (stdout, stderr, success) = cli.output(&[
+        "run",
+        "--rm",
+        "--isolation",
+        "sandbox",
+        "docker.io/library/alpine:latest",
+        "--",
+        "true",
+    ]);
+    assert!(!success, "sandbox run unexpectedly succeeded: {stdout}\n{stderr}");
+    assert!(
+        stderr.contains("Sandbox isolation is supported only on Linux"),
+        "missing sandbox fail-closed diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Creating box") && !stdout.contains("Creating box"),
+        "sandbox must fail before Creating box: stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let (stdout, stderr, success) = cli.output(&[
+        "run",
+        "--rm",
+        "--tee",
+        "docker.io/library/alpine:latest",
+        "--",
+        "true",
+    ]);
+    assert!(!success, "tee run unexpectedly succeeded: {stdout}\n{stderr}");
+    assert!(
+        stderr.contains("TEE configuration is not supported on Windows"),
+        "missing tee fail-closed diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Creating box") && !stdout.contains("Creating box"),
+        "tee must fail before Creating box: stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    cli.fails(
+        &["pause", "missing-box"],
+        "not supported on windows/amd64: requires MicroVM pause/resume support",
+    );
+    cli.fails(
+        &["unpause", "missing-box"],
+        "not supported on windows/amd64: requires MicroVM pause/resume support",
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn test_windows_health_checks_fail_before_run_create_or_start() {
     let cli = CliTest::new();
     let unsupported = "health checks are not supported on Windows";

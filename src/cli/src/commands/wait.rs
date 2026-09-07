@@ -189,10 +189,19 @@ fn wait_poll_action(record: &BoxRecord) -> WaitPollAction {
             Some(pid) if process::is_process_alive_with_identity(pid, record.pid_start_time) => {
                 WaitPollAction::Sleep
             }
-            _ => WaitPollAction::Finish(wait_exit_code(record)),
+            // The shim/host process can disappear before the durable exit code is
+            // written. Keep polling until an authoritative code is available so
+            // `wait` never invents success (0) ahead of inspect/ps.
+            _ => match record.exit_code {
+                Some(code) => WaitPollAction::Finish(code),
+                None => WaitPollAction::Sleep,
+            },
         },
         "created" => WaitPollAction::Sleep,
-        "stopped" | "dead" => WaitPollAction::Finish(wait_exit_code(record)),
+        "stopped" | "dead" => match record.exit_code {
+            Some(code) => WaitPollAction::Finish(code),
+            None => WaitPollAction::Sleep,
+        },
         _ => WaitPollAction::Finish(0),
     }
 }
@@ -231,10 +240,26 @@ mod tests {
     }
 
     #[test]
-    fn test_wait_poll_action_finishes_for_paused_without_pid() {
+    fn test_wait_poll_action_keeps_waiting_when_exit_code_is_missing() {
         let record = crate::test_helpers::fixtures::make_record("id", "box", "paused", None);
+        assert_eq!(wait_poll_action(&record), WaitPollAction::Sleep);
 
-        assert_eq!(wait_poll_action(&record), WaitPollAction::Finish(0));
+        let record = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
+        assert_eq!(wait_poll_action(&record), WaitPollAction::Sleep);
+
+        let record = crate::test_helpers::fixtures::make_record("id", "box", "running", None);
+        assert_eq!(wait_poll_action(&record), WaitPollAction::Sleep);
+    }
+
+    #[test]
+    fn test_wait_poll_action_finishes_with_recorded_exit_code() {
+        let mut record = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
+        record.exit_code = Some(137);
+        assert_eq!(wait_poll_action(&record), WaitPollAction::Finish(137));
+
+        let mut record = crate::test_helpers::fixtures::make_record("id", "box", "running", None);
+        record.exit_code = Some(137);
+        assert_eq!(wait_poll_action(&record), WaitPollAction::Finish(137));
     }
 
     #[test]

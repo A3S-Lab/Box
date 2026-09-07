@@ -21,22 +21,35 @@ pub struct UnpauseArgs {
 }
 
 pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
-    let mut errors: Vec<String> = Vec::new();
-
-    for query in &args.boxes {
-        if let Err(e) = unpause_one(&state, query).await {
-            errors.push(format!("{query}: {e}"));
-        }
+    #[cfg(windows)]
+    {
+        let _ = args;
+        return Err(crate::platform::unsupported_command(
+            "unpause",
+            "MicroVM pause/resume support",
+        ));
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("\n").into())
+    #[cfg(not(windows))]
+    {
+        let state = StateFile::load_default()?;
+        let mut errors: Vec<String> = Vec::new();
+
+        for query in &args.boxes {
+            if let Err(e) = unpause_one(&state, query).await {
+                errors.push(format!("{query}: {e}"));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n").into())
+        }
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let box_id = resolve::resolve(state, query)?.id.clone();
     let lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;

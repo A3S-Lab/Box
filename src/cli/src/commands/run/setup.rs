@@ -21,6 +21,13 @@ pub(super) async fn setup_and_boot(
     let create_start = std::time::Instant::now();
     common::validate_runtime_options(&args.common)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    #[cfg(windows)]
+    if args.tee || args.tee_simulate || args.tee_workload_id.is_some() {
+        return Err(
+            "TEE configuration is not supported on Windows; remove --tee / --tee-simulate / --tee-workload-id"
+                .into(),
+        );
+    }
     let (restart_policy, max_restart_count) =
         crate::state::parse_restart_policy(&args.common.restart)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;

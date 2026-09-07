@@ -7,7 +7,9 @@ use crate::grpc::ExecClient;
 use super::VmManager;
 
 const DEFAULT_EXEC_READY_TIMEOUT_MS: u64 = 15_000;
-const EXEC_READY_PROGRESS_LOG_MS: u64 = 5_000;
+// WHPX cold boots commonly cross ~5s before the guest exec accept loop is up.
+// Delay the first progress WARN so healthy Windows boots stay quiet.
+const EXEC_READY_PROGRESS_LOG_MS: u64 = 10_000;
 
 fn parse_exec_ready_timeout_ms(value: Option<&str>) -> u64 {
     value
