@@ -32,6 +32,9 @@ All notable changes to A3S Box will be documented in this file.
   idle shims/mounts behind.
 - Pool drain removes the on-disk snapshot-fork template directory
   (`~/.a3s/pool/tpl-*`) after idle VMs are destroyed.
+- Warm-pool drain best-effort reaps orphaned box directories when an individual
+  VM destroy fails, so a teardown error cannot leave shim/mount leftovers
+  without a recovery path.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead

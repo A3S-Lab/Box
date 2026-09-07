@@ -680,6 +680,12 @@ impl WarmPool {
                 }
                 Ok((box_id, Err(error))) => {
                     tracing::warn!(%box_id, %error, operation, "Failed to destroy pooled VM");
+                    #[cfg(target_os = "linux")]
+                    {
+                        // VmManager has no Drop reaper; a failed destroy can leave
+                        // shim/mount/box-dir orphans across daemon shutdown.
+                        crate::vm::reap::reap_orphaned_box(&box_id);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, operation, "Pooled VM teardown task failed");
