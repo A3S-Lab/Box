@@ -657,7 +657,10 @@ fn test_windows_sandbox_and_tee_fail_before_creating_box() {
         "--",
         "true",
     ]);
-    assert!(!success, "sandbox run unexpectedly succeeded: {stdout}\n{stderr}");
+    assert!(
+        !success,
+        "sandbox run unexpectedly succeeded: {stdout}\n{stderr}"
+    );
     assert!(
         stderr.contains("Sandbox isolation is supported only on Linux"),
         "missing sandbox fail-closed diagnostic: {stderr}"
@@ -675,7 +678,10 @@ fn test_windows_sandbox_and_tee_fail_before_creating_box() {
         "--",
         "true",
     ]);
-    assert!(!success, "tee run unexpectedly succeeded: {stdout}\n{stderr}");
+    assert!(
+        !success,
+        "tee run unexpectedly succeeded: {stdout}\n{stderr}"
+    );
     assert!(
         stderr.contains("TEE configuration is not supported on Windows"),
         "missing tee fail-closed diagnostic: {stderr}"
