@@ -250,13 +250,19 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
             let rgid = libc::getgid();
             let euid = libc::geteuid();
             if euid == 0 && ruid != 0 {
-                if libc::setresgid(rgid as libc::gid_t, rgid as libc::gid_t, rgid as libc::gid_t)
-                    == -1
+                if libc::setresgid(
+                    rgid as libc::gid_t,
+                    rgid as libc::gid_t,
+                    rgid as libc::gid_t,
+                ) == -1
                 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::setresuid(ruid as libc::uid_t, ruid as libc::uid_t, ruid as libc::uid_t)
-                    == -1
+                if libc::setresuid(
+                    ruid as libc::uid_t,
+                    ruid as libc::uid_t,
+                    ruid as libc::uid_t,
+                ) == -1
                 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -277,8 +283,14 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
 /// the same root and logs.
 fn owner_fs_ids() -> (u32, u32) {
     // SAFETY: credential queries have no pointer arguments or failure results.
-    let (ruid, rgid, euid, egid) =
-        unsafe { (libc::getuid(), libc::getgid(), libc::geteuid(), libc::getegid()) };
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
     if euid == 0 && ruid != 0 {
         (ruid, rgid)
     } else {
