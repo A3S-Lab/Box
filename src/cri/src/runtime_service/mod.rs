@@ -714,7 +714,17 @@ impl RuntimeService for BoxRuntimeService {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         if let Some(mut vm) = vm_managers.write().await.remove(&sid) {
-                            let _ = vm.destroy().await;
+                            let box_id = vm.box_id().to_string();
+                            if let Err(error) = vm.destroy().await {
+                                tracing::warn!(
+                                    sandbox_id = %sid,
+                                    %box_id,
+                                    %error,
+                                    "Failed to destroy sandbox VM after cancel; attempting orphan reap"
+                                );
+                                #[cfg(target_os = "linux")]
+                                a3s_box_runtime::vm::reap::reap_orphaned_box(&box_id);
+                            }
                         }
                     });
                 }

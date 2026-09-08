@@ -365,6 +365,39 @@ async fn test_wait_for_exec_ready_returns_when_guest_exit_code_persisted() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_wait_for_exec_ready_fails_closed_when_cap_elapses_without_heartbeat() {
+    std::env::set_var("A3S_EXEC_READY_TIMEOUT_MS", "400");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-exec-cap".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(tmp.path().join("boxes").join(&box_id).join("logs")).unwrap();
+    *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: false }));
+
+    let started = std::time::Instant::now();
+    let error = vm
+        .wait_for_exec_ready(&tmp.path().join("missing-exec.sock"))
+        .await
+        .expect_err("wedged guest without heartbeat must fail closed");
+    std::env::remove_var("A3S_EXEC_READY_TIMEOUT_MS");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Guest exec server did not become ready"),
+        "{error}"
+    );
+    assert!(vm.exec_client.is_none());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "fail-closed must not wait out the historical 15s soft-proceed window"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_probe_exec_ready_once_ignores_missing_socket() {
     let mut vm = VmManager::with_box_id(
         BoxConfig::default(),

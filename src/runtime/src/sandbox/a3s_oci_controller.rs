@@ -22,7 +22,7 @@ use super::controller::{
     EXEC_LISTENER_FD, INIT_LOG_FD, PTY_LISTENER_FD, START_TIMEOUT,
 };
 use super::runtime_record::SandboxRuntimeRecord;
-use super::CertifiedA3sOci;
+use super::{linux_sandbox_delegated_cgroup_root, resolve_sandbox_oci_launcher, CertifiedA3sOci};
 
 const START_FAILURE_LOG_LIMIT_BYTES: u64 = 4 * 1024;
 /// Controller pinned to one verified runtime/agent artifact pair.
@@ -73,13 +73,17 @@ impl A3sOciController {
         let pty_fd = inherited_pty.as_raw_fd();
         let log_fd = inherited_log.as_raw_fd();
 
-        let mut command = Command::new(&self.runtime.runtime_path);
+        let delegated_cgroup_root = linux_sandbox_delegated_cgroup_root();
+        let launcher = resolve_sandbox_oci_launcher(None)?;
+        let mut command = Command::new(&launcher);
         command
             .arg("native-linux-service")
             .arg("--root")
             .arg(&launch.runtime_root)
             .arg("--agent")
             .arg(&self.runtime.agent_path)
+            .arg("--delegated-cgroup-root")
+            .arg(&delegated_cgroup_root)
             .arg("--container-id")
             .arg(&launch.container_id)
             .arg("--a3s-box-control-fds")

@@ -20,6 +20,39 @@ All notable changes to A3S Box will be documented in this file.
   socket-serving message (#261).
 - `container-update --cpus` applies the same WHPX single-vCPU validation as
   `run`/`create`, so invalid counts are not persisted (#262).
+- Linux Sandbox OCI owners resolve the setuid launcher through
+  `A3S_BOX_SANDBOX_OCI_LAUNCHER`, packaged locations, and
+  `/usr/local/libexec/a3s-box-sandbox-oci-launcher` instead of a hardcoded path.
+- Unix VM destroy skips guest-control stop delivery when the provider has
+  exited or the guest has published a terminal status (including the MicroVM
+  console-handoff window where the shim is still alive), so short `--rm` runs
+  no longer WARN on the 1s delivery timeout.
+- Cold MicroVM boot crash-detection grace is reduced from 250ms to 80ms so
+  healthy short workloads are not taxed by a fixed sleep after shim spawn.
+- Unix cold boots fail closed when the guest exec heartbeat never arrives
+  within `A3S_EXEC_READY_TIMEOUT_MS` (default 15s), matching Windows so a live
+  shim without a usable control plane is never marked Ready. Short workloads
+  that publish a terminal status before heartbeat still succeed.
+- Warm-pool snapshot-fork template socket polling fails after ~1.5s instead of
+  a fixed ~5s busy-wait when the trigger socket never appears.
+- The warm-pool daemon drains on SIGTERM as well as SIGINT/`pool stop`, matching
+  the monitor supervisor, so bench `kill` and service managers no longer leave
+  idle shims/mounts behind.
+- Pool drain removes the on-disk snapshot-fork template directory
+  (`~/.a3s/pool/tpl-*`) after idle VMs are destroyed.
+- Warm-pool drain best-effort reaps orphaned box directories when an individual
+  VM destroy fails, so a teardown error cannot leave shim/mount leftovers
+  without a recovery path.
+- Lease release, expired-lease reclaim, and oneshot `pool run` teardown use the
+  same destroy-or-reap path, so a failed destroy after the lease/map entry is
+  removed cannot permanently orphan a shim/mount/box-dir.
+- Snapshot template cleanup also removes the canonical `tpl-<image-hash>`
+  directory when template state is Failing or Unavailable, not only Ready.
+- CRI cancel guards and sandbox destroy paths best-effort reap orphans when
+  destroy fails after the sandbox is removed from the in-memory map.
+- Performance reference docs mark the historical Linux foreground-Sandbox and
+  warm-pool cleanup blockers as addressed in later tips while retaining the
+  2026-07-31 matrix numbers.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead

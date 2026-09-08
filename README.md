@@ -3,6 +3,12 @@
 </p>
 
 <p align="center">
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+<p align="center">
   <strong>The local product plane for Linux OCI workloads: Docker-like workflows, typed SDKs, and isolation that never changes behind your back.</strong>
 </p>
 
@@ -68,10 +74,12 @@ the latest runtime and integration fixes from `main`:
 
 | Area | Latest behavior |
 | --- | --- |
-| Warm pools | Shutdown joins replenishment and tears down owned VMs with bounded concurrency, preventing orphaned shims and sockets. |
-| CRI | PodSandbox creation defers the agent workload until `StartContainer`, with fail-closed resource validation and a bounded cold-boot smoke deadline. |
+| Warm pools | SIGTERM/`SIGINT`/`pool stop` drain idle VMs and leases with bounded concurrency; destroy failures best-effort reap orphans (idle, lease release/expiry, oneshot `pool run`, mid-replenish, and template teardown); snapshot template dirs (`~/.a3s/pool/tpl-*`) are removed even after a Failing/Unavailable build. |
+| Linux Sandbox | Setuid OCI launcher discovery covers env, packaged paths, and `/usr/local/libexec/...`; with a delegated user cgroup, foreground `run --rm --isolation sandbox` completes cleanly on qualified hosts. |
+| MicroVM lifecycle | Guest stop is skipped when the workload already exited; Unix cold boot fail-closes without an exec heartbeat; crash-detection grace is 80ms. |
+| CRI | PodSandbox creation defers the agent workload until `StartContainer`; cancel and destroy paths best-effort reap orphans when VM teardown fails. |
 | Runtime builds | OCI-only builds retain durable cleanup and socket handling without hypervisor dependencies. |
-| Evidence | Soak runs record per-capability results and versioned host-resource samples for reproducible comparisons. |
+| Evidence | Soak runs record per-capability results and versioned host-resource samples; the historical performance matrix retains numbers while documenting which Linux cleanup blockers later tips closed. |
 
 Installers, native binaries, and the Rust, Python, TypeScript, and Go SDK
 artifacts are published from the same versioned release tag. See the

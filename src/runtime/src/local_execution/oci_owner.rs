@@ -225,6 +225,8 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .arg(service_root)
         .arg("--agent")
         .arg(&artifacts.agent_path)
+        .arg("--delegated-cgroup-root")
+        .arg(crate::sandbox::linux_sandbox_delegated_cgroup_root())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));

@@ -35,15 +35,18 @@ impl VmManager {
         // process is alive the instant the shim is spawned, and we just watch for it
         // exiting immediately. A snapshot-restored VM reaches its run loop in ~20ms
         // (no cold boot), so a short grace catches an immediate restore failure while
-        // saving ~200ms on the fork fast-path; a cold boot keeps the longer grace.
+        // saving cold-path latency on the fork fast-path. Cold boots only need enough
+        // time to observe an immediate shim abort; later failures are caught by
+        // wait_for_exec_ready. Keep the cold window well under a quarter-second so
+        // short --rm workloads are not taxed by a fixed sleep.
         #[cfg(unix)]
         let max_wait_ms: u64 = if super::is_restore_mode(&self.config) {
             40
         } else {
-            250
+            80
         };
         #[cfg(not(unix))]
-        let max_wait_ms: u64 = 250;
+        let max_wait_ms: u64 = 80;
         const POLL_MS: u64 = 10;
 
         tracing::debug!("Confirming VM process started");
@@ -80,10 +83,10 @@ impl VmManager {
     /// succeed and then block on read until the guest accepts), the loop returns
     /// at once if the VM has exited (a fast-exiting container never stalls), and a
     /// large absolute cap is only a last-resort backstop against a wedged-but-alive
-    /// guest — not the expected wait. Unix keeps its historical best-effort
-    /// behavior so foreground logs and process exit remain visible. Windows fails
-    /// startup at the cap because a live WHPX shim without a responsive guest was
-    /// previously exposed as a false `running` state.
+    /// guest — not the expected wait. Both Unix and Windows fail closed at that
+    /// cap so a live shim without a responsive exec channel is never published as
+    /// Ready; short workloads that finish before heartbeat still succeed via the
+    /// early terminal-status / provider-exit paths below.
     pub(crate) async fn wait_for_exec_ready(
         &mut self,
         exec_socket_path: &std::path::Path,
@@ -217,26 +220,15 @@ impl VmManager {
 
             let elapsed_ms = start.elapsed().as_millis() as u64;
             if elapsed_ms >= max_wait_ms {
-                #[cfg(windows)]
                 return Err(BoxError::BoxBootError {
                     message: format!(
-                        "WHPX guest exec server did not become ready within {max_wait_ms} ms"
+                        "Guest exec server did not become ready within {max_wait_ms} ms"
                     ),
                     hint: Some(
-                        "The VM shim remained alive but the Windows guest-control/exec channel did not answer; inspect the per-box console and shim logs"
+                        "The VM shim remained alive but the guest exec channel did not answer; inspect the per-box console and shim logs"
                             .to_string(),
                     ),
                 });
-                #[cfg(not(windows))]
-                {
-                    tracing::warn!(
-                        timeout_ms = max_wait_ms,
-                        elapsed_ms,
-                        socket_path = %exec_endpoint.display(),
-                        "Exec server did not become ready within the safety cap; proceeding so foreground logs and process exit are visible. Exec/attach will connect on demand once the guest finishes starting."
-                    );
-                    return Ok(());
-                }
             }
             if elapsed_ms >= next_progress_log_ms {
                 tracing::warn!(

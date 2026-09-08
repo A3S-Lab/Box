@@ -30,9 +30,9 @@ impl VmManager {
 
     /// Wait until the guest exec server can complete a heartbeat.
     ///
-    /// Cold foreground boots may proceed after the short diagnostic readiness
-    /// cap so logs remain visible. A warm pool has a stronger contract: an idle
-    /// VM must actually be executable before it is published to callers.
+    /// Cold boots fail closed when the diagnostic readiness cap elapses without a
+    /// heartbeat. A warm pool additionally requires an idle VM to pass this
+    /// stricter availability check before it is published to callers.
     #[cfg(unix)]
     pub async fn wait_for_exec_available(&mut self, timeout: std::time::Duration) -> Result<()> {
         let socket_path = self

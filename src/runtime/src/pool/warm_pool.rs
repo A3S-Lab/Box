@@ -469,7 +469,7 @@ impl WarmPool {
         if *self.shutdown_rx.borrow() {
             drop(idle);
             let mut vm = vm;
-            vm.destroy().await?;
+            Self::destroy_manager_or_reap(&mut vm, None).await?;
             return Ok(());
         }
 
@@ -477,10 +477,11 @@ impl WarmPool {
             // Pool is full — destroy the VM
             drop(idle); // Release lock before async destroy
             let mut vm = vm;
-            vm.destroy().await?;
+            let box_id = vm.box_id().to_string();
+            Self::destroy_manager_or_reap(&mut vm, None).await?;
 
             tracing::debug!(
-                box_id = %vm.box_id(),
+                box_id = %box_id,
                 "Pool full, destroyed released VM"
             );
             return Ok(());
@@ -555,6 +556,8 @@ impl WarmPool {
 
         Self::destroy_vms(idle_vms, None, "drain").await;
 
+        self.clear_snapshot_template().await;
+
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
 
@@ -591,8 +594,83 @@ impl WarmPool {
         let timeout_ms = (!self.box_config.persistent).then_some(EPHEMERAL_DRAIN_TIMEOUT_MS);
         Self::destroy_vms(idle_vms, timeout_ms, "drain_idle").await;
         self.stats.lock().await.idle_count = 0;
+        self.clear_snapshot_template().await;
         tracing::info!(destroyed = count, "Warm pool idle VMs drained");
         Ok(())
+    }
+
+    /// Drop the in-memory snapshot-fork template and remove its on-disk directory.
+    ///
+    /// Idle VMs are already destroyed before this runs. Holding the same
+    /// per-image flock used by `build_template` avoids racing another process
+    /// that is still building the same image template.
+    ///
+    /// Removes the Ready template's parent dir when present, and always tries
+    /// the canonical `tpl-<image-hash>` path so Failing/Unavailable leftovers
+    /// from a failed `build_template` do not survive drain.
+    async fn clear_snapshot_template(&self) {
+        let state = {
+            let mut guard = self.template.lock().await;
+            std::mem::replace(&mut *guard, TemplateState::Unbuilt)
+        };
+        let mut dirs = Vec::new();
+        if let TemplateState::Ready(template) = state {
+            if let Some(dir) = std::path::Path::new(&template.mem_file)
+                .parent()
+                .map(std::path::PathBuf::from)
+            {
+                dirs.push(dir);
+            }
+        }
+        let canonical = a3s_box_core::dirs_home().join("pool").join(format!(
+            "tpl-{:016x}",
+            crate::vm::fnv1a_hash(&self.box_config.image)
+        ));
+        if !dirs.iter().any(|dir| dir == &canonical) {
+            dirs.push(canonical);
+        }
+
+        for dir in dirs {
+            if !dir.exists() {
+                continue;
+            }
+            let lock_target = dir.clone();
+            let remove_result = tokio::task::spawn_blocking(move || {
+                let _lock = crate::file_lock::FileLock::acquire(&lock_target).map_err(|error| {
+                    BoxError::PoolError(format!(
+                        "Failed to lock snapshot-fork template dir {}: {error}",
+                        lock_target.display()
+                    ))
+                })?;
+                if lock_target.exists() {
+                    std::fs::remove_dir_all(&lock_target).map_err(BoxError::IoError)?;
+                }
+                Ok::<(), BoxError>(())
+            })
+            .await;
+            match remove_result {
+                Ok(Ok(())) => {
+                    tracing::debug!(
+                        template_dir = %dir.display(),
+                        "Removed snapshot-fork template directory after pool drain"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        template_dir = %dir.display(),
+                        %error,
+                        "Failed to remove snapshot-fork template directory after pool drain"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        template_dir = %dir.display(),
+                        %error,
+                        "Snapshot-fork template cleanup task failed after pool drain"
+                    );
+                }
+            }
+        }
     }
 
     /// Destroy detached VMs in a bounded fan-out. The caller must remove the
@@ -635,11 +713,30 @@ impl WarmPool {
     async fn destroy_one(warm_vm: WarmVm, timeout_ms: Option<u64>) -> (String, Result<()>) {
         let box_id = warm_vm.vm.box_id().to_string();
         let mut vm = warm_vm.vm;
+        let result = Self::destroy_manager_or_reap(&mut vm, timeout_ms).await;
+        (box_id, result)
+    }
+
+    /// Destroy a pool-owned manager; on failure, best-effort reap leftovers.
+    ///
+    /// `VmManager` has no Drop reaper, so ignored destroy errors permanently
+    /// leak shim/mount/box-dir state across daemon shutdown and failed fills.
+    async fn destroy_manager_or_reap(vm: &mut VmManager, timeout_ms: Option<u64>) -> Result<()> {
+        let box_id = vm.box_id().to_string();
         let result = match timeout_ms {
             Some(timeout_ms) => vm.destroy_with_timeout(timeout_ms).await,
             None => vm.destroy().await,
         };
-        (box_id, result)
+        if let Err(error) = &result {
+            tracing::warn!(
+                %box_id,
+                %error,
+                "Failed to destroy pooled VM; attempting orphan reap"
+            );
+            #[cfg(target_os = "linux")]
+            crate::vm::reap::reap_orphaned_box(&box_id);
+        }
+        result
     }
 
     /// Remove and destroy specific idle VMs by their box IDs.
@@ -749,7 +846,7 @@ impl WarmPool {
                         match restored {
                             Ok(()) => return Ok(vm),
                             Err(error) => {
-                                let _ = vm.destroy_with_timeout(2000).await;
+                                let _ = Self::destroy_manager_or_reap(&mut vm, Some(2000)).await;
                                 tracing::warn!(
                                     %error,
                                     "snapshot-fork restore failed; cold-booting this pool VM"
@@ -936,7 +1033,7 @@ impl WarmPool {
         let rootfs_cache_key = match src.current_rootfs_cache_key() {
             Ok(key) => key,
             Err(error) => {
-                let _ = src.destroy_with_timeout(2000).await;
+                let _ = Self::destroy_manager_or_reap(&mut src, Some(2000)).await;
                 return Err(error);
             }
         };
@@ -950,7 +1047,7 @@ impl WarmPool {
         // mount, box dir, sockets) — neither VmManager nor ShimHandler reaps on
         // drop. Capture the result, tear down, then propagate.
         let snapshot = Self::trigger_snapshot(&sock, &state_file).await;
-        let _ = src.destroy_with_timeout(2000).await;
+        let _ = Self::destroy_manager_or_reap(&mut src, Some(2000)).await;
         snapshot?;
 
         Ok(PoolTemplate {
@@ -969,14 +1066,19 @@ impl WarmPool {
     async fn trigger_snapshot(sock: &std::path::Path, state_file: &std::path::Path) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // The socket is bound by libkrun after the guest starts; poll briefly.
+        // Cap well under the historical 5s busy-wait so a missing template
+        // socket fails fast instead of taxing snapshot-fork fill.
+        const SNAPSHOT_SOCKET_POLL_ATTEMPTS: u32 = 60;
+        const SNAPSHOT_SOCKET_POLL_INTERVAL: std::time::Duration =
+            std::time::Duration::from_millis(25);
         let mut stream = None;
-        for _ in 0..200 {
+        for _ in 0..SNAPSHOT_SOCKET_POLL_ATTEMPTS {
             match tokio::net::UnixStream::connect(sock).await {
                 Ok(s) => {
                     stream = Some(s);
                     break;
                 }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                Err(_) => tokio::time::sleep(SNAPSHOT_SOCKET_POLL_INTERVAL).await,
             }
         }
         let mut stream = stream.ok_or_else(|| {
@@ -1205,7 +1307,9 @@ impl WarmPool {
                                                 box_id = %box_id,
                                                 "Pool shutting down mid-replenish; destroying freshly-booted VM"
                                             );
-                                            let _ = vm.destroy_with_timeout(2000).await;
+                                            let _ =
+                                                Self::destroy_manager_or_reap(&mut vm, Some(2000))
+                                                    .await;
                                             continue;
                                         }
                                         pool.push(WarmVm {
@@ -1788,5 +1892,96 @@ mod tests {
                 // a usable VM provider; min_idle=0 normally avoids this path.
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn trigger_snapshot_fails_fast_when_socket_never_appears() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("missing-template.sock");
+        let state = tmp.path().join("template.state");
+
+        let started = Instant::now();
+        let error = WarmPool::trigger_snapshot(&sock, &state)
+            .await
+            .expect_err("missing snapshot socket must fail");
+        assert!(error.to_string().contains("never appeared"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "missing snapshot socket must not busy-wait the historical ~5s window"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_snapshot_template_removes_ready_template_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("tpl-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mem_file = dir.join("template.ram");
+        let state_file = dir.join("template.state");
+        std::fs::write(&mem_file, b"ram").unwrap();
+        std::fs::write(&state_file, b"state").unwrap();
+
+        let config = test_pool_config(0, 1);
+        let mut pool =
+            match WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await {
+                Ok(pool) => pool,
+                Err(_) => return, // environments without a usable provider still cover Ready cleanup below
+            };
+        {
+            let mut template = pool.template.lock().await;
+            *template = TemplateState::Ready(PoolTemplate {
+                mem_file: mem_file.to_string_lossy().into_owned(),
+                state_file: state_file.to_string_lossy().into_owned(),
+                rootfs_cache_key: None,
+            });
+        }
+
+        pool.clear_snapshot_template().await;
+        assert!(
+            !dir.exists(),
+            "drain must remove the on-disk snapshot-fork template directory"
+        );
+        assert!(matches!(
+            &*pool.template.lock().await,
+            TemplateState::Unbuilt
+        ));
+        let _ = pool.drain().await;
+    }
+
+    #[tokio::test]
+    async fn clear_snapshot_template_removes_canonical_dir_when_failing() {
+        let config = test_pool_config(0, 1);
+        let mut box_config = BoxConfig::default();
+        box_config.image = "alpine:clear-tpl-failing".into();
+        let mut pool = match WarmPool::start(config, box_config.clone(), test_event_emitter()).await
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let dir = a3s_box_core::dirs_home().join("pool").join(format!(
+            "tpl-{:016x}",
+            crate::vm::fnv1a_hash(&box_config.image)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("template.ram"), b"ram").unwrap();
+        {
+            let mut template = pool.template.lock().await;
+            *template = TemplateState::Failing(1);
+        }
+
+        pool.clear_snapshot_template().await;
+        assert!(
+            !dir.exists(),
+            "Failing template state must still remove the canonical tpl directory"
+        );
+        assert!(matches!(
+            &*pool.template.lock().await,
+            TemplateState::Unbuilt
+        ));
+        let _ = pool.drain().await;
     }
 }

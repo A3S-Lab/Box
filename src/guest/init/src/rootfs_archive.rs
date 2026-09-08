@@ -230,6 +230,24 @@ fn apply_metadata_manifest(
         }
         let path = std::ffi::CString::new(target.as_os_str().as_bytes())?;
         if unsafe { libc::lchown(path.as_ptr(), entry.uid as u32, entry.gid as u32) } != 0 {
+            let error = std::io::Error::last_os_error();
+            // Linux directory transports (virtio-fs) expose the host's
+            // synthetic uid/gid and reject chown from the guest with EPERM.
+            // The manifest remains authoritative for ext4-backed guests,
+            // where chown succeeds; on virtio-fs the current ownership is the
+            // only representable host state, so continue with the validated
+            // mode replay instead of aborting the whole workload.
+            if error.raw_os_error() == Some(libc::EPERM) {
+                tracing::debug!(
+                    path = %target.display(),
+                    current_uid,
+                    current_gid,
+                    expected_uid = entry.uid,
+                    expected_gid = entry.gid,
+                    "Skipping unsupported guest rootfs ownership replay"
+                );
+                continue;
+            }
             return Err(format!(
                 "failed to restore ownership at {} from {}:{} to {}:{}: {}",
                 target.display(),
@@ -237,7 +255,7 @@ fn apply_metadata_manifest(
                 current_gid,
                 entry.uid,
                 entry.gid,
-                std::io::Error::last_os_error()
+                error
             )
             .into());
         }

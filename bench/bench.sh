@@ -117,6 +117,39 @@ boxdir_count() {
     awk 'END { print NR + 0 }'
 }
 
+# Stop a pool daemon cleanly and assert host resources did not grow.
+# Prefer `pool stop` (graceful client path); fall back to SIGTERM so the
+# daemon's terminate handler is also exercised when the socket is already gone.
+stop_pool_daemon() {
+  local sock="$1"
+  local daemon="$2"
+  if [ -S "$sock" ]; then
+    "$A3S_BOX" pool stop --socket "$sock" >/dev/null 2>&1 || true
+  fi
+  if kill -0 "$daemon" 2>/dev/null; then
+    kill -TERM "$daemon" 2>/dev/null || true
+  fi
+  wait "$daemon" 2>/dev/null || true
+  sleep 2
+}
+
+assert_no_resource_growth() {
+  local label="$1"
+  local b_shim="$2" b_mount="$3" b_dir="$4"
+  local a_shim a_mount a_dir
+  a_shim=$(shim_count); a_mount=$(mount_count); a_dir=$(boxdir_count)
+  local leak=0
+  [ "$a_shim" -gt "$b_shim" ]  && { echo "  LEAK ($label): $(( a_shim - b_shim )) orphan shim(s)"; leak=1; }
+  [ "$a_mount" -gt "$b_mount" ] && { echo "  LEAK ($label): $(( a_mount - b_mount )) leaked overlay mount(s)"; leak=1; }
+  [ "$a_dir" -gt "$b_dir" ]    && { echo "  LEAK ($label): $(( a_dir - b_dir )) leaked box dir(s)"; leak=1; }
+  if [ "$leak" -ne 0 ]; then
+    echo "  FAIL ($label): pool shutdown left host resources behind (shims=$a_shim mounts=$a_mount dirs=$a_dir; baseline shims=$b_shim mounts=$b_mount dirs=$b_dir)"
+    return 1
+  fi
+  echo "  PASS ($label): no orphan shims / mounts / box dirs after pool shutdown"
+  return 0
+}
+
 bench_cold() {
   echo "## Cold boot ($RUNS runs, $IMAGE)"
   "$A3S_BOX" pull "$IMAGE" >/dev/null 2>&1 || true
@@ -333,6 +366,8 @@ EOF
 bench_warm() {
   echo "## Warm-pool acquire ($RUNS runs, pool size $POOL_SIZE)"
   local sock=/tmp/a3s-bench-pool.sock
+  local b_shim b_mount b_dir
+  b_shim=$(shim_count); b_mount=$(mount_count); b_dir=$(boxdir_count)
   "$A3S_BOX" pool start --image "$IMAGE" --size "$POOL_SIZE" --socket "$sock" >/tmp/a3s-bench-pool.log 2>&1 &
   local daemon=$!
   # Wait for the pool to be ready (socket appears + first acquire succeeds).
@@ -344,13 +379,16 @@ bench_warm() {
     "$A3S_BOX" pool run --socket "$sock" -- true >/dev/null 2>&1
     e=$(now_ms); samples="$samples $(( e - s ))"
   done
-  kill "$daemon" 2>/dev/null; wait "$daemon" 2>/dev/null
+  stop_pool_daemon "$sock" "$daemon"
   echo "  p50=$(pct "$samples" 50)ms  p90=$(pct "$samples" 90)ms  min=$(pct "$samples" 1)ms"
+  assert_no_resource_growth "warm-pool" "$b_shim" "$b_mount" "$b_dir"
 }
 
 bench_fork() {
   echo "## Snapshot-fork pool fill ($POOL_SIZE VMs, cold-boot vs CoW restore)"
   local sock=/tmp/a3s-bench-fork.sock
+  local b_shim b_mount b_dir
+  b_shim=$(shim_count); b_mount=$(mount_count); b_dir=$(boxdir_count)
   for mode in "" "--snapshot-fork"; do
     local label="cold-fill"; [ -n "$mode" ] && label="snapshot-fork"
     local s e; s=$(now_ms)
@@ -359,10 +397,11 @@ bench_fork() {
     local daemon=$!
     for _ in $(seq 1 120); do [ -S "$sock" ] && "$A3S_BOX" pool run --socket "$sock" -- true >/dev/null 2>&1 && break; sleep 1; done
     e=$(now_ms)
-    kill "$daemon" 2>/dev/null; wait "$daemon" 2>/dev/null
+    stop_pool_daemon "$sock" "$daemon"
     local total=$(( e - s ))
     echo "  $label: fill-to-$POOL_SIZE ${total}ms (~$(( total / POOL_SIZE ))ms amortized)"
-    sleep 2
+    assert_no_resource_growth "$label" "$b_shim" "$b_mount" "$b_dir" || return 1
+    sleep 1
   done
 }
 

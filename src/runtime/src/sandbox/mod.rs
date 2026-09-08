@@ -30,6 +30,27 @@ pub(crate) mod runtime_record;
 #[cfg(target_os = "linux")]
 pub(crate) const A3S_OCI_LIFECYCLE_TIMEOUT_MS: u64 = 15_000;
 
+/// Host cgroup root handed to the setuid Sandbox launcher / native OCI owner.
+///
+/// The path must match the administrator helper that enables controllers under
+/// the caller's systemd user instance before dropping privileges.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_sandbox_delegated_cgroup_root() -> String {
+    let uid = unsafe { libc::geteuid() };
+    format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/a3s-box-delegated")
+}
+
+/// Resolve the administrator-owned setuid launcher used for Sandbox OCI owners.
+///
+/// Discovery order matches other packaged Sandbox artifacts: explicit override,
+/// environment, then the system libexec install location.
+#[cfg(target_os = "linux")]
+pub(crate) fn resolve_sandbox_oci_launcher(
+    explicit: Option<&std::path::Path>,
+) -> a3s_box_core::error::Result<std::path::PathBuf> {
+    capability::resolve_sandbox_oci_launcher(explicit)
+}
+
 /// Apply a complete resource contract to the exact recorded Sandbox generation.
 ///
 /// The A3S OCI SDK is the only live-update path for a host Sandbox. MicroVM

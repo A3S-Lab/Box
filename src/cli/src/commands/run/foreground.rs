@@ -441,10 +441,16 @@ async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
 }
 
 pub(super) fn run_context_uses_oci(ctx: &RunContext) -> bool {
+    // Linux Sandbox executions are hosted by the A3S OCI runtime through the
+    // VM backend. Their durable route remains `BoxVm` for compatibility, so
+    // the route field alone cannot identify the live owner or its log worker.
+    // Treat the isolation mode as OCI-backed on Linux as well as honoring the
+    // explicit OCI route used by managed executions.
     ctx.record
         .managed_execution
         .as_ref()
         .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
+        || (cfg!(target_os = "linux") && ctx.record.isolation.is_sandbox())
 }
 
 pub(super) fn foreground_completion_message(

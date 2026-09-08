@@ -491,13 +491,23 @@ impl BoxRuntimeService {
         let Some(mut vm) = vm else {
             return Ok(false);
         };
+        let box_id = vm.box_id().to_string();
 
         match timeout_ms {
-            Some(timeout_ms) => vm
-                .destroy_with_timeout(timeout_ms)
-                .await
-                .map_err(box_error_to_status)?,
-            None => vm.destroy().await.map_err(box_error_to_status)?,
+            Some(timeout_ms) => {
+                if let Err(error) = vm.destroy_with_timeout(timeout_ms).await {
+                    #[cfg(target_os = "linux")]
+                    a3s_box_runtime::vm::reap::reap_orphaned_box(&box_id);
+                    return Err(box_error_to_status(error));
+                }
+            }
+            None => {
+                if let Err(error) = vm.destroy().await {
+                    #[cfg(target_os = "linux")]
+                    a3s_box_runtime::vm::reap::reap_orphaned_box(&box_id);
+                    return Err(box_error_to_status(error));
+                }
+            }
         }
 
         Ok(true)

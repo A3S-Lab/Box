@@ -5,14 +5,15 @@ description: 查看 A3S Box 在 Linux/KVM、Linux Sandbox 与 macOS/HVF 实机�
 
 # 2026-07-31 实机性能报告
 
-状态：**已采集性能数据；发现发布阻断项。**
+状态：**保留历史矩阵；该次采集中的 Linux 清理阻断项已在后续 Box tip
+中处理。** 下方数字仍为 2026-07-31 采样，不是新的全绿复测。
 
 本次矩阵运行真实的 A3S Box `3.2.0` CLI，覆盖 Linux/KVM 与 macOS/HVF
 独立内核 MicroVM，以及 Linux 共享内核 Sandbox。测试包括生命周期、exec、
 空闲内存、计算、rootfs/CoW、tmpfs、绑定挂载、命名卷、初始化、网络、并发、
 暖池、snapshot-fork 和 TEE 模拟。
 
-这些结果不是全绿认证：
+采集当时这些结果不是全绿认证：
 
 | 测试通道                         | 样本结果                 | 清理结果                                            | 结论                           |
 | -------------------------------- | ------------------------ | --------------------------------------------------- | ------------------------------ |
@@ -112,10 +113,16 @@ TEE 行使用 `--tee-simulate`。Linux 主机没有符合条件的 SEV-SNP 或 T
 
 ## 已知阻断项
 
-1. 修复前台 Sandbox 的 cgroup 挂载与日志排空行为，再运行正常的
-   `run --rm` 生命周期矩阵。
-2. 修复 KVM 与 HVF 上 snapshot-fork 服务关闭后的 shim、文件系统挂载、
-   socket 和 box 目录回收。
+后续 Linux tip（采集之后）状态：
+
+1. ~~修复前台 Sandbox 的 cgroup 挂载与日志排空行为~~ — 在具备 setuid OCI
+   launcher 与 delegated user cgroup 的主机上已可干净完成
+   `run --rm --isolation sandbox` smoke；发布新的 Sandbox 性能数字前仍需重跑
+   完整生命周期矩阵。
+2. ~~修复 Linux 上 snapshot-fork / 暖池关闭后的 shim、挂载、socket 与 box
+   目录回收~~ — 池 drain 会拆除 idle VM 与 lease、清理 snapshot 模板目录，
+   并在 destroy 失败时尽力 reap 孤儿（含 mid-replenish 与 lease 回收）。
+   macOS/HVF 池残留清理仍需主机复测。
 3. 修复 macOS/HVF TSI 的连接提前关闭问题，再发布网络可靠性结论。
 4. 在符合条件的 SEV-SNP 主机上完成 attestation、RA-TLS、seal/unseal 与
    secret 注入测试；模拟永远不能替代硬件证据。
