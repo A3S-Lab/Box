@@ -604,6 +604,10 @@ jobs:
           sudo rm -rf --one-file-system -- "$A3S_BOX_OCI_HOST_ROOT"
           sudo install -d -m 700 -o "${A3S_BOX_CI_SANDBOX_UID}" -g "${A3S_BOX_CI_SANDBOX_GID}" \
             "$A3S_BOX_OCI_HOST_ROOT"
+          # Prior Sandbox CI steps use setpriv with euid 0, so A3S_HOME content is
+          # root-owned. Composition matches euid to the sandbox ruid for peer auth
+          # and must own the home tree (and writable Runtime Secret mount).
+          sudo chown -R "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" "$A3S_HOME"
           # Owner drops to the real UID before exec; Unix SDK peer auth uses
           # SO_PEERCRED euid, so the harness must match (not stay euid 0).
           export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
