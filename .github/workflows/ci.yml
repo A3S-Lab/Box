@@ -599,6 +599,11 @@ jobs:
           cd src
           set +e
           log="$RUNNER_TEMP/a3s-box-production-oci-owner-composition.log"
+          # Fresh host root for this identity; leftover sockets/records from prior
+          # steps or failed starts poison ensure_native_linux_oci_owner.
+          sudo rm -rf --one-file-system -- "$A3S_BOX_OCI_HOST_ROOT"
+          sudo install -d -m 700 -o "${A3S_BOX_CI_SANDBOX_UID}" -g "${A3S_BOX_CI_SANDBOX_GID}" \
+            "$A3S_BOX_OCI_HOST_ROOT"
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_MIGRATION=sandbox
