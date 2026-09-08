@@ -134,16 +134,20 @@ pub(crate) async fn ensure_native_linux_oci_owner(
     }
 
     let mut child = spawn_owner(service_root, artifacts)?;
-    let pid = child.id();
-    let pid_start_time = crate::process::pid_start_time(pid).ok_or_else(|| {
+    let launch_pid = child.id();
+    let launch_start_time = crate::process::pid_start_time(launch_pid).ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
         ExecutionManagerError::Unavailable(format!(
-            "could not capture native Linux OCI owner identity for PID {pid}"
+            "could not capture native Linux OCI owner launch identity for PID {launch_pid}"
         ))
     })?;
-    let record = NativeLinuxOwnerRecord::new(pid, pid_start_time, artifacts, socket_path.clone());
-    if let Err(error) = write_owner_record(&record_path, &record) {
+    // Provisional identity: elevated CI launches go through sudo/setpriv, so the
+    // Child PID may be a supervisor. Rewrite from SO_PEERCRED after the socket is
+    // ready so owner-death recovery finds the real a3s-oci executor root.
+    let provisional =
+        NativeLinuxOwnerRecord::new(launch_pid, launch_start_time, artifacts, socket_path.clone());
+    if let Err(error) = write_owner_record(&record_path, &provisional) {
         let _ = child.kill();
         let _ = child.wait();
         reclaim_dead_owner_socket(&socket_path)?;
@@ -155,7 +159,7 @@ pub(crate) async fn ensure_native_linux_oci_owner(
         let detail = read_owner_log_tail(service_root);
         let _ = child.kill();
         let _ = child.wait();
-        let _ = remove_record_if_same(&record_path, &record);
+        let _ = remove_record_if_same(&record_path, &provisional);
         let _ = reclaim_dead_owner_socket(&socket_path);
         return Err(match error {
             ExecutionManagerError::Unavailable(message) if !detail.is_empty() => {
@@ -164,6 +168,25 @@ pub(crate) async fn ensure_native_linux_oci_owner(
             other => other,
         });
     }
+    let _record = match resolve_owner_identity_from_socket(&socket_path, artifacts) {
+        Ok(record) => {
+            if let Err(error) = write_owner_record(&record_path, &record) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = remove_record_if_same(&record_path, &provisional);
+                let _ = reclaim_dead_owner_socket(&socket_path);
+                return Err(error);
+            }
+            record
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = remove_record_if_same(&record_path, &provisional);
+            let _ = reclaim_dead_owner_socket(&socket_path);
+            return Err(error);
+        }
+    };
     // A short-lived CLI will naturally hand the owner to init, while a
     // long-lived embedding process must still reap an owner that later exits.
     // Retaining the Child in this waiter prevents a persistent SDK host from
@@ -219,6 +242,71 @@ async fn wait_until_ready(
         }
         tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
     }
+}
+
+fn resolve_owner_identity_from_socket(
+    socket_path: &Path,
+    artifacts: &CertifiedA3sOci,
+) -> ExecutionManagerResult<NativeLinuxOwnerRecord> {
+    use std::mem::{size_of, MaybeUninit};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let stream = UnixStream::connect(socket_path).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to authenticate native Linux OCI owner socket {}: {error}",
+            socket_path.display()
+        ))
+    })?;
+    let mut credentials = MaybeUninit::<libc::ucred>::zeroed();
+    let mut value_length = libc::socklen_t::try_from(size_of::<libc::ucred>()).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to represent SO_PEERCRED value size: {error}"
+        ))
+    })?;
+    // SAFETY: the stream owns a connected Unix descriptor and the output
+    // storage is valid for one ucred structure.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut value_length,
+        )
+    };
+    if status != 0 {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to read SO_PEERCRED for native Linux OCI owner {}: {}",
+            socket_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    if usize::try_from(value_length).ok() != Some(size_of::<libc::ucred>()) {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "SO_PEERCRED returned {value_length} bytes for native Linux OCI owner {}",
+            socket_path.display()
+        )));
+    }
+    // SAFETY: getsockopt reported a full ucred write into credentials.
+    let credentials = unsafe { credentials.assume_init() };
+    let pid = credentials.pid as u32;
+    if pid == 0 {
+        return Err(ExecutionManagerError::Unavailable(
+            "native Linux OCI owner socket returned an invalid peer PID".to_string(),
+        ));
+    }
+    let pid_start_time = crate::process::pid_start_time(pid).ok_or_else(|| {
+        ExecutionManagerError::Unavailable(format!(
+            "could not capture native Linux OCI owner identity for peer PID {pid}"
+        ))
+    })?;
+    Ok(NativeLinuxOwnerRecord::new(
+        pid,
+        pid_start_time,
+        artifacts,
+        socket_path.to_path_buf(),
+    ))
 }
 
 fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionManagerResult<Child> {

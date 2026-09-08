@@ -28,13 +28,15 @@ All notable changes to A3S Box will be documented in this file.
   after device-policy bootstrap drops the owner to the real UID. The owner child
   is elevated through `A3S_BOX_CI_SETPRIV_WRAPPER` (euid 0 / non-root ruid) so
   `native-linux-host-service` can install the parent-bound rootless device
-  helper on nosuid CI mounts. The same matched/elevate pair is used for the
-  no-KVM installed-product smoke, and owner-death evidence expects the sandbox
-  UID rather than host root. The CI cgroup root `cgroup.procs` is owned by the
-  sandbox identity so owner migration into a delegated child still works.
-  Composition also chowns `A3S_HOME` to that identity after earlier euid-0
-  steps so the matched harness can write state and sockets. The local SDK
-  Sandbox smoke skips host-bridge network prune under Sandbox isolation
+  helper on nosuid CI mounts. After the socket is ready, the owner identity
+  record is rewritten from `SO_PEERCRED` so sudo/setpriv supervisors are not
+  mistaken for the durable `a3s-oci` process. The same matched/elevate pair is
+  used for the no-KVM installed-product smoke, and owner-death evidence expects
+  the sandbox UID rather than host root. The CI cgroup root `cgroup.procs` is
+  owned by the sandbox identity so owner migration into a delegated child still
+  works. Composition also chowns `A3S_HOME` to that identity after earlier
+  euid-0 steps so the matched harness can write state and sockets. The local
+  SDK Sandbox smoke skips host-bridge network prune under Sandbox isolation
   because matched credentials lack `CAP_NET_ADMIN`.
 - Production Box-to-OCI host-service composition migrates the owner into a
   fresh child under `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so
