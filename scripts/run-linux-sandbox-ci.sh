@@ -11,13 +11,16 @@
 # launcher alone.
 set -euo pipefail
 
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 if [[ "$(uname -s)" != Linux ]]; then
   echo "Linux Sandbox CI runner requires Linux" >&2
   exit 1
 fi
 
 if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo -E -- "$0" "$@"
+  # Absolute path: sudo does not resolve relative script paths via PATH.
+  exec sudo -E -- "$SCRIPT_PATH" "$@"
 fi
 
 if [[ "$#" -lt 1 ]]; then
