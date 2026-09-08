@@ -236,15 +236,32 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    // SAFETY: the closure performs only the async-signal-safe setsid syscall
-    // between fork and exec and does not access shared Rust state.
+    // SAFETY: the closure only performs async-signal-safe credential and session
+    // syscalls between fork and exec and does not access shared Rust state.
+    // Under setpriv (euid 0, non-root ruid), drop to the real identity before
+    // exec: native-linux-host-service installs rootless cgroup delegation and
+    // rejects a privileged effective UID.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+                return Err(std::io::Error::last_os_error());
             }
+            let ruid = libc::getuid();
+            let rgid = libc::getgid();
+            let euid = libc::geteuid();
+            if euid == 0 && ruid != 0 {
+                if libc::setresgid(rgid as libc::gid_t, rgid as libc::gid_t, rgid as libc::gid_t)
+                    == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setresuid(ruid as libc::uid_t, ruid as libc::uid_t, ruid as libc::uid_t)
+                    == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
         });
     }
     command.spawn().map_err(|error| {
@@ -253,6 +270,41 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
             artifacts.runtime_path.display()
         ))
     })
+}
+
+/// Filesystem identity for owner state. Under setpriv (euid 0, non-root ruid),
+/// durable ownership follows the real UID so the dropped host service can open
+/// the same root and logs.
+fn owner_fs_ids() -> (u32, u32) {
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) =
+        unsafe { (libc::getuid(), libc::getgid(), libc::geteuid(), libc::getegid()) };
+    if euid == 0 && ruid != 0 {
+        (ruid, rgid)
+    } else {
+        (euid, egid)
+    }
+}
+
+fn chown_to_owner_fs(path: &Path) -> ExecutionManagerResult<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let (uid, gid) = owner_fs_ids();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        ExecutionManagerError::Unavailable(format!(
+            "native Linux OCI path contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to assign native Linux OCI path {} to UID {uid}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
@@ -268,6 +320,7 @@ fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
                 path.display()
             ))
         })?;
+    chown_to_owner_fs(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to protect native Linux OCI owner log {}: {error}",
@@ -327,21 +380,21 @@ fn prepare_service_root(path: &Path) -> ExecutionManagerResult<()> {
             path.display()
         ))
     })?;
+    chown_to_owner_fs(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to inspect native Linux OCI service root {}: {error}",
             path.display()
         ))
     })?;
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
+    let (owner_uid, _) = owner_fs_ids();
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != effective_uid
+        || metadata.uid() != owner_uid
         || metadata.mode() & 0o777 != 0o700
     {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "native Linux OCI service root {} must be a real UID {effective_uid}-owned directory with mode 0700",
+            "native Linux OCI service root {} must be a real UID {owner_uid}-owned directory with mode 0700",
             path.display()
         )));
     }
@@ -375,11 +428,10 @@ fn load_owner_record(
             )))
         }
     };
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
+    let (owner_uid, _) = owner_fs_ids();
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != effective_uid
+        || metadata.uid() != owner_uid
         || metadata.mode() & 0o777 != 0o600
         || metadata.len() > 16 * 1024
     {
@@ -431,6 +483,7 @@ fn write_owner_record(path: &Path, record: &NativeLinuxOwnerRecord) -> Execution
             path.display()
         )));
     }
+    chown_to_owner_fs(path)?;
     Ok(())
 }
 
@@ -461,11 +514,10 @@ fn reclaim_dead_owner_socket(path: &Path) -> ExecutionManagerResult<()> {
             )))
         }
     };
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
-    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid {
+    let (owner_uid, _) = owner_fs_ids();
+    if !metadata.file_type().is_socket() || metadata.uid() != owner_uid {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "refusing to remove stale native Linux OCI path {} because it is not a socket owned by UID {effective_uid}",
+            "refusing to remove stale native Linux OCI path {} because it is not a socket owned by UID {owner_uid}",
             path.display()
         )));
     }
