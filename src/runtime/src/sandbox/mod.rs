@@ -36,8 +36,7 @@ pub(crate) const A3S_OCI_LIFECYCLE_TIMEOUT_MS: u64 = 15_000;
 /// path (for example CI runners using a temporary cgroup tree) set this to an
 /// absolute, pre-created, caller-owned cgroup v2 directory.
 #[cfg(target_os = "linux")]
-pub(crate) const SANDBOX_DELEGATED_CGROUP_ROOT_ENV: &str =
-    "A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT";
+pub(crate) const SANDBOX_DELEGATED_CGROUP_ROOT_ENV: &str = "A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT";
 
 /// Host cgroup root handed to the setuid Sandbox launcher / native OCI owner.
 ///
