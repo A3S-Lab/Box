@@ -1221,20 +1221,14 @@ fn validate_digest(label: &str, digest: &str) -> Result<()> {
 }
 
 fn validate_cpuset(value: &str) -> Result<()> {
-    let first = value.as_bytes().first().copied();
-    let last = value.as_bytes().last().copied();
-    if value.is_empty()
-        || matches!(first, Some(b',' | b'-'))
-        || matches!(last, Some(b',' | b'-'))
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b',' | b'-'))
-    {
-        return Err(BoxError::ConfigError(format!(
-            "Invalid Sandbox cpuset {value:?}"
-        )));
+    if crate::resize::is_valid_cpuset(value) {
+        Ok(())
+    } else {
+        Err(BoxError::ConfigError(format!(
+            "Invalid Sandbox cpuset {value:?}: expected a comma-separated list of CPU indices or \
+             ascending ranges such as \"0-3\" or \"0,2,4\""
+        )))
     }
-    Ok(())
 }
 
 fn masked_paths() -> Vec<String> {

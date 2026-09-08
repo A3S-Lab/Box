@@ -489,6 +489,13 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
 
     let network = resolve_network(common.network.as_deref());
+    #[cfg(windows)]
+    if matches!(network, NetworkMode::Bridge { .. }) {
+        return Err(
+            "bridge networking is not supported on Windows; omit --network or use --network none"
+                .to_string(),
+        );
+    }
     let compatibility_config = a3s_box_core::BoxConfig {
         isolation: execution_isolation(common),
         port_map: common.publish.clone(),
@@ -669,7 +676,17 @@ pub(crate) fn build_resource_limits(
 
     Ok(ResourceLimits {
         pids_limit: args.pids_limit,
-        cpuset_cpus: args.cpuset_cpus.clone(),
+        cpuset_cpus: match &args.cpuset_cpus {
+            Some(cpuset) if !a3s_box_runtime::is_valid_cpuset(cpuset) => {
+                return Err(format!(
+                    "Invalid --cpuset-cpus value {cpuset:?}: expected a comma-separated list of CPU \
+                     indices or ascending ranges such as \"0-3\" or \"0,2,4\" (inverted ranges like \
+                     \"3-1\" are rejected)."
+                )
+                .into());
+            }
+            other => other.clone(),
+        },
         ulimits: args.ulimits.clone(),
         cpu_shares: args.cpu_shares,
         cpu_quota: args.cpu_quota,
@@ -780,6 +797,20 @@ mod tests {
             .contains("cpus"));
         args.cpus = 256;
         assert!(validate_runtime_options(&args).unwrap_err().contains("255"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_rejects_windows_bridge_network() {
+        let mut args = default_common_args();
+        args.network = Some("mynet".to_string());
+        let err = validate_runtime_options(&args).unwrap_err();
+        assert!(
+            err.contains("bridge networking is not supported on Windows"),
+            "got: {err}"
+        );
+        args.network = Some("none".to_string());
+        assert!(validate_runtime_options(&args).is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -1341,6 +1372,17 @@ mod tests {
         assert_eq!(limits.cpu_period, Some(100000));
         assert_eq!(limits.memory_reservation, Some(256 * 1024 * 1024));
         assert_eq!(limits.memory_swap, Some(-1));
+    }
+
+    #[test]
+    fn test_build_resource_limits_rejects_inverted_cpuset() {
+        let mut args = default_common_args();
+        args.cpuset_cpus = Some("3-1".to_string());
+        let err = build_resource_limits(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("cpuset") && err.contains("3-1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

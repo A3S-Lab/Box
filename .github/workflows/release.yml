@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  A3S_OCI_RUNTIME_REV: 878f8414cef3b85bef1b51fe6735017b25828252
+  A3S_OCI_RUNTIME_REV: fb517c6fe7793911c860f07143f6f1b4cb37eae7
 
 jobs:
   # ── Tests must pass before release ─────────────────────────────
@@ -280,6 +280,7 @@ jobs:
             OCI_RELEASE_DIR="oci-runtime/target/${{ matrix.host_target }}/release"
             cp "$OCI_RELEASE_DIR/a3s-oci" "$DIR/"
             cp "$OCI_RELEASE_DIR/a3s-oci-agent" "$DIR/"
+            cp "$OCI_RELEASE_DIR/a3s-oci" "$DIR/a3s-box-sandbox-oci-launcher"
             cp oci-runtime/LICENSE "$DIR/OCI-RUNTIME-LICENSE"
             printf '%s\n' "$A3S_OCI_RUNTIME_REV" \
               > "$DIR/OCI-RUNTIME-REVISION"
@@ -362,6 +363,7 @@ jobs:
               "$DIR/a3s-box-shim"
               "$DIR/a3s-oci"
               "$DIR/a3s-oci-agent"
+              "$DIR/a3s-box-sandbox-oci-launcher"
             )
             if [ "${{ matrix.build_cri }}" = "true" ]; then
               HOST_BINARIES+=("$DIR/a3s-box-cri")
@@ -522,7 +524,7 @@ jobs:
             test -s "$DIR/$binary" && test -x "$DIR/$binary"
           done
           if [ "${{ runner.os }}" = "Linux" ]; then
-            for binary in a3s-oci a3s-oci-agent; do
+            for binary in a3s-oci a3s-oci-agent a3s-box-sandbox-oci-launcher; do
               test -s "$DIR/$binary" && test -x "$DIR/$binary"
             done
             test "$(cat "$DIR/OCI-RUNTIME-REVISION")" = \
@@ -552,6 +554,7 @@ jobs:
           if [ "${{ runner.os }}" = "Linux" ]; then
             grep -Fx "${DIR}/a3s-oci" "${DIR}.contents"
             grep -Fx "${DIR}/a3s-oci-agent" "${DIR}.contents"
+            grep -Fx "${DIR}/a3s-box-sandbox-oci-launcher" "${DIR}.contents"
             grep -Fx "${DIR}/OCI-RUNTIME-REVISION" "${DIR}.contents"
           fi
           checksum_inputs=("${DIR}.tar.gz")
@@ -1066,6 +1069,7 @@ jobs:
               bin.install "a3s-box-guest-init"
               bin.install "a3s-oci" if File.exist?("a3s-oci")
               bin.install "a3s-oci-agent" if File.exist?("a3s-oci-agent")
+              bin.install "a3s-box-sandbox-oci-launcher" if File.exist?("a3s-box-sandbox-oci-launcher")
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
               lib.install Dir["lib/*"] if Dir.exist?("lib")
             end

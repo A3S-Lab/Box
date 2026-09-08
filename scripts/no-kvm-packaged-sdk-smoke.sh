@@ -140,6 +140,16 @@ validate_recovery_report() {
         "$report" >/dev/null
 }
 
+# Prefer the setpriv CI identity when prepare-linux-sandbox-ci-host.sh ran.
+# Plain sudo yields UID 0/0 and fails rootless device-policy bootstrap.
+run_sandbox_env() {
+    if [[ -n "${A3S_BOX_CI_SANDBOX_UID:-}" ]]; then
+        bash "$SCRIPT_DIR/run-linux-sandbox-ci.sh" env "$@"
+    else
+        sudo env "$@"
+    fi
+}
+
 run_sdk_phase() {
     local phase="$1"
     local expected_info_pattern info report
@@ -182,15 +192,17 @@ PY
     esac
 
     info="$(
-        sudo env \
+        run_sandbox_env \
             PATH="$A3S_BOX_INSTALL_DIR:$PATH" \
             HOME="$HOME" \
             A3S_HOME="$A3S_HOME" \
+            A3S_BOX_SANDBOX_OCI_LAUNCHER="${A3S_BOX_SANDBOX_OCI_LAUNCHER:-}" \
+            A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="${A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT:-}" \
             "$A3S_BOX_BINARY" info
     )"
     grep -E "$expected_info_pattern" <<< "$info"
 
-    sudo env \
+    run_sandbox_env \
         PATH="$A3S_BOX_INSTALL_DIR:$PATH" \
         HOME="$HOME" \
         RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
@@ -201,6 +213,8 @@ PY
         A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
         A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
         A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
+        A3S_BOX_SANDBOX_OCI_LAUNCHER="${A3S_BOX_SANDBOX_OCI_LAUNCHER:-}" \
+        A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="${A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT:-}" \
         A3S_BOX_OCI_OWNER_RECOVERY_REPORT="$report" \
         A3S_BOX_BINARY="$A3S_BOX_BINARY" \
         A3S_BOX_SHIM_BINARY="$A3S_BOX_SHIM_BINARY" \

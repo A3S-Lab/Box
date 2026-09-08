@@ -30,12 +30,27 @@ pub(crate) mod runtime_record;
 #[cfg(target_os = "linux")]
 pub(crate) const A3S_OCI_LIFECYCLE_TIMEOUT_MS: u64 = 15_000;
 
+/// Environment override for the Sandbox OCI delegated cgroup root.
+///
+/// Qualification hosts that cannot expose the default systemd user-instance
+/// path (for example CI runners using a temporary cgroup tree) set this to an
+/// absolute, pre-created, caller-owned cgroup v2 directory.
+#[cfg(target_os = "linux")]
+pub(crate) const SANDBOX_DELEGATED_CGROUP_ROOT_ENV: &str = "A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT";
+
 /// Host cgroup root handed to the setuid Sandbox launcher / native OCI owner.
 ///
-/// The path must match the administrator helper that enables controllers under
-/// the caller's systemd user instance before dropping privileges.
+/// Default path matches the administrator helper that enables controllers under
+/// the caller's systemd user instance before dropping privileges. An absolute
+/// [`SANDBOX_DELEGATED_CGROUP_ROOT_ENV`] value replaces that default.
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_sandbox_delegated_cgroup_root() -> String {
+    if let Ok(path) = std::env::var(SANDBOX_DELEGATED_CGROUP_ROOT_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            return path.to_string();
+        }
+    }
     let uid = unsafe { libc::geteuid() };
     format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/a3s-box-delegated")
 }

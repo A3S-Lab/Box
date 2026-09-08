@@ -134,16 +134,24 @@ pub(crate) async fn ensure_native_linux_oci_owner(
     }
 
     let mut child = spawn_owner(service_root, artifacts)?;
-    let pid = child.id();
-    let pid_start_time = crate::process::pid_start_time(pid).ok_or_else(|| {
+    let launch_pid = child.id();
+    let launch_start_time = crate::process::pid_start_time(launch_pid).ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
         ExecutionManagerError::Unavailable(format!(
-            "could not capture native Linux OCI owner identity for PID {pid}"
+            "could not capture native Linux OCI owner launch identity for PID {launch_pid}"
         ))
     })?;
-    let record = NativeLinuxOwnerRecord::new(pid, pid_start_time, artifacts, socket_path.clone());
-    if let Err(error) = write_owner_record(&record_path, &record) {
+    // Provisional identity: elevated CI launches go through sudo/setpriv, so the
+    // Child PID may be a supervisor. Rewrite from SO_PEERCRED after the socket is
+    // ready so owner-death recovery finds the real a3s-oci executor root.
+    let provisional = NativeLinuxOwnerRecord::new(
+        launch_pid,
+        launch_start_time,
+        artifacts,
+        socket_path.clone(),
+    );
+    if let Err(error) = write_owner_record(&record_path, &provisional) {
         let _ = child.kill();
         let _ = child.wait();
         reclaim_dead_owner_socket(&socket_path)?;
@@ -152,12 +160,37 @@ pub(crate) async fn ensure_native_linux_oci_owner(
 
     let ready = wait_until_ready(&endpoint, Some(&mut child)).await;
     if let Err(error) = ready {
+        let detail = read_owner_log_tail(service_root);
         let _ = child.kill();
         let _ = child.wait();
-        let _ = remove_record_if_same(&record_path, &record);
+        let _ = remove_record_if_same(&record_path, &provisional);
         let _ = reclaim_dead_owner_socket(&socket_path);
-        return Err(error);
+        return Err(match error {
+            ExecutionManagerError::Unavailable(message) if !detail.is_empty() => {
+                ExecutionManagerError::Unavailable(format!("{message}{detail}"))
+            }
+            other => other,
+        });
     }
+    let _record = match resolve_owner_identity_from_socket(&socket_path, artifacts) {
+        Ok(record) => {
+            if let Err(error) = write_owner_record(&record_path, &record) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = remove_record_if_same(&record_path, &provisional);
+                let _ = reclaim_dead_owner_socket(&socket_path);
+                return Err(error);
+            }
+            record
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = remove_record_if_same(&record_path, &provisional);
+            let _ = reclaim_dead_owner_socket(&socket_path);
+            return Err(error);
+        }
+    };
     // A short-lived CLI will naturally hand the owner to init, while a
     // long-lived embedding process must still reap an owner that later exits.
     // Retaining the Child in this waiter prevents a persistent SDK host from
@@ -187,7 +220,7 @@ async fn wait_until_ready(
                 Ok(Some(status)) => {
                     return Err(ExecutionManagerError::Unavailable(format!(
                         "native Linux OCI owner exited during startup with {status}"
-                    )))
+                    )));
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -215,10 +248,97 @@ async fn wait_until_ready(
     }
 }
 
+fn resolve_owner_identity_from_socket(
+    socket_path: &Path,
+    artifacts: &CertifiedA3sOci,
+) -> ExecutionManagerResult<NativeLinuxOwnerRecord> {
+    use std::mem::{size_of, MaybeUninit};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let stream = UnixStream::connect(socket_path).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to authenticate native Linux OCI owner socket {}: {error}",
+            socket_path.display()
+        ))
+    })?;
+    let mut credentials = MaybeUninit::<libc::ucred>::zeroed();
+    let mut value_length =
+        libc::socklen_t::try_from(size_of::<libc::ucred>()).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to represent SO_PEERCRED value size: {error}"
+            ))
+        })?;
+    // SAFETY: the stream owns a connected Unix descriptor and the output
+    // storage is valid for one ucred structure.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut value_length,
+        )
+    };
+    if status != 0 {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to read SO_PEERCRED for native Linux OCI owner {}: {}",
+            socket_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    if usize::try_from(value_length).ok() != Some(size_of::<libc::ucred>()) {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "SO_PEERCRED returned {value_length} bytes for native Linux OCI owner {}",
+            socket_path.display()
+        )));
+    }
+    // SAFETY: getsockopt reported a full ucred write into credentials.
+    let credentials = unsafe { credentials.assume_init() };
+    let pid = credentials.pid as u32;
+    if pid == 0 {
+        return Err(ExecutionManagerError::Unavailable(
+            "native Linux OCI owner socket returned an invalid peer PID".to_string(),
+        ));
+    }
+    let pid_start_time = crate::process::pid_start_time(pid).ok_or_else(|| {
+        ExecutionManagerError::Unavailable(format!(
+            "could not capture native Linux OCI owner identity for peer PID {pid}"
+        ))
+    })?;
+    Ok(NativeLinuxOwnerRecord::new(
+        pid,
+        pid_start_time,
+        artifacts,
+        socket_path.to_path_buf(),
+    ))
+}
+
 fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionManagerResult<Child> {
     let stdout = open_owner_log(&service_root.join("owner.stdout.log"))?;
     let stderr = open_owner_log(&service_root.join("owner.stderr.log"))?;
-    let mut command = Command::new(&artifacts.runtime_path);
+    let owner_cgroup = prepare_owner_delegation_child()?;
+    // Prefer the Sandbox OCI launcher name so production setuid installs elevate
+    // for device-policy bootstrap; CI packages the same a3s-oci binary there.
+    let launcher = crate::sandbox::resolve_sandbox_oci_launcher(None)
+        .unwrap_or_else(|_| artifacts.runtime_path.clone());
+    // Matched-cred CI harnesses (euid==ruid) cannot bootstrap device policy.
+    // When CI supplies the setpriv wrapper, spawn the owner with euid 0 / non-root
+    // ruid so native-linux-host-service can install the parent-bound helper, then
+    // drop to the real identity for Unix peer auth with the matched harness.
+    let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
+        .filter(|value| !value.is_empty())
+        .filter(|_| unsafe { libc::geteuid() } != 0);
+    let mut command = if let Some(wrapper) = elevate_wrapper {
+        let mut command = Command::new("bash");
+        command.arg(wrapper);
+        command.arg(&launcher);
+        command.env_remove("A3S_BOX_CI_SETPRIV_MATCHED_CREDS");
+        command.env_remove("A3S_BOX_CI_PROBE_CGROUP");
+        command
+    } else {
+        Command::new(&launcher)
+    };
     command
         .arg("native-linux-host-service")
         .arg("--root")
@@ -230,23 +350,138 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    // SAFETY: the closure performs only the async-signal-safe setsid syscall
-    // between fork and exec and does not access shared Rust state.
+    // SAFETY: the closure only performs async-signal-safe session and
+    // cgroup.procs migration syscalls between fork and exec and does not
+    // access shared Rust state.
+    // Do not drop euid here: with --delegated-cgroup-root the host service CLI
+    // bootstraps rootless device policy under effective root, then permanently
+    // drops to the real UID before publishing the SDK socket. Migrate into a
+    // child below the empty delegated root so rootless open accepts host-owned
+    // membership without moving the Sandbox CI harness out of its probe cgroup.
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+        command.pre_exec(move || {
+            if let Some(ref cgroup) = owner_cgroup {
+                migrate_current_task_into_cgroup(cgroup)?;
             }
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
         });
     }
     command.spawn().map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to spawn native Linux OCI owner {}: {error}",
-            artifacts.runtime_path.display()
+            launcher.display()
         ))
     })
+}
+
+/// Create an empty child under the Sandbox delegated cgroup for the owner.
+///
+/// The CI harness stays in the sibling probe cgroup for device-policy certify;
+/// only the forked owner migrates here in `pre_exec`.
+fn prepare_owner_delegation_child() -> ExecutionManagerResult<Option<PathBuf>> {
+    let root = PathBuf::from(crate::sandbox::linux_sandbox_delegated_cgroup_root());
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let child = root.join(format!("box-native-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&child).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to create native Linux OCI owner cgroup {}: {error}",
+            child.display()
+        ))
+    })?;
+    chown_to_owner_fs(&child)?;
+    // access(W_OK) and rootless capability probes use the real UID; own the
+    // control files the host service will write after setuid drop.
+    for name in [
+        "cgroup.procs",
+        "cgroup.subtree_control",
+        "cgroup.controllers",
+    ] {
+        let control = child.join(name);
+        if control.exists() {
+            chown_to_owner_fs(&control)?;
+        }
+    }
+    Ok(Some(child))
+}
+
+fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let procs = cgroup.join("cgroup.procs");
+    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cgroup.procs path contains an interior NUL",
+        )
+    })?;
+    // SAFETY: open/write/close on cgroup.procs between fork and exec; path is
+    // NUL-terminated and owned for the duration of the calls.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = unsafe { libc::write(fd, b"0".as_ptr().cast(), 1) };
+    let close_rc = unsafe { libc::close(fd) };
+    if written != 1 {
+        return Err(if written < 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write migrating into owner cgroup",
+            )
+        });
+    }
+    if close_rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Filesystem identity for owner state. Under setpriv (euid 0, non-root ruid),
+/// durable ownership follows the real UID so the dropped host service can open
+/// the same root and logs.
+fn owner_fs_ids() -> (u32, u32) {
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
+    if euid == 0 && ruid != 0 {
+        (ruid, rgid)
+    } else {
+        (euid, egid)
+    }
+}
+
+fn chown_to_owner_fs(path: &Path) -> ExecutionManagerResult<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let (uid, gid) = owner_fs_ids();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        ExecutionManagerError::Unavailable(format!(
+            "native Linux OCI path contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to assign native Linux OCI path {} to UID {uid}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
@@ -262,6 +497,7 @@ fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
                 path.display()
             ))
         })?;
+    chown_to_owner_fs(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to protect native Linux OCI owner log {}: {error}",
@@ -269,6 +505,32 @@ fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
         ))
     })?;
     Ok(file)
+}
+
+fn read_owner_log_tail(service_root: &Path) -> String {
+    let mut parts = Vec::new();
+    for name in ["owner.stderr.log", "owner.stdout.log"] {
+        let path = service_root.join(name);
+        match std::fs::read(&path) {
+            Ok(bytes) if !bytes.is_empty() => {
+                let text = String::from_utf8_lossy(&bytes);
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let tail = trimmed
+                        .chars()
+                        .rev()
+                        .take(1200)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect::<String>();
+                    parts.push(format!("; {name}: {tail}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.concat()
 }
 
 fn validate_service_root(path: &Path) -> ExecutionManagerResult<()> {
@@ -295,21 +557,21 @@ fn prepare_service_root(path: &Path) -> ExecutionManagerResult<()> {
             path.display()
         ))
     })?;
+    chown_to_owner_fs(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to inspect native Linux OCI service root {}: {error}",
             path.display()
         ))
     })?;
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
+    let (owner_uid, _) = owner_fs_ids();
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != effective_uid
+        || metadata.uid() != owner_uid
         || metadata.mode() & 0o777 != 0o700
     {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "native Linux OCI service root {} must be a real UID {effective_uid}-owned directory with mode 0700",
+            "native Linux OCI service root {} must be a real UID {owner_uid}-owned directory with mode 0700",
             path.display()
         )));
     }
@@ -343,11 +605,10 @@ fn load_owner_record(
             )))
         }
     };
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
+    let (owner_uid, _) = owner_fs_ids();
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != effective_uid
+        || metadata.uid() != owner_uid
         || metadata.mode() & 0o777 != 0o600
         || metadata.len() > 16 * 1024
     {
@@ -399,6 +660,7 @@ fn write_owner_record(path: &Path, record: &NativeLinuxOwnerRecord) -> Execution
             path.display()
         )));
     }
+    chown_to_owner_fs(path)?;
     Ok(())
 }
 
@@ -429,11 +691,10 @@ fn reclaim_dead_owner_socket(path: &Path) -> ExecutionManagerResult<()> {
             )))
         }
     };
-    // SAFETY: geteuid has no preconditions or failure result.
-    let effective_uid = unsafe { libc::geteuid() };
-    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid {
+    let (owner_uid, _) = owner_fs_ids();
+    if !metadata.file_type().is_socket() || metadata.uid() != owner_uid {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "refusing to remove stale native Linux OCI path {} because it is not a socket owned by UID {effective_uid}",
+            "refusing to remove stale native Linux OCI path {} because it is not a socket owned by UID {owner_uid}",
             path.display()
         )));
     }

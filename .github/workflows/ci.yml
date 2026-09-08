@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 878f8414cef3b85bef1b51fe6735017b25828252
+  A3S_OCI_RUNTIME_REV: fb517c6fe7793911c860f07143f6f1b4cb37eae7
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -535,7 +535,8 @@ jobs:
             "$RUNNER_TEMP" \
             "$install_dir"
 
-          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
+          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent \
+              a3s-box-sandbox-oci-launcher; do
             test -x "$install_dir/$artifact"
             test ! -L "$install_dir/$artifact"
           done
@@ -549,12 +550,15 @@ jobs:
             echo "A3S_BOX_GUEST_INIT_BINARY=$install_dir/a3s-box-guest-init"
             echo "A3S_BOX_OCI_RUNTIME_PATH=$install_dir/a3s-oci"
             echo "A3S_BOX_OCI_AGENT_PATH=$install_dir/a3s-oci-agent"
+            echo "A3S_BOX_SANDBOX_OCI_LAUNCHER=$install_dir/a3s-box-sandbox-oci-launcher"
           } >> "$GITHUB_ENV"
 
           grep -q '^root:' /etc/subuid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subgid
+      - name: Prepare Linux Sandbox CI identity and cgroup tree
+        run: bash scripts/prepare-linux-sandbox-ci-host.sh
       - name: Mount private Runtime Secret tmpfs
         run: |
           sudo install -d -m 700 "$A3S_HOME/runtime-secrets"
@@ -564,57 +568,65 @@ jobs:
           mountpoint -q "$A3S_HOME/runtime-secrets"
       - name: Cache the pinned public R17 image over HTTPS
         run: |
-          sudo env \
+          bash scripts/run-linux-sandbox-ci.sh env \
               PATH="$PATH" \
               HOME="$HOME" \
               A3S_DEPS_STUB=1 \
               A3S_HOME="$A3S_HOME" \
+              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
+              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
               "$A3S_BOX_BINARY" pull \
                 'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
       - name: Certify all advertised R17 profiles and private registry pull
         run: |
           cd src
-          sudo env \
-              PATH="$PATH" \
-              HOME="$HOME" \
-              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
-              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-              A3S_DEPS_STUB=1 \
-              A3S_HOME="$A3S_HOME" \
-              A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
-              A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
-              A3S_BOX_RUNTIME_CONFORMANCE=1 \
-              A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
-              A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
-              A3S_REGISTRY_PROTOCOL=http \
-              RUST_MIN_STACK=33554432 \
-              cargo test --locked -p a3s-box-runtime --lib \
-                box_runtime_passes_all_advertised_profiles \
-                -- --ignored --nocapture --test-threads=1
+          # Compile as the runner; execute under setpriv (rustc cannot run AT_SECURE).
+          export A3S_DEPS_STUB=1
+          export A3S_HOME
+          export A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
+          export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
+          export A3S_BOX_RUNTIME_CONFORMANCE=1
+          export A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+          export A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json'
+          export A3S_REGISTRY_PROTOCOL=http
+          export RUST_MIN_STACK=33554432
+          bash ../scripts/run-linux-sandbox-cargo-test.sh \
+            --locked -p a3s-box-runtime --lib \
+            box_runtime_passes_all_advertised_profiles \
+            -- --ignored --nocapture --exact box_runtime_passes_all_advertised_profiles --test-threads=1
       - name: Exercise production Box-to-OCI owner composition
         run: |
           cd src
           set +e
           log="$RUNNER_TEMP/a3s-box-production-oci-owner-composition.log"
-          sudo env \
-              PATH="$PATH" \
-              HOME="$HOME" \
-              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
-              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-              A3S_DEPS_STUB=1 \
-              A3S_HOME="$A3S_HOME" \
-              A3S_BOX_OCI_MIGRATION=sandbox \
-              A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
-              A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
-              A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
-              A3S_BOX_SDK_LOCAL_SMOKE=1 \
-              A3S_BOX_SDK_SMOKE_ISOLATION=sandbox \
-              A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
-              RUST_MIN_STACK=16777216 \
-              cargo test --locked -p a3s-box-sdk --test local_sandbox \
-                local_sandbox_exercises_real_runtime \
-                -- --ignored --nocapture --test-threads=1 \
-              2>&1 | tee "$log"
+          # Fresh host root for this identity; leftover sockets/records from prior
+          # steps or failed starts poison ensure_native_linux_oci_owner.
+          sudo rm -rf --one-file-system -- "$A3S_BOX_OCI_HOST_ROOT"
+          sudo install -d -m 700 -o "${A3S_BOX_CI_SANDBOX_UID}" -g "${A3S_BOX_CI_SANDBOX_GID}" \
+            "$A3S_BOX_OCI_HOST_ROOT"
+          # Prior Sandbox CI steps use setpriv with euid 0, so A3S_HOME content is
+          # root-owned. Composition matches euid to the sandbox ruid for peer auth
+          # and must own the home tree (and writable Runtime Secret mount).
+          sudo chown -R "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" "$A3S_HOME"
+          # Owner drops to the real UID after device-policy bootstrap; Unix SDK
+          # peer auth uses SO_PEERCRED euid, so the harness must match (not stay
+          # euid 0). Elevate only the owner child via the setpriv wrapper.
+          export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
+          export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
+          export A3S_DEPS_STUB=1
+          export A3S_HOME
+          export A3S_BOX_OCI_MIGRATION=sandbox
+          export A3S_BOX_OCI_HOST_ROOT A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
+          export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
+          export A3S_BOX_SDK_LOCAL_SMOKE=1
+          export A3S_BOX_SDK_SMOKE_ISOLATION=sandbox
+          export A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+          export RUST_MIN_STACK=16777216
+          bash ../scripts/run-linux-sandbox-cargo-test.sh \
+            --locked -p a3s-box-sdk --test local_sandbox \
+            local_sandbox_exercises_real_runtime \
+            -- --ignored --nocapture --exact local_sandbox_exercises_real_runtime --test-threads=1 \
+            2>&1 | tee "$log"
           status=${PIPESTATUS[0]}
           if ((status != 0)); then
             while IFS= read -r worker_log; do
@@ -623,18 +635,22 @@ jobs:
                 echo "===== $worker_log ====="
                 sudo tail -c 3800 "$worker_log"
               } | tee -a "$log"
-            done < <(sudo find "$A3S_HOME" -type f -path '*/oci-log-projection/worker.log' -print 2>/dev/null)
+            done < <(sudo find "$A3S_HOME" "$A3S_BOX_OCI_HOST_ROOT" -type f \( -name 'owner.stderr.log' -o -name 'owner.stdout.log' -o -path '*/oci-log-projection/worker.log' \) -print 2>/dev/null)
             diagnostic="$(tail -c 3800 "$log")"
             diagnostic="${diagnostic//'%'/'%25'}"
             diagnostic="${diagnostic//$'\r'/'%0D'}"
             diagnostic="${diagnostic//$'\n'/'%0A'}"
-            echo "::error title=Production Box-to-OCI owner composition failure::$diagnostic"
+            echo "::error title=Production Box-to-OCI owner composition failed::${diagnostic}"
           fi
-          exit "$status"
+          exit "${status}"
       - name: Test the installed SDK product with KVM absent and inaccessible
         run: |
           set +e
           log="$RUNNER_TEMP/a3s-box-local-sdk-smoke.log"
+          # Match composition: harness euid==ruid for Unix peer auth; elevate only
+          # the owner child so device-policy bootstrap still sees effective root.
+          export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
+          export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
           bash scripts/no-kvm-packaged-sdk-smoke.sh 2>&1 | tee "$log"
           status=${PIPESTATUS[0]}
           if ((status != 0)); then

@@ -59,14 +59,19 @@ async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
         client.prune_volumes()?.contains(&prune_volume.name),
         "volume prune did not remove an unused volume",
     )?;
-    let prune_network = client
-        .network("rust-sdk-prune-network")
-        .subnet("10.89.94.0/24")
-        .create()?;
-    require(
-        client.prune_networks()?.contains(&prune_network.name),
-        "network prune did not remove an unused network",
-    )?;
+    // Bridge network create needs CAP_NET_ADMIN. Sandbox CI composition runs the
+    // harness with matched euid==ruid (no effective root) for Unix peer auth, so
+    // skip host-bridge prune coverage there; MicroVM smoke still exercises it.
+    if isolation == ExecutionIsolation::Microvm {
+        let prune_network = client
+            .network("rust-sdk-prune-network")
+            .subnet("10.89.94.0/24")
+            .create()?;
+        require(
+            client.prune_networks()?.contains(&prune_network.name),
+            "network prune did not remove an unused network",
+        )?;
+    }
     let volume = client
         .volume("rust-sdk-cache")
         .label("purpose", "local-sdk-smoke")

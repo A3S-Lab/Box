@@ -184,18 +184,23 @@ impl VmManager {
             let workload_already_finished =
                 crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
             #[cfg(unix)]
-            let provider_already_exited = match handler.try_wait_exit() {
-                Ok(Some(_)) => true,
-                Ok(None) => handler.has_exited(),
-                Err(error) => {
-                    tracing::debug!(
-                        box_id = %self.box_id,
-                        %error,
-                        "Could not poll provider exit before guest stop delivery"
-                    );
-                    handler.has_exited()
-                }
-            };
+            let provider_already_exited =
+                if handler.exit_code().is_some() || handler.has_exited() || !handler.is_running() {
+                    true
+                } else {
+                    match handler.try_wait_exit() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::debug!(
+                                box_id = %self.box_id,
+                                %error,
+                                "Could not poll provider exit before guest stop delivery"
+                            );
+                            handler.has_exited()
+                        }
+                    }
+                };
             #[cfg(unix)]
             let guest_stop_delivered = {
                 // Skip guest-control stop when the workload already published a
@@ -221,7 +226,12 @@ impl VmManager {
                 }
             };
             #[cfg(unix)]
-            let _provider_exited = if guest_stop_delivered {
+            let _provider_exited = if provider_already_exited {
+                // The pre-check already reaped a terminal provider status. Do not
+                // call try_wait_exit again before handler.stop; fake/test handlers
+                // count each poll, and a second wait is redundant for real ones.
+                true
+            } else if guest_stop_delivered {
                 let graceful_wait = if signal == libc::SIGKILL {
                     std::time::Duration::ZERO
                 } else {

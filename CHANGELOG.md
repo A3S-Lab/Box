@@ -9,9 +9,56 @@ All notable changes to A3S Box will be documented in this file.
 - Windows WHPX docs now include a first-principles acceptance matrix index
   (`WIN-HOST` / `WIN-POS` / `WIN-NEG` / `WIN-SLO`) tied to issues #252, #255,
   and #257.
+- Windows CLI coverage for bridge/network-create/pool-start/container-update
+  fail-closed negatives (#260).
 
 ### Fixed
 
+- Guest rootfs archives encode FIFOs as zero-length tar special entries instead
+  of opening them for read, so `a3s-box diff` succeeds when the writable layer
+  contains a FIFO (#265).
+- Scale reconciliation replaces terminal create operations for deterministic
+  slot IDs instead of dead-ending on `ReconcileOutcome::Failed`, and MicroVM
+  startup-terminal paths release the in-process runtime owner so retries cannot
+  stick on "already has an in-process runtime owner" (#266).
+- CLI `--cpuset-cpus` rejects inverted ranges such as `3-1` before run/create
+  (#267), matching resize/update validation.
+- Production Box-to-OCI composition under Sandbox CI uses matched setpriv
+  credentials (`euid==ruid`) so Unix SDK peer auth matches the rootless owner
+  after device-policy bootstrap drops the owner to the real UID. The owner child
+  is elevated through `A3S_BOX_CI_SETPRIV_WRAPPER` (euid 0 / non-root ruid) so
+  `native-linux-host-service` can install the parent-bound rootless device
+  helper on nosuid CI mounts. After the socket is ready, the owner identity
+  record is rewritten from `SO_PEERCRED` so sudo/setpriv supervisors are not
+  mistaken for the durable `a3s-oci` process. The same matched/elevate pair is
+  used for the no-KVM installed-product smoke, and owner-death evidence expects
+  the sandbox UID rather than host root. The CI cgroup root `cgroup.procs` is
+  owned by the sandbox identity so owner migration into a delegated child still
+  works. Composition also chowns `A3S_HOME` to that identity after earlier
+  euid-0 steps so the matched harness can write state and sockets. The local
+  SDK Sandbox smoke skips host-bridge network prune under Sandbox isolation
+  because matched credentials lack `CAP_NET_ADMIN`.
+- Production Box-to-OCI host-service composition migrates the owner into a
+  fresh child under `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so
+  rootless open sees a host-owned child while the CI harness remains in the
+  sibling probe cgroup. Owner-child `cgroup.procs` / `cgroup.subtree_control`
+  are chowned for setpriv `access(W_OK)` after the credential drop.
+- SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
+  `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
+  bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
+  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
+- Bump the pinned OCI Runtime revision to `fb517c6f` so
+  `native-linux-host-service --delegated-cgroup-root` bootstraps rootless
+  device policy (required for Sandbox creates through the durable host owner).
+- No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the
+  packaged `a3s-oci` binary under the Sandbox launcher name) so SDK Local
+  Sandbox CI can resolve owners without a system libexec path.
+- Windows rejects `--network <bridge>` before image pull / Creating box (#259).
+- Windows `network create` fail-closes for unsupported bridge networks (#263).
+- Windows `pool start` exits immediately instead of hanging after an unsupported
+  socket-serving message (#261).
+- `container-update --cpus` applies the same WHPX single-vCPU validation as
+  `run`/`create`, so invalid counts are not persisted (#262).
 - Linux Sandbox OCI owners resolve the setuid launcher through
   `A3S_BOX_SANDBOX_OCI_LAUNCHER`, packaged locations, and
   `/usr/local/libexec/a3s-box-sandbox-oci-launcher` instead of a hardcoded path.

@@ -133,11 +133,23 @@ from pathlib import Path
 from a3s_box import A3SBoxClient, AsyncSandbox, ExecutionResourceUpdate, Sandbox
 
 
+def expected_owner_uid() -> int:
+    # Sandbox CI setpriv keeps a non-root real UID. After rootless device-policy
+    # bootstrap the durable OCI host owner drops to that UID, so evidence must
+    # be owned by the sandbox identity rather than host root.
+    configured = os.environ.get("A3S_BOX_CI_SANDBOX_UID", "").strip()
+    if configured:
+        return int(configured)
+    return os.geteuid()
+
+
 def read_private_json(path: Path) -> dict:
     metadata = path.lstat()
     assert stat.S_ISREG(metadata.st_mode), f"{path} is not a regular file"
     assert not path.is_symlink(), f"{path} is a symlink"
-    assert metadata.st_uid == 0, f"{path} is not root-owned"
+    assert metadata.st_uid == expected_owner_uid(), (
+        f"{path} is not owned by the Sandbox OCI owner UID {expected_owner_uid()}"
+    )
     assert stat.S_IMODE(metadata.st_mode) == 0o600, f"{path} is not mode 0600"
     payload = path.read_bytes()
     assert len(payload) <= 64 * 1024, f"{path} exceeds the evidence bound"
@@ -182,7 +194,9 @@ def wait_identity_gone(label: str, identity: tuple[int, int]) -> None:
 def load_owner_record(host_root: Path) -> dict:
     root_metadata = host_root.lstat()
     assert stat.S_ISDIR(root_metadata.st_mode), f"{host_root} is not a directory"
-    assert root_metadata.st_uid == 0, f"{host_root} is not root-owned"
+    assert root_metadata.st_uid == expected_owner_uid(), (
+        f"{host_root} is not owned by the Sandbox OCI owner UID {expected_owner_uid()}"
+    )
     assert stat.S_IMODE(root_metadata.st_mode) == 0o700, f"{host_root} is not mode 0700"
     record = read_private_json(host_root / "box-owner.json")
     assert set(record) == {
@@ -209,7 +223,9 @@ def load_owner_record(host_root: Path) -> dict:
     require_live_identity("OCI owner", owner_identity)
     socket_metadata = (host_root / "runtime.sock").lstat()
     assert stat.S_ISSOCK(socket_metadata.st_mode), "OCI endpoint is not a Unix socket"
-    assert socket_metadata.st_uid == 0, "OCI endpoint is not root-owned"
+    assert socket_metadata.st_uid == expected_owner_uid(), (
+        "OCI endpoint is not owned by the Sandbox OCI owner UID"
+    )
     return record
 
 

@@ -655,7 +655,8 @@ for required in a3s-box a3s-box-shim a3s-box-guest-init; do
         fail "archive file is not executable: $required"
 done
 if [ "$platform" = "linux-x86_64" ] || [ "$platform" = "linux-arm64" ]; then
-    for required in a3s-oci a3s-oci-agent OCI-RUNTIME-REVISION; do
+    for required in a3s-oci a3s-oci-agent a3s-box-sandbox-oci-launcher \
+        OCI-RUNTIME-REVISION; do
         [ -f "$package_root/$required" ] ||
             fail "archive is missing required Linux file: $required"
     done
@@ -663,6 +664,8 @@ if [ "$platform" = "linux-x86_64" ] || [ "$platform" = "linux-arm64" ]; then
         fail "archive file is not executable: a3s-oci"
     [ -x "$package_root/a3s-oci-agent" ] ||
         fail "archive file is not executable: a3s-oci-agent"
+    [ -x "$package_root/a3s-box-sandbox-oci-launcher" ] ||
+        fail "archive file is not executable: a3s-box-sandbox-oci-launcher"
 fi
 validate_version_output "$package_root/a3s-box"
 

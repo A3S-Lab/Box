@@ -189,6 +189,14 @@ CLI coverage for several negatives lives in
 `src/cli/tests/command_coverage.rs` (`test_windows_*`). Real WHPX soak remains
 the evidence gate for positives (`scripts/windows-whpx-soak.ps1`).
 
+Additional fail-closed negatives covered after #259–#263:
+
+| ID | Assertion |
+| --- | --- |
+| `WIN-NEG-BRIDGE-*` | `--network` bridge fails before pull; `network create` rejects bridge |
+| `WIN-NEG-POOL-01` | `pool start` exits non-zero immediately |
+| `WIN-NEG-CUPD-01` | `container-update --cpus 2` rejects and does not persist |
+
 ## WHPX soak validation
 
 Run the Windows-specific soak harness from the Box repository root on an

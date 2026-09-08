@@ -197,7 +197,8 @@ impl ResourceUpdate {
 /// and ranges, e.g. `0`, `0,2,4`, `0-3`, `0-1,4-7`. Only ASCII digits, `,` and
 /// `-` are allowed, so no shell metacharacter can survive — the kernel rejects
 /// anything else anyway. Surrounding whitespace per element is tolerated.
-fn is_valid_cpuset(cpuset: &str) -> bool {
+/// Inverted ranges such as `3-1` are rejected.
+pub fn is_valid_cpuset(cpuset: &str) -> bool {
     let cpuset = cpuset.trim();
     if cpuset.is_empty() {
         return false;
@@ -264,6 +265,9 @@ pub fn validate_update(update: &ResourceUpdate) -> Result<()> {
 /// Callers that persist limits for a stopped Box must still call this function:
 /// lifecycle state only controls hot-resize support, not input validity.
 pub fn validate_update_values(update: &ResourceUpdate) -> Result<()> {
+    if let Some(vcpus) = update.vcpus {
+        a3s_box_core::config::validate_vcpu_count(vcpus).map_err(BoxError::ResizeError)?;
+    }
     // Reject a malformed cpuset before it can be persisted or interpolated into
     // the resize shell command (cgroup `cpuset.cpus` accepts only indices/ranges).
     if let Some(ref cpuset) = update.limits.cpuset_cpus {
@@ -281,6 +285,20 @@ pub fn validate_update_values(update: &ResourceUpdate) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_update_values_rejects_windows_smp() {
+        let update = ResourceUpdate {
+            vcpus: Some(2),
+            ..Default::default()
+        };
+        let err = validate_update_values(&update).unwrap_err().to_string();
+        assert!(
+            err.contains("WHPX") || err.contains("exactly 1"),
+            "got: {err}"
+        );
+    }
 
     #[test]
     fn test_empty_update_has_no_changes() {

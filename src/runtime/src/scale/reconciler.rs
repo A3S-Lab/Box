@@ -502,9 +502,20 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
                 )))
             }
             ReconcileOutcome::Failed => {
-                return Err(ScaleReconcileError::Lifecycle(format!(
-                    "scale create operation {operation_id} is terminal"
-                )))
+                // Deterministic slot operation IDs must not permanently block a
+                // slot after a terminal create/start. Replace the dead record
+                // so the next create can reserve a fresh execution.
+                self.replace_failed_create(&operation_id).await?;
+                match self.manager.create(request, &operation_id).await {
+                    Ok(reservation) => reservation,
+                    Err(create_error) => match self.manager.reconcile(&operation_id).await {
+                        Ok(ReconcileOutcome::Ready(lease)) => {
+                            return self.ensure_lease_running(lease).await;
+                        }
+                        Ok(ReconcileOutcome::Created(reservation)) => reservation,
+                        _ => return Err(lifecycle_error(create_error)),
+                    },
+                }
             }
         };
 
@@ -516,6 +527,16 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
             Ok(_) => Ok(()),
             Err(start_error) => match self.manager.reconcile(&operation_id).await {
                 Ok(ReconcileOutcome::Ready(lease)) => self.ensure_lease_running(lease).await,
+                Ok(ReconcileOutcome::Failed) => {
+                    // Persist a clean Absent slot after startup-terminal so the
+                    // next convergence tick can recreate instead of dead-ending.
+                    if let Err(replace_error) = self.replace_failed_create(&operation_id).await {
+                        return Err(ScaleReconcileError::Lifecycle(format!(
+                            "{start_error}; also failed to replace terminal scale create: {replace_error}"
+                        )));
+                    }
+                    Err(lifecycle_error(start_error))
+                }
                 _ => Err(lifecycle_error(start_error)),
             },
         }
@@ -547,6 +568,76 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
             .map(|_| ())
             .map_err(lifecycle_error)
     }
+}
+
+impl LocalScaleExecutionLifecycle {
+    async fn replace_failed_create(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<(), ScaleReconcileError> {
+        let records = self
+            .manager
+            .managed_records()
+            .await
+            .map_err(lifecycle_error)?;
+        let Some(record) = records.into_iter().find(|record| {
+            record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| metadata.operation_id.as_str() == operation_id.as_str())
+        }) else {
+            return Ok(());
+        };
+        let execution = scale_execution_from_terminal_record(record)?;
+        self.ensure_removed(&execution).await
+    }
+}
+
+fn scale_execution_from_terminal_record(
+    record: crate::BoxRecord,
+) -> Result<ScaleExecution, ScaleReconcileError> {
+    let service = required_label(&record.labels, SCALE_SERVICE_LABEL, &record.id)?;
+    let slot = required_label(&record.labels, SCALE_SLOT_LABEL, &record.id)?
+        .parse::<u32>()
+        .map_err(|error| {
+            ScaleReconcileError::Lifecycle(format!(
+                "scale execution {} has invalid slot label: {error}",
+                record.id
+            ))
+        })?;
+    let template_digest = required_label(&record.labels, SCALE_TEMPLATE_DIGEST_LABEL, &record.id)?;
+    let guest_port = record
+        .labels
+        .get(SCALE_GUEST_PORT_LABEL)
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .ok()
+                .and_then(NonZeroU16::new)
+                .ok_or_else(|| {
+                    ScaleReconcileError::Lifecycle(format!(
+                        "scale execution {} has invalid guest port label",
+                        record.id
+                    ))
+                })
+        })
+        .transpose()?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        ScaleReconcileError::Lifecycle(format!(
+            "scale execution {} has no managed lifecycle metadata",
+            record.id
+        ))
+    })?;
+    let execution_id = ExecutionId::new(record.id.clone()).map_err(lifecycle_error)?;
+    Ok(ScaleExecution {
+        execution_id,
+        generation: metadata.generation,
+        service,
+        slot,
+        template_digest,
+        guest_port,
+        phase: InstancePhase::Terminal,
+    })
 }
 
 fn required_label(
@@ -960,7 +1051,7 @@ mod tests {
         let catalog = ScaleServiceCatalog::from_acl_str(
             CATALOG,
             "gateway-scale",
-            ExecutionIsolation::Sandbox,
+            ExecutionIsolation::Microvm,
         )
         .unwrap();
         let reconciler = LocalScaleReconciler::new(manager, catalog.clone());
@@ -992,7 +1083,7 @@ mod tests {
         let catalog = ScaleServiceCatalog::from_acl_str(
             CATALOG,
             "gateway-scale",
-            ExecutionIsolation::Sandbox,
+            ExecutionIsolation::Microvm,
         )
         .unwrap();
         let reconciler = LocalScaleReconciler::new(manager.clone(), catalog);

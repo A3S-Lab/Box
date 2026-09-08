@@ -51,6 +51,11 @@ install -m 0755 \
 install -m 0755 "$OCI_WORKSPACE/target/release/a3s-oci" "$PACKAGE_ROOT/a3s-oci"
 install -m 0755 "$OCI_WORKSPACE/target/release/a3s-oci-agent" \
     "$PACKAGE_ROOT/a3s-oci-agent"
+# Sandbox owners spawn through a dedicated launcher name. In the no-KVM
+# qualification layout that is the same a3s-oci binary (production installs
+# may replace it with a setuid wrapper at the same path).
+install -m 0755 "$OCI_WORKSPACE/target/release/a3s-oci" \
+    "$PACKAGE_ROOT/a3s-box-sandbox-oci-launcher"
 
 mapfile -t libkrun_build_dirs < <(
     find "$BOX_WORKSPACE/target/release/build" \
@@ -138,7 +143,8 @@ jq --exit-status \
     --arg platform "$PLATFORM" \
     '.version == $version and .platform == $platform' \
     "$INSTALL_DIR/.a3s-box-install.json" >/dev/null
-for artifact in a3s-box a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
+for artifact in a3s-box a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent \
+    a3s-box-sandbox-oci-launcher; do
     test -x "$INSTALL_DIR/$artifact"
 done
 installed_shim_ldd_output="$(LD_LIBRARY_PATH= ldd "$INSTALL_DIR/a3s-box-shim")"

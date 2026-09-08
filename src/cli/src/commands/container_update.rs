@@ -511,6 +511,20 @@ mod tests {
     use a3s_box_core::{CreateExecutionRequest, ExecutionGeneration, OperationId};
     use a3s_box_runtime::ManagedExecutionMetadata;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_whpx_incompatible_vcpu_updates() {
+        let update = ResourceUpdate {
+            vcpus: Some(2),
+            ..Default::default()
+        };
+        let error = validate_running_update(false, &update).unwrap_err();
+        assert!(
+            error.contains("WHPX") || error.contains("exactly 1"),
+            "got: {error}"
+        );
+    }
+
     #[test]
     fn test_tier1_rejected_on_running() {
         let update = ResourceUpdate {
