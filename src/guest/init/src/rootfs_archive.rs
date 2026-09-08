@@ -470,11 +470,7 @@ fn collect_diff_entries(
         };
         #[cfg(not(unix))]
         let is_fifo = false;
-        if !file_type.is_dir()
-            && !file_type.is_file()
-            && !file_type.is_symlink()
-            && !is_fifo
-        {
+        if !file_type.is_dir() && !file_type.is_file() && !file_type.is_symlink() && !is_fifo {
             return Ok(());
         }
         let relative = source.strip_prefix(root)?;
@@ -703,7 +699,10 @@ mod tests {
         assert!(saw_fifo, "archive must include the FIFO entry");
 
         let baseline = snapshot_diff_baseline(directory.path()).unwrap();
-        let info = baseline.entries.get("/qa-pipe").expect("baseline lists FIFO");
+        let info = baseline
+            .entries
+            .get("/qa-pipe")
+            .expect("baseline lists FIFO");
         assert_eq!(info.size, 0);
         assert!(!info.is_dir);
     }
