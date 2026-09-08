@@ -609,9 +609,11 @@ jobs:
           # probe cgroup used for device-policy certify).
           export A3S_BOX_CI_PROBE_CGROUP="${A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT}/ci-harness"
           sudo mkdir -p "$A3S_BOX_CI_PROBE_CGROUP"
+          # access(W_OK) uses the real UID under setpriv; chown subtree_control too.
           sudo chown "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" \
             "$A3S_BOX_CI_PROBE_CGROUP" \
-            "$A3S_BOX_CI_PROBE_CGROUP/cgroup.procs"
+            "$A3S_BOX_CI_PROBE_CGROUP/cgroup.procs" \
+            "$A3S_BOX_CI_PROBE_CGROUP/cgroup.subtree_control"
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_MIGRATION=sandbox
