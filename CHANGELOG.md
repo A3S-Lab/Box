@@ -14,6 +14,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Bump the pinned OCI Runtime revision to `807d87e9` so Sandbox owners accept
+  `--delegated-cgroup-root` (required by Box native-Linux launch).
 - No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the
   packaged `a3s-oci` binary under the Sandbox launcher name) so SDK Local
   Sandbox CI can resolve owners without a system libexec path.
