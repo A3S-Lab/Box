@@ -14,6 +14,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
+  `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
+  bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
+  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
 - Bump the pinned OCI Runtime revision to `807d87e9` so Sandbox owners accept
   `--delegated-cgroup-root` (required by Box native-Linux launch).
 - No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the

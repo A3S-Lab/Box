@@ -557,6 +557,8 @@ jobs:
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subgid
+      - name: Prepare Linux Sandbox CI identity and cgroup tree
+        run: bash scripts/prepare-linux-sandbox-ci-host.sh
       - name: Mount private Runtime Secret tmpfs
         run: |
           sudo install -d -m 700 "$A3S_HOME/runtime-secrets"
@@ -566,17 +568,19 @@ jobs:
           mountpoint -q "$A3S_HOME/runtime-secrets"
       - name: Cache the pinned public R17 image over HTTPS
         run: |
-          sudo env \
+          bash scripts/run-linux-sandbox-ci.sh env \
               PATH="$PATH" \
               HOME="$HOME" \
               A3S_DEPS_STUB=1 \
               A3S_HOME="$A3S_HOME" \
+              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
+              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
               "$A3S_BOX_BINARY" pull \
                 'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
       - name: Certify all advertised R17 profiles and private registry pull
         run: |
           cd src
-          sudo env \
+          bash ../scripts/run-linux-sandbox-ci.sh env \
               PATH="$PATH" \
               HOME="$HOME" \
               RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
@@ -586,6 +590,7 @@ jobs:
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
               A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
+              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
               A3S_BOX_RUNTIME_CONFORMANCE=1 \
               A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
               A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
@@ -599,7 +604,7 @@ jobs:
           cd src
           set +e
           log="$RUNNER_TEMP/a3s-box-production-oci-owner-composition.log"
-          sudo env \
+          bash ../scripts/run-linux-sandbox-ci.sh env \
               PATH="$PATH" \
               HOME="$HOME" \
               RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
@@ -611,6 +616,7 @@ jobs:
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
               A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
+              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
               A3S_BOX_SDK_LOCAL_SMOKE=1 \
               A3S_BOX_SDK_SMOKE_ISOLATION=sandbox \
               A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
