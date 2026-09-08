@@ -1954,8 +1954,10 @@ mod tests {
     #[tokio::test]
     async fn clear_snapshot_template_removes_canonical_dir_when_failing() {
         let config = test_pool_config(0, 1);
-        let mut box_config = BoxConfig::default();
-        box_config.image = "alpine:clear-tpl-failing".into();
+        let box_config = BoxConfig {
+            image: "alpine:clear-tpl-failing".into(),
+            ..BoxConfig::default()
+        };
         let mut pool = match WarmPool::start(config, box_config.clone(), test_event_emitter()).await
         {
             Ok(pool) => pool,
