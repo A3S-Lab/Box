@@ -52,7 +52,9 @@ async fn destroy_skips_guest_stop_when_workload_already_exited() {
     *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 0 }));
 
     let started = Instant::now();
-    vm.destroy_with_options(default_stop_signal(), 100).await.unwrap();
+    vm.destroy_with_options(default_stop_signal(), 100)
+        .await
+        .unwrap();
     assert!(
         started.elapsed() < Duration::from_millis(500),
         "already-exited destroy must not wait for guest-stop delivery timeout"

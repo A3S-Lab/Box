@@ -251,8 +251,7 @@ const SANDBOX_OCI_LAUNCHER_ENV: &str = "A3S_BOX_SANDBOX_OCI_LAUNCHER";
 #[cfg(target_os = "linux")]
 const SANDBOX_OCI_LAUNCHER_FILENAME: &str = "a3s-box-sandbox-oci-launcher";
 #[cfg(target_os = "linux")]
-const SANDBOX_OCI_LAUNCHER_SYSTEM_PATH: &str =
-    "/usr/local/libexec/a3s-box-sandbox-oci-launcher";
+const SANDBOX_OCI_LAUNCHER_SYSTEM_PATH: &str = "/usr/local/libexec/a3s-box-sandbox-oci-launcher";
 
 /// Resolve the setuid Sandbox OCI launcher used for native-linux-service owners.
 #[cfg(target_os = "linux")]

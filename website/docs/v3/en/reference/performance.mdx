@@ -5,7 +5,9 @@ description: Review the A3S Box real-host method, results, and known issues acro
 
 # Real-host performance report — 2026-07-31
 
-Status: **Performance data collected; release blockers found.**
+Status: **Historical matrix retained; Linux cleanup blockers from that run
+have been addressed in later Box tips.** Numbers below remain the
+2026-07-31 capture and are not a fresh all-green requalification.
 
 The matrix ran the real A3S Box `3.2.0` CLI against dedicated-kernel
 MicroVMs on Linux/KVM and macOS/HVF, plus the shared-kernel Sandbox backend
@@ -13,7 +15,7 @@ on Linux. It covered lifecycle, exec, idle memory, compute, rootfs/CoW,
 tmpfs, bind mounts, named volumes, initialization, networking, concurrency,
 warm pools, snapshot-fork, and TEE simulation.
 
-This was not an all-green qualification:
+This was not an all-green qualification at capture time:
 
 | Lane                                   | Sample outcome           | Cleanup outcome                                               | Decision                                       |
 | -------------------------------------- | ------------------------ | ------------------------------------------------------------- | ---------------------------------------------- |
@@ -119,10 +121,17 @@ real TEE overhead.
 
 ## Known blockers
 
-1. Fix foreground Sandbox cgroup-mount and log-drain behavior, then rerun the
-   normal `run --rm` lifecycle matrix.
-2. Reclaim every shim, filesystem mount, socket, and box directory after
-   snapshot-fork shutdown on KVM and HVF.
+Status as of later Linux tips (post-capture):
+
+1. ~~Fix foreground Sandbox cgroup-mount and log-drain behavior~~ — addressed
+   for hosts with the setuid OCI launcher and a delegated user cgroup; a local
+   `run --rm --isolation sandbox` smoke now completes cleanly. Re-run the full
+   lifecycle matrix before publishing new Sandbox performance numbers.
+2. ~~Reclaim every shim, filesystem mount, socket, and box directory after
+   snapshot-fork / warm-pool shutdown on Linux~~ — pool drain now tears down
+   idle VMs and leases, clears snapshot template dirs, and best-effort reaps
+   orphans when destroy fails (including mid-replenish and lease reclaim).
+   macOS/HVF pool leftover cleanup still needs host re-verification.
 3. Fix premature TSI connection closure on macOS/HVF before publishing a
    network-reliability conclusion.
 4. Run attestation, RA-TLS, seal/unseal, and secret injection on qualifying

@@ -32,6 +32,8 @@ use a3s_box_runtime::pool::{
     PoolRunResponse, PoolStatusResponse,
 };
 use a3s_box_runtime::pool::{PoolStats, WarmPool};
+#[cfg(target_os = "linux")]
+use a3s_box_runtime::vm::reap::reap_orphaned_box;
 #[cfg(not(windows))]
 use tokio::task::JoinSet;
 
@@ -744,35 +746,32 @@ impl PoolRegistry {
         let mut lease_tasks = JoinSet::new();
         for _ in 0..POOL_DRAIN_CONCURRENCY {
             if let Some((lease_id, leased)) = pending_leases.next() {
-                lease_tasks.spawn(async move {
-                    let result = {
-                        let mut vm = leased.vm.lock().await;
-                        vm.destroy().await
-                    };
-                    (lease_id, result)
-                });
+                lease_tasks.spawn(async move { destroy_leased_vm(lease_id, leased).await });
             }
         }
         while let Some(result) = lease_tasks.join_next().await {
             match result {
-                Ok((lease_id, Ok(()))) => {
-                    tracing::debug!(%lease_id, "Destroyed warm-pool lease during shutdown");
+                Ok((lease_id, box_id, Ok(()))) => {
+                    tracing::debug!(
+                        %lease_id,
+                        %box_id,
+                        "Destroyed warm-pool lease during shutdown"
+                    );
                 }
-                Ok((lease_id, Err(error))) => {
-                    tracing::warn!(%lease_id, %error, "Failed to destroy warm-pool lease during shutdown");
+                Ok((lease_id, box_id, Err(error))) => {
+                    tracing::warn!(
+                        %lease_id,
+                        %box_id,
+                        %error,
+                        "Failed to destroy warm-pool lease during shutdown"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(%error, "Warm-pool lease teardown task failed");
                 }
             }
             if let Some((lease_id, leased)) = pending_leases.next() {
-                lease_tasks.spawn(async move {
-                    let result = {
-                        let mut vm = leased.vm.lock().await;
-                        vm.destroy().await
-                    };
-                    (lease_id, result)
-                });
+                lease_tasks.spawn(async move { destroy_leased_vm(lease_id, leased).await });
             }
         }
 
@@ -932,11 +931,11 @@ impl PoolRegistry {
             Some(leased) => leased,
             None => return Some(format!("unknown pool lease '{}'", req.lease_id)),
         };
-        let result = {
-            let mut vm = leased.vm.lock().await;
-            vm.destroy().await.err().map(|e| e.to_string())
-        };
-        result
+        let mut vm = leased.vm.lock().await;
+        destroy_vm_or_reap(&mut vm)
+            .await
+            .err()
+            .map(|e| e.to_string())
     }
 
     #[cfg(not(windows))]
@@ -978,11 +977,53 @@ impl PoolRegistry {
                 continue;
             }
             tracing::warn!(lease_id = %lease_id, "Reclaiming expired warm-pool lease");
-            let _ = leased.vm.lock().await.destroy().await;
-            count += 1;
+            let mut vm = leased.vm.lock().await;
+            match destroy_vm_or_reap(&mut vm).await {
+                Ok(()) => count += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        %lease_id,
+                        box_id = %vm.box_id(),
+                        %error,
+                        "Failed to destroy expired warm-pool lease after orphan reap attempt"
+                    );
+                    count += 1;
+                }
+            }
         }
         count
     }
+}
+
+/// Destroy a VM; on Linux, best-effort reap leftovers if destroy fails.
+#[cfg(not(windows))]
+async fn destroy_vm_or_reap(
+    vm: &mut a3s_box_runtime::VmManager,
+) -> Result<(), a3s_box_core::error::BoxError> {
+    let box_id = vm.box_id().to_string();
+    let result = vm.destroy().await;
+    if let Err(error) = &result {
+        tracing::warn!(
+            %box_id,
+            %error,
+            "VM destroy failed; attempting orphan reap"
+        );
+        #[cfg(target_os = "linux")]
+        reap_orphaned_box(&box_id);
+    }
+    result
+}
+
+/// Destroy a leased VM; on Linux, reap orphans if destroy fails.
+#[cfg(not(windows))]
+async fn destroy_leased_vm(
+    lease_id: String,
+    leased: LeasedVm,
+) -> (String, String, Result<(), a3s_box_core::error::BoxError>) {
+    let mut vm = leased.vm.lock().await;
+    let box_id = vm.box_id().to_string();
+    let result = destroy_vm_or_reap(&mut vm).await;
+    (lease_id, box_id, result)
 }
 
 async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1298,7 +1339,10 @@ async fn serve(
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
     if !json {
-        println!("Listening on {} (Ctrl-C or SIGTERM to drain and stop)", socket);
+        println!(
+            "Listening on {} (Ctrl-C or SIGTERM to drain and stop)",
+            socket
+        );
     }
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -1486,7 +1530,7 @@ async fn handle_conn(
     // while the response is being written.
     let write_result = write_frame(stream, &bytes).await;
     if let Some((mut vm, permit)) = used {
-        if let Err(error) = vm.destroy().await {
+        if let Err(error) = destroy_vm_or_reap(&mut vm).await {
             tracing::warn!(%error, "failed to destroy pooled VM after request");
         }
         drop(permit);

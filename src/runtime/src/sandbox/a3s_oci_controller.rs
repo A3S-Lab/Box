@@ -22,9 +22,7 @@ use super::controller::{
     EXEC_LISTENER_FD, INIT_LOG_FD, PTY_LISTENER_FD, START_TIMEOUT,
 };
 use super::runtime_record::SandboxRuntimeRecord;
-use super::{
-    linux_sandbox_delegated_cgroup_root, resolve_sandbox_oci_launcher, CertifiedA3sOci,
-};
+use super::{linux_sandbox_delegated_cgroup_root, resolve_sandbox_oci_launcher, CertifiedA3sOci};
 
 const START_FAILURE_LOG_LIMIT_BYTES: u64 = 4 * 1024;
 /// Controller pinned to one verified runtime/agent artifact pair.
