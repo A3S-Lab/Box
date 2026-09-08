@@ -152,11 +152,17 @@ pub(crate) async fn ensure_native_linux_oci_owner(
 
     let ready = wait_until_ready(&endpoint, Some(&mut child)).await;
     if let Err(error) = ready {
+        let detail = read_owner_log_tail(service_root);
         let _ = child.kill();
         let _ = child.wait();
         let _ = remove_record_if_same(&record_path, &record);
         let _ = reclaim_dead_owner_socket(&socket_path);
-        return Err(error);
+        return Err(match error {
+            ExecutionManagerError::Unavailable(message) if !detail.is_empty() => {
+                ExecutionManagerError::Unavailable(format!("{message}{detail}"))
+            }
+            other => other,
+        });
     }
     // A short-lived CLI will naturally hand the owner to init, while a
     // long-lived embedding process must still reap an owner that later exits.
@@ -187,7 +193,7 @@ async fn wait_until_ready(
                 Ok(Some(status)) => {
                     return Err(ExecutionManagerError::Unavailable(format!(
                         "native Linux OCI owner exited during startup with {status}"
-                    )))
+                    )));
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -269,6 +275,32 @@ fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
         ))
     })?;
     Ok(file)
+}
+
+fn read_owner_log_tail(service_root: &Path) -> String {
+    let mut parts = Vec::new();
+    for name in ["owner.stderr.log", "owner.stdout.log"] {
+        let path = service_root.join(name);
+        match std::fs::read(&path) {
+            Ok(bytes) if !bytes.is_empty() => {
+                let text = String::from_utf8_lossy(&bytes);
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let tail = trimmed
+                        .chars()
+                        .rev()
+                        .take(1200)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect::<String>();
+                    parts.push(format!("; {name}: {tail}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.concat()
 }
 
 fn validate_service_root(path: &Path) -> ExecutionManagerResult<()> {
