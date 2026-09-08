@@ -225,7 +225,27 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
     let stdout = open_owner_log(&service_root.join("owner.stdout.log"))?;
     let stderr = open_owner_log(&service_root.join("owner.stderr.log"))?;
     let owner_cgroup = prepare_owner_delegation_child()?;
-    let mut command = Command::new(&artifacts.runtime_path);
+    // Prefer the Sandbox OCI launcher name so production setuid installs elevate
+    // for device-policy bootstrap; CI packages the same a3s-oci binary there.
+    let launcher = crate::sandbox::resolve_sandbox_oci_launcher(None)
+        .unwrap_or_else(|_| artifacts.runtime_path.clone());
+    // Matched-cred CI harnesses (euid==ruid) cannot bootstrap device policy.
+    // When CI supplies the setpriv wrapper, spawn the owner with euid 0 / non-root
+    // ruid so native-linux-host-service can install the parent-bound helper, then
+    // drop to the real identity for Unix peer auth with the matched harness.
+    let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
+        .filter(|value| !value.is_empty())
+        .filter(|_| unsafe { libc::geteuid() } != 0);
+    let mut command = if let Some(wrapper) = elevate_wrapper {
+        let mut command = Command::new("bash");
+        command.arg(wrapper);
+        command.arg(&launcher);
+        command.env_remove("A3S_BOX_CI_SETPRIV_MATCHED_CREDS");
+        command.env_remove("A3S_BOX_CI_PROBE_CGROUP");
+        command
+    } else {
+        Command::new(&launcher)
+    };
     command
         .arg("native-linux-host-service")
         .arg("--root")
@@ -237,14 +257,14 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    // SAFETY: the closure only performs async-signal-safe credential, session,
-    // and cgroup.procs migration syscalls between fork and exec and does not
+    // SAFETY: the closure only performs async-signal-safe session and
+    // cgroup.procs migration syscalls between fork and exec and does not
     // access shared Rust state.
-    // Under setpriv (euid 0, non-root ruid), drop to the real identity before
-    // exec: native-linux-host-service installs rootless cgroup delegation and
-    // rejects a privileged effective UID. Also migrate into a child below the
-    // empty delegated root so rootless open accepts host-owned membership
-    // without moving the Sandbox CI harness out of its probe cgroup.
+    // Do not drop euid here: with --delegated-cgroup-root the host service CLI
+    // bootstraps rootless device policy under effective root, then permanently
+    // drops to the real UID before publishing the SDK socket. Migrate into a
+    // child below the empty delegated root so rootless open accepts host-owned
+    // membership without moving the Sandbox CI harness out of its probe cgroup.
     unsafe {
         command.pre_exec(move || {
             if let Some(ref cgroup) = owner_cgroup {
@@ -253,34 +273,13 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            let ruid = libc::getuid();
-            let rgid = libc::getgid();
-            let euid = libc::geteuid();
-            if euid == 0 && ruid != 0 {
-                if libc::setresgid(
-                    rgid as libc::gid_t,
-                    rgid as libc::gid_t,
-                    rgid as libc::gid_t,
-                ) == -1
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setresuid(
-                    ruid as libc::uid_t,
-                    ruid as libc::uid_t,
-                    ruid as libc::uid_t,
-                ) == -1
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
             Ok(())
         });
     }
     command.spawn().map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to spawn native Linux OCI owner {}: {error}",
-            artifacts.runtime_path.display()
+            launcher.display()
         ))
     })
 }

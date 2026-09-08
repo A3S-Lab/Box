@@ -25,27 +25,27 @@ All notable changes to A3S Box will be documented in this file.
   (#267), matching resize/update validation.
 - Production Box-to-OCI composition under Sandbox CI uses matched setpriv
   credentials (`euid==ruid`) so Unix SDK peer auth matches the rootless owner
-  after credential drop; the CI cgroup root `cgroup.procs` is owned by the
+  after device-policy bootstrap drops the owner to the real UID. The owner child
+  is elevated through `A3S_BOX_CI_SETPRIV_WRAPPER` (euid 0 / non-root ruid) so
+  `native-linux-host-service` can install the parent-bound rootless device
+  helper on nosuid CI mounts. The CI cgroup root `cgroup.procs` is owned by the
   sandbox identity so owner migration into a delegated child still works.
   Composition also chowns `A3S_HOME` to that identity after earlier euid-0
   steps so the matched harness can write state and sockets. The local SDK
   Sandbox smoke skips host-bridge network prune under Sandbox isolation
   because matched credentials lack `CAP_NET_ADMIN`.
-- Production Box-to-OCI host-service composition under Sandbox CI `setpriv`
-  drops the owner child to the real non-root identity before exec and owns
-  service-root/log/record paths by that UID, so `native-linux-host-service`
-  can install rootless cgroup delegation (privileged euid rejected that path).
-  The owner also migrates into a fresh child under
-  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so rootless open sees a
-  host-owned child while the CI harness remains in the sibling probe cgroup.
-  Owner-child `cgroup.procs` / `cgroup.subtree_control` are chowned for setpriv
-  `access(W_OK)` after the credential drop.
+- Production Box-to-OCI host-service composition migrates the owner into a
+  fresh child under `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so
+  rootless open sees a host-owned child while the CI harness remains in the
+  sibling probe cgroup. Owner-child `cgroup.procs` / `cgroup.subtree_control`
+  are chowned for setpriv `access(W_OK)` after the credential drop.
 - SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
-- Bump the pinned OCI Runtime revision to `807d87e9` so Sandbox owners accept
-  `--delegated-cgroup-root` (required by Box native-Linux launch).
+- Bump the pinned OCI Runtime revision to `9ff67c54` so
+  `native-linux-host-service --delegated-cgroup-root` bootstraps rootless
+  device policy (required for Sandbox creates through the durable host owner).
 - No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the
   packaged `a3s-oci` binary under the Sandbox launcher name) so SDK Local
   Sandbox CI can resolve owners without a system libexec path.

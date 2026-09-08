@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 807d87e9ecbb27add773ad32a2318cd66c1f562c
+  A3S_OCI_RUNTIME_REV: 9ff67c545610813f61a9f6ac0eba214510990ae5
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -608,9 +608,11 @@ jobs:
           # root-owned. Composition matches euid to the sandbox ruid for peer auth
           # and must own the home tree (and writable Runtime Secret mount).
           sudo chown -R "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" "$A3S_HOME"
-          # Owner drops to the real UID before exec; Unix SDK peer auth uses
-          # SO_PEERCRED euid, so the harness must match (not stay euid 0).
+          # Owner drops to the real UID after device-policy bootstrap; Unix SDK
+          # peer auth uses SO_PEERCRED euid, so the harness must match (not stay
+          # euid 0). Elevate only the owner child via the setpriv wrapper.
           export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
+          export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_MIGRATION=sandbox
