@@ -184,25 +184,23 @@ impl VmManager {
             let workload_already_finished =
                 crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
             #[cfg(unix)]
-            let provider_already_exited = if handler.exit_code().is_some()
-                || handler.has_exited()
-                || !handler.is_running()
-            {
-                true
-            } else {
-                match handler.try_wait_exit() {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(error) => {
-                        tracing::debug!(
-                            box_id = %self.box_id,
-                            %error,
-                            "Could not poll provider exit before guest stop delivery"
-                        );
-                        handler.has_exited()
+            let provider_already_exited =
+                if handler.exit_code().is_some() || handler.has_exited() || !handler.is_running() {
+                    true
+                } else {
+                    match handler.try_wait_exit() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::debug!(
+                                box_id = %self.box_id,
+                                %error,
+                                "Could not poll provider exit before guest stop delivery"
+                            );
+                            handler.has_exited()
+                        }
                     }
-                }
-            };
+                };
             #[cfg(unix)]
             let guest_stop_delivered = {
                 // Skip guest-control stop when the workload already published a
