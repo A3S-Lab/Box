@@ -3,6 +3,12 @@
 </p>
 
 <p align="center">
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+<p align="center">
   <strong>The local product plane for Linux OCI workloads: Docker-like workflows, typed SDKs, and isolation that never changes behind your back.</strong>
 </p>
 
