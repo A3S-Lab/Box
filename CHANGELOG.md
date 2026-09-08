@@ -14,6 +14,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Guest rootfs archives encode FIFOs as zero-length tar special entries instead
+  of opening them for read, so `a3s-box diff` succeeds when the writable layer
+  contains a FIFO (#265).
 - CLI `--cpuset-cpus` rejects inverted ranges such as `3-1` before run/create
   (#267), matching resize/update validation.
 - Production Box-to-OCI composition under Sandbox CI uses matched setpriv

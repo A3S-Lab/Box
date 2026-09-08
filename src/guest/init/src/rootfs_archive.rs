@@ -352,6 +352,12 @@ fn append_tree<W: Write>(
         if file_type.is_socket() {
             return Ok(());
         }
+        // `append_path_with_name` opens and reads the path; FIFOs block forever
+        // (and can surface empty-path tar errors). Emit a zero-length FIFO entry
+        // so `a3s-box diff` can list them without hanging.
+        if file_type.is_fifo() {
+            return append_fifo(builder, archive_path, &metadata);
+        }
     }
 
     if file_type.is_dir() {
@@ -370,6 +376,21 @@ fn append_tree<W: Write>(
     } else {
         builder.append_path_with_name(source, archive_path)?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn append_fifo<W: Write>(
+    builder: &mut tar::Builder<W>,
+    archive_path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata(metadata);
+    header.set_entry_type(tar::EntryType::Fifo);
+    header.set_size(0);
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, std::io::empty())?;
     Ok(())
 }
 
@@ -442,7 +463,18 @@ fn collect_diff_entries(
     let metadata = std::fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
     if source != root {
-        if !file_type.is_dir() && !file_type.is_file() && !file_type.is_symlink() {
+        #[cfg(unix)]
+        let is_fifo = {
+            use std::os::unix::fs::FileTypeExt;
+            file_type.is_fifo()
+        };
+        #[cfg(not(unix))]
+        let is_fifo = false;
+        if !file_type.is_dir()
+            && !file_type.is_file()
+            && !file_type.is_symlink()
+            && !is_fifo
+        {
             return Ok(());
         }
         let relative = source.strip_prefix(root)?;
@@ -459,7 +491,7 @@ fn collect_diff_entries(
         entries.insert(
             format!("/{}", path.trim_start_matches('/')),
             RootfsFileInfo {
-                size: metadata.len(),
+                size: if is_fifo { 0 } else { metadata.len() },
                 mode,
                 is_dir: file_type.is_dir(),
             },
@@ -639,6 +671,41 @@ mod tests {
         }
         assert!(saw_executable);
         assert!(saw_link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_includes_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let fifo = directory.path().join("qa-pipe");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let mut bytes = Vec::new();
+        write_rootfs_archive(directory.path(), &mut bytes).expect("fifo archive must succeed");
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut saw_fifo = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap();
+            let path = path.strip_prefix(".").unwrap_or(path.as_ref());
+            if path == Path::new("qa-pipe") {
+                saw_fifo = true;
+                assert_eq!(entry.header().entry_type(), tar::EntryType::Fifo);
+                assert_eq!(entry.header().size().unwrap(), 0);
+                assert_eq!(entry.header().mode().unwrap() & 0o7777, 0o640);
+            }
+        }
+        assert!(saw_fifo, "archive must include the FIFO entry");
+
+        let baseline = snapshot_diff_baseline(directory.path()).unwrap();
+        let info = baseline.entries.get("/qa-pipe").expect("baseline lists FIFO");
+        assert_eq!(info.size, 0);
+        assert!(!info.is_dir);
     }
 
     #[cfg(unix)]
