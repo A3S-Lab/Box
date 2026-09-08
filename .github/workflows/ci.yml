@@ -647,6 +647,10 @@ jobs:
         run: |
           set +e
           log="$RUNNER_TEMP/a3s-box-local-sdk-smoke.log"
+          # Match composition: harness euid==ruid for Unix peer auth; elevate only
+          # the owner child so device-policy bootstrap still sees effective root.
+          export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
+          export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
           bash scripts/no-kvm-packaged-sdk-smoke.sh 2>&1 | tee "$log"
           status=${PIPESTATUS[0]}
           if ((status != 0)); then

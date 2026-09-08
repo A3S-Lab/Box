@@ -28,7 +28,9 @@ All notable changes to A3S Box will be documented in this file.
   after device-policy bootstrap drops the owner to the real UID. The owner child
   is elevated through `A3S_BOX_CI_SETPRIV_WRAPPER` (euid 0 / non-root ruid) so
   `native-linux-host-service` can install the parent-bound rootless device
-  helper on nosuid CI mounts. The CI cgroup root `cgroup.procs` is owned by the
+  helper on nosuid CI mounts. The same matched/elevate pair is used for the
+  no-KVM installed-product smoke, and owner-death evidence expects the sandbox
+  UID rather than host root. The CI cgroup root `cgroup.procs` is owned by the
   sandbox identity so owner migration into a delegated child still works.
   Composition also chowns `A3S_HOME` to that identity after earlier euid-0
   steps so the matched harness can write state and sockets. The local SDK
