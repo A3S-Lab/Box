@@ -35,6 +35,16 @@ All notable changes to A3S Box will be documented in this file.
 - Warm-pool drain best-effort reaps orphaned box directories when an individual
   VM destroy fails, so a teardown error cannot leave shim/mount leftovers
   without a recovery path.
+- Lease release, expired-lease reclaim, and oneshot `pool run` teardown use the
+  same destroy-or-reap path, so a failed destroy after the lease/map entry is
+  removed cannot permanently orphan a shim/mount/box-dir.
+- Snapshot template cleanup also removes the canonical `tpl-<image-hash>`
+  directory when template state is Failing or Unavailable, not only Ready.
+- CRI cancel guards and sandbox destroy paths best-effort reap orphans when
+  destroy fails after the sandbox is removed from the in-memory map.
+- Performance reference docs mark the historical Linux foreground-Sandbox and
+  warm-pool cleanup blockers as addressed in later tips while retaining the
+  2026-07-31 matrix numbers.
 - Windows rejects `--isolation sandbox` and `--tee` before box creation /
   image pull, matching other WHPX fail-closed gates (#249).
 - `pause` / `unpause` fail closed on Windows with a platform diagnostic instead
