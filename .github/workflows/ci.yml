@@ -604,6 +604,9 @@ jobs:
           sudo rm -rf --one-file-system -- "$A3S_BOX_OCI_HOST_ROOT"
           sudo install -d -m 700 -o "${A3S_BOX_CI_SANDBOX_UID}" -g "${A3S_BOX_CI_SANDBOX_GID}" \
             "$A3S_BOX_OCI_HOST_ROOT"
+          # Owner drops to the real UID before exec; Unix SDK peer auth uses
+          # SO_PEERCRED euid, so the harness must match (not stay euid 0).
+          export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_MIGRATION=sandbox

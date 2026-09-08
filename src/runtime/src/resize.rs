@@ -197,7 +197,8 @@ impl ResourceUpdate {
 /// and ranges, e.g. `0`, `0,2,4`, `0-3`, `0-1,4-7`. Only ASCII digits, `,` and
 /// `-` are allowed, so no shell metacharacter can survive — the kernel rejects
 /// anything else anyway. Surrounding whitespace per element is tolerated.
-fn is_valid_cpuset(cpuset: &str) -> bool {
+/// Inverted ranges such as `3-1` are rejected.
+pub fn is_valid_cpuset(cpuset: &str) -> bool {
     let cpuset = cpuset.trim();
     if cpuset.is_empty() {
         return false;

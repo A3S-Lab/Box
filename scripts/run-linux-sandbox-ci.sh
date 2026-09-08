@@ -5,6 +5,7 @@
 #   A3S_BOX_CI_SANDBOX_UID / A3S_BOX_CI_SANDBOX_GID
 #   A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
 #   A3S_BOX_CI_PROBE_CGROUP (optional; migrates this process before setpriv)
+#   A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1 (optional; euid==ruid for Unix SDK peer auth)
 #
 # Mirrors OCI Runtime native-linux-smoke rootless setpriv identity: chmod 4755
 # under /tmp is ignored on nosuid mounts, so CI cannot rely on the packaged
@@ -58,7 +59,16 @@ fi
 
 export A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="${delegated}"
 
+# Matched creds: euid==ruid so Unix SDK peer auth matches a rootless owner
+# (SO_PEERCRED reports euid). Default keeps euid 0 for setuid-launcher mirrors.
+euid=0
+egid=0
+if [[ "${A3S_BOX_CI_SETPRIV_MATCHED_CREDS:-}" == "1" ]]; then
+  euid="${uid}"
+  egid="${gid}"
+fi
+
 exec setpriv \
-  --ruid="${uid}" --euid=0 \
-  --rgid="${gid}" --egid=0 \
+  --ruid="${uid}" --euid="${euid}" \
+  --rgid="${gid}" --egid="${egid}" \
   --clear-groups -- "$@"

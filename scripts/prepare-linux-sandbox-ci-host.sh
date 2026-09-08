@@ -60,6 +60,9 @@ enable_controllers "${cgroup_root}"
 mkdir -p "${probe_cgroup}" "${delegated_cgroup}"
 enable_controllers "${delegated_cgroup}"
 chown "${identity_uid}:${identity_gid}" \
+  "${cgroup_root}" \
+  "${cgroup_root}/cgroup.procs" \
+  "${cgroup_root}/cgroup.subtree_control" \
   "${probe_cgroup}" \
   "${delegated_cgroup}" \
   "${probe_cgroup}/cgroup.procs" \

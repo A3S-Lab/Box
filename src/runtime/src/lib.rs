@@ -156,7 +156,7 @@ pub use vmm::{
 };
 
 // Resize
-pub use resize::{validate_update, ResizeResult, ResourceUpdate};
+pub use resize::{is_valid_cpuset, validate_update, ResizeResult, ResourceUpdate};
 
 // Volume
 pub use volume::VolumeStore;

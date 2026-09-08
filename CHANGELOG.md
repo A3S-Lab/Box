@@ -14,6 +14,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `--cpuset-cpus` rejects inverted ranges such as `3-1` before run/create
+  (#267), matching resize/update validation.
+- Production Box-to-OCI composition under Sandbox CI uses matched setpriv
+  credentials (`euid==ruid`) so Unix SDK peer auth matches the rootless owner
+  after credential drop; the CI cgroup root `cgroup.procs` is owned by the
+  sandbox identity so owner migration into a delegated child still works.
 - Production Box-to-OCI host-service composition under Sandbox CI `setpriv`
   drops the owner child to the real non-root identity before exec and owns
   service-root/log/record paths by that UID, so `native-linux-host-service`

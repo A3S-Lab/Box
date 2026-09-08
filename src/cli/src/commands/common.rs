@@ -676,7 +676,17 @@ pub(crate) fn build_resource_limits(
 
     Ok(ResourceLimits {
         pids_limit: args.pids_limit,
-        cpuset_cpus: args.cpuset_cpus.clone(),
+        cpuset_cpus: match &args.cpuset_cpus {
+            Some(cpuset) if !a3s_box_runtime::is_valid_cpuset(cpuset) => {
+                return Err(format!(
+                    "Invalid --cpuset-cpus value {cpuset:?}: expected a comma-separated list of CPU \
+                     indices or ascending ranges such as \"0-3\" or \"0,2,4\" (inverted ranges like \
+                     \"3-1\" are rejected)."
+                )
+                .into());
+            }
+            other => other.clone(),
+        },
         ulimits: args.ulimits.clone(),
         cpu_shares: args.cpu_shares,
         cpu_quota: args.cpu_quota,
@@ -1362,6 +1372,17 @@ mod tests {
         assert_eq!(limits.cpu_period, Some(100000));
         assert_eq!(limits.memory_reservation, Some(256 * 1024 * 1024));
         assert_eq!(limits.memory_swap, Some(-1));
+    }
+
+    #[test]
+    fn test_build_resource_limits_rejects_inverted_cpuset() {
+        let mut args = default_common_args();
+        args.cpuset_cpus = Some("3-1".to_string());
+        let err = build_resource_limits(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("cpuset") && err.contains("3-1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
