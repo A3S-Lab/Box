@@ -76,7 +76,23 @@ impl A3sOciController {
         let delegated_cgroup_root = linux_sandbox_delegated_cgroup_root();
         let owner_cgroup = prepare_sandbox_delegation_child()?;
         let launcher = resolve_sandbox_oci_launcher(None)?;
-        let mut command = Command::new(&launcher);
+        // Matched-cred CI harnesses (euid==ruid) cannot bootstrap device policy.
+        // When CI supplies the setpriv wrapper, spawn the owner with euid 0 /
+        // non-root ruid so native-linux-service can install the parent-bound
+        // helper, then drop to the real identity.
+        let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
+            .filter(|value| !value.is_empty())
+            .filter(|_| unsafe { libc::geteuid() } != 0);
+        let mut command = if let Some(wrapper) = elevate_wrapper {
+            let mut command = Command::new("bash");
+            command.arg(wrapper);
+            command.arg(&launcher);
+            command.env_remove("A3S_BOX_CI_SETPRIV_MATCHED_CREDS");
+            command.env_remove("A3S_BOX_CI_PROBE_CGROUP");
+            command
+        } else {
+            Command::new(&launcher)
+        };
         command
             .arg("native-linux-service")
             .arg("--root")

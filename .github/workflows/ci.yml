@@ -581,6 +581,11 @@ jobs:
         run: |
           cd src
           # Compile as the runner; execute under setpriv (rustc cannot run AT_SECURE).
+          # Match composition: euid==ruid for peer auth, elevate only the owner
+          # child so native-linux-service can bootstrap rootless device policy.
+          sudo chown -R "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" "$A3S_HOME"
+          export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
+          export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
