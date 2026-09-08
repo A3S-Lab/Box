@@ -16,8 +16,9 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 
 if [[ "${EUID}" -ne 0 ]]; then
-  # Absolute path: sudo does not resolve relative script paths via PATH.
-  exec sudo -E -- "$SCRIPT_PATH" "$@"
+  # Absolute path + bash: sudo does not resolve relative paths, and the helper
+  # may not be marked executable in the git tree.
+  exec sudo -E -- bash "$SCRIPT_PATH" "$@"
 fi
 
 identity_uid="${SUDO_UID:-}"
