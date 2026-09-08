@@ -621,7 +621,7 @@ jobs:
                 echo "===== $worker_log ====="
                 sudo tail -c 3800 "$worker_log"
               } | tee -a "$log"
-            done < <(sudo find "$A3S_HOME" -type f -path '*/oci-log-projection/worker.log' -print 2>/dev/null)
+            done < <(sudo find "$A3S_HOME" "$A3S_BOX_OCI_HOST_ROOT" -type f \( -name 'owner.stderr.log' -o -name 'owner.stdout.log' -o -path '*/oci-log-projection/worker.log' \) -print 2>/dev/null)
             diagnostic="$(tail -c 3800 "$log")"
             diagnostic="${diagnostic//'%'/'%25'}"
             diagnostic="${diagnostic//$'\r'/'%0D'}"

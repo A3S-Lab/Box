@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Compile a cargo test harness as the normal CI user, then execute it under
 # run-linux-sandbox-ci.sh (setpriv Sandbox identity).
 #
