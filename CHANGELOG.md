@@ -28,7 +28,9 @@ All notable changes to A3S Box will be documented in this file.
   after credential drop; the CI cgroup root `cgroup.procs` is owned by the
   sandbox identity so owner migration into a delegated child still works.
   Composition also chowns `A3S_HOME` to that identity after earlier euid-0
-  steps so the matched harness can write state and sockets.
+  steps so the matched harness can write state and sockets. The local SDK
+  Sandbox smoke skips host-bridge network prune under Sandbox isolation
+  because matched credentials lack `CAP_NET_ADMIN`.
 - Production Box-to-OCI host-service composition under Sandbox CI `setpriv`
   drops the owner child to the real non-root identity before exec and owns
   service-root/log/record paths by that UID, so `native-linux-host-service`
