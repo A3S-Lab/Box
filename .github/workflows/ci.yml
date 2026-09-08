@@ -580,51 +580,39 @@ jobs:
       - name: Certify all advertised R17 profiles and private registry pull
         run: |
           cd src
-          bash ../scripts/run-linux-sandbox-ci.sh env \
-              PATH="$PATH" \
-              HOME="$HOME" \
-              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
-              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-              A3S_DEPS_STUB=1 \
-              A3S_HOME="$A3S_HOME" \
-              A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
-              A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
-              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
-              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
-              A3S_BOX_RUNTIME_CONFORMANCE=1 \
-              A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
-              A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
-              A3S_REGISTRY_PROTOCOL=http \
-              RUST_MIN_STACK=33554432 \
-              cargo test --locked -p a3s-box-runtime --lib \
-                box_runtime_passes_all_advertised_profiles \
-                -- --ignored --nocapture --test-threads=1
+          # Compile as the runner; execute under setpriv (rustc cannot run AT_SECURE).
+          export A3S_DEPS_STUB=1
+          export A3S_HOME
+          export A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
+          export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
+          export A3S_BOX_RUNTIME_CONFORMANCE=1
+          export A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+          export A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json'
+          export A3S_REGISTRY_PROTOCOL=http
+          export RUST_MIN_STACK=33554432
+          bash ../scripts/run-linux-sandbox-cargo-test.sh \
+            --locked -p a3s-box-runtime --lib \
+            box_runtime_passes_all_advertised_profiles \
+            -- --ignored --nocapture --exact box_runtime_passes_all_advertised_profiles --test-threads=1
       - name: Exercise production Box-to-OCI owner composition
         run: |
           cd src
           set +e
           log="$RUNNER_TEMP/a3s-box-production-oci-owner-composition.log"
-          bash ../scripts/run-linux-sandbox-ci.sh env \
-              PATH="$PATH" \
-              HOME="$HOME" \
-              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
-              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-              A3S_DEPS_STUB=1 \
-              A3S_HOME="$A3S_HOME" \
-              A3S_BOX_OCI_MIGRATION=sandbox \
-              A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
-              A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
-              A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
-              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
-              A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT="$A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT" \
-              A3S_BOX_SDK_LOCAL_SMOKE=1 \
-              A3S_BOX_SDK_SMOKE_ISOLATION=sandbox \
-              A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
-              RUST_MIN_STACK=16777216 \
-              cargo test --locked -p a3s-box-sdk --test local_sandbox \
-                local_sandbox_exercises_real_runtime \
-                -- --ignored --nocapture --test-threads=1 \
-              2>&1 | tee "$log"
+          export A3S_DEPS_STUB=1
+          export A3S_HOME
+          export A3S_BOX_OCI_MIGRATION=sandbox
+          export A3S_BOX_OCI_HOST_ROOT A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
+          export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
+          export A3S_BOX_SDK_LOCAL_SMOKE=1
+          export A3S_BOX_SDK_SMOKE_ISOLATION=sandbox
+          export A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+          export RUST_MIN_STACK=16777216
+          bash ../scripts/run-linux-sandbox-cargo-test.sh \
+            --locked -p a3s-box-sdk --test local_sandbox \
+            local_sandbox_exercises_real_runtime \
+            -- --ignored --nocapture --exact local_sandbox_exercises_real_runtime --test-threads=1 \
+            2>&1 | tee "$log"
           status=${PIPESTATUS[0]}
           if ((status != 0)); then
             while IFS= read -r worker_log; do
@@ -638,9 +626,9 @@ jobs:
             diagnostic="${diagnostic//'%'/'%25'}"
             diagnostic="${diagnostic//$'\r'/'%0D'}"
             diagnostic="${diagnostic//$'\n'/'%0A'}"
-            echo "::error title=Production Box-to-OCI owner composition failure::$diagnostic"
+            echo "::error title=Production Box-to-OCI owner composition failed::${diagnostic}"
           fi
-          exit "$status"
+          exit "${status}"
       - name: Test the installed SDK product with KVM absent and inaccessible
         run: |
           set +e
