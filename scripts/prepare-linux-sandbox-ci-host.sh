@@ -39,7 +39,6 @@ fi
 cgroup_root="${A3S_BOX_CI_CGROUP_ROOT:-/sys/fs/cgroup/a3s-box-ci}"
 probe_cgroup="${cgroup_root}/probe"
 delegated_cgroup="${cgroup_root}/delegated"
-controllers="+cpu +cpuset +memory +pids"
 
 if [[ ! -e /sys/fs/cgroup/cgroup.controllers ]]; then
   echo "cgroup v2 is required at /sys/fs/cgroup" >&2
@@ -48,13 +47,15 @@ fi
 
 enable_controllers() {
   local target="$1"
-  # shellcheck disable=SC2086 # controllers is a fixed token list.
-  printf '%s' ${controllers} >"${target}/cgroup.subtree_control"
+  # One string with spaces: unquoted word-splitting would make printf '%s'
+  # concatenate tokens without separators and reject the write.
+  printf '+cpu +cpuset +memory +pids' >"${target}/cgroup.subtree_control"
 }
 
 rm -rf --one-file-system -- "${cgroup_root}"
+# Ensure parent can delegate before creating the CI tree.
+printf '+cpu +cpuset +memory +pids' >/sys/fs/cgroup/cgroup.subtree_control || true
 mkdir -p "${cgroup_root}"
-enable_controllers /sys/fs/cgroup || true
 enable_controllers "${cgroup_root}"
 mkdir -p "${probe_cgroup}" "${delegated_cgroup}"
 enable_controllers "${delegated_cgroup}"
