@@ -302,9 +302,17 @@ fn prepare_owner_delegation_child() -> ExecutionManagerResult<Option<PathBuf>> {
         ))
     })?;
     chown_to_owner_fs(&child)?;
-    let procs = child.join("cgroup.procs");
-    if procs.exists() {
-        chown_to_owner_fs(&procs)?;
+    // access(W_OK) and rootless capability probes use the real UID; own the
+    // control files the host service will write after setuid drop.
+    for name in [
+        "cgroup.procs",
+        "cgroup.subtree_control",
+        "cgroup.controllers",
+    ] {
+        let control = child.join(name);
+        if control.exists() {
+            chown_to_owner_fs(&control)?;
+        }
     }
     Ok(Some(child))
 }

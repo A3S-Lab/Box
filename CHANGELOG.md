@@ -21,6 +21,8 @@ All notable changes to A3S Box will be documented in this file.
   The owner also migrates into a fresh child under
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so rootless open sees a
   host-owned child while the CI harness remains in the sibling probe cgroup.
+  Owner-child `cgroup.procs` / `cgroup.subtree_control` are chowned for setpriv
+  `access(W_OK)` after the credential drop.
 - SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
