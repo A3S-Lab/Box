@@ -744,6 +744,8 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                     "Runtime completed while startup was establishing readiness"
                 );
                 resources.disarm();
+                drop(guard);
+                self.remove_manager(&record.id, &manager);
                 return Err(ExecutionManagerError::Unavailable(format!(
                     "execution {} completed during startup",
                     record.id
@@ -770,6 +772,17 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             .is_some()
             || guard.has_exited().await;
         if exited_during_start {
+            let exit_code = guard.exit_code();
+            tracing::debug!(
+                execution_id = %record.id,
+                ?exit_code,
+                "execution completed during startup; releasing runtime owner for retry"
+            );
+            drop(guard);
+            // Short --rm workloads keep an inspectable exit through the durable
+            // record path. Drop the in-process owner so a scale/retry start cannot
+            // dead-end on "already has an in-process runtime owner".
+            self.remove_manager(&record.id, &manager);
             return Err(ExecutionManagerError::Unavailable(format!(
                 "execution {} completed during startup",
                 record.id

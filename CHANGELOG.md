@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
+- Scale reconciliation replaces terminal create operations for deterministic
+  slot IDs instead of dead-ending on `ReconcileOutcome::Failed`, and MicroVM
+  startup-terminal paths release the in-process runtime owner so retries cannot
+  stick on "already has an in-process runtime owner" (#266).
 - CLI `--cpuset-cpus` rejects inverted ranges such as `3-1` before run/create
   (#267), matching resize/update validation.
 - Production Box-to-OCI composition under Sandbox CI uses matched setpriv
