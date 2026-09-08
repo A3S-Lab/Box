@@ -14,6 +14,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Production Box-to-OCI host-service composition under Sandbox CI `setpriv`
+  drops the owner child to the real non-root identity before exec and owns
+  service-root/log/record paths by that UID, so `native-linux-host-service`
+  can install rootless cgroup delegation (privileged euid rejected that path).
 - SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
