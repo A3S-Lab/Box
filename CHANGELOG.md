@@ -14,6 +14,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux Sandbox `native-linux-service` owners now migrate into a child of the
+  empty delegated cgroup root before exec, matching host-service composition.
+  Advertised Runtime profiles can start when the CI harness lives in a sibling
+  probe cgroup rather than under the delegated tree.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).

@@ -593,7 +593,9 @@ jobs:
           bash ../scripts/run-linux-sandbox-cargo-test.sh \
             --locked -p a3s-box-runtime --lib \
             box_runtime_passes_all_advertised_profiles \
-            -- --ignored --nocapture --exact box_runtime_passes_all_advertised_profiles --test-threads=1
+            -- --ignored --nocapture --exact \
+              a3s_runtime_driver::conformance_tests::box_runtime_passes_all_advertised_profiles \
+              --test-threads=1
       - name: Exercise production Box-to-OCI owner composition
         run: |
           cd src

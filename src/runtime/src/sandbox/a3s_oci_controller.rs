@@ -3,7 +3,7 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,7 @@ impl A3sOciController {
         let log_fd = inherited_log.as_raw_fd();
 
         let delegated_cgroup_root = linux_sandbox_delegated_cgroup_root();
+        let owner_cgroup = prepare_sandbox_delegation_child()?;
         let launcher = resolve_sandbox_oci_launcher(None)?;
         let mut command = Command::new(&launcher);
         command
@@ -94,8 +95,14 @@ impl A3sOciController {
 
         // Sources are duplicated above 10, so installing the fixed Box roles
         // cannot clobber another source. `dup2` clears CLOEXEC on 3/4/5.
+        // Migrate into a child below the empty delegated root so rootless open
+        // accepts host-owned membership without moving the Sandbox CI harness
+        // out of its probe cgroup.
         unsafe {
             command.pre_exec(move || {
+                if let Some(ref cgroup) = owner_cgroup {
+                    migrate_current_task_into_cgroup(cgroup)?;
+                }
                 for (source, destination) in [
                     (exec_fd, EXEC_LISTENER_FD),
                     (pty_fd, PTY_LISTENER_FD),
@@ -478,6 +485,109 @@ fn sdk_boot_error(error: a3s_oci_sdk::Error) -> BoxError {
     }
 }
 
+fn prepare_sandbox_delegation_child() -> Result<Option<PathBuf>> {
+    prepare_sandbox_delegation_child_in(PathBuf::from(linux_sandbox_delegated_cgroup_root()))
+}
+
+fn prepare_sandbox_delegation_child_in(root: PathBuf) -> Result<Option<PathBuf>> {
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let child = root.join(format!("box-sandbox-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&child).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "failed to create Sandbox OCI owner cgroup {}: {error}",
+            child.display()
+        ),
+        hint: None,
+    })?;
+    chown_to_real_owner(&child)?;
+    for name in [
+        "cgroup.procs",
+        "cgroup.subtree_control",
+        "cgroup.controllers",
+    ] {
+        let control = child.join(name);
+        if control.exists() {
+            chown_to_real_owner(&control)?;
+        }
+    }
+    Ok(Some(child))
+}
+
+fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let procs = cgroup.join("cgroup.procs");
+    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cgroup.procs path contains an interior NUL",
+        )
+    })?;
+    // SAFETY: open/write/close on cgroup.procs between fork and exec; path is
+    // NUL-terminated and owned for the duration of the calls.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = unsafe { libc::write(fd, b"0".as_ptr().cast(), 1) };
+    let close_rc = unsafe { libc::close(fd) };
+    if written != 1 {
+        return Err(if written < 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write migrating into Sandbox owner cgroup",
+            )
+        });
+    }
+    if close_rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn chown_to_real_owner(path: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let (uid, gid) = {
+        // SAFETY: credential queries have no pointer arguments or failure results.
+        let (ruid, rgid, euid, egid) = unsafe {
+            (
+                libc::getuid(),
+                libc::getgid(),
+                libc::geteuid(),
+                libc::getegid(),
+            )
+        };
+        if euid == 0 && ruid != 0 {
+            (ruid, rgid)
+        } else {
+            (euid, egid)
+        }
+    };
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Sandbox OCI path contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to assign Sandbox OCI path {} to UID {uid}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +642,29 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not return a running or stopped container"));
+    }
+
+    #[test]
+    fn prepares_a_child_below_the_delegated_cgroup_root() {
+        let root = tempfile::tempdir().unwrap();
+        let child = prepare_sandbox_delegation_child_in(root.path().to_path_buf())
+            .unwrap()
+            .expect("delegated root exists");
+
+        assert!(child.starts_with(root.path()));
+        assert!(child.is_dir());
+        assert!(child
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("box-sandbox-owner-"));
+    }
+
+    #[test]
+    fn skips_delegation_child_when_the_root_is_absent() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing");
+        assert!(prepare_sandbox_delegation_child_in(missing)
+            .unwrap()
+            .is_none());
     }
 }
