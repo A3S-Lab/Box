@@ -18,10 +18,9 @@ All notable changes to A3S Box will be documented in this file.
   drops the owner child to the real non-root identity before exec and owns
   service-root/log/record paths by that UID, so `native-linux-host-service`
   can install rootless cgroup delegation (privileged euid rejected that path).
-  Composition also migrates the harness into a child under
-  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` (not the sibling probe cgroup) so the
-  owner satisfies the host-owned-child membership check, and chowns that child's
-  `cgroup.subtree_control` for setpriv `access(W_OK)` capability probing.
+  The owner also migrates into a fresh child under
+  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` in `pre_exec` so rootless open sees a
+  host-owned child while the CI harness remains in the sibling probe cgroup.
 - SDK Local Sandbox CI prepares a delegated cgroup tree and runs owners under
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;

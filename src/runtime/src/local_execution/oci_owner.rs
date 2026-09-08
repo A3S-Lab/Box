@@ -224,6 +224,7 @@ async fn wait_until_ready(
 fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionManagerResult<Child> {
     let stdout = open_owner_log(&service_root.join("owner.stdout.log"))?;
     let stderr = open_owner_log(&service_root.join("owner.stderr.log"))?;
+    let owner_cgroup = prepare_owner_delegation_child()?;
     let mut command = Command::new(&artifacts.runtime_path);
     command
         .arg("native-linux-host-service")
@@ -236,13 +237,19 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    // SAFETY: the closure only performs async-signal-safe credential and session
-    // syscalls between fork and exec and does not access shared Rust state.
+    // SAFETY: the closure only performs async-signal-safe credential, session,
+    // and cgroup.procs migration syscalls between fork and exec and does not
+    // access shared Rust state.
     // Under setpriv (euid 0, non-root ruid), drop to the real identity before
     // exec: native-linux-host-service installs rootless cgroup delegation and
-    // rejects a privileged effective UID.
+    // rejects a privileged effective UID. Also migrate into a child below the
+    // empty delegated root so rootless open accepts host-owned membership
+    // without moving the Sandbox CI harness out of its probe cgroup.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            if let Some(ref cgroup) = owner_cgroup {
+                migrate_current_task_into_cgroup(cgroup)?;
+            }
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -276,6 +283,64 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
             artifacts.runtime_path.display()
         ))
     })
+}
+
+/// Create an empty child under the Sandbox delegated cgroup for the owner.
+///
+/// The CI harness stays in the sibling probe cgroup for device-policy certify;
+/// only the forked owner migrates here in `pre_exec`.
+fn prepare_owner_delegation_child() -> ExecutionManagerResult<Option<PathBuf>> {
+    let root = PathBuf::from(crate::sandbox::linux_sandbox_delegated_cgroup_root());
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let child = root.join(format!("box-native-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&child).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to create native Linux OCI owner cgroup {}: {error}",
+            child.display()
+        ))
+    })?;
+    chown_to_owner_fs(&child)?;
+    let procs = child.join("cgroup.procs");
+    if procs.exists() {
+        chown_to_owner_fs(&procs)?;
+    }
+    Ok(Some(child))
+}
+
+fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let procs = cgroup.join("cgroup.procs");
+    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cgroup.procs path contains an interior NUL",
+        )
+    })?;
+    // SAFETY: open/write/close on cgroup.procs between fork and exec; path is
+    // NUL-terminated and owned for the duration of the calls.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = unsafe { libc::write(fd, b"0".as_ptr().cast(), 1) };
+    let close_rc = unsafe { libc::close(fd) };
+    if written != 1 {
+        return Err(if written < 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write migrating into owner cgroup",
+            )
+        });
+    }
+    if close_rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Filesystem identity for owner state. Under setpriv (euid 0, non-root ruid),

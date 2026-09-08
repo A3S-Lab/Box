@@ -604,22 +604,11 @@ jobs:
           sudo rm -rf --one-file-system -- "$A3S_BOX_OCI_HOST_ROOT"
           sudo install -d -m 700 -o "${A3S_BOX_CI_SANDBOX_UID}" -g "${A3S_BOX_CI_SANDBOX_GID}" \
             "$A3S_BOX_OCI_HOST_ROOT"
-          # Host-service rootless cgroup delegation requires the owner process
-          # to run in a child below the empty delegated root (not the sibling
-          # probe cgroup used for device-policy certify).
-          export A3S_BOX_CI_PROBE_CGROUP="${A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT}/ci-harness"
-          sudo mkdir -p "$A3S_BOX_CI_PROBE_CGROUP"
-          # access(W_OK) uses the real UID under setpriv; chown subtree_control too.
-          sudo chown "${A3S_BOX_CI_SANDBOX_UID}:${A3S_BOX_CI_SANDBOX_GID}" \
-            "$A3S_BOX_CI_PROBE_CGROUP" \
-            "$A3S_BOX_CI_PROBE_CGROUP/cgroup.procs" \
-            "$A3S_BOX_CI_PROBE_CGROUP/cgroup.subtree_control"
           export A3S_DEPS_STUB=1
           export A3S_HOME
           export A3S_BOX_OCI_MIGRATION=sandbox
           export A3S_BOX_OCI_HOST_ROOT A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
           export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
-          export A3S_BOX_CI_PROBE_CGROUP
           export A3S_BOX_SDK_LOCAL_SMOKE=1
           export A3S_BOX_SDK_SMOKE_ISOLATION=sandbox
           export A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
