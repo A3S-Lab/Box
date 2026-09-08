@@ -535,7 +535,8 @@ jobs:
             "$RUNNER_TEMP" \
             "$install_dir"
 
-          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent; do
+          for artifact in a3s-box-shim a3s-box-guest-init a3s-oci a3s-oci-agent \
+              a3s-box-sandbox-oci-launcher; do
             test -x "$install_dir/$artifact"
             test ! -L "$install_dir/$artifact"
           done
@@ -549,6 +550,7 @@ jobs:
             echo "A3S_BOX_GUEST_INIT_BINARY=$install_dir/a3s-box-guest-init"
             echo "A3S_BOX_OCI_RUNTIME_PATH=$install_dir/a3s-oci"
             echo "A3S_BOX_OCI_AGENT_PATH=$install_dir/a3s-oci-agent"
+            echo "A3S_BOX_SANDBOX_OCI_LAUNCHER=$install_dir/a3s-box-sandbox-oci-launcher"
           } >> "$GITHUB_ENV"
 
           grep -q '^root:' /etc/subuid ||
@@ -583,6 +585,7 @@ jobs:
               A3S_HOME="$A3S_HOME" \
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
+              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
               A3S_BOX_RUNTIME_CONFORMANCE=1 \
               A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
               A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
@@ -607,6 +610,7 @@ jobs:
               A3S_BOX_OCI_HOST_ROOT="$A3S_BOX_OCI_HOST_ROOT" \
               A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
               A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
+              A3S_BOX_SANDBOX_OCI_LAUNCHER="$A3S_BOX_SANDBOX_OCI_LAUNCHER" \
               A3S_BOX_SDK_LOCAL_SMOKE=1 \
               A3S_BOX_SDK_SMOKE_ISOLATION=sandbox \
               A3S_BOX_SDK_SMOKE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \

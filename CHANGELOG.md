@@ -14,6 +14,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the
+  packaged `a3s-oci` binary under the Sandbox launcher name) so SDK Local
+  Sandbox CI can resolve owners without a system libexec path.
 - Windows rejects `--network <bridge>` before image pull / Creating box (#259).
 - Windows `network create` fail-closes for unsupported bridge networks (#263).
 - Windows `pool start` exits immediately instead of hanging after an unsupported

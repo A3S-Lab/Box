@@ -86,6 +86,7 @@ EOF
     linux-*)
       cp "$fixture_root/a3s-box-shim" "$fixture_root/a3s-oci"
       cp "$fixture_root/a3s-box-shim" "$fixture_root/a3s-oci-agent"
+      cp "$fixture_root/a3s-box-shim" "$fixture_root/a3s-box-sandbox-oci-launcher"
       printf '%s\n' 'fixture-revision' > "$fixture_root/OCI-RUNTIME-REVISION"
       ;;
   esac
@@ -94,7 +95,8 @@ EOF
     "$fixture_root/a3s-box-shim" \
     "$fixture_root/a3s-box-guest-init"
   case "$PLATFORM" in
-    linux-*) chmod 0755 "$fixture_root/a3s-oci" "$fixture_root/a3s-oci-agent" ;;
+    linux-*) chmod 0755 "$fixture_root/a3s-oci" "$fixture_root/a3s-oci-agent" \
+      "$fixture_root/a3s-box-sandbox-oci-launcher" ;;
   esac
 
   tar czf "$ARCHIVE" -C "$TEST_TMP/fixture" "$PACKAGE_DIR"
