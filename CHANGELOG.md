@@ -47,7 +47,7 @@ All notable changes to A3S Box will be documented in this file.
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
-- Bump the pinned OCI Runtime revision to `9ff67c54` so
+- Bump the pinned OCI Runtime revision to `fb517c6f` so
   `native-linux-host-service --delegated-cgroup-root` bootstraps rootless
   device policy (required for Sandbox creates through the durable host owner).
 - No-KVM qualification packages install `a3s-box-sandbox-oci-launcher` (the

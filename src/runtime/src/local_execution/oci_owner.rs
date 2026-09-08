@@ -145,8 +145,12 @@ pub(crate) async fn ensure_native_linux_oci_owner(
     // Provisional identity: elevated CI launches go through sudo/setpriv, so the
     // Child PID may be a supervisor. Rewrite from SO_PEERCRED after the socket is
     // ready so owner-death recovery finds the real a3s-oci executor root.
-    let provisional =
-        NativeLinuxOwnerRecord::new(launch_pid, launch_start_time, artifacts, socket_path.clone());
+    let provisional = NativeLinuxOwnerRecord::new(
+        launch_pid,
+        launch_start_time,
+        artifacts,
+        socket_path.clone(),
+    );
     if let Err(error) = write_owner_record(&record_path, &provisional) {
         let _ = child.kill();
         let _ = child.wait();
@@ -259,11 +263,12 @@ fn resolve_owner_identity_from_socket(
         ))
     })?;
     let mut credentials = MaybeUninit::<libc::ucred>::zeroed();
-    let mut value_length = libc::socklen_t::try_from(size_of::<libc::ucred>()).map_err(|error| {
-        ExecutionManagerError::Internal(format!(
-            "failed to represent SO_PEERCRED value size: {error}"
-        ))
-    })?;
+    let mut value_length =
+        libc::socklen_t::try_from(size_of::<libc::ucred>()).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to represent SO_PEERCRED value size: {error}"
+            ))
+        })?;
     // SAFETY: the stream owns a connected Unix descriptor and the output
     // storage is valid for one ucred structure.
     let status = unsafe {
