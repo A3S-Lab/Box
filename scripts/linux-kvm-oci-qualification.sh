@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Local Linux KVM MicroVM vertical-slice gate for Box over OCI Runtime.
 #
-# Prerequisites (operator-owned):
-#   - usable /dev/kvm
-#   - running `a3s-oci box-kvm-qualification-service` with absolute --root,
-#     --shim, and --system-image-manifest on a Linux-native filesystem
-#   - release `a3s-box` / `a3s-box-shim` able to resolve libkrun
+# Starts box-kvm-qualification-service, then runs:
+#   1) create replay → Box-manager reopen → start → exact exit 23 → delete
+#   2) Host Service SIGKILL/restart while a generation is running → stopped-only
+#      reconcile without invented exit status → delete
 #
-# This script does not start the Host Service and does not claim fresh-host
-# promotion. It only proves the public Box create → manager reopen → start →
-# exact exit → delete slice against an already-running qualification service.
+# Observation-only. Does not claim fresh-host or AArch64 promotion.
 
 set -euo pipefail
 
@@ -18,8 +15,10 @@ usage() {
 Usage:
   linux-kvm-oci-qualification.sh \
     --box-bin DIR \
-    --runtime-root ABS_PATH \
-    --kvm-endpoint ABS_SOCK \
+    --a3s-oci ABS_BIN \
+    --service-root ABS_DIR \
+    --shim ABS_BIN \
+    --system-image-manifest ABS_JSON \
     --image REF \
     --report ABS_JSON \
     [--home ABS_DIR]
@@ -30,42 +29,26 @@ EOF
 }
 
 BOX_BIN=""
-RUNTIME_ROOT=""
-KVM_ENDPOINT=""
+A3S_OCI=""
+SERVICE_ROOT=""
+SHIM=""
+MANIFEST=""
 IMAGE=""
 REPORT=""
 HOME_DIR=""
+SERVICE_PID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --box-bin)
-      BOX_BIN="${2:?}"
-      shift 2
-      ;;
-    --runtime-root)
-      RUNTIME_ROOT="${2:?}"
-      shift 2
-      ;;
-    --kvm-endpoint)
-      KVM_ENDPOINT="${2:?}"
-      shift 2
-      ;;
-    --image)
-      IMAGE="${2:?}"
-      shift 2
-      ;;
-    --report)
-      REPORT="${2:?}"
-      shift 2
-      ;;
-    --home)
-      HOME_DIR="${2:?}"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
+    --box-bin) BOX_BIN="${2:?}"; shift 2 ;;
+    --a3s-oci) A3S_OCI="${2:?}"; shift 2 ;;
+    --service-root) SERVICE_ROOT="${2:?}"; shift 2 ;;
+    --shim) SHIM="${2:?}"; shift 2 ;;
+    --system-image-manifest) MANIFEST="${2:?}"; shift 2 ;;
+    --image) IMAGE="${2:?}"; shift 2 ;;
+    --report) REPORT="${2:?}"; shift 2 ;;
+    --home) HOME_DIR="${2:?}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
     *)
       echo "unknown argument: $1" >&2
       usage >&2
@@ -84,8 +67,10 @@ require_abs() {
 }
 
 require_abs "--box-bin" "${BOX_BIN}"
-require_abs "--runtime-root" "${RUNTIME_ROOT}"
-require_abs "--kvm-endpoint" "${KVM_ENDPOINT}"
+require_abs "--a3s-oci" "${A3S_OCI}"
+require_abs "--service-root" "${SERVICE_ROOT}"
+require_abs "--shim" "${SHIM}"
+require_abs "--system-image-manifest" "${MANIFEST}"
 require_abs "--report" "${REPORT}"
 
 if [[ -z "$IMAGE" ]]; then
@@ -105,16 +90,18 @@ case "$(basename "$HOME_DIR")" in
     ;;
 esac
 
-if [[ ! -x "${BOX_BIN}/a3s-box" ]]; then
-  echo "missing executable ${BOX_BIN}/a3s-box" >&2
-  exit 2
-fi
-if [[ ! -S "${KVM_ENDPOINT}" ]]; then
-  echo "missing Unix socket ${KVM_ENDPOINT}" >&2
-  exit 2
-fi
-if [[ ! -d "${RUNTIME_ROOT}" ]]; then
-  echo "missing runtime root ${RUNTIME_ROOT}" >&2
+EXAMPLE_BIN="${BOX_BIN}/linux-kvm-oci-qualification"
+for path in "${BOX_BIN}/a3s-box" "${EXAMPLE_BIN}" "${A3S_OCI}" "${SHIM}"; do
+  if [[ ! -x "$path" ]]; then
+    echo "missing executable ${path}" >&2
+    if [[ "$path" == "${EXAMPLE_BIN}" ]]; then
+      echo "  cargo build -p a3s-box-runtime --example linux-kvm-oci-qualification --release" >&2
+    fi
+    exit 2
+  fi
+done
+if [[ ! -f "${MANIFEST}" ]]; then
+  echo "missing system-image manifest ${MANIFEST}" >&2
   exit 2
 fi
 if [[ -e "${REPORT}" ]]; then
@@ -122,14 +109,56 @@ if [[ -e "${REPORT}" ]]; then
   exit 2
 fi
 
-EXAMPLE_BIN="${BOX_BIN}/linux-kvm-oci-qualification"
-if [[ ! -x "${EXAMPLE_BIN}" ]]; then
-  echo "missing executable ${EXAMPLE_BIN}; build with:" >&2
-  echo "  cargo build -p a3s-box-runtime --example linux-kvm-oci-qualification --release" >&2
+mkdir -p "${HOME_DIR}"
+mkdir -m 0700 -p "${SERVICE_ROOT}"
+chmod 0700 "${SERVICE_ROOT}"
+
+RUNTIME_ROOT="${SERVICE_ROOT}/runtime"
+KVM_ENDPOINT="${SERVICE_ROOT}/runtime.sock"
+SERVICE_LOG="${SERVICE_ROOT}/qualification-service.log"
+
+if [[ -S "${KVM_ENDPOINT}" ]]; then
+  echo "refusing to reuse an already-bound endpoint ${KVM_ENDPOINT}" >&2
   exit 2
 fi
 
-mkdir -p "${HOME_DIR}"
+cleanup() {
+  local status=$?
+  if [[ -f "${SERVICE_ROOT}/qualification-service.pid" ]]; then
+    SERVICE_PID="$(tr -d '[:space:]' <"${SERVICE_ROOT}/qualification-service.pid" || true)"
+  fi
+  if [[ -n "${SERVICE_PID:-}" ]] && kill -0 "${SERVICE_PID}" 2>/dev/null; then
+    kill -TERM "${SERVICE_PID}" 2>/dev/null || true
+    wait "${SERVICE_PID}" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+nohup "${A3S_OCI}" box-kvm-qualification-service \
+  --root "${SERVICE_ROOT}" \
+  --shim "${SHIM}" \
+  --system-image-manifest "${MANIFEST}" \
+  >"${SERVICE_LOG}" 2>&1 &
+SERVICE_PID=$!
+echo "${SERVICE_PID}" >"${SERVICE_ROOT}/qualification-service.pid"
+
+for _ in $(seq 1 120); do
+  if [[ -S "${KVM_ENDPOINT}" ]]; then
+    break
+  fi
+  if ! kill -0 "${SERVICE_PID}" 2>/dev/null; then
+    echo "Host Service exited before readiness; log: ${SERVICE_LOG}" >&2
+    tail -40 "${SERVICE_LOG}" >&2 || true
+    exit 1
+  fi
+  sleep 0.25
+done
+if [[ ! -S "${KVM_ENDPOINT}" ]]; then
+  echo "Host Service did not publish ${KVM_ENDPOINT}" >&2
+  exit 1
+fi
+
 export PATH="${BOX_BIN}:${PATH}"
 export A3S_HOME="${HOME_DIR}"
 export A3S_BOX_OCI_HOST_ROOT="${RUNTIME_ROOT}"
@@ -137,12 +166,18 @@ export A3S_BOX_OCI_KVM_ENDPOINT="${KVM_ENDPOINT}"
 export A3S_BOX_KVM_OCI_IMAGE="${IMAGE}"
 export A3S_BOX_KVM_OCI_REPORT="${REPORT}"
 export A3S_BOX_KVM_OCI_QUALIFICATION=1
+export A3S_BOX_KVM_OCI_SERVICE_PID="${SERVICE_PID}"
+export A3S_BOX_KVM_OCI_SERVICE_BIN="${A3S_OCI}"
+export A3S_BOX_KVM_OCI_SERVICE_ROOT="${SERVICE_ROOT}"
+export A3S_BOX_KVM_OCI_SERVICE_SHIM="${SHIM}"
+export A3S_BOX_KVM_OCI_SERVICE_MANIFEST="${MANIFEST}"
+export A3S_BOX_KVM_OCI_SERVICE_LOG="${SERVICE_LOG}"
 
-echo "running Linux KVM OCI qualification"
+echo "running Linux KVM OCI qualification v2"
 echo "  home=${A3S_HOME}"
-echo "  runtime-root=${A3S_BOX_OCI_HOST_ROOT}"
-echo "  endpoint=${A3S_BOX_OCI_KVM_ENDPOINT}"
-echo "  image=${A3S_BOX_KVM_OCI_IMAGE}"
-echo "  report=${A3S_BOX_KVM_OCI_REPORT}"
+echo "  service-root=${SERVICE_ROOT}"
+echo "  service-pid=${SERVICE_PID}"
+echo "  image=${IMAGE}"
+echo "  report=${REPORT}"
 
 "${EXAMPLE_BIN}"

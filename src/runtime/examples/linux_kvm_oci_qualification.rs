@@ -1,9 +1,15 @@
 //! Destructive product-lifecycle qualification for Box over A3S OCI Runtime/KVM.
 //!
-//! A host operator owns the isolated home, `box-kvm-qualification-service`,
-//! image import, and process-leak checks. This executable exercises only the
-//! public Box lifecycle boundary and always emits a versioned JSON report when
-//! `A3S_BOX_KVM_OCI_REPORT` names an absolute output path.
+//! A host operator owns image import and process-leak checks. This executable
+//! exercises the public Box lifecycle boundary, including an optional Host
+//! Service SIGKILL/restart while a MicroVM is running. It always emits a
+//! versioned JSON report when `A3S_BOX_KVM_OCI_REPORT` names an absolute path.
+//!
+//! Schema `a3s.box.linux-kvm-oci-qualification.v2` covers:
+//! 1. create replay + Box-manager reopen + start + exact exit `23` + delete
+//! 2. when service restart inputs are present: a second generation that is
+//!    observed running, interrupted by Host Service SIGKILL/restart, and
+//!    reconciled to stopped without an invented exit status before delete
 
 #[cfg(not(all(
     target_os = "linux",
@@ -36,12 +42,14 @@ mod qualification {
     use std::fs::OpenOptions;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::time::Duration;
 
     use a3s_box_core::{
         BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionGeneration, ExecutionId,
-        ExecutionIsolation, ExecutionManager, ExecutionState, IsolationClass as BoxIsolationClass,
-        NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
+        ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionState,
+        IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
+        ResourceConfig,
     };
     use a3s_box_runtime::{
         LinuxKvmOciMigrationConfig, LocalExecutionManager, ManagedExecutionStore,
@@ -56,12 +64,28 @@ mod qualification {
     const ENDPOINT_ENV: &str = "A3S_BOX_OCI_KVM_ENDPOINT";
     const IMAGE_ENV: &str = "A3S_BOX_KVM_OCI_IMAGE";
     const REPORT_ENV: &str = "A3S_BOX_KVM_OCI_REPORT";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-oci-qualification.v1";
+    const SERVICE_PID_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_PID";
+    const SERVICE_BIN_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_BIN";
+    const SERVICE_ROOT_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_ROOT";
+    const SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_SHIM";
+    const SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_MANIFEST";
+    const SERVICE_LOG_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_LOG";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-oci-qualification.v2";
     const STDOUT_MARKER: &str = "a3s-box-kvm-oci-stdout";
     const STDERR_MARKER: &str = "a3s-box-kvm-oci-stderr";
     const EXPECTED_EXIT_CODE: i32 = 23;
 
     type AnyError = Box<dyn Error + Send + Sync>;
+
+    #[derive(Debug, Clone)]
+    struct ServiceRestartInputs {
+        pid: u32,
+        service_bin: PathBuf,
+        service_root: PathBuf,
+        service_shim: PathBuf,
+        system_image_manifest: PathBuf,
+        service_log: PathBuf,
+    }
 
     #[derive(Debug, Clone)]
     struct Inputs {
@@ -70,6 +94,7 @@ mod qualification {
         runtime_root: PathBuf,
         endpoint: PathBuf,
         image: String,
+        service_restart: Option<ServiceRestartInputs>,
     }
 
     #[derive(Debug, Serialize)]
@@ -100,6 +125,14 @@ mod qualification {
         box_directory_absent: bool,
         runtime_shares_absent: bool,
         bundle_handoffs_absent: bool,
+        runtime_service_restart_requested: bool,
+        runtime_service_restarted: bool,
+        restart_operation_id: Option<String>,
+        restart_execution_id: Option<String>,
+        restart_observed_running: bool,
+        restart_reconciled_stopped: bool,
+        restart_exit_code_absent: bool,
+        restart_removed: bool,
     }
 
     impl QualificationReport {
@@ -131,6 +164,14 @@ mod qualification {
                 box_directory_absent: false,
                 runtime_shares_absent: false,
                 bundle_handoffs_absent: false,
+                runtime_service_restart_requested: false,
+                runtime_service_restarted: false,
+                restart_operation_id: None,
+                restart_execution_id: None,
+                restart_observed_running: false,
+                restart_reconciled_stopped: false,
+                restart_exit_code_absent: false,
+                restart_removed: false,
             }
         }
     }
@@ -157,9 +198,24 @@ mod qualification {
                         report.operation_id = Some(operation_id.to_string());
                         let outcome = exercise(&inputs, &operation_id, &mut report).await;
                         if outcome.is_err() {
+                            let mut cleanup_error = None;
                             if let Err(error) = cleanup(&inputs, &operation_id).await {
-                                report.cleanup_error = Some(error.to_string());
+                                cleanup_error = Some(error.to_string());
                             }
+                            if let Some(restart_operation) = report
+                                .restart_operation_id
+                                .as_deref()
+                                .and_then(|value| OperationId::new(value.to_string()).ok())
+                            {
+                                if let Err(error) = cleanup(&inputs, &restart_operation).await {
+                                    let message = error.to_string();
+                                    cleanup_error = Some(match cleanup_error {
+                                        Some(existing) => format!("{existing}; {message}"),
+                                        None => message,
+                                    });
+                                }
+                            }
+                            report.cleanup_error = cleanup_error;
                         }
                         outcome
                     }
@@ -218,6 +274,8 @@ mod qualification {
         )?;
         let image = required_environment_string(IMAGE_ENV)?;
         let state_path = home_dir.join("managed-executions.json");
+        let service_restart = load_service_restart_inputs()?;
+        report.runtime_service_restart_requested = service_restart.is_some();
 
         report.home_dir = Some(home_dir.clone());
         report.state_path = Some(state_path.clone());
@@ -230,7 +288,27 @@ mod qualification {
             runtime_root,
             endpoint,
             image,
+            service_restart,
         })
+    }
+
+    fn load_service_restart_inputs() -> Result<Option<ServiceRestartInputs>, AnyError> {
+        let pid_raw = match std::env::var(SERVICE_PID_ENV) {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return Ok(None),
+        };
+        let pid: u32 = pid_raw
+            .parse()
+            .map_err(|_| failure(format!("{SERVICE_PID_ENV} must be a positive pid")))?;
+        require(pid > 1, format!("{SERVICE_PID_ENV} must be a positive pid"))?;
+        Ok(Some(ServiceRestartInputs {
+            pid,
+            service_bin: absolute_environment_path(SERVICE_BIN_ENV)?,
+            service_root: absolute_environment_path(SERVICE_ROOT_ENV)?,
+            service_shim: absolute_environment_path(SERVICE_SHIM_ENV)?,
+            system_image_manifest: absolute_environment_path(SERVICE_MANIFEST_ENV)?,
+            service_log: absolute_environment_path(SERVICE_LOG_ENV)?,
+        }))
     }
 
     async fn exercise(
@@ -238,7 +316,19 @@ mod qualification {
         operation_id: &OperationId,
         report: &mut QualificationReport,
     ) -> Result<(), AnyError> {
-        let request = qualification_request(&inputs.image);
+        exercise_exact_exit(inputs, operation_id, report).await?;
+        if let Some(service) = inputs.service_restart.as_ref() {
+            exercise_runtime_service_restart(inputs, service, report).await?;
+        }
+        Ok(())
+    }
+
+    async fn exercise_exact_exit(
+        inputs: &Inputs,
+        operation_id: &OperationId,
+        report: &mut QualificationReport,
+    ) -> Result<(), AnyError> {
+        let request = qualification_request(&inputs.image, false);
         let manager = connect(inputs).await?;
         let reservation = manager.create(request.clone(), operation_id).await?;
         report.execution_id = Some(reservation.execution_id.to_string());
@@ -408,6 +498,239 @@ mod qualification {
         Ok(())
     }
 
+    async fn exercise_runtime_service_restart(
+        inputs: &Inputs,
+        service: &ServiceRestartInputs,
+        report: &mut QualificationReport,
+    ) -> Result<(), AnyError> {
+        let operation_id = OperationId::new(format!(
+            "linux-kvm-oci-runtime-restart-{}",
+            uuid::Uuid::new_v4()
+        ))?;
+        report.restart_operation_id = Some(operation_id.to_string());
+
+        let request = qualification_request(&inputs.image, true);
+        let manager = connect(inputs).await?;
+        let reservation = manager.create(request, &operation_id).await?;
+        report.restart_execution_id = Some(reservation.execution_id.to_string());
+        let lease = tokio::time::timeout(
+            Duration::from_secs(30 * 60),
+            manager.start(&reservation.execution_id, reservation.generation),
+        )
+        .await
+        .map_err(|_| failure("timed out starting the runtime-restart KVM execution"))??;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let status = manager.inspect(&lease.execution_id).await?;
+            if matches!(status.state, ExecutionState::Running) {
+                report.restart_observed_running = true;
+                break;
+            }
+            if matches!(status.state, ExecutionState::Failed | ExecutionState::Stopped) {
+                return Err(failure(
+                    "runtime-restart generation left running before Host Service SIGKILL",
+                ));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(failure(
+                    "timed out waiting for runtime-restart generation to run",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        drop(manager);
+        restart_host_service(service, &inputs.endpoint)?;
+        report.runtime_service_restarted = true;
+
+        let reconnected = connect(inputs).await?;
+        // Host Service reopen may briefly report Unavailable while the
+        // replacement owner recovers durable state; retry only that class.
+        let mut outcome = None;
+        let reconcile_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while outcome.is_none() {
+            match reconnected.reconcile(&operation_id).await {
+                Ok(value) => outcome = Some(value),
+                Err(ExecutionManagerError::Unavailable(_)) => {
+                    if tokio::time::Instant::now() >= reconcile_deadline {
+                        return Err(failure(
+                            "Box remained Unavailable for 120s after Host Service restart",
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(error) => {
+                    return Err(failure(format!(
+                        "Box reconcile failed after Host Service restart: {error}"
+                    )));
+                }
+            }
+        }
+        let outcome = outcome.expect("reconcile outcome assigned before loop exit");
+        // Ready and Created carry different payload types; match them apart.
+        // Failed is the durable terminal outcome for stopped-only owner loss.
+        match outcome {
+            ReconcileOutcome::Ready(recovered) => {
+                require(
+                    recovered.execution_id == reservation.execution_id
+                        && recovered.generation == reservation.generation,
+                    "Host Service restart recovered a different Ready Box generation",
+                )?;
+            }
+            ReconcileOutcome::Created(recovered) => {
+                require(
+                    recovered.execution_id == reservation.execution_id
+                        && recovered.generation == reservation.generation,
+                    "Host Service restart recovered a different Created Box generation",
+                )?;
+            }
+            ReconcileOutcome::Failed => {}
+            ReconcileOutcome::Creating => {
+                return Err(failure(
+                    "Host Service restart left the Box generation stuck creating",
+                ));
+            }
+            ReconcileOutcome::Absent => {
+                return Err(failure(
+                    "Host Service restart lost the Box operation before stopped reconciliation",
+                ));
+            }
+        }
+
+        let status = reconnected.inspect(&reservation.execution_id).await?;
+        require(
+            matches!(status.state, ExecutionState::Stopped),
+            format!(
+                "expected stopped-only reconciliation after Host Service restart, found {:?}",
+                status.state
+            ),
+        )?;
+        report.restart_reconciled_stopped = true;
+
+        let store = ManagedExecutionStore::new(&inputs.state_path);
+        let stopped = store
+            .get(&reservation.execution_id)?
+            .ok_or_else(|| failure("restart generation record is missing after reconcile"))?;
+        require(
+            stopped.exit_code.is_none(),
+            format!(
+                "Host Service restart invented exit status {:?}",
+                stopped.exit_code
+            ),
+        )?;
+        report.restart_exit_code_absent = true;
+
+        report.restart_removed = reconnected
+            .remove(&reservation.execution_id, reservation.generation)
+            .await?;
+        require(
+            report.restart_removed,
+            "stopped restart generation was not removed",
+        )?;
+        require(
+            matches!(
+                reconnected.reconcile(&operation_id).await?,
+                ReconcileOutcome::Absent
+            ),
+            "removed restart operation remained reconcilable",
+        )?;
+        require(
+            !inputs
+                .home_dir
+                .join("boxes")
+                .join(reservation.execution_id.as_str())
+                .exists(),
+            "restart Box directory remained after deletion",
+        )?;
+        require(
+            directory_absent_or_empty(&inputs.runtime_root.join("shares"))?,
+            "runtime shares remained after restart-generation deletion",
+        )?;
+        require(
+            directory_absent_or_empty(&inputs.runtime_root.join("bundle-handoffs"))?,
+            "bundle handoffs remained after restart-generation deletion",
+        )?;
+        Ok(())
+    }
+
+    fn restart_host_service(service: &ServiceRestartInputs, endpoint: &Path) -> Result<(), AnyError> {
+        // SAFETY: qualification-only SIGKILL of the exact operator-supplied pid.
+        let kill_rc = unsafe { libc::kill(service.pid as i32, libc::SIGKILL) };
+        if kill_rc != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::NotFound {
+                return Err(failure(format!(
+                    "failed to SIGKILL Host Service pid {}: {err}",
+                    service.pid
+                )));
+            }
+        }
+
+        let gone_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < gone_deadline {
+            // SAFETY: existence probe for the exact pid we killed.
+            let still_alive = unsafe { libc::kill(service.pid as i32, 0) } == 0;
+            if !still_alive && !endpoint.exists() {
+                break;
+            }
+            if endpoint.exists() {
+                let _ = std::fs::remove_file(endpoint);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        require(
+            unsafe { libc::kill(service.pid as i32, 0) } != 0,
+            "Host Service pid remained alive after SIGKILL",
+        )?;
+
+        if let Some(parent) = service.service_log.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&service.service_log)?;
+        let log_err = log.try_clone()?;
+        let mut child = Command::new(&service.service_bin)
+            .arg("box-kvm-qualification-service")
+            .arg("--root")
+            .arg(&service.service_root)
+            .arg("--shim")
+            .arg(&service.service_shim)
+            .arg("--system-image-manifest")
+            .arg(&service.system_image_manifest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .spawn()?;
+        let replacement_pid = child.id();
+        std::fs::write(
+            service.service_root.join("qualification-service.pid"),
+            format!("{replacement_pid}\n"),
+        )?;
+
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < ready_deadline {
+            if endpoint.exists() {
+                // Keep the replacement Host Service running after this process exits.
+                std::mem::forget(child);
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(failure(format!(
+                    "replacement Host Service exited before readiness: {status}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(failure(
+            "replacement Host Service did not recreate the Unix endpoint",
+        ))
+    }
+
     async fn connect(inputs: &Inputs) -> Result<LocalExecutionManager, AnyError> {
         let config = LinuxKvmOciMigrationConfig::new(
             inputs.runtime_root.clone(),
@@ -421,9 +744,22 @@ mod qualification {
         .await?)
     }
 
-    fn qualification_request(image: &str) -> CreateExecutionRequest {
+    fn qualification_request(image: &str, long_running: bool) -> CreateExecutionRequest {
+        let cmd = if long_running {
+            format!(
+                "printf '{STDOUT_MARKER}\\n'; printf '{STDERR_MARKER}\\n' >&2; sleep 120; exit {EXPECTED_EXIT_CODE}"
+            )
+        } else {
+            format!(
+                "printf '{STDOUT_MARKER}\\n'; printf '{STDERR_MARKER}\\n' >&2; sleep 10; exit {EXPECTED_EXIT_CODE}"
+            )
+        };
         CreateExecutionRequest {
-            external_sandbox_id: "linux-kvm-oci-qualification".to_string(),
+            external_sandbox_id: if long_running {
+                "linux-kvm-oci-runtime-restart".to_string()
+            } else {
+                "linux-kvm-oci-qualification".to_string()
+            },
             config: BoxConfig {
                 isolation: ExecutionIsolation::Microvm,
                 image: image.to_string(),
@@ -432,20 +768,18 @@ mod qualification {
                     memory_mb: 512,
                     ..Default::default()
                 },
-                cmd: vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    format!(
-                        "printf '{STDOUT_MARKER}\\n'; printf '{STDERR_MARKER}\\n' >&2; sleep 10; exit {EXPECTED_EXIT_CODE}"
-                    ),
-                ],
+                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd],
                 network: NetworkMode::None,
                 persistent: false,
                 ..Default::default()
             },
             labels: BTreeMap::from([(
                 "purpose".to_string(),
-                "linux-kvm-oci-qualification".to_string(),
+                if long_running {
+                    "linux-kvm-oci-runtime-restart".to_string()
+                } else {
+                    "linux-kvm-oci-qualification".to_string()
+                },
             )]),
             policy: Default::default(),
             rootfs_snapshot_id: None,
