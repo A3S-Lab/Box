@@ -31,6 +31,15 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
+  `49d409383dc0c6214d76aa91250f6f6c0d453eba` (live Host reopen reattach
+  #257–#259: wait/kill/delete, shared supervisor cache, init process
+  inventory). Migration stays opt-in via `A3S_BOX_OCI_MIGRATION`; default
+  MicroVM/sandbox cutover is unchanged. Re-ran the existing-host WSL2 Linux
+  KVM OCI qualification v2 against that pin: exact exit `23`, Host Service
+  restart → stopped-only reconcile, report SHA-256
+  `3266909e1cb5f03a2544443bd27b19180acfa541ed9e15123b0dd10a397416eb`. Observation-only; does not close fresh-host,
+  AArch64, live-session gate, or default MicroVM cutover.
+- Bump the pinned OCI Runtime revision to
   `f14c9401f92a5fa97be62c54f58925f5fc1a2a51` (merge of supervised create PR
   #253: opt-in Native `Host → Supervisor → Launcher` create; default create
   stays Host-bound). Live reattach remains incomplete in OCI; migration stays
