@@ -327,9 +327,21 @@ fn verify_recorded_a3s_oci_owner(
             "Cannot inspect A3S OCI endpoint for {box_id}: {error}"
         ))
     })?;
+    // After rootless device-policy drop the endpoint is owned by the real UID
+    // while effective-root controllers still have euid 0. Accept either the
+    // durable owner identity or the current effective UID.
+    let expected_uids = {
+        let ruid = unsafe { libc::getuid() };
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 && ruid != 0 {
+            [ruid, euid]
+        } else {
+            [euid, euid]
+        }
+    };
     if !metadata.file_type().is_socket()
         || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || !expected_uids.contains(&metadata.uid())
     {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "A3S OCI endpoint identity is invalid for {box_id}"

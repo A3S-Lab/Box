@@ -51,7 +51,9 @@ All notable changes to A3S Box will be documented in this file.
   device nodes after its own credential drop without following rootfs symlinks
   into host packaging paths. Sandbox log workers clear the setpriv euid/ruid
   mismatch before exec and prepend the shim `lib/` dir to `LD_LIBRARY_PATH` so
-  secure-execution mode cannot hide bundled libkrun.
+  secure-execution mode cannot hide bundled libkrun. Crash-recovery / inspect
+  endpoint checks accept real-UID-owned `runtime.sock` under effective-root
+  controllers (same contract as private socket readiness).
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
