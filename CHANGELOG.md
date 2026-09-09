@@ -31,6 +31,16 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
+  `26ab4889242c73216ad1b9abadd48367118df028` (PR #261: exclusive stdout/stderr
+  Host reopen via supervisor IPC relay). Migration stays opt-in via
+  `A3S_BOX_OCI_MIGRATION`; default MicroVM/sandbox cutover is unchanged.
+  Re-ran the existing-host WSL2 Linux KVM OCI qualification v2 against that
+  pin: exact exit `23`, Host Service restart → stopped-only reconcile, report
+  SHA-256
+  `576687d960023aea4e3c7599052a4138fec30f643d28a0c7c21232117d3a49f9`.
+  Observation-only; does not close fresh-host, AArch64, live-session gate, or
+  default MicroVM cutover.
+- Bump the pinned OCI Runtime revision to
   `7d27d1deaa19566a4b51e82032658f6699230112` (PR #260: supervised stdin
   restore on Host reopen). Migration stays opt-in via
   `A3S_BOX_OCI_MIGRATION`; default MicroVM/sandbox cutover is unchanged.
