@@ -649,6 +649,14 @@ impl BoxRuntimeConformanceFixture {
             }
         }
 
+        // Sandbox controller drops euid to the real UID for SO_PEERCRED after
+        // owner spawn, retaining saved UID 0. Restore before deleting state
+        // trees created as effective root during prepare.
+        #[cfg(target_os = "linux")]
+        if let Err(error) = crate::sandbox::restore_effective_root_if_saved() {
+            failures.push(format!("restore effective root for R17 cleanup: {error}"));
+        }
+
         for root in self.state_roots.lock().unwrap().iter() {
             if let Err(error) = remove_tree(root) {
                 failures.push(format!("remove Runtime state {}: {error}", root.display()));

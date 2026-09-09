@@ -615,15 +615,15 @@ fn expected_owner_uid() -> u32 {
     expected_owner_ids().0
 }
 
-/// Permanently match the Sandbox controller to the post-bootstrap owner UID.
+/// Match the Sandbox controller to the post-bootstrap owner UID for SDK auth.
 ///
 /// Effective-root CI / setuid launchers keep euid 0 through rootfs prep and
 /// owner spawn so `native-linux-service` can install the device-policy helper.
 /// After spawn, the owner drops to the real UID and rejects other peer UIDs on
-/// the SDK socket. Dropping here is process-wide and intentional for that
-/// connection lifetime.
+/// the SDK socket. Keep saved UID/GID 0 so fixture cleanup can restore
+/// effective root and remove state created before the drop.
 fn drop_effective_root_to_real_owner() -> Result<()> {
-    let (ruid, rgid, euid, egid) = unsafe {
+    let (ruid, rgid, euid, _egid) = unsafe {
         (
             libc::getuid(),
             libc::getgid(),
@@ -634,23 +634,50 @@ fn drop_effective_root_to_real_owner() -> Result<()> {
     if euid != 0 || ruid == 0 {
         return Ok(());
     }
-    if egid != rgid {
-        // SAFETY: setegid takes a gid_t; failure is reported via errno.
-        if unsafe { libc::setegid(rgid) } != 0 {
-            return Err(BoxError::BoxBootError {
-                message: format!(
-                    "failed to drop Sandbox controller egid to {rgid}: {}",
-                    std::io::Error::last_os_error()
-                ),
-                hint: None,
-            });
-        }
-    }
-    // SAFETY: seteuid takes a uid_t; failure is reported via errno.
-    if unsafe { libc::seteuid(ruid) } != 0 {
+    // SAFETY: setresgid/setresuid take gid_t/uid_t; keep saved IDs at 0 so the
+    // process can restore effective root for cleanup without CAP_SETUID.
+    if unsafe { libc::setresgid(rgid, rgid, 0) } != 0 {
         return Err(BoxError::BoxBootError {
             message: format!(
-                "failed to drop Sandbox controller euid to {ruid}: {}",
+                "failed to drop Sandbox controller to rgid {rgid} (saved 0): {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if unsafe { libc::setresuid(ruid, ruid, 0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to drop Sandbox controller to ruid {ruid} (saved 0): {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+/// Restore effective root when saved UID 0 was retained by
+/// [`drop_effective_root_to_real_owner`].
+pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
+    let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
+    if euid == 0 || ruid == 0 {
+        return Ok(());
+    }
+    // SAFETY: seteuid/setegid use the retained saved IDs from setresuid/setresgid.
+    if unsafe { libc::setegid(0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller egid 0: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if unsafe { libc::seteuid(0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller euid 0: {}",
                 std::io::Error::last_os_error()
             ),
             hint: None,

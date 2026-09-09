@@ -117,7 +117,7 @@ pub fn update_recorded_resources(
 }
 
 #[cfg(target_os = "linux")]
-pub use a3s_oci_controller::A3sOciController;
+pub use a3s_oci_controller::{restore_effective_root_if_saved, A3sOciController};
 #[cfg(target_os = "linux")]
 pub use a3s_oci_handler::A3sOciHandler;
 pub use capability::{

@@ -23,9 +23,10 @@ All notable changes to A3S Box will be documented in this file.
   keeps euid 0 (no setpriv elevate wrapper) so inherited `--a3s-box-control-fds`
   remain Unix stream listeners. Private runtime socket readiness accepts the
   real-UID owner (not `geteuid`) so effective-root harnesses can wait for the
-  dropped owner endpoint. After owner spawn the controller permanently drops
-  euid/egid to that real identity so Unix SDK `SO_PEERCRED` same-UID auth
-  succeeds without matched-cred setpriv (which would break control-FD inheritance).
+  dropped owner endpoint. After owner spawn the controller drops euid/egid to
+  that real identity via `setresuid`/`setresgid` (saved IDs stay 0) so Unix SDK
+  `SO_PEERCRED` same-UID auth succeeds; R17 cleanup restores effective root
+  before deleting prepare-time state trees.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
