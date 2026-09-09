@@ -31,6 +31,15 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
+  `95d624f9831b79abf86bc8e369df849054c63eaf` (includes DedicatedVm containerd
+  Created/Running/Stopped daemon-restart slice,
+  `a3s.oci.linux-kvm-containerd-lifecycle.v2`). Re-ran the existing-host WSL2
+  Linux KVM OCI qualification v2 against that pin: exact exit `23`, Host
+  Service restart → stopped-only reconcile, report SHA-256
+  `1821ba153a77f17c1e4f5b5b130d6e2f7d58f3fb0abfd3f742c5531a68a50630`.
+  Observation-only; does not close fresh-host, AArch64, or default MicroVM
+  cutover.
+- Bump the pinned OCI Runtime revision to
   `3cea73d7fe6c53469ceb73ca8876e175255c3fcb` (includes containerd DedicatedVm
   bundle handoff and Linux KVM containerd vertical-slice gate). Re-ran the
   existing-host WSL2 Linux KVM OCI qualification v2 against that pin: exact
