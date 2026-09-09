@@ -1475,16 +1475,35 @@ impl OciLocalExecutionBackend {
         let execution_id = self.execution_id(record)?;
         let generation = self.metadata(record)?.generation;
         let status = self.adapter.wait_stopped(runtime, binding).await?;
-        if status.is_some() {
-            self.provider.ensure_log_projection(record, binding).await?;
-            self.provider
-                .wait_log_projection_drained(record, binding)
-                .await?;
-        } else {
-            self.provider
-                .wait_log_projection_stopped_after_owner_loss(record, binding)
-                .await?;
-        }
+        let exit_code = match status {
+            Some(status) => match self.provider.ensure_log_projection(record, binding).await {
+                Ok(()) => {
+                    self.provider
+                        .wait_log_projection_drained(record, binding)
+                        .await?;
+                    Some(exit_code(&status)?)
+                }
+                Err(ExecutionManagerError::Unavailable(message))
+                    if message.contains("exited before drain") =>
+                {
+                    // The projection worker died with the utility-VM/Host
+                    // owner. Do not restart it for drain theater, and do not
+                    // publish an exit code that Box cannot authenticate through
+                    // drained init output after owner loss.
+                    self.provider
+                        .wait_log_projection_stopped_after_owner_loss(record, binding)
+                        .await?;
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+            None => {
+                self.provider
+                    .wait_log_projection_stopped_after_owner_loss(record, binding)
+                    .await?;
+                None
+            }
+        };
         self.adapter
             .delete(&execution_id, generation, binding, DeleteMode::StoppedOnly)
             .await?;
@@ -1492,7 +1511,7 @@ impl OciLocalExecutionBackend {
         Ok(LocalExecutionObservation {
             state: ExecutionState::Stopped,
             handle: None,
-            exit_code: status.as_ref().map(exit_code).transpose()?,
+            exit_code,
         })
     }
 }

@@ -1275,6 +1275,7 @@ struct FakeBundleProvider {
     projection_drains: AtomicUsize,
     projection_owner_loss_stops: AtomicUsize,
     fail_projection: AtomicBool,
+    fail_projection_exited_before_drain: AtomicBool,
     invalid_console: AtomicBool,
     expected_snapshot_lower: Mutex<Option<std::path::PathBuf>>,
     snapshot_lower_observed: AtomicBool,
@@ -1365,6 +1366,11 @@ impl OciBundleProvider for FakeBundleProvider {
         _binding: &OciRuntimeBinding,
     ) -> ExecutionManagerResult<()> {
         self.projection_ensures.fetch_add(1, Ordering::SeqCst);
+        if self.fail_projection_exited_before_drain.load(Ordering::SeqCst) {
+            return Err(ExecutionManagerError::Unavailable(
+                "managed OCI log worker for fake generation 1 exited before drain; refusing to replay its Box log projection".to_string(),
+            ));
+        }
         if self.fail_projection.load(Ordering::SeqCst) {
             return Err(ExecutionManagerError::Unavailable(
                 "fake managed OCI log projection is unavailable".to_string(),
@@ -4216,6 +4222,51 @@ async fn reopened_backend_cleans_stopped_generation_without_inventing_exit_statu
         .as_ref()
         .and_then(|metadata| metadata.oci_runtime.as_ref())
         .is_none());
+}
+
+#[tokio::test]
+async fn reopened_backend_treats_undrained_projection_death_as_owner_loss() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let lease = first
+        .create_and_start(
+            request("projection-owner-loss", ExecutionIsolation::Sandbox),
+            &box_operation("projection-owner-loss-operation"),
+        )
+        .await
+        .expect("initial launch");
+    provider
+        .fail_projection_exited_before_drain
+        .store(true, Ordering::SeqCst);
+    // Wait evidence alone must not invent a product exit when the projection
+    // died with the owner before drain.
+    service.mark_stopped(
+        &lease.execution_id,
+        ExitStatus::exited(23).expect("exit status"),
+    );
+    let reopened = manager(&directory, endpoint, service.clone(), provider.clone());
+
+    let status = reopened
+        .inspect(&lease.execution_id)
+        .await
+        .expect("projection-owner-loss terminal inspection");
+    let record = persisted(&reopened, &lease.execution_id);
+
+    assert_eq!(status.state, ExecutionState::Stopped);
+    assert_eq!(record.exit_code, None);
+    assert_eq!(provider.projection_drains.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        provider.projection_owner_loss_stops.load(Ordering::SeqCst),
+        1
+    );
 }
 
 #[tokio::test]
