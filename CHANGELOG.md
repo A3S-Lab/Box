@@ -6,11 +6,34 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Linux qualification-only MicroVM OCI vertical-slice gate:
+  `linux-kvm-oci-qualification` example plus
+  `scripts/linux-kvm-oci-qualification.sh`. Schema
+  `a3s.box.linux-kvm-oci-qualification.v2` exercises create replay, Box
+  manager reopen, start, exact exit status `23`, delete replay, residual path
+  cleanup, and—when service restart inputs are supplied—Host Service
+  SIGKILL/restart while a generation is running with stopped-only reconcile
+  (no invented exit status). The local runner starts
+  `box-kvm-qualification-service` itself. Observation-only; not a fresh-host
+  or production-routing claim.
+- Linux qualification-only MicroVM OCI opt-in through
+  `A3S_BOX_OCI_MIGRATION=microvm|all` plus an explicit
+  `A3S_BOX_OCI_KVM_ENDPOINT` Unix socket pointing at OCI Runtime's
+  `box-kvm-qualification-service`. The public KVM probe stays non-registerable;
+  this path reuses the portable DedicatedVm bundle provider already used by
+  WHPX and is not a production claim.
 - Windows WHPX docs now include a first-principles acceptance matrix index
   (`WIN-HOST` / `WIN-POS` / `WIN-NEG` / `WIN-SLO`) tied to issues #252, #255,
   and #257.
 - Windows CLI coverage for bridge/network-create/pool-start/container-update
   fail-closed negatives (#260).
+
+### Changed
+
+- Bump the pinned OCI Runtime revision to
+  `402949c2d73cabdf5b959113806db9108e918cf1` so Box tracks the Guest Agent
+  portable-rootfs FD-root fix plus retained KVM lifecycle/recovery/soak/
+  create-reopen evidence on that mainline.
 
 ### Fixed
 
@@ -55,6 +78,18 @@ All notable changes to A3S Box will be documented in this file.
   cannot hide bundled libkrun. Crash-recovery / inspect endpoint checks accept
   real-UID-owned `runtime.sock` under effective-root controllers (same contract
   as private socket readiness).
+- Terminal reconcile after utility-VM/Host owner loss no longer fails closed
+  when the managed OCI log projection exits before drain. Box treats that as
+  stopped-only owner-loss recovery and refuses to invent an exit status from
+  undrained Wait evidence.
+- Linux/macOS portable MicroVM OCI specs no longer request guest
+  `a3s.oci.rootfs-metadata.v1` ownership replay. Same-uid virtio-fs retains
+  Host share-root UIDs and refuses guest `chown`; Windows WHPX still opts into
+  the portable metadata contract. Bundle publish writes the metadata file only
+  when that annotation is present. First-principles unit tests now lock the
+  annotation gate: absent or non-contract annotation values omit the file;
+  the exact schema value publishes and consumes the Box image manifest on the
+  handoff copy only.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
@@ -88,7 +123,7 @@ All notable changes to A3S Box will be documented in this file.
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
-- Bump the pinned OCI Runtime revision to `0f6908e5` so rootless durable
+- Bump the pinned OCI Runtime revision to `402949c2` so rootless durable
   owners skip detached `open_tree` RO binds after device-policy drop (Box R17
   mounts profile) while host-service owners keep the previous clone path.
 - Bump the pinned OCI Runtime revision to `fb517c6f` so

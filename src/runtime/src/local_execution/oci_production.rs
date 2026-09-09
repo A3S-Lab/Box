@@ -29,23 +29,116 @@ pub struct NativeLinuxOciBundleProvider {
 /// Qualification-only producer for OCI Runtime's Windows dedicated-VM service.
 #[derive(Clone)]
 pub struct WindowsWhpxOciBundleProvider {
+    inner: DedicatedVmOciBundleProvider,
+}
+
+/// Qualification-only producer for OCI Runtime's Linux KVM dedicated-VM service.
+#[derive(Clone)]
+pub struct LinuxKvmOciBundleProvider {
+    inner: DedicatedVmOciBundleProvider,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DedicatedVmOciProfile {
+    WindowsWhpx,
+    LinuxKvm,
+}
+
+impl DedicatedVmOciProfile {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::WindowsWhpx => "WHPX",
+            Self::LinuxKvm => "KVM",
+        }
+    }
+
+    const fn host_supported(self) -> bool {
+        match self {
+            Self::WindowsWhpx => cfg!(all(target_os = "windows", target_arch = "x86_64")),
+            Self::LinuxKvm => {
+                cfg!(all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))
+            }
+        }
+    }
+
+    fn host_requirement(self) -> &'static str {
+        match self {
+            Self::WindowsWhpx => "Windows x86_64",
+            Self::LinuxKvm => "Linux x86_64 or aarch64",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DedicatedVmOciBundleProvider {
     preparer: VmLocalExecutionBackend,
     runtime_root: PathBuf,
+    profile: DedicatedVmOciProfile,
 }
 
 impl WindowsWhpxOciBundleProvider {
     pub fn new(home_dir: impl Into<PathBuf>, runtime_root: impl Into<PathBuf>) -> Self {
         Self {
-            preparer: VmLocalExecutionBackend::new(home_dir),
-            runtime_root: runtime_root.into(),
+            inner: DedicatedVmOciBundleProvider::new(
+                home_dir,
+                runtime_root,
+                DedicatedVmOciProfile::WindowsWhpx,
+            ),
         }
     }
 
     pub fn runtime_root(&self) -> &Path {
-        &self.runtime_root
+        self.inner.runtime_root()
     }
 
     pub fn with_pull_progress_fn(mut self, pull_progress_fn: crate::PullProgressFn) -> Self {
+        self.inner = self.inner.with_pull_progress_fn(pull_progress_fn);
+        self
+    }
+}
+
+impl LinuxKvmOciBundleProvider {
+    pub fn new(home_dir: impl Into<PathBuf>, runtime_root: impl Into<PathBuf>) -> Self {
+        Self {
+            inner: DedicatedVmOciBundleProvider::new(
+                home_dir,
+                runtime_root,
+                DedicatedVmOciProfile::LinuxKvm,
+            ),
+        }
+    }
+
+    pub fn runtime_root(&self) -> &Path {
+        self.inner.runtime_root()
+    }
+
+    pub fn with_pull_progress_fn(mut self, pull_progress_fn: crate::PullProgressFn) -> Self {
+        self.inner = self.inner.with_pull_progress_fn(pull_progress_fn);
+        self
+    }
+}
+
+impl DedicatedVmOciBundleProvider {
+    fn new(
+        home_dir: impl Into<PathBuf>,
+        runtime_root: impl Into<PathBuf>,
+        profile: DedicatedVmOciProfile,
+    ) -> Self {
+        Self {
+            preparer: VmLocalExecutionBackend::new(home_dir),
+            runtime_root: runtime_root.into(),
+            profile,
+        }
+    }
+
+    fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    fn with_pull_progress_fn(mut self, pull_progress_fn: crate::PullProgressFn) -> Self {
         self.preparer = self.preparer.with_pull_progress_fn(pull_progress_fn);
         self
     }
@@ -229,17 +322,122 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         record: &BoxRecord,
         context: &OciBundlePreparationContext,
     ) -> ExecutionManagerResult<()> {
-        if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-            return Err(ExecutionManagerError::Unavailable(
-                "Box/WHPX OCI qualification requires Windows x86_64".to_string(),
-            ));
+        self.inner.preflight(record, context)
+    }
+
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution> {
+        self.inner.prepare(record, context).await
+    }
+
+    async fn cleanup(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.inner.cleanup(record).await
+    }
+
+    async fn ensure_log_projection(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner.ensure_log_projection(record, binding).await
+    }
+
+    async fn wait_log_projection_drained(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner
+            .wait_log_projection_drained(record, binding)
+            .await
+    }
+
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner
+            .wait_log_projection_stopped_after_owner_loss(record, binding)
+            .await
+    }
+}
+
+#[async_trait]
+impl OciBundleProvider for LinuxKvmOciBundleProvider {
+    fn preflight(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<()> {
+        self.inner.preflight(record, context)
+    }
+
+    async fn prepare(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<OciPreparedExecution> {
+        self.inner.prepare(record, context).await
+    }
+
+    async fn cleanup(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.inner.cleanup(record).await
+    }
+
+    async fn ensure_log_projection(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner.ensure_log_projection(record, binding).await
+    }
+
+    async fn wait_log_projection_drained(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner
+            .wait_log_projection_drained(record, binding)
+            .await
+    }
+
+    async fn wait_log_projection_stopped_after_owner_loss(
+        &self,
+        record: &BoxRecord,
+        binding: &super::OciRuntimeBinding,
+    ) -> ExecutionManagerResult<()> {
+        self.inner
+            .wait_log_projection_stopped_after_owner_loss(record, binding)
+            .await
+    }
+}
+
+#[async_trait]
+impl OciBundleProvider for DedicatedVmOciBundleProvider {
+    fn preflight(
+        &self,
+        record: &BoxRecord,
+        context: &OciBundlePreparationContext,
+    ) -> ExecutionManagerResult<()> {
+        if !self.profile.host_supported() {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "Box/{} OCI qualification requires {}",
+                self.profile.label(),
+                self.profile.host_requirement()
+            )));
         }
         if record.isolation != ExecutionIsolation::Microvm
             || !matches!(context.isolation(), IsolationRequest::DedicatedVm)
         {
-            return Err(ExecutionManagerError::InvalidRequest(
-                "Box/WHPX OCI qualification requires dedicated MicroVM isolation".to_string(),
-            ));
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "Box/{} OCI qualification requires dedicated MicroVM isolation",
+                self.profile.label()
+            )));
         }
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {
             ExecutionManagerError::Internal(format!(
@@ -256,9 +454,9 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
                 record.id
             )));
         }
-        validate_whpx_qualification(record)?;
+        validate_dedicated_vm_qualification(record, self.profile)?;
         context.runtime_bundle_handoff_directory(&self.runtime_root)?;
-        validate_runtime_root(&self.runtime_root)
+        validate_runtime_root(&self.runtime_root, self.profile)
     }
 
     async fn prepare(
@@ -278,11 +476,13 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         let prepared = manager
             .prepare_runtime_owned_microvm_bundle(&metadata.plan, &bundle_directory)
             .await
-            .map_err(|error| whpx_preparation_error("prepare bundle", error))?;
+            .map_err(|error| {
+                dedicated_vm_preparation_error(self.profile, "prepare bundle", error)
+            })?;
         let bundle = match OciBundle::load(&prepared.bundle_dir).await {
             Ok(bundle) => bundle,
             Err(error) => {
-                return Err(cleanup_after_whpx_prepare_failure(
+                return Err(cleanup_after_dedicated_vm_prepare_failure(
                     &manager,
                     &bundle_directory,
                     format!("failed to load the generated portable OCI bundle: {error}"),
@@ -302,7 +502,7 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         let attachments = match CreateAttachments::from_bundle(&bundle, io) {
             Ok(attachments) => attachments,
             Err(error) => {
-                return Err(cleanup_after_whpx_prepare_failure(
+                return Err(cleanup_after_dedicated_vm_prepare_failure(
                     &manager,
                     &bundle_directory,
                     format!("failed to derive portable OCI bundle attachments: {error}"),
@@ -316,7 +516,7 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         ) {
             Ok(result) => result,
             Err(error) => {
-                return Err(cleanup_after_whpx_prepare_failure(
+                return Err(cleanup_after_dedicated_vm_prepare_failure(
                     &manager,
                     &bundle_directory,
                     format!("failed to validate portable OCI bundle attachments: {error}"),
@@ -326,7 +526,7 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         result = match result.with_runtime_bundle_handoff(context, &self.runtime_root) {
             Ok(result) => result,
             Err(error) => {
-                return Err(cleanup_after_whpx_prepare_failure(
+                return Err(cleanup_after_dedicated_vm_prepare_failure(
                     &manager,
                     &bundle_directory,
                     format!("failed to bind portable OCI bundle handoff: {error}"),
@@ -341,7 +541,7 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
         let manager = self.preparer.new_oci_preparation_manager(record)?;
         manager
             .cleanup_runtime_owned_microvm_bundle()
-            .map_err(|error| whpx_preparation_error("cleanup bundle", error))
+            .map_err(|error| dedicated_vm_preparation_error(self.profile, "cleanup bundle", error))
     }
 
     async fn ensure_log_projection(
@@ -369,7 +569,10 @@ impl OciBundleProvider for WindowsWhpxOciBundleProvider {
     }
 }
 
-fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()> {
+fn validate_dedicated_vm_qualification(
+    record: &BoxRecord,
+    profile: DedicatedVmOciProfile,
+) -> ExecutionManagerResult<()> {
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
         ExecutionManagerError::Internal(format!(
             "execution {} has no managed lifecycle metadata",
@@ -380,17 +583,22 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
     let defaults = ResourceConfig::default();
     if config.resources.vcpus != 1 || config.resources.memory_mb != 512 {
         return Err(unqualified(
-            "the fixed WHPX profile requires exactly 1 vCPU and 512 MiB of memory",
+            profile,
+            "the fixed profile requires exactly 1 vCPU and 512 MiB of memory",
         ));
     }
     if config.resources.disk_mb != defaults.disk_mb || config.resources.timeout != defaults.timeout
     {
         return Err(unqualified(
-            "custom disk size or lifetime timeout is not qualified for the WHPX OCI profile",
+            profile,
+            "custom disk size or lifetime timeout is not qualified for this OCI profile",
         ));
     }
     if config.tee != TeeConfig::None {
-        return Err(unqualified("TEE is not qualified for the WHPX OCI profile"));
+        return Err(unqualified(
+            profile,
+            "TEE is not qualified for this OCI profile",
+        ));
     }
     if !config.workspace.as_os_str().is_empty()
         || !config.volumes.is_empty()
@@ -399,7 +607,8 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
         || metadata.request.policy.managed_secret_root.is_some()
     {
         return Err(unqualified(
-            "workspace, bind, named, and secret mounts are not qualified for the WHPX OCI profile",
+            profile,
+            "workspace, bind, named, and secret mounts are not qualified for this OCI profile",
         ));
     }
     if !matches!(config.network, NetworkMode::None)
@@ -409,7 +618,8 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
         || !config.add_hosts.is_empty()
     {
         return Err(unqualified(
-            "the WHPX OCI profile requires network=none and no network customization",
+            profile,
+            "this OCI profile requires network=none and no network customization",
         ));
     }
     if config.pool.enabled
@@ -422,7 +632,8 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
         || metadata.request.rootfs_snapshot_id.is_some()
     {
         return Err(unqualified(
-            "pool, deferred-main, KSM, and Snapshot modes are not qualified for the WHPX OCI profile",
+            profile,
+            "pool, deferred-main, KSM, and Snapshot modes are not qualified for this OCI profile",
         ));
     }
     if !config.tmpfs.is_empty()
@@ -437,7 +648,8 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
         || config.persistent
     {
         return Err(unqualified(
-            "custom mounts, controls, privileges, sidecars, and persistence are not qualified for the WHPX OCI profile",
+            profile,
+            "custom mounts, controls, privileges, sidecars, and persistence are not qualified for this OCI profile",
         ));
     }
     let policy = &metadata.request.policy;
@@ -449,41 +661,68 @@ fn validate_whpx_qualification(record: &BoxRecord) -> ExecutionManagerResult<()>
         || policy.oom_score_adj.is_some()
     {
         return Err(unqualified(
-            "init, device, GPU, shared-memory, and OOM overrides are not qualified for the WHPX OCI profile",
+            profile,
+            "init, device, GPU, shared-memory, and OOM overrides are not qualified for this OCI profile",
         ));
     }
     if policy.platform.as_deref().is_some_and(|platform| {
-        !matches!(
-            platform.trim().to_ascii_lowercase().as_str(),
-            "linux/amd64" | "linux/x86_64"
-        )
+        !platform_supported(profile, platform.trim().to_ascii_lowercase().as_str())
     }) {
         return Err(unqualified(
-            "the WHPX OCI profile supports only Linux amd64 images",
+            profile,
+            match profile {
+                DedicatedVmOciProfile::WindowsWhpx => {
+                    "this OCI profile supports only Linux amd64 images"
+                }
+                DedicatedVmOciProfile::LinuxKvm => {
+                    "this OCI profile supports only Linux amd64 or arm64 images"
+                }
+            },
         ));
     }
     if record.cpus != 1 || record.memory_mb != 512 {
-        return Err(ExecutionManagerError::Internal(
-            "Box record resources drifted from the fixed WHPX qualification profile".to_string(),
-        ));
+        return Err(ExecutionManagerError::Internal(format!(
+            "Box record resources drifted from the fixed {} qualification profile",
+            profile.label()
+        )));
     }
     Ok(())
 }
 
-fn unqualified(message: &str) -> ExecutionManagerError {
-    ExecutionManagerError::InvalidRequest(format!("Box/WHPX OCI qualification rejected: {message}"))
+fn unqualified(profile: DedicatedVmOciProfile, message: &str) -> ExecutionManagerError {
+    ExecutionManagerError::InvalidRequest(format!(
+        "Box/{} OCI qualification rejected: {message}",
+        profile.label()
+    ))
 }
 
-fn validate_runtime_root(path: &Path) -> ExecutionManagerResult<()> {
+fn platform_supported(profile: DedicatedVmOciProfile, platform: &str) -> bool {
+    match profile {
+        DedicatedVmOciProfile::WindowsWhpx => {
+            matches!(platform, "linux/amd64" | "linux/x86_64")
+        }
+        DedicatedVmOciProfile::LinuxKvm => matches!(
+            platform,
+            "linux/amd64" | "linux/x86_64" | "linux/arm64" | "linux/aarch64"
+        ),
+    }
+}
+
+fn validate_runtime_root(
+    path: &Path,
+    profile: DedicatedVmOciProfile,
+) -> ExecutionManagerResult<()> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
-            "failed to inspect WHPX runtime root {}: {error}",
+            "failed to inspect {} runtime root {}: {error}",
+            profile.label(),
             path.display()
         ))
     })?;
     if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
         return Err(ExecutionManagerError::InvalidRequest(format!(
-            "WHPX runtime root is not a plain directory: {}",
+            "{} runtime root is not a plain directory: {}",
+            profile.label(),
             path.display()
         )));
     }
@@ -502,16 +741,21 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn whpx_preparation_error(action: &str, error: BoxError) -> ExecutionManagerError {
+fn dedicated_vm_preparation_error(
+    profile: DedicatedVmOciProfile,
+    action: &str,
+    error: BoxError,
+) -> ExecutionManagerError {
     match error {
         BoxError::ConfigError(message) => ExecutionManagerError::InvalidRequest(message),
-        error => {
-            ExecutionManagerError::Unavailable(format!("Box/WHPX OCI {action} failed: {error}"))
-        }
+        error => ExecutionManagerError::Unavailable(format!(
+            "Box/{} OCI {action} failed: {error}",
+            profile.label()
+        )),
     }
 }
 
-fn cleanup_after_whpx_prepare_failure(
+fn cleanup_after_dedicated_vm_prepare_failure(
     manager: &crate::VmManager,
     bundle_directory: &Path,
     message: String,

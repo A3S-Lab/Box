@@ -12,8 +12,9 @@ use a3s_box_core::rootfs_metadata::{
 use a3s_box_core::{BoxError, Result};
 use a3s_oci_sdk::{
     PortableRootfsEntryKind, PortableRootfsMetadataEntry, PortableRootfsMetadataManifest,
-    PORTABLE_ROOTFS_METADATA_FILE, PORTABLE_ROOTFS_METADATA_MAX_BYTES,
-    PORTABLE_ROOTFS_METADATA_MAX_ENTRIES,
+    PORTABLE_ROOTFS_METADATA_ANNOTATION, PORTABLE_ROOTFS_METADATA_FILE,
+    PORTABLE_ROOTFS_METADATA_MAX_BYTES, PORTABLE_ROOTFS_METADATA_MAX_ENTRIES,
+    PORTABLE_ROOTFS_METADATA_SCHEMA_V1,
 };
 use base64::Engine as _;
 use oci_spec::runtime::Spec;
@@ -124,18 +125,22 @@ pub(crate) fn publish_portable_bundle(
         ))
     })?;
     std::fs::create_dir_all(operation_directory).map_err(BoxError::IoError)?;
+    ensure_private_handoff_ancestors(operation_directory)?;
     validate_plain_directory(operation_directory, "portable OCI operation directory")?;
     ensure_absent(bundle_directory, "portable OCI bundle")?;
 
     let pending = operation_directory.join("bundle.pending");
     ensure_absent(&pending, "portable OCI bundle temporary")?;
     std::fs::create_dir(&pending).map_err(BoxError::IoError)?;
+    set_private_directory_mode(&pending)?;
 
     let publish = (|| -> Result<()> {
         let rootfs = pending.join("rootfs");
         crate::cache::layer_cache::copy_dir_recursive(source_rootfs, &rootfs)?;
         make_owner_writable(&rootfs)?;
-        publish_portable_rootfs_metadata(&rootfs)?;
+        if portable_rootfs_metadata_requested(spec) {
+            publish_portable_rootfs_metadata(&rootfs)?;
+        }
 
         let config = pending.join("config.json");
         let encoded = serde_json::to_vec_pretty(spec)
@@ -151,6 +156,7 @@ pub(crate) fn publish_portable_bundle(
         sync_directory(&pending).map_err(BoxError::IoError)?;
 
         std::fs::rename(&pending, bundle_directory).map_err(BoxError::IoError)?;
+        set_private_directory_mode(bundle_directory)?;
         sync_directory(operation_directory).map_err(BoxError::IoError)
     })();
 
@@ -159,6 +165,13 @@ pub(crate) fn publish_portable_bundle(
         return Err(error);
     }
     Ok(())
+}
+
+fn portable_rootfs_metadata_requested(spec: &Spec) -> bool {
+    spec.annotations().as_ref().is_some_and(|annotations| {
+        annotations.get(PORTABLE_ROOTFS_METADATA_ANNOTATION)
+            == Some(&PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string())
+    })
 }
 
 fn encode_portable_manifest(source: RootfsMetadataManifest) -> Result<Vec<u8>> {
@@ -291,6 +304,40 @@ fn validate_plain_directory(path: &Path, label: &str) -> Result<()> {
             "{label} is not a plain directory: {}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// OCI Runtime accepts only same-UID `0700` bundle handoff directories on Unix.
+fn set_private_directory_mode(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        validate_plain_directory(path, "portable OCI private directory")?;
+        let mut permissions = std::fs::symlink_metadata(path)
+            .map_err(BoxError::IoError)?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).map_err(BoxError::IoError)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+/// Tighten Box-created handoff ancestors to the runtime's private-directory
+/// contract without touching the runtime-owned `bundle-handoffs` root itself.
+fn ensure_private_handoff_ancestors(operation_directory: &Path) -> Result<()> {
+    set_private_directory_mode(operation_directory)?;
+    if let Some(container_directory) = operation_directory.parent() {
+        if container_directory
+            .file_name()
+            .is_some_and(|name| name != "bundle-handoffs")
+        {
+            set_private_directory_mode(container_directory)?;
+        }
     }
     Ok(())
 }
@@ -560,5 +607,127 @@ mod tests {
             .path()
             .join(PORTABLE_ROOTFS_METADATA_FILE)
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_portable_bundle_uses_private_directory_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(
+            &source,
+            vec![
+                entry(b".", RootfsEntryKind::Directory),
+                entry(b"./bin", RootfsEntryKind::Directory),
+            ],
+        );
+        let bundle = temporary
+            .path()
+            .join("handoffs")
+            .join("box-1")
+            .join("create-1")
+            .join("bundle");
+        let spec = Spec::default();
+
+        publish_portable_bundle(&source, &spec, &bundle).unwrap();
+
+        let mode = std::fs::symlink_metadata(&bundle).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let operation_mode = std::fs::symlink_metadata(bundle.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(operation_mode, 0o700);
+        let container_mode = std::fs::symlink_metadata(bundle.parent().unwrap().parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(container_mode, 0o700);
+        assert!(bundle.join("config.json").is_file());
+        assert!(bundle.join("rootfs").is_dir());
+        assert!(
+            !bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists(),
+            "default Spec must not publish portable rootfs metadata"
+        );
+    }
+
+    fn portable_bundle_fixture(temporary: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+        let source = temporary.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(
+            &source,
+            vec![
+                entry(b".", RootfsEntryKind::Directory),
+                entry(b"./bin", RootfsEntryKind::Directory),
+            ],
+        );
+        let bundle = temporary
+            .path()
+            .join("handoffs")
+            .join("box-1")
+            .join("create-1")
+            .join("bundle");
+        (source, bundle)
+    }
+
+    fn spec_requesting_portable_rootfs_metadata() -> Spec {
+        use std::collections::HashMap;
+
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+            PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string(),
+        );
+        oci_spec::runtime::SpecBuilder::default()
+            .annotations(annotations)
+            .build()
+            .expect("portable metadata Spec")
+    }
+
+    #[test]
+    fn publish_portable_bundle_writes_metadata_only_when_annotation_requests_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+
+        publish_portable_bundle(&source, &Spec::default(), &bundle).unwrap();
+        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+        publish_portable_bundle(&source, &spec_requesting_portable_rootfs_metadata(), &bundle)
+            .unwrap();
+        assert!(bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).is_file());
+        assert!(!bundle
+            .join("rootfs")
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .exists());
+        assert!(source
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .is_file());
+    }
+
+    #[test]
+    fn publish_portable_bundle_ignores_non_contract_metadata_annotation_values() {
+        use std::collections::HashMap;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+            "a3s.oci.rootfs-metadata.v0".to_string(),
+        );
+        let spec = oci_spec::runtime::SpecBuilder::default()
+            .annotations(annotations)
+            .build()
+            .unwrap();
+
+        publish_portable_bundle(&source, &spec, &bundle).unwrap();
+        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
     }
 }

@@ -58,9 +58,13 @@ never retried on the Box backend. On Linux, the CLI, machine bridge, and the
 async Rust SDK constructor can now opt new Sandbox records into the production
 bundle provider and long-lived pinned runtime owner with
 `A3S_BOX_OCI_MIGRATION=sandbox`. With the setting absent, current behavior is
-unchanged. Windows x86_64 also has an explicit qualification-only
-`microvm`/`all` composition for the externally launched OCI Runtime WHPX
-service; it is not enabled by default and is not yet a production claim.
+unchanged. Linux also has an explicit qualification-only `microvm`/`all`
+composition for the externally launched OCI Runtime
+`box-kvm-qualification-service`; it requires `A3S_BOX_OCI_KVM_ENDPOINT`, is not
+enabled by default, and is not yet a production claim. Windows x86_64 likewise
+has an explicit qualification-only `microvm`/`all` composition for the
+externally launched OCI Runtime WHPX service; it is not enabled by default and
+is not yet a production claim.
 
 > **Looking for a lightweight Agent sandbox?** See [`a3s-sandbox`](https://github.com/A3S-Lab/Sandbox).
 > That project focuses on lightweight cross-platform command sandboxing;
@@ -256,6 +260,57 @@ Rust applications select the same path with
 `from_home`, and `with_paths` constructors retain legacy behavior for API
 compatibility.
 
+### Exercise the qualification-only KVM handoff on Linux
+
+Start the pinned OCI Runtime `box-kvm-qualification-service` with its private
+root, isolated shim, and immutable system-image manifest. Point Box at the
+driver runtime directory (`<root>/runtime`) for handoffs and at the explicit
+Unix socket (`<root>/runtime.sock`):
+
+```bash
+a3s-oci box-kvm-qualification-service \
+  --root /run/a3s/oci-kvm-box \
+  --shim /absolute/path/to/isolated-libkrun-shim \
+  --system-image-manifest /absolute/path/to/system-image.json
+
+export A3S_BOX_OCI_MIGRATION=microvm
+export A3S_BOX_OCI_HOST_ROOT=/run/a3s/oci-kvm-box/runtime
+export A3S_BOX_OCI_KVM_ENDPOINT=/run/a3s/oci-kvm-box/runtime.sock
+
+a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
+```
+
+The endpoint must be supplied explicitly so the experimental KVM service cannot
+activate by accident. The profile matches the WHPX qualification constraints:
+one vCPU, 512 MiB, `network=none`, and no TEE, mounts, volumes, devices,
+sidecars, Snapshot, or persistence. Rust applications can construct
+`LinuxKvmOciMigrationConfig` explicitly or use
+`A3sBoxClient::with_configured_paths(...).await`.
+
+For the exact public-lifecycle vertical slice (create replay, Box-manager
+reopen, start, exact exit status, delete, residual cleanup, plus Host Service
+SIGKILL/restart while a generation is running), build and run:
+
+```bash
+cargo build -p a3s-box-runtime --example linux-kvm-oci-qualification --release
+# place the example beside a3s-box, then:
+./scripts/linux-kvm-oci-qualification.sh \
+  --box-bin /absolute/path/to/bin \
+  --a3s-oci /absolute/path/to/a3s-oci \
+  --service-root /run/a3s/oci-kvm-box \
+  --shim /absolute/path/to/isolated-libkrun-shim \
+  --system-image-manifest /absolute/path/to/system-image.json \
+  --image alpine:3.20 \
+  --report /absolute/path/to/report.json \
+  --home /tmp/a3s-box-kvm-oci-qualification-home
+```
+
+The report schema is `a3s.box.linux-kvm-oci-qualification.v2`. The runner
+starts `box-kvm-qualification-service` and passes service restart inputs so
+phase 2 can SIGKILL/restart the Host Service. This remains qualification-only
+evidence; it does not promote the public KVM candidate or change default
+MicroVM routing.
+
 ### Exercise the qualification-only WHPX handoff on Windows
 
 Start the pinned OCI Runtime `box-whpx-qualification-service` with its shim,
@@ -323,8 +378,14 @@ support or any unqualified option fails before image preparation. In addition,
 endpoint must be supplied explicitly so this experimental service can never
 activate by accident.
 
-Current Linux opt-in limits are intentional: only new Sandbox reservations are
-routed there, and `all`/MicroVM migration is rejected on Linux. Image-declared
+Current Linux opt-in covers new Sandbox reservations through the long-lived
+Native Linux owner, plus an explicit qualification-only MicroVM path through
+`box-kvm-qualification-service` when `A3S_BOX_OCI_KVM_ENDPOINT` is set. On that
+Linux/macOS same-uid virtio-fs path, Box does not request guest portable
+rootfs-metadata ownership replay: the share retains Host UIDs and guest
+`chown` is refused by design. Windows WHPX still converts image metadata to
+`a3s.oci.rootfs-metadata.v1` so the guest can restore Linux ownership that
+NTFS cannot store. Image-declared
 anonymous volumes are planned from normalized image metadata after capability
 preflight, persisted in the initial Box reservation, and atomically claimed by
 the exact execution during bundle preparation. Recovery and removal therefore

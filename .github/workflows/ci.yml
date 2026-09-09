@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 0f6908e5bb01cfe0b056509e4cc30789f3c6a987
+  A3S_OCI_RUNTIME_REV: 402949c2d73cabdf5b959113806db9108e918cf1
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────

@@ -195,8 +195,11 @@ startup across processes, records the exact PID start identity and pinned
 runtime/agent paths plus SHA-256 digests, refuses an unowned socket or live
 artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
 bridge and async Rust SDK constructor honor the explicit
-`A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
-startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
+`A3S_BOX_OCI_MIGRATION=sandbox` Sandbox opt-in and the qualification-only
+`A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path that requires an explicit
+`A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`. No setting means
+no owner probe or startup and preserves the legacy route. Core lifecycle,
+run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
 lanes now pass the Rust, Python, TypeScript, and Go Sandbox suites through this
@@ -305,6 +308,18 @@ later gates.
     profile.
   - [x] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
     delete gate and retain machine-readable evidence in blocking CI.
+- [x] Add the Linux KVM qualification-only vertical-slice executable and local
+  runner (`linux-kvm-oci-qualification`,
+  `scripts/linux-kvm-oci-qualification.sh`) that prove create replay, Box
+  manager reopen, start, exact exit status, delete replay, residual cleanup,
+  and Host Service SIGKILL/restart (stopped-only reconcile, no invented exit
+  status) against `box-kvm-qualification-service` when service restart inputs
+  are available. Existing-host WSL2 evidence on Box `e0fd63db` (with OCI pin
+  `01786abf`) retained report SHA-256
+  `87191a0d4334866d3a06283ff615c7342479e28b23f8f95a5b91969a9a1d6d31` for
+  schema `a3s.box.linux-kvm-oci-qualification.v2` (exact exit `23` plus Host
+  Service restart → stopped-only, no invented exit). This does not close
+  fresh-host promotion, AArch64 promotion, or default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
