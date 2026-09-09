@@ -138,18 +138,51 @@ pub(crate) fn start_log_worker(
     })?;
     let stdout = open_log(&launch.log_worker_log_path)?;
     let stderr = stdout.try_clone().map_err(BoxError::IoError)?;
-    let mut worker = Command::new(&launch.log_worker_path)
+    let mut command = Command::new(&launch.log_worker_path);
+    command
         .arg("--sandbox-log-worker-config")
         .arg(config)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!("Failed to start Sandbox log worker: {error}"),
-            hint: None,
-        })?;
+        .stderr(Stdio::from(stderr));
+    // Packaged `a3s-box-shim` resolves libkrun via `$ORIGIN/../lib`. Under
+    // setpriv (`euid=0`, `ruid≠0`) the child inherits mismatched IDs, so the
+    // dynamic linker enters secure-execution mode, ignores `LD_LIBRARY_PATH`,
+    // and can fail to open the bundled libkrun (`ENOENT` / exit 127). Clear the
+    // mismatch before exec and keep the shim lib dir first on the search path.
+    if let Some(lib_dir) = launch
+        .log_worker_path
+        .parent()
+        .map(|bin| bin.join("lib"))
+        .filter(|path| path.is_dir())
+    {
+        let mut paths = vec![lib_dir];
+        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("LD_LIBRARY_PATH", joined);
+        }
+    }
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setresgid(0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setresuid(0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut worker = command.spawn().map_err(|error| BoxError::BoxBootError {
+        message: format!("Failed to start Sandbox log worker: {error}"),
+        hint: None,
+    })?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {

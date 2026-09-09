@@ -635,8 +635,22 @@ where
     if euid != 0 || ruid == 0 {
         return Ok(f());
     }
+    // Without PR_SET_KEEPCAPS, seteuid(non-root) clears the permitted capability
+    // set permanently — even after seteuid(0) the process has no CAP_SYS_ADMIN
+    // for overlay mounts or network relays.
+    // SAFETY: prctl capability-keep flag has no pointer arguments.
+    if unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to retain capabilities for Sandbox SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
     // SAFETY: seteuid/setegid use the retained saved IDs from setpriv / setuid.
     if unsafe { libc::setegid(rgid) } != 0 {
+        let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
         return Err(BoxError::BoxBootError {
             message: format!(
                 "failed to match Sandbox controller egid {rgid} for SDK peer auth: {}",
@@ -647,6 +661,7 @@ where
     }
     if unsafe { libc::seteuid(ruid) } != 0 {
         let _ = unsafe { libc::setegid(egid) };
+        let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
         return Err(BoxError::BoxBootError {
             message: format!(
                 "failed to match Sandbox controller euid {ruid} for SDK peer auth: {}",
@@ -656,8 +671,9 @@ where
         });
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    let restore_gid = unsafe { libc::setegid(0) };
     let restore_uid = unsafe { libc::seteuid(0) };
+    let restore_gid = unsafe { libc::setegid(0) };
+    let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
     if restore_gid != 0 || restore_uid != 0 {
         return Err(BoxError::BoxBootError {
             message: format!(
@@ -754,8 +770,9 @@ fn chown_path_to_ids(path: &Path, (uid, gid): (u32, u32)) -> Result<()> {
             path.display()
         ))
     })?;
-    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
-    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    // SAFETY: lchown takes a NUL-terminated path and does not follow symlinks,
+    // so a rootfs link cannot reassign host packaging paths such as bin/lib.
+    let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if rc != 0 {
         return Err(BoxError::BoxBootError {
             message: format!(
