@@ -66,9 +66,13 @@ pub use oci_backend::{
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 #[cfg(feature = "vm")]
-pub use oci_migration::{NativeLinuxOciMigrationConfig, WindowsWhpxOciMigrationConfig};
+pub use oci_migration::{
+    LinuxKvmOciMigrationConfig, NativeLinuxOciMigrationConfig, WindowsWhpxOciMigrationConfig,
+};
 #[cfg(feature = "vm")]
-pub use oci_production::{NativeLinuxOciBundleProvider, WindowsWhpxOciBundleProvider};
+pub use oci_production::{
+    LinuxKvmOciBundleProvider, NativeLinuxOciBundleProvider, WindowsWhpxOciBundleProvider,
+};
 use record::{build_managed_record, status_from_record};
 pub use router::{LocalExecutionBackendRouter, OciMigrationPolicy};
 use store::RuntimeUpdate;
