@@ -31,6 +31,14 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
+  `3cea73d7fe6c53469ceb73ca8876e175255c3fcb` (includes containerd DedicatedVm
+  bundle handoff and Linux KVM containerd vertical-slice gate). Re-ran the
+  existing-host WSL2 Linux KVM OCI qualification v2 against that pin: exact
+  exit `23`, Host Service restart → stopped-only reconcile, report SHA-256
+  `832e2d04f06197cfd7e724eee769f061af9f8f80a5ae0b60aaeabf687f5c7dfd`.
+  Observation-only; does not close fresh-host, AArch64, or default MicroVM
+  cutover.
+- Bump the pinned OCI Runtime revision to
   `402949c2d73cabdf5b959113806db9108e918cf1` so Box tracks the Guest Agent
   portable-rootfs FD-root fix plus retained KVM lifecycle/recovery/soak/
   create-reopen evidence on that mainline.
