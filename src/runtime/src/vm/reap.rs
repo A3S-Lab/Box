@@ -284,11 +284,17 @@ fn verify_recorded_a3s_oci_owner(
             "Cannot resolve recorded A3S OCI runtime for {box_id}: {error}"
         ))
     })?;
-    if runtime_path != record.runtime_path
-        || std::fs::read_link(format!("/proc/{owner_pid}/exe"))
-            .ok()
-            .as_deref()
-            != Some(runtime_path.as_path())
+    let owner_exe = std::fs::read_link(format!("/proc/{owner_pid}/exe")).map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot resolve A3S OCI owner executable for {box_id}: {error}"
+        ))
+    })?;
+    // Sandbox CI/production may exec `a3s-box-sandbox-oci-launcher` (same bytes
+    // as a3s-oci) while the record stores the certified runtime path. Accept
+    // either exact path match or identical artifact digest.
+    if owner_exe != runtime_path
+        && (runtime_path != record.runtime_path
+            || sha256_file(&owner_exe).as_deref() != record.runtime_sha256.as_deref())
     {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "A3S OCI owner executable identity is invalid for {box_id}"
