@@ -20,8 +20,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
-- Bump the pinned OCI Runtime revision to `53e21ef204c8a45bcc2a02f28d35acf2edc9415f` so Box can target the
-  merged `box-kvm-qualification-service` Host Service.
+- Bump the pinned OCI Runtime revision to
+  `01786abf4812890ca6f274f1cadf80ebd99ad44f` so Box tracks the Guest Agent
+  portable-rootfs FD-root fix plus retained KVM lifecycle/recovery/soak/
+  create-reopen evidence on that mainline.
 
 ### Fixed
 
