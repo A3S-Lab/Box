@@ -124,6 +124,7 @@ pub(crate) fn publish_portable_bundle(
         ))
     })?;
     std::fs::create_dir_all(operation_directory).map_err(BoxError::IoError)?;
+    ensure_private_handoff_ancestors(operation_directory)?;
     validate_plain_directory(operation_directory, "portable OCI operation directory")?;
     ensure_absent(bundle_directory, "portable OCI bundle")?;
 
@@ -312,6 +313,21 @@ fn set_private_directory_mode(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+    Ok(())
+}
+
+/// Tighten Box-created handoff ancestors to the runtime's private-directory
+/// contract without touching the runtime-owned `bundle-handoffs` root itself.
+fn ensure_private_handoff_ancestors(operation_directory: &Path) -> Result<()> {
+    set_private_directory_mode(operation_directory)?;
+    if let Some(container_directory) = operation_directory.parent() {
+        if container_directory
+            .file_name()
+            .is_some_and(|name| name != "bundle-handoffs")
+        {
+            set_private_directory_mode(container_directory)?;
+        }
     }
     Ok(())
 }
@@ -610,6 +626,18 @@ mod tests {
 
         let mode = std::fs::symlink_metadata(&bundle).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+        let operation_mode = std::fs::symlink_metadata(bundle.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(operation_mode, 0o700);
+        let container_mode = std::fs::symlink_metadata(bundle.parent().unwrap().parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(container_mode, 0o700);
         assert!(bundle.join("config.json").is_file());
         assert!(bundle.join("rootfs").is_dir());
     }
