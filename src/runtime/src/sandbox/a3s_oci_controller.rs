@@ -150,9 +150,12 @@ impl A3sOciController {
         // Keep the controller at effective root for overlay mounts, network
         // relays, and Runtime state ownership. The durable OCI owner scans the
         // prepared rootfs as the real UID after device-policy drop, so hand that
-        // box tree (not Runtime state) to the real owner before create.
+        // tree (not Runtime state, and not read-only bind attachments) to the
+        // real owner before create.
         if let Some(box_dir) = launch.bundle_dir.ancestors().nth(2) {
-            chown_tree_to_ids(box_dir, expected_owner_ids())?;
+            let ids = expected_owner_ids();
+            chown_path_to_ids(box_dir, ids)?;
+            chown_tree_to_ids(&box_dir.join("rootfs"), ids)?;
         }
         // SO_PEERCRED is checked only at SDK connect time —
         // [`super::a3s_oci_client`] temporarily matches the real UID for that
@@ -774,11 +777,16 @@ fn chown_path_to_ids(path: &Path, (uid, gid): (u32, u32)) -> Result<()> {
     // so a rootfs link cannot reassign host packaging paths such as bin/lib.
     let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        // Read-only bind mounts under boxes/<id> (R17 mounts profile) cannot be
+        // reassigned; skip them rather than failing the whole owner handoff.
+        if error.raw_os_error() == Some(libc::EROFS) {
+            return Ok(());
+        }
         return Err(BoxError::BoxBootError {
             message: format!(
-                "failed to assign Sandbox OCI path {} to UID {uid}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
+                "failed to assign Sandbox OCI path {} to UID {uid}: {error}",
+                path.display()
             ),
             hint: None,
         });
