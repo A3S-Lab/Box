@@ -79,6 +79,10 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
+    // Peer-auth drops leave the process without CAP_SYS_ADMIN; restore before
+    // overlay unmount and mount-alias cleanup.
+    let _ = crate::sandbox::a3s_oci_controller::restore_effective_root_if_saved();
+
     let runtime_owned_cgroup = match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
         SandboxReap::NotPresent => false,
         SandboxReap::Cleaned => true,
