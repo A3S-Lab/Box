@@ -578,30 +578,6 @@ fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn chown_to_real_owner(path: &Path) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let (uid, gid) = expected_owner_ids();
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        BoxError::ConfigError(format!(
-            "Sandbox OCI path contains an interior NUL: {}",
-            path.display()
-        ))
-    })?;
-    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
-    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
-    if rc != 0 {
-        return Err(BoxError::BoxBootError {
-            message: format!(
-                "failed to assign Sandbox OCI path {} to UID {uid}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ),
-            hint: None,
-        });
-    }
-    Ok(())
-}
-
 /// Durable filesystem identity for Sandbox OCI owners.
 ///
 /// Under setpriv / setuid launchers (euid 0, non-root ruid), ownership follows
@@ -678,30 +654,41 @@ fn reassign_sandbox_home_to_real_owner() -> Result<()> {
     let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    chown_tree_to_real_owner(Path::new(&home))
+    chown_tree_to_ids(Path::new(&home), expected_owner_ids())
 }
 
-fn chown_tree_to_real_owner(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    chown_to_real_owner(path)?;
-    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
-        let entry = entry.map_err(BoxError::IoError)?;
-        chown_tree_to_real_owner(&entry.path())?;
-    }
-    Ok(())
+fn chown_to_real_owner(path: &Path) -> Result<()> {
+    chown_path_to_ids(path, expected_owner_ids())
 }
 
 /// Restore effective root when saved UID 0 was retained by
 /// [`drop_effective_root_to_real_owner`].
 pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
-    let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
-    if euid == 0 || ruid == 0 {
+    let (ruid, euid, saved_uid, saved_gid) = {
+        let mut ruid = 0;
+        let mut euid = 0;
+        let mut saved_uid = 0;
+        let mut rgid = 0;
+        let mut egid = 0;
+        let mut saved_gid = 0;
+        // SAFETY: getresuid/getresgid write three uid_t/gid_t outputs.
+        let uid_rc = unsafe { libc::getresuid(&mut ruid, &mut euid, &mut saved_uid) };
+        let gid_rc = unsafe { libc::getresgid(&mut rgid, &mut egid, &mut saved_gid) };
+        if uid_rc != 0 || gid_rc != 0 {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "failed to inspect Sandbox controller credentials: {}",
+                    std::io::Error::last_os_error()
+                ),
+                hint: None,
+            });
+        }
+        let _ = (rgid, egid);
+        (ruid, euid, saved_uid, saved_gid)
+    };
+    if euid == 0 || ruid == 0 || saved_uid != 0 || saved_gid != 0 {
+        // Already effective root, or this process never retained saved root via
+        // setresuid/setresgid from [`drop_effective_root_to_real_owner`].
         return Ok(());
     }
     // SAFETY: seteuid/setegid use the retained saved IDs from setresuid/setresgid.
@@ -718,6 +705,57 @@ pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
         return Err(BoxError::BoxBootError {
             message: format!(
                 "failed to restore Sandbox controller euid 0: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    // Prepare-time state trees were handed to the real UID for peer-auth; reclaim
+    // them for effective-root mounts and Runtime state ownership checks.
+    reassign_sandbox_home_to_current_effective_owner()?;
+    Ok(())
+}
+
+fn reassign_sandbox_home_to_current_effective_owner() -> Result<()> {
+    let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    chown_tree_to_ids(Path::new(&home), unsafe {
+        (libc::geteuid(), libc::getegid())
+    })
+}
+
+fn chown_tree_to_ids(path: &Path, ids: (u32, u32)) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    chown_path_to_ids(path, ids)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
+        let entry = entry.map_err(BoxError::IoError)?;
+        chown_tree_to_ids(&entry.path(), ids)?;
+    }
+    Ok(())
+}
+
+fn chown_path_to_ids(path: &Path, (uid, gid): (u32, u32)) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Sandbox OCI path contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    // SAFETY: chown takes a NUL-terminated path owned for the duration of the call.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to assign Sandbox OCI path {} to UID {uid}: {}",
+                path.display(),
                 std::io::Error::last_os_error()
             ),
             hint: None,

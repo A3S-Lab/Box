@@ -34,7 +34,10 @@ All notable changes to A3S Box will be documented in this file.
   matches the certified `a3s-oci` artifact (CI installs them as sibling copies).
   Subsequent Sandbox boots restore effective root before overlay mounts so
   multi-case R17 profiles are not stuck without CAP_SYS_ADMIN after the first
-  peer-auth drop.
+  peer-auth drop. Restore only runs when saved UID/GID remain 0 (the
+  `setresuid`/`setresgid` contract), so ordinary unit tests that never dropped
+  do not hit `seteuid(0)` EPERM; after restore, `A3S_HOME` is reclaimed to the
+  current effective owner so Runtime state ownership checks pass.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
