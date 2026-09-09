@@ -131,6 +131,11 @@ impl A3sOciController {
         drop((inherited_exec, inherited_pty, inherited_log));
         drop((exec_listener, pty_listener, init_log));
 
+        // Owner inherits effective root for device-policy bootstrap, then drops
+        // to the real UID before publishing the SDK socket. Match that durable
+        // identity here so SO_PEERCRED same-UID auth accepts the controller.
+        drop_effective_root_to_real_owner()?;
+
         let owner_pid = owner.id();
         let owner_pid_start_time = crate::process::pid_start_time(owner_pid).ok_or_else(|| {
             let _ = owner.kill();
@@ -608,6 +613,50 @@ fn expected_owner_ids() -> (u32, u32) {
 
 fn expected_owner_uid() -> u32 {
     expected_owner_ids().0
+}
+
+/// Permanently match the Sandbox controller to the post-bootstrap owner UID.
+///
+/// Effective-root CI / setuid launchers keep euid 0 through rootfs prep and
+/// owner spawn so `native-linux-service` can install the device-policy helper.
+/// After spawn, the owner drops to the real UID and rejects other peer UIDs on
+/// the SDK socket. Dropping here is process-wide and intentional for that
+/// connection lifetime.
+fn drop_effective_root_to_real_owner() -> Result<()> {
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
+    if euid != 0 || ruid == 0 {
+        return Ok(());
+    }
+    if egid != rgid {
+        // SAFETY: setegid takes a gid_t; failure is reported via errno.
+        if unsafe { libc::setegid(rgid) } != 0 {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "failed to drop Sandbox controller egid to {rgid}: {}",
+                    std::io::Error::last_os_error()
+                ),
+                hint: None,
+            });
+        }
+    }
+    // SAFETY: seteuid takes a uid_t; failure is reported via errno.
+    if unsafe { libc::seteuid(ruid) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to drop Sandbox controller euid to {ruid}: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
