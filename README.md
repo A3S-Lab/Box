@@ -288,23 +288,28 @@ sidecars, Snapshot, or persistence. Rust applications can construct
 `A3sBoxClient::with_configured_paths(...).await`.
 
 For the exact public-lifecycle vertical slice (create replay, Box-manager
-reopen, start, exact exit status, delete, residual cleanup), build and run:
+reopen, start, exact exit status, delete, residual cleanup, plus Host Service
+SIGKILL/restart while a generation is running), build and run:
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-kvm-oci-qualification --release
 # place the example beside a3s-box, then:
 ./scripts/linux-kvm-oci-qualification.sh \
   --box-bin /absolute/path/to/bin \
-  --runtime-root /run/a3s/oci-kvm-box/runtime \
-  --kvm-endpoint /run/a3s/oci-kvm-box/runtime.sock \
+  --a3s-oci /absolute/path/to/a3s-oci \
+  --service-root /run/a3s/oci-kvm-box \
+  --shim /absolute/path/to/isolated-libkrun-shim \
+  --system-image-manifest /absolute/path/to/system-image.json \
   --image alpine:3.20 \
   --report /absolute/path/to/report.json \
   --home /tmp/a3s-box-kvm-oci-qualification-home
 ```
 
-The report schema is `a3s.box.linux-kvm-oci-qualification.v1`. This remains
-qualification-only evidence against an operator-started Host Service; it does
-not promote the public KVM candidate or change default MicroVM routing.
+The report schema is `a3s.box.linux-kvm-oci-qualification.v2`. The runner
+starts `box-kvm-qualification-service` and passes service restart inputs so
+phase 2 can SIGKILL/restart the Host Service. This remains qualification-only
+evidence; it does not promote the public KVM candidate or change default
+MicroVM routing.
 
 ### Exercise the qualification-only WHPX handoff on Windows
 

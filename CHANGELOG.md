@@ -8,11 +8,14 @@ All notable changes to A3S Box will be documented in this file.
 
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
-  `scripts/linux-kvm-oci-qualification.sh`. It exercises create replay, Box
-  manager reopen, start, exact exit status `23`, delete replay, and residual
-  path cleanup against an operator-started `box-kvm-qualification-service`.
-  Schema `a3s.box.linux-kvm-oci-qualification.v1`. Observation-only; not a
-  fresh-host or production-routing claim.
+  `scripts/linux-kvm-oci-qualification.sh`. Schema
+  `a3s.box.linux-kvm-oci-qualification.v2` exercises create replay, Box
+  manager reopen, start, exact exit status `23`, delete replay, residual path
+  cleanup, and—when service restart inputs are supplied—Host Service
+  SIGKILL/restart while a generation is running with stopped-only reconcile
+  (no invented exit status). The local runner starts
+  `box-kvm-qualification-service` itself. Observation-only; not a fresh-host
+  or production-routing claim.
 - Linux qualification-only MicroVM OCI opt-in through
   `A3S_BOX_OCI_MIGRATION=microvm|all` plus an explicit
   `A3S_BOX_OCI_KVM_ENDPOINT` Unix socket pointing at OCI Runtime's

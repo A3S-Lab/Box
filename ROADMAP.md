@@ -311,13 +311,15 @@ later gates.
 - [x] Add the Linux KVM qualification-only vertical-slice executable and local
   runner (`linux-kvm-oci-qualification`,
   `scripts/linux-kvm-oci-qualification.sh`) that prove create replay, Box
-  manager reopen, start, exact exit status, delete replay, and residual cleanup
-  against `box-kvm-qualification-service`. Existing-host WSL2 evidence on Box
-  `75879f0a` against OCI Runtime `fdc4258e` /
-  `01786abf` retained report SHA-256
-  `d10fd7bd4437cbaba223b0c7630c85a090e0999b9d69bc3704ba157804e4683c`. This does
-  not close fresh-host promotion, AArch64 promotion, runtime-service restart, or
-  default MicroVM cutover.
+  manager reopen, start, exact exit status, delete replay, residual cleanup,
+  and Host Service SIGKILL/restart (stopped-only reconcile, no invented exit
+  status) against `box-kvm-qualification-service` when service restart inputs
+  are available. Existing-host WSL2 evidence on Box `e0fd63db` (with OCI pin
+  `01786abf`) retained report SHA-256
+  `87191a0d4334866d3a06283ff615c7342479e28b23f8f95a5b91969a9a1d6d31` for
+  schema `a3s.box.linux-kvm-oci-qualification.v2` (exact exit `23` plus Host
+  Service restart → stopped-only, no invented exit). This does not close
+  fresh-host promotion, AArch64 promotion, or default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
