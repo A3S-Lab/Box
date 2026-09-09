@@ -149,13 +149,11 @@ impl A3sOciController {
 
         // Keep the controller at effective root for overlay mounts, network
         // relays, and Runtime state ownership. The durable OCI owner scans the
-        // prepared rootfs as the real UID after device-policy drop, so hand that
-        // tree (not Runtime state, and not read-only bind attachments) to the
-        // real owner before create.
+        // prepared rootfs/merged tree as the real UID after device-policy drop,
+        // so hand the box tree (not Runtime state) to the real owner before
+        // create. Recursion skips sandbox/attachments bind mounts (EROFS).
         if let Some(box_dir) = launch.bundle_dir.ancestors().nth(2) {
-            let ids = expected_owner_ids();
-            chown_path_to_ids(box_dir, ids)?;
-            chown_tree_to_ids(&box_dir.join("rootfs"), ids)?;
+            chown_tree_to_ids(box_dir, expected_owner_ids())?;
         }
         // SO_PEERCRED is checked only at SDK connect time —
         // [`super::a3s_oci_client`] temporarily matches the real UID for that
@@ -707,6 +705,11 @@ fn chown_tree_to_ids(path: &Path, ids: (u32, u32)) -> Result<()> {
     }
     for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
         let entry = entry.map_err(BoxError::IoError)?;
+        // R17 mounts profile bind-mounts host paths under sandbox/attachments.
+        if entry.file_name() == "attachments" {
+            chown_path_to_ids(&entry.path(), ids)?;
+            continue;
+        }
         chown_tree_to_ids(&entry.path(), ids)?;
     }
     Ok(())

@@ -46,13 +46,13 @@ All notable changes to A3S Box will be documented in this file.
   so overlay mounts, TCP endpoint relays, and Runtime state ownership keep
   effective root / capabilities for the full R17 profile set. Temporary
   peer-auth `seteuid` uses `PR_SET_KEEPCAPS` so permitted capabilities survive
-  the round-trip. The prepared `boxes/<id>/rootfs` tree is chowned with `lchown`
-  to the real UID (skipping `EROFS` bind attachments) so the durable owner can
-  scan device nodes after its own credential drop without following rootfs
-  symlinks into host packaging paths or failing on read-only mounts. Sandbox
-  log workers clear the setpriv euid/ruid mismatch before exec and prepend the
-  shim `lib/` dir to `LD_LIBRARY_PATH` so secure-execution mode cannot hide
-  bundled libkrun. Crash-recovery / inspect endpoint checks accept
+  the round-trip. Box trees under `A3S_HOME/boxes/<id>` are chowned with `lchown`
+  to the real UID so the durable owner can scan device nodes after its own
+  credential drop; recursion skips `sandbox/attachments` bind mounts and
+  ignores `EROFS` so R17 read-only volume cases cannot fail the handoff.
+  Sandbox log workers clear the setpriv euid/ruid mismatch before exec and
+  prepend the shim `lib/` dir to `LD_LIBRARY_PATH` so secure-execution mode
+  cannot hide bundled libkrun. Crash-recovery / inspect endpoint checks accept
   real-UID-owned `runtime.sock` under effective-root controllers (same contract
   as private socket readiness).
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
