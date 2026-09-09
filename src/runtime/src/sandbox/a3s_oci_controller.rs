@@ -148,9 +148,15 @@ impl A3sOciController {
         drop((exec_listener, pty_listener, init_log));
 
         // Keep the controller at effective root for overlay mounts, network
-        // relays, and Runtime state ownership. SO_PEERCRED is checked only at
-        // SDK connect time — [`super::a3s_oci_client`] temporarily matches the
-        // real UID for that handshake.
+        // relays, and Runtime state ownership. The durable OCI owner scans the
+        // prepared rootfs as the real UID after device-policy drop, so hand that
+        // box tree (not Runtime state) to the real owner before create.
+        if let Some(box_dir) = launch.bundle_dir.ancestors().nth(2) {
+            chown_tree_to_ids(box_dir, expected_owner_ids())?;
+        }
+        // SO_PEERCRED is checked only at SDK connect time —
+        // [`super::a3s_oci_client`] temporarily matches the real UID for that
+        // handshake.
 
         let owner_pid = owner.id();
         let owner_pid_start_time = crate::process::pid_start_time(owner_pid).ok_or_else(|| {
@@ -669,6 +675,22 @@ where
 
 fn chown_to_real_owner(path: &Path) -> Result<()> {
     chown_path_to_ids(path, expected_owner_ids())
+}
+
+fn chown_tree_to_ids(path: &Path, ids: (u32, u32)) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    chown_path_to_ids(path, ids)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
+        let entry = entry.map_err(BoxError::IoError)?;
+        chown_tree_to_ids(&entry.path(), ids)?;
+    }
+    Ok(())
 }
 
 /// No-op unless a process permanently dropped via saved-UID retention.
