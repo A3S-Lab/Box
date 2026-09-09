@@ -59,6 +59,10 @@ impl A3sOciController {
             BoxError::ConfigError("A3S OCI runtime root has no parent".to_string())
         })?;
         create_private_dir(runtime_parent)?;
+        // Effective-root CI / setuid launchers create paths as euid 0. After
+        // RootlessDevicePolicyBootstrap drops to the real UID, native-linux-service
+        // requires the service root parent to be owned by that UID (mode 0700).
+        chown_to_real_owner(runtime_parent)?;
 
         let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
         let pty_listener = bind_control_listener(&launch.pty_socket_path)?;
@@ -76,23 +80,11 @@ impl A3sOciController {
         let delegated_cgroup_root = linux_sandbox_delegated_cgroup_root();
         let owner_cgroup = prepare_sandbox_delegation_child()?;
         let launcher = resolve_sandbox_oci_launcher(None)?;
-        // Matched-cred CI harnesses (euid==ruid) cannot bootstrap device policy.
-        // When CI supplies the setpriv wrapper, spawn the owner with euid 0 /
-        // non-root ruid so native-linux-service can install the parent-bound
-        // helper, then drop to the real identity.
-        let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
-            .filter(|value| !value.is_empty())
-            .filter(|_| unsafe { libc::geteuid() } != 0);
-        let mut command = if let Some(wrapper) = elevate_wrapper {
-            let mut command = Command::new("bash");
-            command.arg(wrapper);
-            command.arg(&launcher);
-            command.env_remove("A3S_BOX_CI_SETPRIV_MATCHED_CREDS");
-            command.env_remove("A3S_BOX_CI_PROBE_CGROUP");
-            command
-        } else {
-            Command::new(&launcher)
-        };
+        // Keep the launcher as the direct exec target. Intermediate bash/setpriv
+        // wrappers break `--a3s-box-control-fds` (ExecListener must remain a Unix
+        // stream on the fixed inherited descriptors). R17 stays on euid 0 so the
+        // owner can bootstrap device policy without elevation.
+        let mut command = Command::new(&launcher);
         command
             .arg("native-linux-service")
             .arg("--root")
@@ -682,5 +674,18 @@ mod tests {
         assert!(prepare_sandbox_delegation_child_in(missing)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn assigns_private_dirs_to_the_real_owner_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-parent");
+        create_private_dir(&path).unwrap();
+        chown_to_real_owner(&path).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let expected = unsafe { libc::geteuid() };
+        assert_eq!(metadata.uid(), expected);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }
 }
