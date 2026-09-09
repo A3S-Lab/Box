@@ -353,11 +353,15 @@ async fn wait_for_private_socket(owner: &mut Child, socket_path: &Path) -> Resul
 }
 
 fn private_socket_ready(socket_path: &Path) -> Result<bool> {
+    let expected_uid = expected_owner_uid();
     match std::fs::symlink_metadata(socket_path) {
         Ok(metadata) if !metadata.file_type().is_socket() => {
             Err(private_socket_contract_error(socket_path))
         }
-        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => {
+        // After rootless device-policy drop the socket is owned by the real UID
+        // while effective-root harnesses still have euid 0. Accept the durable
+        // owner identity, not geteuid().
+        Ok(metadata) if metadata.uid() != expected_uid => {
             Err(private_socket_contract_error(socket_path))
         }
         // bind(2) publishes the same-owner socket before the Runtime owner can
@@ -559,22 +563,7 @@ fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
 
 fn chown_to_real_owner(path: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let (uid, gid) = {
-        // SAFETY: credential queries have no pointer arguments or failure results.
-        let (ruid, rgid, euid, egid) = unsafe {
-            (
-                libc::getuid(),
-                libc::getgid(),
-                libc::geteuid(),
-                libc::getegid(),
-            )
-        };
-        if euid == 0 && ruid != 0 {
-            (ruid, rgid)
-        } else {
-            (euid, egid)
-        }
-    };
+    let (uid, gid) = expected_owner_ids();
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         BoxError::ConfigError(format!(
             "Sandbox OCI path contains an interior NUL: {}",
@@ -594,6 +583,31 @@ fn chown_to_real_owner(path: &Path) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Durable filesystem identity for Sandbox OCI owners.
+///
+/// Under setpriv / setuid launchers (euid 0, non-root ruid), ownership follows
+/// the real UID so paths remain usable after rootless device-policy drop.
+fn expected_owner_ids() -> (u32, u32) {
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
+    if euid == 0 && ruid != 0 {
+        (ruid, rgid)
+    } else {
+        (euid, egid)
+    }
+}
+
+fn expected_owner_uid() -> u32 {
+    expected_owner_ids().0
 }
 
 #[cfg(test)]
@@ -684,7 +698,7 @@ mod tests {
         chown_to_real_owner(&path).unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
-        let expected = unsafe { libc::geteuid() };
+        let expected = expected_owner_uid();
         assert_eq!(metadata.uid(), expected);
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }

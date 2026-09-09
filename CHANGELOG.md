@@ -21,7 +21,9 @@ All notable changes to A3S Box will be documented in this file.
   also assign the service-root parent to the real UID before spawn so
   `prepare_private_directory` succeeds after rootless device-policy drop; R17
   keeps euid 0 (no setpriv elevate wrapper) so inherited `--a3s-box-control-fds`
-  remain Unix stream listeners.
+  remain Unix stream listeners. Private runtime socket readiness accepts the
+  real-UID owner (not `geteuid`) so effective-root harnesses can wait for the
+  dropped owner endpoint.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
