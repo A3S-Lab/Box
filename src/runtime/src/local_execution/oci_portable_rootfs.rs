@@ -12,8 +12,9 @@ use a3s_box_core::rootfs_metadata::{
 use a3s_box_core::{BoxError, Result};
 use a3s_oci_sdk::{
     PortableRootfsEntryKind, PortableRootfsMetadataEntry, PortableRootfsMetadataManifest,
-    PORTABLE_ROOTFS_METADATA_FILE, PORTABLE_ROOTFS_METADATA_MAX_BYTES,
-    PORTABLE_ROOTFS_METADATA_MAX_ENTRIES,
+    PORTABLE_ROOTFS_METADATA_ANNOTATION, PORTABLE_ROOTFS_METADATA_FILE,
+    PORTABLE_ROOTFS_METADATA_MAX_BYTES, PORTABLE_ROOTFS_METADATA_MAX_ENTRIES,
+    PORTABLE_ROOTFS_METADATA_SCHEMA_V1,
 };
 use base64::Engine as _;
 use oci_spec::runtime::Spec;
@@ -137,7 +138,9 @@ pub(crate) fn publish_portable_bundle(
         let rootfs = pending.join("rootfs");
         crate::cache::layer_cache::copy_dir_recursive(source_rootfs, &rootfs)?;
         make_owner_writable(&rootfs)?;
-        publish_portable_rootfs_metadata(&rootfs)?;
+        if portable_rootfs_metadata_requested(spec) {
+            publish_portable_rootfs_metadata(&rootfs)?;
+        }
 
         let config = pending.join("config.json");
         let encoded = serde_json::to_vec_pretty(spec)
@@ -162,6 +165,13 @@ pub(crate) fn publish_portable_bundle(
         return Err(error);
     }
     Ok(())
+}
+
+fn portable_rootfs_metadata_requested(spec: &Spec) -> bool {
+    spec.annotations().as_ref().is_some_and(|annotations| {
+        annotations.get(PORTABLE_ROOTFS_METADATA_ANNOTATION)
+            == Some(&PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string())
+    })
 }
 
 fn encode_portable_manifest(source: RootfsMetadataManifest) -> Result<Vec<u8>> {

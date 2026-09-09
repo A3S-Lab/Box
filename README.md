@@ -356,7 +356,12 @@ activate by accident.
 
 Current Linux opt-in covers new Sandbox reservations through the long-lived
 Native Linux owner, plus an explicit qualification-only MicroVM path through
-`box-kvm-qualification-service` when `A3S_BOX_OCI_KVM_ENDPOINT` is set. Image-declared
+`box-kvm-qualification-service` when `A3S_BOX_OCI_KVM_ENDPOINT` is set. On that
+Linux/macOS same-uid virtio-fs path, Box does not request guest portable
+rootfs-metadata ownership replay: the share retains Host UIDs and guest
+`chown` is refused by design. Windows WHPX still converts image metadata to
+`a3s.oci.rootfs-metadata.v1` so the guest can restore Linux ownership that
+NTFS cannot store. Image-declared
 anonymous volumes are planned from normalized image metadata after capability
 preflight, persisted in the initial Box reservation, and atomically claimed by
 the exact execution during bundle preparation. Recovery and removal therefore
