@@ -37,7 +37,11 @@ All notable changes to A3S Box will be documented in this file.
   peer-auth drop. Restore only runs when saved UID/GID remain 0 (the
   `setresuid`/`setresgid` contract), so ordinary unit tests that never dropped
   do not hit `seteuid(0)` EPERM; after restore, `A3S_HOME` is reclaimed to the
-  current effective owner so Runtime state ownership checks pass.
+  current effective owner so Runtime state ownership checks pass. Sandbox exec
+  and PTY control sockets under `/tmp/a3s-box-sockets` are chowned to the real
+  UID after bind so post-drop readiness heartbeats can connect to mode `0600`
+  endpoints; boot-failure cleanup also restores effective root before overlay
+  unmount.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).

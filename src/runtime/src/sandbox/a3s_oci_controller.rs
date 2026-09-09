@@ -76,6 +76,12 @@ impl A3sOciController {
 
         let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
         let pty_listener = bind_control_listener(&launch.pty_socket_path)?;
+        // Control sockets live under /tmp/a3s-box-sockets (not A3S_HOME). bind(2)
+        // creates them as euid 0 / mode 0600; after the peer-auth drop the
+        // controller must still connect for exec readiness, so assign them to
+        // the real UID before that drop.
+        chown_to_real_owner(&launch.exec_socket_path)?;
+        chown_to_real_owner(&launch.pty_socket_path)?;
         let stdout = open_log(&launch.stdout_path)?;
         let stderr = open_log(&launch.stderr_path)?;
         let init_log = open_log(&launch.init_log_path)?;

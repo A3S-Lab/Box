@@ -747,7 +747,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 drop(guard);
                 self.remove_manager(&record.id, &manager);
                 return Err(ExecutionManagerError::Unavailable(format!(
-                    "execution {} completed during startup",
+                    "execution {} completed during startup ({error})",
                     record.id
                 )));
             }
