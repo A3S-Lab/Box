@@ -34,6 +34,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Terminal reconcile after utility-VM/Host owner loss no longer fails closed
+  when the managed OCI log projection exits before drain. Box treats that as
+  stopped-only owner-loss recovery and refuses to invent an exit status from
+  undrained Wait evidence.
 - Linux/macOS portable MicroVM OCI specs no longer request guest
   `a3s.oci.rootfs-metadata.v1` ownership replay. Same-uid virtio-fs retains
   Host share-root UIDs and refuses guest `chown`; Windows WHPX still opts into
