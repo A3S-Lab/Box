@@ -699,7 +699,6 @@ fn chown_tree_to_real_owner(path: &Path) -> Result<()> {
 
 /// Restore effective root when saved UID 0 was retained by
 /// [`drop_effective_root_to_real_owner`].
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
     let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
     if euid == 0 || ruid == 0 {

@@ -52,6 +52,11 @@ impl VmManager {
                 hint: None,
             });
         }
+        // A prior Sandbox owner may have dropped this process to the real UID
+        // for SO_PEERCRED. Restore effective root before overlay mounts and
+        // capability probes that require CAP_SYS_ADMIN.
+        #[cfg(target_os = "linux")]
+        crate::sandbox::a3s_oci_controller::restore_effective_root_if_saved()?;
         // This probe is deliberately before image pulls, rootfs mounts, volume
         // creation, or bundle writes. Every mandatory control is fail-closed.
         let capability_start = std::time::Instant::now();
