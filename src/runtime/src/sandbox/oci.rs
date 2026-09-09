@@ -348,10 +348,16 @@ pub fn compile_portable_microvm_oci_spec(
         RUNTIME_BUNDLE_HANDOFF_EXTENSION.to_string(),
         RUNTIME_BUNDLE_HANDOFF_MOVE_V1.to_string(),
     );
-    annotations.insert(
-        PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
-        PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string(),
-    );
+    // Windows virtio-fs cannot store Linux UID/GID; the guest must replay the
+    // portable metadata contract. Linux/macOS same-uid virtio-fs retains the
+    // Host share-root UIDs and refuses guest chown by design, so ownership
+    // replay would fail closed with EPERM.
+    if cfg!(windows) {
+        annotations.insert(
+            PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+            PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string(),
+        );
+    }
 
     SpecBuilder::default()
         .version("1.3.0".to_string())
@@ -1613,10 +1619,15 @@ mod tests {
         assert_eq!(value["ociVersion"], "1.3.0");
         assert_eq!(value["root"]["path"], "rootfs");
         assert_eq!(value["root"]["readonly"], false);
-        assert_eq!(
-            value["annotations"][PORTABLE_ROOTFS_METADATA_ANNOTATION],
-            PORTABLE_ROOTFS_METADATA_SCHEMA_V1
-        );
+        let annotations = value["annotations"].as_object().unwrap();
+        if cfg!(windows) {
+            assert_eq!(
+                annotations[PORTABLE_ROOTFS_METADATA_ANNOTATION],
+                PORTABLE_ROOTFS_METADATA_SCHEMA_V1
+            );
+        } else {
+            assert!(!annotations.contains_key(PORTABLE_ROOTFS_METADATA_ANNOTATION));
+        }
         assert_eq!(
             value["annotations"][RUNTIME_BUNDLE_HANDOFF_EXTENSION],
             RUNTIME_BUNDLE_HANDOFF_MOVE_V1

@@ -25,6 +25,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux/macOS portable MicroVM OCI specs no longer request guest
+  `a3s.oci.rootfs-metadata.v1` ownership replay. Same-uid virtio-fs retains
+  Host share-root UIDs and refuses guest `chown`; Windows WHPX still opts into
+  the portable metadata contract. Bundle publish writes the metadata file only
+  when that annotation is present.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
