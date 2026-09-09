@@ -28,6 +28,8 @@ All notable changes to A3S Box will be documented in this file.
   `SO_PEERCRED` same-UID auth succeeds; prepare-time `A3S_HOME` trees are
   reassigned to the real UID first so lifecycle locks remain usable, and R17
   cleanup can still restore effective root for any leftover root-owned paths.
+  Capability probing under effective root plans rootless UID/GID mappings for
+  the real UID so the bundle matches the post-bootstrap owner identity.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
