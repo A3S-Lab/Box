@@ -88,7 +88,7 @@ All notable changes to A3S Box will be documented in this file.
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
-- Bump the pinned OCI Runtime revision to `1e0eba9a` so rootless durable
+- Bump the pinned OCI Runtime revision to `0f6908e5` so rootless durable
   owners skip detached `open_tree` RO binds after device-policy drop (Box R17
   mounts profile) while host-service owners keep the previous clone path.
 - Bump the pinned OCI Runtime revision to `fb517c6f` so
