@@ -315,13 +315,13 @@ later gates.
   and Host Service SIGKILL/restart (stopped-only reconcile, no invented exit
   status) against `box-kvm-qualification-service` when service restart inputs
   are available. Existing-host WSL2 evidence with OCI pin
-  `60b18880942d6ed44a73eddfa102ac6ab1361d0c` retained report SHA-256
-  `41d2933d8d8a3d9653be195f6849d8893f0055568ce5d94d5ccb56790bf2429c` for
+  `f14c9401f92a5fa97be62c54f58925f5fc1a2a51` retained report SHA-256
+  `42a8576d93cd5e82fbe5a02ba9dec2958363a08bc8dc91cea06f552077a58edb` for
   schema `a3s.box.linux-kvm-oci-qualification.v2` (exact exit `23` plus Host
   Service restart → stopped-only, no invented exit). Prior evidence on
-  `d57739f0`/`95d624f`, `8b2804c5`/`3cea73d7`, and `e0fd63db`/`01786abf`
-  remains historical. This does not close fresh-host promotion, AArch64
-  promotion, or default MicroVM cutover.
+  `a318f4ec`/`60b1888`, `d57739f0`/`95d624f`, `8b2804c5`/`3cea73d7`, and
+  `e0fd63db`/`01786abf` remains historical. This does not close fresh-host
+  promotion, AArch64 promotion, or default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
