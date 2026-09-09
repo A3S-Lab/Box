@@ -308,6 +308,16 @@ later gates.
     profile.
   - [x] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
     delete gate and retain machine-readable evidence in blocking CI.
+- [x] Add the Linux KVM qualification-only vertical-slice executable and local
+  runner (`linux-kvm-oci-qualification`,
+  `scripts/linux-kvm-oci-qualification.sh`) that prove create replay, Box
+  manager reopen, start, exact exit status, delete replay, and residual cleanup
+  against `box-kvm-qualification-service`. Existing-host WSL2 evidence on Box
+  `75879f0a` against OCI Runtime `fdc4258e` /
+  `01786abf` retained report SHA-256
+  `d10fd7bd4437cbaba223b0c7630c85a090e0999b9d69bc3704ba157804e4683c`. This does
+  not close fresh-host promotion, AArch64 promotion, runtime-service restart, or
+  default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.

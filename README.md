@@ -287,6 +287,25 @@ sidecars, Snapshot, or persistence. Rust applications can construct
 `LinuxKvmOciMigrationConfig` explicitly or use
 `A3sBoxClient::with_configured_paths(...).await`.
 
+For the exact public-lifecycle vertical slice (create replay, Box-manager
+reopen, start, exact exit status, delete, residual cleanup), build and run:
+
+```bash
+cargo build -p a3s-box-runtime --example linux-kvm-oci-qualification --release
+# place the example beside a3s-box, then:
+./scripts/linux-kvm-oci-qualification.sh \
+  --box-bin /absolute/path/to/bin \
+  --runtime-root /run/a3s/oci-kvm-box/runtime \
+  --kvm-endpoint /run/a3s/oci-kvm-box/runtime.sock \
+  --image alpine:3.20 \
+  --report /absolute/path/to/report.json \
+  --home /tmp/a3s-box-kvm-oci-qualification-home
+```
+
+The report schema is `a3s.box.linux-kvm-oci-qualification.v1`. This remains
+qualification-only evidence against an operator-started Host Service; it does
+not promote the public KVM candidate or change default MicroVM routing.
+
 ### Exercise the qualification-only WHPX handoff on Windows
 
 Start the pinned OCI Runtime `box-whpx-qualification-service` with its shim,
