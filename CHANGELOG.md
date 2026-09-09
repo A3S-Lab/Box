@@ -25,8 +25,9 @@ All notable changes to A3S Box will be documented in this file.
   real-UID owner (not `geteuid`) so effective-root harnesses can wait for the
   dropped owner endpoint. After owner spawn the controller drops euid/egid to
   that real identity via `setresuid`/`setresgid` (saved IDs stay 0) so Unix SDK
-  `SO_PEERCRED` same-UID auth succeeds; R17 cleanup restores effective root
-  before deleting prepare-time state trees.
+  `SO_PEERCRED` same-UID auth succeeds; prepare-time `A3S_HOME` trees are
+  reassigned to the real UID first so lifecycle locks remain usable, and R17
+  cleanup can still restore effective root for any leftover root-owned paths.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).

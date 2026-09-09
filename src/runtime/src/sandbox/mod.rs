@@ -119,8 +119,6 @@ pub fn update_recorded_resources(
 #[cfg(target_os = "linux")]
 pub use a3s_oci_controller::A3sOciController;
 #[cfg(target_os = "linux")]
-pub(crate) use a3s_oci_controller::restore_effective_root_if_saved;
-#[cfg(target_os = "linux")]
 pub use a3s_oci_handler::A3sOciHandler;
 pub use capability::{
     map_container_gid, map_container_uid, plan_id_mappings, probe_sandbox_capabilities,

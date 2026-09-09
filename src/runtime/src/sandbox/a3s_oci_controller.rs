@@ -132,8 +132,10 @@ impl A3sOciController {
         drop((exec_listener, pty_listener, init_log));
 
         // Owner inherits effective root for device-policy bootstrap, then drops
-        // to the real UID before publishing the SDK socket. Match that durable
-        // identity here so SO_PEERCRED same-UID auth accepts the controller.
+        // to the real UID before publishing the SDK socket. Hand prepare-time
+        // home/state trees to that UID first so lifecycle locks and Runtime
+        // state remain writable after the controller matches SO_PEERCRED.
+        reassign_sandbox_home_to_real_owner()?;
         drop_effective_root_to_real_owner()?;
 
         let owner_pid = owner.id();
@@ -620,8 +622,8 @@ fn expected_owner_uid() -> u32 {
 /// Effective-root CI / setuid launchers keep euid 0 through rootfs prep and
 /// owner spawn so `native-linux-service` can install the device-policy helper.
 /// After spawn, the owner drops to the real UID and rejects other peer UIDs on
-/// the SDK socket. Keep saved UID/GID 0 so fixture cleanup can restore
-/// effective root and remove state created before the drop.
+/// the SDK socket. Keep saved UID/GID 0 so callers can restore effective root
+/// when they still need to delete prepare-time trees that escaped reassignment.
 fn drop_effective_root_to_real_owner() -> Result<()> {
     let (ruid, rgid, euid, _egid) = unsafe {
         (
@@ -657,8 +659,37 @@ fn drop_effective_root_to_real_owner() -> Result<()> {
     Ok(())
 }
 
+fn reassign_sandbox_home_to_real_owner() -> Result<()> {
+    let euid = unsafe { libc::geteuid() };
+    let ruid = unsafe { libc::getuid() };
+    if euid != 0 || ruid == 0 {
+        return Ok(());
+    }
+    let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    chown_tree_to_real_owner(Path::new(&home))
+}
+
+fn chown_tree_to_real_owner(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    chown_to_real_owner(path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
+        let entry = entry.map_err(BoxError::IoError)?;
+        chown_tree_to_real_owner(&entry.path())?;
+    }
+    Ok(())
+}
+
 /// Restore effective root when saved UID 0 was retained by
 /// [`drop_effective_root_to_real_owner`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
     let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
     if euid == 0 || ruid == 0 {
