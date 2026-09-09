@@ -650,5 +650,84 @@ mod tests {
         assert_eq!(container_mode, 0o700);
         assert!(bundle.join("config.json").is_file());
         assert!(bundle.join("rootfs").is_dir());
+        assert!(
+            !bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists(),
+            "default Spec must not publish portable rootfs metadata"
+        );
+    }
+
+    fn portable_bundle_fixture(temporary: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+        let source = temporary.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(
+            &source,
+            vec![
+                entry(b".", RootfsEntryKind::Directory),
+                entry(b"./bin", RootfsEntryKind::Directory),
+            ],
+        );
+        let bundle = temporary
+            .path()
+            .join("handoffs")
+            .join("box-1")
+            .join("create-1")
+            .join("bundle");
+        (source, bundle)
+    }
+
+    fn spec_requesting_portable_rootfs_metadata() -> Spec {
+        use std::collections::HashMap;
+
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+            PORTABLE_ROOTFS_METADATA_SCHEMA_V1.to_string(),
+        );
+        oci_spec::runtime::SpecBuilder::default()
+            .annotations(annotations)
+            .build()
+            .expect("portable metadata Spec")
+    }
+
+    #[test]
+    fn publish_portable_bundle_writes_metadata_only_when_annotation_requests_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+
+        publish_portable_bundle(&source, &Spec::default(), &bundle).unwrap();
+        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+        publish_portable_bundle(&source, &spec_requesting_portable_rootfs_metadata(), &bundle)
+            .unwrap();
+        assert!(bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).is_file());
+        assert!(!bundle
+            .join("rootfs")
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .exists());
+        assert!(source
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .is_file());
+    }
+
+    #[test]
+    fn publish_portable_bundle_ignores_non_contract_metadata_annotation_values() {
+        use std::collections::HashMap;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (source, bundle) = portable_bundle_fixture(&temporary);
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            PORTABLE_ROOTFS_METADATA_ANNOTATION.to_string(),
+            "a3s.oci.rootfs-metadata.v0".to_string(),
+        );
+        let spec = oci_spec::runtime::SpecBuilder::default()
+            .annotations(annotations)
+            .build()
+            .unwrap();
+
+        publish_portable_bundle(&source, &spec, &bundle).unwrap();
+        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
     }
 }

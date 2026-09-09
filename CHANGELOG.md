@@ -31,7 +31,10 @@ All notable changes to A3S Box will be documented in this file.
   `a3s.oci.rootfs-metadata.v1` ownership replay. Same-uid virtio-fs retains
   Host share-root UIDs and refuses guest `chown`; Windows WHPX still opts into
   the portable metadata contract. Bundle publish writes the metadata file only
-  when that annotation is present.
+  when that annotation is present. First-principles unit tests now lock the
+  annotation gate: absent or non-contract annotation values omit the file;
+  the exact schema value publishes and consumes the Box image manifest on the
+  handoff copy only.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
