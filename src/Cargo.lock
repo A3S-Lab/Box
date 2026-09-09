@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=fb517c6fe7793911c860f07143f6f1b4cb37eae7#fb517c6fe7793911c860f07143f6f1b4cb37eae7"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=1e0eba9aba93dbd97d3bd0241faddd47e63c5177#1e0eba9aba93dbd97d3bd0241faddd47e63c5177"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -284,7 +284,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=fb517c6fe7793911c860f07143f6f1b4cb37eae7#fb517c6fe7793911c860f07143f6f1b4cb37eae7"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=1e0eba9aba93dbd97d3bd0241faddd47e63c5177#1e0eba9aba93dbd97d3bd0241faddd47e63c5177"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
