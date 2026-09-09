@@ -1366,7 +1366,10 @@ impl OciBundleProvider for FakeBundleProvider {
         _binding: &OciRuntimeBinding,
     ) -> ExecutionManagerResult<()> {
         self.projection_ensures.fetch_add(1, Ordering::SeqCst);
-        if self.fail_projection_exited_before_drain.load(Ordering::SeqCst) {
+        if self
+            .fail_projection_exited_before_drain
+            .load(Ordering::SeqCst)
+        {
             return Err(ExecutionManagerError::Unavailable(
                 "managed OCI log worker for fake generation 1 exited before drain; refusing to replay its Box log projection".to_string(),
             ));

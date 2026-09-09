@@ -527,7 +527,10 @@ mod qualification {
                 report.restart_observed_running = true;
                 break;
             }
-            if matches!(status.state, ExecutionState::Failed | ExecutionState::Stopped) {
+            if matches!(
+                status.state,
+                ExecutionState::Failed | ExecutionState::Stopped
+            ) {
                 return Err(failure(
                     "runtime-restart generation left running before Host Service SIGKILL",
                 ));
@@ -654,7 +657,10 @@ mod qualification {
         Ok(())
     }
 
-    fn restart_host_service(service: &ServiceRestartInputs, endpoint: &Path) -> Result<(), AnyError> {
+    fn restart_host_service(
+        service: &ServiceRestartInputs,
+        endpoint: &Path,
+    ) -> Result<(), AnyError> {
         // SAFETY: qualification-only SIGKILL of the exact operator-supplied pid.
         let kill_rc = unsafe { libc::kill(service.pid as i32, libc::SIGKILL) };
         if kill_rc != 0 {
@@ -732,10 +738,8 @@ mod qualification {
     }
 
     async fn connect(inputs: &Inputs) -> Result<LocalExecutionManager, AnyError> {
-        let config = LinuxKvmOciMigrationConfig::new(
-            inputs.runtime_root.clone(),
-            inputs.endpoint.clone(),
-        )?;
+        let config =
+            LinuxKvmOciMigrationConfig::new(inputs.runtime_root.clone(), inputs.endpoint.clone())?;
         Ok(LocalExecutionManager::with_linux_kvm_oci_qualification(
             &inputs.state_path,
             &inputs.home_dir,
