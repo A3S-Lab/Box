@@ -41,7 +41,10 @@ All notable changes to A3S Box will be documented in this file.
   and PTY control sockets under `/tmp/a3s-box-sockets` are chowned to the real
   UID after bind so post-drop readiness heartbeats can connect to mode `0600`
   endpoints; boot-failure cleanup also restores effective root before overlay
-  unmount.
+  unmount. The controller no longer permanently drops euid after owner spawn —
+  it only matches the real UID around OCI SDK connect (`SO_PEERCRED` accept)
+  so overlay mounts, TCP endpoint relays, and Runtime state ownership keep
+  effective root / capabilities for the full R17 profile set.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).

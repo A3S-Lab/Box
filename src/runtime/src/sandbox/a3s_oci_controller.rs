@@ -147,12 +147,10 @@ impl A3sOciController {
         drop((inherited_exec, inherited_pty, inherited_log));
         drop((exec_listener, pty_listener, init_log));
 
-        // Owner inherits effective root for device-policy bootstrap, then drops
-        // to the real UID before publishing the SDK socket. Hand prepare-time
-        // home/state trees to that UID first so lifecycle locks and Runtime
-        // state remain writable after the controller matches SO_PEERCRED.
-        reassign_sandbox_home_to_real_owner()?;
-        drop_effective_root_to_real_owner()?;
+        // Keep the controller at effective root for overlay mounts, network
+        // relays, and Runtime state ownership. SO_PEERCRED is checked only at
+        // SDK connect time — [`super::a3s_oci_client`] temporarily matches the
+        // real UID for that handshake.
 
         let owner_pid = owner.id();
         let owner_pid_start_time = crate::process::pid_start_time(owner_pid).ok_or_else(|| {
@@ -609,15 +607,18 @@ fn expected_owner_uid() -> u32 {
     expected_owner_ids().0
 }
 
-/// Match the Sandbox controller to the post-bootstrap owner UID for SDK auth.
+/// Temporarily match the real UID/GID for Unix SDK `SO_PEERCRED` handshakes.
 ///
-/// Effective-root CI / setuid launchers keep euid 0 through rootfs prep and
-/// owner spawn so `native-linux-service` can install the device-policy helper.
-/// After spawn, the owner drops to the real UID and rejects other peer UIDs on
-/// the SDK socket. Keep saved UID/GID 0 so callers can restore effective root
-/// when they still need to delete prepare-time trees that escaped reassignment.
-fn drop_effective_root_to_real_owner() -> Result<()> {
-    let (ruid, rgid, euid, _egid) = unsafe {
+/// Effective-root CI / setuid launchers keep euid 0 for mounts and network
+/// relays. The durable OCI owner publishes its SDK socket as the real UID, so
+/// connect must briefly match that identity. Peer auth is checked only at
+/// accept time; credentials are restored before returning.
+pub(crate) fn with_real_owner_euid<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) = unsafe {
         (
             libc::getuid(),
             libc::getgid(),
@@ -626,49 +627,55 @@ fn drop_effective_root_to_real_owner() -> Result<()> {
         )
     };
     if euid != 0 || ruid == 0 {
-        return Ok(());
+        return Ok(f());
     }
-    // SAFETY: setresgid/setresuid take gid_t/uid_t; keep saved IDs at 0 so the
-    // process can restore effective root for cleanup without CAP_SETUID.
-    if unsafe { libc::setresgid(rgid, rgid, 0) } != 0 {
+    // SAFETY: seteuid/setegid use the retained saved IDs from setpriv / setuid.
+    if unsafe { libc::setegid(rgid) } != 0 {
         return Err(BoxError::BoxBootError {
             message: format!(
-                "failed to drop Sandbox controller to rgid {rgid} (saved 0): {}",
+                "failed to match Sandbox controller egid {rgid} for SDK peer auth: {}",
                 std::io::Error::last_os_error()
             ),
             hint: None,
         });
     }
-    if unsafe { libc::setresuid(ruid, ruid, 0) } != 0 {
+    if unsafe { libc::seteuid(ruid) } != 0 {
+        let _ = unsafe { libc::setegid(egid) };
         return Err(BoxError::BoxBootError {
             message: format!(
-                "failed to drop Sandbox controller to ruid {ruid} (saved 0): {}",
+                "failed to match Sandbox controller euid {ruid} for SDK peer auth: {}",
                 std::io::Error::last_os_error()
             ),
             hint: None,
         });
     }
-    Ok(())
-}
-
-fn reassign_sandbox_home_to_real_owner() -> Result<()> {
-    let euid = unsafe { libc::geteuid() };
-    let ruid = unsafe { libc::getuid() };
-    if euid != 0 || ruid == 0 {
-        return Ok(());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    let restore_gid = unsafe { libc::setegid(0) };
+    let restore_uid = unsafe { libc::seteuid(0) };
+    if restore_gid != 0 || restore_uid != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller effective root after SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
     }
-    let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    chown_tree_to_ids(Path::new(&home), expected_owner_ids())
+    match result {
+        Ok(value) => Ok(value),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn chown_to_real_owner(path: &Path) -> Result<()> {
     chown_path_to_ids(path, expected_owner_ids())
 }
 
-/// Restore effective root when saved UID 0 was retained by
-/// [`drop_effective_root_to_real_owner`].
+/// No-op unless a process permanently dropped via saved-UID retention.
+///
+/// Controllers prefer [`with_real_owner_euid`] around SDK connect, so this is
+/// typically unused. Teardown paths still call it for older permanent-drop
+/// sequences.
 pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
     let (ruid, euid, saved_uid, saved_gid) = {
         let mut ruid = 0;
@@ -693,11 +700,9 @@ pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
         (ruid, euid, saved_uid, saved_gid)
     };
     if euid == 0 || ruid == 0 || saved_uid != 0 || saved_gid != 0 {
-        // Already effective root, or this process never retained saved root via
-        // setresuid/setresgid from [`drop_effective_root_to_real_owner`].
         return Ok(());
     }
-    // SAFETY: seteuid/setegid use the retained saved IDs from setresuid/setresgid.
+    // SAFETY: seteuid/setegid use the retained saved IDs.
     if unsafe { libc::setegid(0) } != 0 {
         return Err(BoxError::BoxBootError {
             message: format!(
@@ -715,34 +720,6 @@ pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
             ),
             hint: None,
         });
-    }
-    // Prepare-time state trees were handed to the real UID for peer-auth; reclaim
-    // them for effective-root mounts and Runtime state ownership checks.
-    reassign_sandbox_home_to_current_effective_owner()?;
-    Ok(())
-}
-
-fn reassign_sandbox_home_to_current_effective_owner() -> Result<()> {
-    let Some(home) = std::env::var_os("A3S_HOME").filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    chown_tree_to_ids(Path::new(&home), unsafe {
-        (libc::geteuid(), libc::getegid())
-    })
-}
-
-fn chown_tree_to_ids(path: &Path, ids: (u32, u32)) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    chown_path_to_ids(path, ids)?;
-    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
-        let entry = entry.map_err(BoxError::IoError)?;
-        chown_tree_to_ids(&entry.path(), ids)?;
     }
     Ok(())
 }

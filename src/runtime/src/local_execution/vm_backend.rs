@@ -784,7 +784,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             // dead-end on "already has an in-process runtime owner".
             self.remove_manager(&record.id, &manager);
             return Err(ExecutionManagerError::Unavailable(format!(
-                "execution {} completed during startup",
+                "execution {} completed during startup (exit_code={exit_code:?})",
                 record.id
             )));
         }
