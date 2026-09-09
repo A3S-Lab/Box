@@ -507,6 +507,17 @@ impl VmManager {
 
     /// Remove host-side boot artifacts after a failed boot attempt.
     async fn cleanup_boot_failure(&mut self) {
+        // Sandbox peer-auth may have dropped this process to the real UID.
+        // Overlay unmount needs effective root / CAP_SYS_ADMIN.
+        #[cfg(target_os = "linux")]
+        if let Err(error) = crate::sandbox::a3s_oci_controller::restore_effective_root_if_saved() {
+            tracing::warn!(
+                box_id = %self.box_id,
+                %error,
+                "Failed to restore effective root before Sandbox boot-failure cleanup"
+            );
+        }
+
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         #[cfg(target_os = "windows")]

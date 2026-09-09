@@ -229,10 +229,19 @@ fn run_client_worker(
             return;
         }
     };
-    let client = match runtime.block_on(RuntimeClient::connect(&endpoint)) {
-        Ok(client) => client,
-        Err(error) => {
+    let client = match super::a3s_oci_controller::with_real_owner_euid(|| {
+        runtime.block_on(RuntimeClient::connect(&endpoint))
+    }) {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             let _ = ready.send(Err(error));
+            return;
+        }
+        Err(error) => {
+            let _ = ready.send(Err(a3s_oci_sdk::Error::new(
+                a3s_oci_sdk::ErrorCode::PermissionDenied,
+                error.to_string(),
+            )));
             return;
         }
     };

@@ -634,7 +634,11 @@ mod tests {
 
         publish_portable_bundle(&source, &spec, &bundle).unwrap();
 
-        let mode = std::fs::symlink_metadata(&bundle).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::symlink_metadata(&bundle)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o700);
         let operation_mode = std::fs::symlink_metadata(bundle.parent().unwrap())
             .unwrap()
@@ -651,12 +655,17 @@ mod tests {
         assert!(bundle.join("config.json").is_file());
         assert!(bundle.join("rootfs").is_dir());
         assert!(
-            !bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists(),
+            !bundle
+                .join("rootfs")
+                .join(PORTABLE_ROOTFS_METADATA_FILE)
+                .exists(),
             "default Spec must not publish portable rootfs metadata"
         );
     }
 
-    fn portable_bundle_fixture(temporary: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn portable_bundle_fixture(
+        temporary: &tempfile::TempDir,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let source = temporary.path().join("source-rootfs");
         std::fs::create_dir_all(&source).unwrap();
         write_source(
@@ -695,13 +704,23 @@ mod tests {
         let (source, bundle) = portable_bundle_fixture(&temporary);
 
         publish_portable_bundle(&source, &Spec::default(), &bundle).unwrap();
-        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
+        assert!(!bundle
+            .join("rootfs")
+            .join(PORTABLE_ROOTFS_METADATA_FILE)
+            .exists());
 
         let temporary = tempfile::tempdir().unwrap();
         let (source, bundle) = portable_bundle_fixture(&temporary);
-        publish_portable_bundle(&source, &spec_requesting_portable_rootfs_metadata(), &bundle)
-            .unwrap();
-        assert!(bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).is_file());
+        publish_portable_bundle(
+            &source,
+            &spec_requesting_portable_rootfs_metadata(),
+            &bundle,
+        )
+        .unwrap();
+        assert!(bundle
+            .join("rootfs")
+            .join(PORTABLE_ROOTFS_METADATA_FILE)
+            .is_file());
         assert!(!bundle
             .join("rootfs")
             .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
@@ -728,6 +747,9 @@ mod tests {
             .unwrap();
 
         publish_portable_bundle(&source, &spec, &bundle).unwrap();
-        assert!(!bundle.join("rootfs").join(PORTABLE_ROOTFS_METADATA_FILE).exists());
+        assert!(!bundle
+            .join("rootfs")
+            .join(PORTABLE_ROOTFS_METADATA_FILE)
+            .exists());
     }
 }

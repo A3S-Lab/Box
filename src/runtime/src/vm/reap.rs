@@ -79,6 +79,10 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
+    // Peer-auth drops leave the process without CAP_SYS_ADMIN; restore before
+    // overlay unmount and mount-alias cleanup.
+    let _ = crate::sandbox::a3s_oci_controller::restore_effective_root_if_saved();
+
     let runtime_owned_cgroup = match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
         SandboxReap::NotPresent => false,
         SandboxReap::Cleaned => true,
@@ -284,11 +288,17 @@ fn verify_recorded_a3s_oci_owner(
             "Cannot resolve recorded A3S OCI runtime for {box_id}: {error}"
         ))
     })?;
-    if runtime_path != record.runtime_path
-        || std::fs::read_link(format!("/proc/{owner_pid}/exe"))
-            .ok()
-            .as_deref()
-            != Some(runtime_path.as_path())
+    let owner_exe = std::fs::read_link(format!("/proc/{owner_pid}/exe")).map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot resolve A3S OCI owner executable for {box_id}: {error}"
+        ))
+    })?;
+    // Sandbox CI/production may exec `a3s-box-sandbox-oci-launcher` (same bytes
+    // as a3s-oci) while the record stores the certified runtime path. Accept
+    // either exact path match or identical artifact digest.
+    if owner_exe != runtime_path
+        && (runtime_path != record.runtime_path
+            || sha256_file(&owner_exe).as_deref() != record.runtime_sha256.as_deref())
     {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "A3S OCI owner executable identity is invalid for {box_id}"
@@ -317,9 +327,21 @@ fn verify_recorded_a3s_oci_owner(
             "Cannot inspect A3S OCI endpoint for {box_id}: {error}"
         ))
     })?;
+    // After rootless device-policy drop the endpoint is owned by the real UID
+    // while effective-root controllers still have euid 0. Accept either the
+    // durable owner identity or the current effective UID.
+    let expected_uids = {
+        let ruid = unsafe { libc::getuid() };
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 && ruid != 0 {
+            [ruid, euid]
+        } else {
+            [euid, euid]
+        }
+    };
     if !metadata.file_type().is_socket()
         || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || !expected_uids.contains(&metadata.uid())
     {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "A3S OCI endpoint identity is invalid for {box_id}"

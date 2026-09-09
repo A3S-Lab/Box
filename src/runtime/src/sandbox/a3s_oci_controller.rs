@@ -3,7 +3,7 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -59,9 +59,29 @@ impl A3sOciController {
             BoxError::ConfigError("A3S OCI runtime root has no parent".to_string())
         })?;
         create_private_dir(runtime_parent)?;
+        // Effective-root CI / setuid launchers create paths as euid 0. After
+        // RootlessDevicePolicyBootstrap drops to the real UID, native-linux-service
+        // requires the service root parent to be owned by that UID (mode 0700).
+        // Chown the sockets root too: create_dir_all leaves it root:0700 and the
+        // post-drop controller cannot traverse or remove children otherwise.
+        chown_to_real_owner(runtime_parent)?;
+        if let Some(sockets_root) = runtime_parent.parent() {
+            if sockets_root
+                .file_name()
+                .is_some_and(|name| name == "a3s-box-sockets")
+            {
+                chown_to_real_owner(sockets_root)?;
+            }
+        }
 
         let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
         let pty_listener = bind_control_listener(&launch.pty_socket_path)?;
+        // Control sockets live under /tmp/a3s-box-sockets (not A3S_HOME). bind(2)
+        // creates them as euid 0 / mode 0600; after the peer-auth drop the
+        // controller must still connect for exec readiness, so assign them to
+        // the real UID before that drop.
+        chown_to_real_owner(&launch.exec_socket_path)?;
+        chown_to_real_owner(&launch.pty_socket_path)?;
         let stdout = open_log(&launch.stdout_path)?;
         let stderr = open_log(&launch.stderr_path)?;
         let init_log = open_log(&launch.init_log_path)?;
@@ -74,7 +94,12 @@ impl A3sOciController {
         let log_fd = inherited_log.as_raw_fd();
 
         let delegated_cgroup_root = linux_sandbox_delegated_cgroup_root();
+        let owner_cgroup = prepare_sandbox_delegation_child()?;
         let launcher = resolve_sandbox_oci_launcher(None)?;
+        // Keep the launcher as the direct exec target. Intermediate bash/setpriv
+        // wrappers break `--a3s-box-control-fds` (ExecListener must remain a Unix
+        // stream on the fixed inherited descriptors). R17 stays on euid 0 so the
+        // owner can bootstrap device policy without elevation.
         let mut command = Command::new(&launcher);
         command
             .arg("native-linux-service")
@@ -94,8 +119,14 @@ impl A3sOciController {
 
         // Sources are duplicated above 10, so installing the fixed Box roles
         // cannot clobber another source. `dup2` clears CLOEXEC on 3/4/5.
+        // Migrate into a child below the empty delegated root so rootless open
+        // accepts host-owned membership without moving the Sandbox CI harness
+        // out of its probe cgroup.
         unsafe {
             command.pre_exec(move || {
+                if let Some(ref cgroup) = owner_cgroup {
+                    migrate_current_task_into_cgroup(cgroup)?;
+                }
                 for (source, destination) in [
                     (exec_fd, EXEC_LISTENER_FD),
                     (pty_fd, PTY_LISTENER_FD),
@@ -115,6 +146,18 @@ impl A3sOciController {
         })?;
         drop((inherited_exec, inherited_pty, inherited_log));
         drop((exec_listener, pty_listener, init_log));
+
+        // Keep the controller at effective root for overlay mounts, network
+        // relays, and Runtime state ownership. The durable OCI owner scans the
+        // prepared rootfs/merged tree as the real UID after device-policy drop,
+        // so hand the box tree (not Runtime state) to the real owner before
+        // create. Recursion skips sandbox/attachments bind mounts (EROFS).
+        if let Some(box_dir) = launch.bundle_dir.ancestors().nth(2) {
+            chown_tree_to_ids(box_dir, expected_owner_ids())?;
+        }
+        // SO_PEERCRED is checked only at SDK connect time —
+        // [`super::a3s_oci_client`] temporarily matches the real UID for that
+        // handshake.
 
         let owner_pid = owner.id();
         let owner_pid_start_time = crate::process::pid_start_time(owner_pid).ok_or_else(|| {
@@ -338,11 +381,15 @@ async fn wait_for_private_socket(owner: &mut Child, socket_path: &Path) -> Resul
 }
 
 fn private_socket_ready(socket_path: &Path) -> Result<bool> {
+    let expected_uid = expected_owner_uid();
     match std::fs::symlink_metadata(socket_path) {
         Ok(metadata) if !metadata.file_type().is_socket() => {
             Err(private_socket_contract_error(socket_path))
         }
-        Ok(metadata) if metadata.uid() != unsafe { libc::geteuid() } => {
+        // After rootless device-policy drop the socket is owned by the real UID
+        // while effective-root harnesses still have euid 0. Accept the durable
+        // owner identity, not geteuid().
+        Ok(metadata) if metadata.uid() != expected_uid => {
             Err(private_socket_contract_error(socket_path))
         }
         // bind(2) publishes the same-owner socket before the Runtime owner can
@@ -478,6 +525,278 @@ fn sdk_boot_error(error: a3s_oci_sdk::Error) -> BoxError {
     }
 }
 
+fn prepare_sandbox_delegation_child() -> Result<Option<PathBuf>> {
+    prepare_sandbox_delegation_child_in(PathBuf::from(linux_sandbox_delegated_cgroup_root()))
+}
+
+fn prepare_sandbox_delegation_child_in(root: PathBuf) -> Result<Option<PathBuf>> {
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let child = root.join(format!("box-sandbox-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&child).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "failed to create Sandbox OCI owner cgroup {}: {error}",
+            child.display()
+        ),
+        hint: None,
+    })?;
+    chown_to_real_owner(&child)?;
+    for name in [
+        "cgroup.procs",
+        "cgroup.subtree_control",
+        "cgroup.controllers",
+    ] {
+        let control = child.join(name);
+        if control.exists() {
+            chown_to_real_owner(&control)?;
+        }
+    }
+    Ok(Some(child))
+}
+
+fn migrate_current_task_into_cgroup(cgroup: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let procs = cgroup.join("cgroup.procs");
+    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cgroup.procs path contains an interior NUL",
+        )
+    })?;
+    // SAFETY: open/write/close on cgroup.procs between fork and exec; path is
+    // NUL-terminated and owned for the duration of the calls.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = unsafe { libc::write(fd, b"0".as_ptr().cast(), 1) };
+    let close_rc = unsafe { libc::close(fd) };
+    if written != 1 {
+        return Err(if written < 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write migrating into Sandbox owner cgroup",
+            )
+        });
+    }
+    if close_rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Durable filesystem identity for Sandbox OCI owners.
+///
+/// Under setpriv / setuid launchers (euid 0, non-root ruid), ownership follows
+/// the real UID so paths remain usable after rootless device-policy drop.
+fn expected_owner_ids() -> (u32, u32) {
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
+    if euid == 0 && ruid != 0 {
+        (ruid, rgid)
+    } else {
+        (euid, egid)
+    }
+}
+
+fn expected_owner_uid() -> u32 {
+    expected_owner_ids().0
+}
+
+/// Temporarily match the real UID/GID for Unix SDK `SO_PEERCRED` handshakes.
+///
+/// Effective-root CI / setuid launchers keep euid 0 for mounts and network
+/// relays. The durable OCI owner publishes its SDK socket as the real UID, so
+/// connect must briefly match that identity. Peer auth is checked only at
+/// accept time; credentials are restored before returning.
+pub(crate) fn with_real_owner_euid<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    // SAFETY: credential queries have no pointer arguments or failure results.
+    let (ruid, rgid, euid, egid) = unsafe {
+        (
+            libc::getuid(),
+            libc::getgid(),
+            libc::geteuid(),
+            libc::getegid(),
+        )
+    };
+    if euid != 0 || ruid == 0 {
+        return Ok(f());
+    }
+    // Without PR_SET_KEEPCAPS, seteuid(non-root) clears the permitted capability
+    // set permanently — even after seteuid(0) the process has no CAP_SYS_ADMIN
+    // for overlay mounts or network relays.
+    // SAFETY: prctl capability-keep flag has no pointer arguments.
+    if unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to retain capabilities for Sandbox SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    // SAFETY: seteuid/setegid use the retained saved IDs from setpriv / setuid.
+    if unsafe { libc::setegid(rgid) } != 0 {
+        let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to match Sandbox controller egid {rgid} for SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if unsafe { libc::seteuid(ruid) } != 0 {
+        let _ = unsafe { libc::setegid(egid) };
+        let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to match Sandbox controller euid {ruid} for SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    let restore_uid = unsafe { libc::seteuid(0) };
+    let restore_gid = unsafe { libc::setegid(0) };
+    let _ = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+    if restore_gid != 0 || restore_uid != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller effective root after SDK peer auth: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    match result {
+        Ok(value) => Ok(value),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn chown_to_real_owner(path: &Path) -> Result<()> {
+    chown_path_to_ids(path, expected_owner_ids())
+}
+
+fn chown_tree_to_ids(path: &Path, ids: (u32, u32)) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    chown_path_to_ids(path, ids)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path).map_err(BoxError::IoError)? {
+        let entry = entry.map_err(BoxError::IoError)?;
+        // R17 mounts profile bind-mounts host paths under sandbox/attachments.
+        if entry.file_name() == "attachments" {
+            chown_path_to_ids(&entry.path(), ids)?;
+            continue;
+        }
+        chown_tree_to_ids(&entry.path(), ids)?;
+    }
+    Ok(())
+}
+
+/// No-op unless a process permanently dropped via saved-UID retention.
+///
+/// Controllers prefer [`with_real_owner_euid`] around SDK connect, so this is
+/// typically unused. Teardown paths still call it for older permanent-drop
+/// sequences.
+pub(crate) fn restore_effective_root_if_saved() -> Result<()> {
+    let (ruid, euid, saved_uid, saved_gid) = {
+        let mut ruid = 0;
+        let mut euid = 0;
+        let mut saved_uid = 0;
+        let mut rgid = 0;
+        let mut egid = 0;
+        let mut saved_gid = 0;
+        // SAFETY: getresuid/getresgid write three uid_t/gid_t outputs.
+        let uid_rc = unsafe { libc::getresuid(&mut ruid, &mut euid, &mut saved_uid) };
+        let gid_rc = unsafe { libc::getresgid(&mut rgid, &mut egid, &mut saved_gid) };
+        if uid_rc != 0 || gid_rc != 0 {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "failed to inspect Sandbox controller credentials: {}",
+                    std::io::Error::last_os_error()
+                ),
+                hint: None,
+            });
+        }
+        let _ = (rgid, egid);
+        (ruid, euid, saved_uid, saved_gid)
+    };
+    if euid == 0 || ruid == 0 || saved_uid != 0 || saved_gid != 0 {
+        return Ok(());
+    }
+    // SAFETY: seteuid/setegid use the retained saved IDs.
+    if unsafe { libc::setegid(0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller egid 0: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    if unsafe { libc::seteuid(0) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to restore Sandbox controller euid 0: {}",
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+fn chown_path_to_ids(path: &Path, (uid, gid): (u32, u32)) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Sandbox OCI path contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    // SAFETY: lchown takes a NUL-terminated path and does not follow symlinks,
+    // so a rootfs link cannot reassign host packaging paths such as bin/lib.
+    let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        // Read-only bind mounts under boxes/<id> (R17 mounts profile) cannot be
+        // reassigned; skip them rather than failing the whole owner handoff.
+        if error.raw_os_error() == Some(libc::EROFS) {
+            return Ok(());
+        }
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "failed to assign Sandbox OCI path {} to UID {uid}: {error}",
+                path.display()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +851,42 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not return a running or stopped container"));
+    }
+
+    #[test]
+    fn prepares_a_child_below_the_delegated_cgroup_root() {
+        let root = tempfile::tempdir().unwrap();
+        let child = prepare_sandbox_delegation_child_in(root.path().to_path_buf())
+            .unwrap()
+            .expect("delegated root exists");
+
+        assert!(child.starts_with(root.path()));
+        assert!(child.is_dir());
+        assert!(child
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("box-sandbox-owner-"));
+    }
+
+    #[test]
+    fn skips_delegation_child_when_the_root_is_absent() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing");
+        assert!(prepare_sandbox_delegation_child_in(missing)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn assigns_private_dirs_to_the_real_owner_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-parent");
+        create_private_dir(&path).unwrap();
+        chown_to_real_owner(&path).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let expected = expected_owner_uid();
+        assert_eq!(metadata.uid(), expected);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     }
 }

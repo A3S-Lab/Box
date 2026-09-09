@@ -106,6 +106,15 @@ impl LocalExecutionManager {
 fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionManagerResult<()> {
     validate_owned_paths(home_dir, record)?;
 
+    // Sandbox peer-auth may have dropped this process to the real UID. Overlay
+    // unmount and mount-alias detach need effective root / CAP_SYS_ADMIN.
+    #[cfg(target_os = "linux")]
+    crate::sandbox::a3s_oci_controller::restore_effective_root_if_saved().map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to restore effective root before execution cleanup: {error}"
+        ))
+    })?;
+
     if record.isolation.is_sandbox() {
         #[cfg(feature = "vm")]
         crate::vm::reap::cleanup_recorded_sandbox_runtime_in(home_dir, &record.box_dir, &record.id)

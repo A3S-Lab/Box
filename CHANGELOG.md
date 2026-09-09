@@ -31,12 +31,53 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
-  `01786abf4812890ca6f274f1cadf80ebd99ad44f` so Box tracks the Guest Agent
+  `402949c2d73cabdf5b959113806db9108e918cf1` so Box tracks the Guest Agent
   portable-rootfs FD-root fix plus retained KVM lifecycle/recovery/soak/
   create-reopen evidence on that mainline.
 
 ### Fixed
 
+- Linux Sandbox `native-linux-service` owners now migrate into a child of the
+  empty delegated cgroup root before exec, matching host-service composition.
+  Advertised Runtime profiles can start when the CI harness lives in a sibling
+  probe cgroup rather than under the delegated tree. Effective-root launchers
+  also assign the service-root parent to the real UID before spawn so
+  `prepare_private_directory` succeeds after rootless device-policy drop; R17
+  keeps euid 0 (no setpriv elevate wrapper) so inherited `--a3s-box-control-fds`
+  remain Unix stream listeners. Private runtime socket readiness accepts the
+  real-UID owner (not `geteuid`) so effective-root harnesses can wait for the
+  dropped owner endpoint. After owner spawn the controller drops euid/egid to
+  that real identity via `setresuid`/`setresgid` (saved IDs stay 0) so Unix SDK
+  `SO_PEERCRED` same-UID auth succeeds; prepare-time `A3S_HOME` trees are
+  reassigned to the real UID first so lifecycle locks remain usable, and R17
+  cleanup can still restore effective root for any leftover root-owned paths.
+  Capability probing under effective root plans rootless UID/GID mappings for
+  the real UID so the bundle matches the post-bootstrap owner identity. Owner
+  identity checks accept the Sandbox OCI launcher executable when its digest
+  matches the certified `a3s-oci` artifact (CI installs them as sibling copies).
+  Subsequent Sandbox boots restore effective root before overlay mounts so
+  multi-case R17 profiles are not stuck without CAP_SYS_ADMIN after the first
+  peer-auth drop. Restore only runs when saved UID/GID remain 0 (the
+  `setresuid`/`setresgid` contract), so ordinary unit tests that never dropped
+  do not hit `seteuid(0)` EPERM; after restore, `A3S_HOME` is reclaimed to the
+  current effective owner so Runtime state ownership checks pass. Sandbox exec
+  and PTY control sockets under `/tmp/a3s-box-sockets` are chowned to the real
+  UID after bind so post-drop readiness heartbeats can connect to mode `0600`
+  endpoints; boot-failure cleanup also restores effective root before overlay
+  unmount. The controller no longer permanently drops euid after owner spawn —
+  it only matches the real UID around OCI SDK connect (`SO_PEERCRED` accept)
+  so overlay mounts, TCP endpoint relays, and Runtime state ownership keep
+  effective root / capabilities for the full R17 profile set. Temporary
+  peer-auth `seteuid` uses `PR_SET_KEEPCAPS` so permitted capabilities survive
+  the round-trip. Box trees under `A3S_HOME/boxes/<id>` are chowned with `lchown`
+  to the real UID so the durable owner can scan device nodes after its own
+  credential drop; recursion skips `sandbox/attachments` bind mounts and
+  ignores `EROFS` so R17 read-only volume cases cannot fail the handoff.
+  Sandbox log workers clear the setpriv euid/ruid mismatch before exec and
+  prepend the shim `lib/` dir to `LD_LIBRARY_PATH` so secure-execution mode
+  cannot hide bundled libkrun. Crash-recovery / inspect endpoint checks accept
+  real-UID-owned `runtime.sock` under effective-root controllers (same contract
+  as private socket readiness).
 - Terminal reconcile after utility-VM/Host owner loss no longer fails closed
   when the managed OCI log projection exits before drain. Box treats that as
   stopped-only owner-loss recovery and refuses to invent an exit status from
@@ -82,6 +123,9 @@ All notable changes to A3S Box will be documented in this file.
   `setpriv` (non-root real UID/GID, effective root) so rootless device-policy
   bootstrap works when the packaged launcher lives on a nosuid `/tmp` mount;
   `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` overrides the default systemd path.
+- Bump the pinned OCI Runtime revision to `402949c2` so rootless durable
+  owners skip detached `open_tree` RO binds after device-policy drop (Box R17
+  mounts profile) while host-service owners keep the previous clone path.
 - Bump the pinned OCI Runtime revision to `fb517c6f` so
   `native-linux-host-service --delegated-cgroup-root` bootstraps rootless
   device policy (required for Sandbox creates through the durable host owner).

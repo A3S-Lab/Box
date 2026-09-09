@@ -622,8 +622,24 @@ fn probe_namespaces(snapshot: &mut SandboxCapabilitySnapshot) {
         }
     }
 
-    let effective_uid = unsafe { libc::geteuid() };
-    let effective_gid = unsafe { libc::getegid() };
+    // Under setpriv / setuid launchers (euid 0, non-root ruid), the Sandbox OCI
+    // owner bootstraps device policy then permanently drops to the real UID.
+    // Plan rootless mappings for that durable identity, not for effective root.
+    let (effective_uid, effective_gid) = {
+        let (ruid, rgid, euid, egid) = unsafe {
+            (
+                libc::getuid(),
+                libc::getgid(),
+                libc::geteuid(),
+                libc::getegid(),
+            )
+        };
+        if euid == 0 && ruid != 0 {
+            (ruid, rgid)
+        } else {
+            (euid, egid)
+        }
+    };
     let username = username_for_uid(effective_uid);
     let max_user_namespaces = read_trimmed("/proc/sys/user/max_user_namespaces")
         .and_then(|value| value.parse::<u64>().ok());
