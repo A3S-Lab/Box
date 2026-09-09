@@ -195,8 +195,11 @@ startup across processes, records the exact PID start identity and pinned
 runtime/agent paths plus SHA-256 digests, refuses an unowned socket or live
 artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
 bridge and async Rust SDK constructor honor the explicit
-`A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
-startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
+`A3S_BOX_OCI_MIGRATION=sandbox` Sandbox opt-in and the qualification-only
+`A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path that requires an explicit
+`A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`. No setting means
+no owner probe or startup and preserves the legacy route. Core lifecycle,
+run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
 lanes now pass the Rust, Python, TypeScript, and Go Sandbox suites through this

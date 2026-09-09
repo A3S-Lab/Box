@@ -12,15 +12,21 @@ use sha2::{Digest, Sha256};
 
 use super::LocalExecutionManager;
 #[cfg(target_os = "linux")]
-use super::{NativeLinuxOciBundleProvider, OciLocalExecutionBackend, OciMigrationPolicy};
+use super::{
+    LinuxKvmOciBundleProvider, NativeLinuxOciBundleProvider, OciLocalExecutionBackend,
+    OciMigrationPolicy,
+};
 
 pub const OCI_MIGRATION_ENV: &str = "A3S_BOX_OCI_MIGRATION";
 pub const OCI_HOST_ROOT_ENV: &str = "A3S_BOX_OCI_HOST_ROOT";
 pub const OCI_RUNTIME_PATH_ENV: &str = "A3S_BOX_OCI_RUNTIME_PATH";
 pub const OCI_AGENT_PATH_ENV: &str = "A3S_BOX_OCI_AGENT_PATH";
 pub const OCI_WHPX_ENDPOINT_ENV: &str = "A3S_BOX_OCI_WHPX_ENDPOINT";
+pub const OCI_KVM_ENDPOINT_ENV: &str = "A3S_BOX_OCI_KVM_ENDPOINT";
 #[cfg(test)]
 const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
+#[cfg(test)]
+const DEFAULT_OCI_KVM_ENDPOINT: &str = "/tmp/a3s-oci-kvm-box/runtime.sock";
 
 /// Explicit native-Linux owner and artifact selection for Sandbox migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +41,56 @@ pub struct NativeLinuxOciMigrationConfig {
 pub struct WindowsWhpxOciMigrationConfig {
     runtime_root: PathBuf,
     endpoint: super::OciRuntimeEndpoint,
+}
+
+/// Explicit connection to an externally owned qualification-only Linux KVM service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxKvmOciMigrationConfig {
+    runtime_root: PathBuf,
+    endpoint: super::OciRuntimeEndpoint,
+}
+
+impl LinuxKvmOciMigrationConfig {
+    pub fn new(
+        runtime_root: impl Into<PathBuf>,
+        endpoint: impl Into<PathBuf>,
+    ) -> ExecutionManagerResult<Self> {
+        let config = Self {
+            runtime_root: runtime_root.into(),
+            endpoint: super::OciRuntimeEndpoint::unix_socket(endpoint)?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    pub fn endpoint(&self) -> &super::OciRuntimeEndpoint {
+        &self.endpoint
+    }
+
+    pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
+        parse_linux_kvm_environment(
+            std::env::var_os(OCI_MIGRATION_ENV),
+            std::env::var_os(OCI_HOST_ROOT_ENV),
+            std::env::var_os(OCI_KVM_ENDPOINT_ENV),
+            home_dir,
+        )
+    }
+
+    fn validate(&self) -> ExecutionManagerResult<()> {
+        validate_absolute_normalized(&self.runtime_root, "KVM OCI runtime root")?;
+        match &self.endpoint {
+            super::OciRuntimeEndpoint::UnixSocket { .. } => Ok(()),
+            super::OciRuntimeEndpoint::WindowsNamedPipe { .. } => {
+                Err(ExecutionManagerError::InvalidRequest(
+                    "KVM OCI qualification requires a Unix-domain socket endpoint".to_string(),
+                ))
+            }
+        }
+    }
 }
 
 impl WindowsWhpxOciMigrationConfig {
@@ -273,8 +329,66 @@ impl LocalExecutionManager {
         }
     }
 
+    /// Compose the retained backend with the externally launched Box/KVM OCI service.
+    pub async fn with_linux_kvm_oci_qualification(
+        state_path: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+        config: LinuxKvmOciMigrationConfig,
+    ) -> ExecutionManagerResult<Self> {
+        Self::with_linux_kvm_oci_qualification_and_pull_progress(
+            state_path.into(),
+            home_dir.into(),
+            config,
+            None,
+        )
+        .await
+    }
+
+    async fn with_linux_kvm_oci_qualification_and_pull_progress(
+        state_path: PathBuf,
+        home_dir: PathBuf,
+        config: LinuxKvmOciMigrationConfig,
+        pull_progress_fn: Option<crate::PullProgressFn>,
+    ) -> ExecutionManagerResult<Self> {
+        config.validate()?;
+
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        {
+            let mut provider =
+                LinuxKvmOciBundleProvider::new(home_dir.clone(), config.runtime_root());
+            if let Some(progress) = pull_progress_fn.as_ref() {
+                provider = provider.with_pull_progress_fn(progress.clone());
+            }
+            let oci = Arc::new(
+                OciLocalExecutionBackend::connect(config.endpoint().clone(), Arc::new(provider))
+                    .await?,
+            );
+            Ok(Self::with_oci_migration_backend_and_pull_progress(
+                state_path,
+                home_dir,
+                oci,
+                OciMigrationPolicy::AllViaOci,
+                pull_progress_fn,
+            ))
+        }
+
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        {
+            let _ = (state_path, home_dir, config, pull_progress_fn);
+            Err(ExecutionManagerError::Unavailable(
+                "Box/KVM OCI qualification requires Linux x86_64 or aarch64".to_string(),
+            ))
+        }
+    }
+
     /// Select the production migration composition only when explicitly opted
-    /// in through `A3S_BOX_OCI_MIGRATION=sandbox`.
+    /// in through `A3S_BOX_OCI_MIGRATION`.
     pub async fn with_configured_backend(
         state_path: impl Into<PathBuf>,
         home_dir: impl Into<PathBuf>,
@@ -308,7 +422,35 @@ impl LocalExecutionManager {
             }
         }
 
-        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(config) = LinuxKvmOciMigrationConfig::from_environment(&home_dir)? {
+                return Self::with_linux_kvm_oci_qualification_and_pull_progress(
+                    state_path,
+                    home_dir,
+                    config,
+                    pull_progress_fn,
+                )
+                .await;
+            }
+            match NativeLinuxOciMigrationConfig::from_environment(&home_dir)? {
+                Some(config) => {
+                    Self::with_native_linux_oci_migration_and_pull_progress(
+                        state_path,
+                        home_dir,
+                        config,
+                        pull_progress_fn,
+                    )
+                    .await
+                }
+                None => legacy_backend(state_path, home_dir, pull_progress_fn),
+            }
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            all(target_os = "windows", target_arch = "x86_64")
+        )))]
         {
             match NativeLinuxOciMigrationConfig::from_environment(&home_dir)? {
                 Some(config) => {
@@ -360,10 +502,10 @@ fn parse_environment(
     match mode.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "off" | "disabled" | "legacy" => return Ok(None),
         "1" | "true" | "on" | "sandbox" | "sandbox-via-oci" => {}
-        "all" | "all-via-oci" => {
-            return Err(ExecutionManagerError::InvalidRequest(
-                "all-via-OCI migration is not qualified yet; use sandbox".to_string(),
-            ))
+        "all" | "all-via-oci" | "microvm" | "microvm-via-oci" | "kvm" => {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "MicroVM OCI qualification uses {OCI_KVM_ENDPOINT_ENV} with LinuxKvmOciMigrationConfig; NativeLinuxOciMigrationConfig accepts only sandbox"
+            )))
         }
         value => {
             return Err(ExecutionManagerError::InvalidRequest(format!(
@@ -442,6 +584,46 @@ fn parse_windows_environment(
             ))
         })?;
     WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
+}
+
+fn parse_linux_kvm_environment(
+    mode: Option<OsString>,
+    runtime_root: Option<OsString>,
+    endpoint: Option<OsString>,
+    home_dir: &Path,
+) -> ExecutionManagerResult<Option<LinuxKvmOciMigrationConfig>> {
+    let Some(mode) = mode.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let mode = mode.to_str().ok_or_else(|| {
+        ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_MIGRATION_ENV} must contain UTF-8 text"
+        ))
+    })?;
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "disabled" | "legacy" | "1" | "true" | "on" | "sandbox"
+        | "sandbox-via-oci" => return Ok(None),
+        "all" | "all-via-oci" | "microvm" | "microvm-via-oci" | "kvm" => {}
+        value => {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "unsupported {OCI_MIGRATION_ENV} value {value:?}; expected off, sandbox, microvm, or all"
+            )))
+        }
+    }
+
+    let runtime_root = runtime_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_service_root(home_dir));
+    let endpoint = endpoint
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "{OCI_KVM_ENDPOINT_ENV} must be set explicitly for the qualification-only KVM service"
+            ))
+        })
+        .map(PathBuf::from)?;
+    LinuxKvmOciMigrationConfig::new(runtime_root, endpoint).map(Some)
 }
 
 fn default_service_root(home_dir: &Path) -> PathBuf {
@@ -545,6 +727,38 @@ mod tests {
                 DEFAULT_OCI_WHPX_ENDPOINT,
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn linux_kvm_environment_requires_explicit_socket_and_accepts_microvm() {
+        let home = absolute("a3s-oci-config-home");
+        assert!(
+            parse_linux_kvm_environment(Some(OsString::from("microvm")), None, None, &home)
+                .is_err()
+        );
+        assert_eq!(
+            parse_linux_kvm_environment(Some(OsString::from("sandbox")), None, None, &home)
+                .unwrap(),
+            None
+        );
+
+        let config = parse_linux_kvm_environment(
+            Some(OsString::from("microvm")),
+            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+            Some(OsString::from(DEFAULT_OCI_KVM_ENDPOINT)),
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(DEFAULT_OCI_KVM_ENDPOINT)
+                .unwrap()
+        );
+        assert_eq!(
+            config.runtime_root(),
+            absolute("a3s-oci-kvm-runtime").as_path()
         );
     }
 }

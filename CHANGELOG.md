@@ -6,11 +6,22 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Linux qualification-only MicroVM OCI opt-in through
+  `A3S_BOX_OCI_MIGRATION=microvm|all` plus an explicit
+  `A3S_BOX_OCI_KVM_ENDPOINT` Unix socket pointing at OCI Runtime's
+  `box-kvm-qualification-service`. The public KVM probe stays non-registerable;
+  this path reuses the portable DedicatedVm bundle provider already used by
+  WHPX and is not a production claim.
 - Windows WHPX docs now include a first-principles acceptance matrix index
   (`WIN-HOST` / `WIN-POS` / `WIN-NEG` / `WIN-SLO`) tied to issues #252, #255,
   and #257.
 - Windows CLI coverage for bridge/network-create/pool-start/container-update
   fail-closed negatives (#260).
+
+### Changed
+
+- Bump the pinned OCI Runtime revision to `53e21ef204c8a45bcc2a02f28d35acf2edc9415f` so Box can target the
+  merged `box-kvm-qualification-service` Host Service.
 
 ### Fixed
 
