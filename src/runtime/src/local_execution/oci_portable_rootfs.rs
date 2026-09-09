@@ -130,6 +130,7 @@ pub(crate) fn publish_portable_bundle(
     let pending = operation_directory.join("bundle.pending");
     ensure_absent(&pending, "portable OCI bundle temporary")?;
     std::fs::create_dir(&pending).map_err(BoxError::IoError)?;
+    set_private_directory_mode(&pending)?;
 
     let publish = (|| -> Result<()> {
         let rootfs = pending.join("rootfs");
@@ -151,6 +152,7 @@ pub(crate) fn publish_portable_bundle(
         sync_directory(&pending).map_err(BoxError::IoError)?;
 
         std::fs::rename(&pending, bundle_directory).map_err(BoxError::IoError)?;
+        set_private_directory_mode(bundle_directory)?;
         sync_directory(operation_directory).map_err(BoxError::IoError)
     })();
 
@@ -291,6 +293,25 @@ fn validate_plain_directory(path: &Path, label: &str) -> Result<()> {
             "{label} is not a plain directory: {}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// OCI Runtime accepts only same-UID `0700` bundle handoff directories on Unix.
+fn set_private_directory_mode(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        validate_plain_directory(path, "portable OCI private directory")?;
+        let mut permissions = std::fs::symlink_metadata(path)
+            .map_err(BoxError::IoError)?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).map_err(BoxError::IoError)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
     Ok(())
 }
@@ -560,5 +581,36 @@ mod tests {
             .path()
             .join(PORTABLE_ROOTFS_METADATA_FILE)
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_portable_bundle_uses_private_directory_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(
+            &source,
+            vec![
+                entry(b".", RootfsEntryKind::Directory),
+                entry(b"./bin", RootfsEntryKind::Directory),
+            ],
+        );
+        let bundle = temporary
+            .path()
+            .join("handoffs")
+            .join("box-1")
+            .join("create-1")
+            .join("bundle");
+        let spec = Spec::default();
+
+        publish_portable_bundle(&source, &spec, &bundle).unwrap();
+
+        let mode = std::fs::symlink_metadata(&bundle).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        assert!(bundle.join("config.json").is_file());
+        assert!(bundle.join("rootfs").is_dir());
     }
 }
