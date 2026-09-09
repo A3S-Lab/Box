@@ -62,7 +62,17 @@ impl A3sOciController {
         // Effective-root CI / setuid launchers create paths as euid 0. After
         // RootlessDevicePolicyBootstrap drops to the real UID, native-linux-service
         // requires the service root parent to be owned by that UID (mode 0700).
+        // Chown the sockets root too: create_dir_all leaves it root:0700 and the
+        // post-drop controller cannot traverse or remove children otherwise.
         chown_to_real_owner(runtime_parent)?;
+        if let Some(sockets_root) = runtime_parent.parent() {
+            if sockets_root
+                .file_name()
+                .is_some_and(|name| name == "a3s-box-sockets")
+            {
+                chown_to_real_owner(sockets_root)?;
+            }
+        }
 
         let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
         let pty_listener = bind_control_listener(&launch.pty_socket_path)?;
