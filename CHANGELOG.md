@@ -32,6 +32,9 @@ All notable changes to A3S Box will be documented in this file.
   the real UID so the bundle matches the post-bootstrap owner identity. Owner
   identity checks accept the Sandbox OCI launcher executable when its digest
   matches the certified `a3s-oci` artifact (CI installs them as sibling copies).
+  Subsequent Sandbox boots restore effective root before overlay mounts so
+  multi-case R17 profiles are not stuck without CAP_SYS_ADMIN after the first
+  peer-auth drop.
 - Guest rootfs archives encode FIFOs as zero-length tar special entries instead
   of opening them for read, so `a3s-box diff` succeeds when the writable layer
   contains a FIFO (#265).
