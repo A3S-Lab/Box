@@ -73,7 +73,9 @@ jobs:
           )
           found=0
           for pattern in "${removed_patterns[@]}"; do
-            if git grep -n -I -F -e "$pattern" -- \
+            # Word-regexp: refuse bare E2B/compat tokens without matching hex
+            # substrings inside git SHAs (e.g. OCI pin …e2bbb9a…).
+            if git grep -n -I -w -F -e "$pattern" -- \
               .github compat deploy docs scripts sdk src README.md \
               ':(exclude,glob)**/Cargo.lock'; then
               found=1

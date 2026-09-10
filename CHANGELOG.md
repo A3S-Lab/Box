@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Mark live-session / elevate / KVM qualification shell scripts executable in
+  git (`100755`). Sandbox CI on Linux checkouts was failing closed with
+  `missing executable …/elevate-linux-sandbox-owner.sh` before the v3 gate ran.
+- Format anti-compat grep uses word-regexp so OCI pin SHAs that contain the
+  hex substring `e2b` (for example `7001ce5…e2bbb9a…`) do not false-positive as
+  a reintroduced E2B compatibility surface.
 - Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
   `while read`) so Kill after Host reopen still targets a live retained handle
   instead of failing as not-live under start-time identity.
