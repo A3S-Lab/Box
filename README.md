@@ -315,9 +315,12 @@ MicroVM routing.
 
 Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
 delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
-run the root-owned runner. It mirrors Sandbox CI: matched-cred setpriv for the
-example and `A3S_BOX_CI_SETPRIV_WRAPPER=run-linux-sandbox-ci.sh` so the Native
-Linux owner can elevate for device-policy bootstrap:
+run the root-owned runner. It mirrors Sandbox CI: the runner starts as root,
+then `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`,
+sandbox `ruid`) and the same wrapper is exported as
+`A3S_BOX_CI_SETPRIV_WRAPPER` so the Native Linux owner can elevate for
+device-policy bootstrap. SDK Local Sandbox CI runs this gate and fail-closes
+on a missing or dishonest report; it still does not close B2.
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release

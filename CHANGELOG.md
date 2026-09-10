@@ -68,7 +68,10 @@ All notable changes to A3S Box will be documented in this file.
   `b2_process_session_recovery_closed` stay false. Does not claim KVM MicroVM
   Live continuity or close utility-VM B2/R6. Default create stays Host-bound.
   Green Linux qualification report is still required before treating the
-  retained-stream ROADMAP checkbox as closed.
+  retained-stream ROADMAP checkbox as closed. SDK Local Sandbox CI now runs
+  that same v3 gate after the packaged SDK smoke, uploads the JSON report,
+  and fail-closes unless `retained_stream_handle_proven` is true while B2,
+  fixture continuity, KVM MicroVM Live, and utility-VM claims stay false.
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
   `scripts/linux-kvm-oci-qualification.sh`. Schema

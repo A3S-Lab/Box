@@ -412,6 +412,18 @@ retain process or filesystem sessions after its owner dies.
   stdout/stderr log projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
+  - [x] Observation harness `a3s.box.linux-native-live-session.v2`
+    (`linux-native-live-session-qualification` drop-manager path): supervised
+    create + Host owner SIGKILL + Live rebind with keyed captured exec
+    before/after reopen, state/inventory/stats/kill; no invented exit. Requires
+    `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`. Drops the Box manager before owner
+    death, so it does **not** prove retained streaming handle continuity and
+    does **not** close B2. **Existing-host WSL2 evidence** on OCI
+    `07e653f9fb594e7454f6f732f3d3ceb80928b254`: report SHA-256
+    `614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`
+    (`status=passed`, `keyed_captured_exec_after_reopen=true`,
+    `live_kill_after_reopen=true`, `removed=true`; retained-stream / B2 /
+    fixture / KVM / utility-VM claims stay false).
   - [ ] Observation harness `a3s.box.linux-native-live-session.v3`
     (`linux-native-live-session-qualification`) for Native Linux Sandbox with
     supervised create + Host owner SIGKILL + Live rebind while retaining the
@@ -422,7 +434,10 @@ retain process or filesystem sessions after its owner dies.
     Sets `retained_stream_handle_proven=true` **only** when that path passes;
     keeps `fixture_stream_continuity_claimed` and
     `b2_process_session_recovery_closed` false. Does not close utility-VM /
-    KVM MicroVM Live or default create Host-bound policy. Prior v2 (manager-
+    KVM MicroVM Live or default create Host-bound policy. SDK Local
+    Sandbox CI runs this gate and fail-closes unless
+    `retained_stream_handle_proven` is true while B2/fixture/KVM/utility-VM
+    claims stay false. Prior v2 (manager-
     drop) evidence on OCI
     `07e653f9fb594e7454f6f732f3d3ceb80928b254` remains keyed-capture /
     live-kill only (`614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`);

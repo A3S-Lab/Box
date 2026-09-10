@@ -32,6 +32,8 @@ jobs:
       - name: Verify OCI SDK and artifact pins agree
         shell: bash
         run: bash scripts/check-oci-pins.sh
+      - name: Verify live-session report honesty checker
+        run: python3 scripts/verify-linux-native-live-session-report.py --self-test
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
@@ -464,7 +466,7 @@ jobs:
             platform: linux-arm64
             recovery_artifact: a3s-box-native-owner-recovery-aarch64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       A3S_HOME: /tmp/a3s-local-sdk-smoke-runtime-conformance
       A3S_BOX_OCI_RUNTIME_PATH: /tmp/a3s-local-sdk-smoke-runtime-conformance/bin/a3s-oci
@@ -673,6 +675,47 @@ jobs:
             echo "::error title=Local SDK smoke failure::$diagnostic"
           fi
           exit "$status"
+      - name: Qualify Native Linux live-session retained-stream (v3)
+        env:
+          LIVE_SESSION_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+        run: |
+          set -euo pipefail
+          cd src
+          cargo build --locked --release -p a3s-box-runtime \
+            --example linux-native-live-session-qualification
+          example_bin="$(pwd)/target/release/examples/linux-native-live-session-qualification"
+          test -x "$example_bin"
+          staging="$RUNNER_TEMP/a3s-box-live-session-bin"
+          mkdir -p "$staging"
+          install -m 755 "$A3S_BOX_BINARY" "$staging/a3s-box"
+          install -m 755 "$A3S_BOX_SHIM_BINARY" "$staging/a3s-box-shim"
+          install -m 755 "$A3S_BOX_GUEST_INIT_BINARY" "$staging/a3s-box-guest-init"
+          install -m 755 "$example_bin" "$staging/linux-native-live-session-qualification"
+          report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v3.json"
+          rm -f "$report"
+          # Root entry matches the local gate: prepare cgroup/home, then the
+          # script setpriv-execs the example. Do not treat a missing report as
+          # retained-stream proof, and refuse B2 / fixture / KVM claims.
+          sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT,A3S_BOX_CI_PROBE_CGROUP \
+            bash "$GITHUB_WORKSPACE/scripts/linux-native-live-session-qualification.sh" \
+              --box-bin "$staging" \
+              --a3s-oci "$A3S_BOX_OCI_RUNTIME_PATH" \
+              --a3s-oci-agent "$A3S_BOX_OCI_AGENT_PATH" \
+              --image "$LIVE_SESSION_IMAGE" \
+              --report "$report" \
+              --home "$RUNNER_TEMP/a3s-box-native-live-session-home" \
+              --box-sha "$GITHUB_SHA" \
+              --oci-sha "$A3S_OCI_RUNTIME_REV"
+          python3 "$GITHUB_WORKSPACE/scripts/verify-linux-native-live-session-report.py" \
+            "$report"
+      - name: Upload Native Linux live-session v3 evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: a3s-box-linux-native-live-session-v3-${{ matrix.platform }}
+          path: ${{ runner.temp }}/a3s-box-linux-native-live-session-v3.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload native OCI owner-recovery evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

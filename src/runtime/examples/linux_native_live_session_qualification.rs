@@ -470,12 +470,7 @@ mod qualification {
                     "streaming stdin write before owner SIGKILL failed: {error}"
                 ))
             })?;
-        expect_stream_echo(
-            process.as_mut(),
-            STREAM_ECHO_BEFORE,
-            "before owner SIGKILL",
-        )
-        .await?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_BEFORE, "before owner SIGKILL").await?;
 
         // Keep the Box manager: retained-handle continuity is the v3 gate.
         sigkill_identity(&owner)?;
@@ -494,9 +489,7 @@ mod qualification {
         let disconnect = process.next_event().await;
         require(
             matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))),
-            format!(
-                "retained stream must surface Unavailable on owner death, got {disconnect:?}"
-            ),
+            format!("retained stream must surface Unavailable on owner death, got {disconnect:?}"),
         )?;
 
         let mut outcome = None;
@@ -567,12 +560,7 @@ mod qualification {
                     "retained streaming stdin after owner reopen failed: {error}"
                 ))
             })?;
-        expect_stream_echo(
-            process.as_mut(),
-            STREAM_ECHO_AFTER,
-            "after owner reopen",
-        )
-        .await?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_AFTER, "after owner reopen").await?;
         input.close_stdin().await.map_err(|error| {
             failure(format!(
                 "retained streaming close_stdin after owner reopen failed: {error}"
