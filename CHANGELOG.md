@@ -76,6 +76,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Sandbox CI Verify cleanup tears down the live-session host-root owner and
+  reaps elevate/launcher leftovers whose argv still reference the live-session
+  home, so leftover pgrep does not fail after a greened live-session gate.
+- Keyed captured exec after Host reopen retries OCI retryable `Unavailable`
+  (short `printf` can reap before recovery identity capture on aarch64) with
+  distinct request ids so a partial first attempt cannot collide.
+
 - Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
   `while read`) so Kill after Host reopen still targets a live retained handle
   instead of failing as not-live under start-time identity.
