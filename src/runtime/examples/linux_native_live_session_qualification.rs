@@ -3,15 +3,18 @@
 //! Exercises the public Box Sandbox path with
 //! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across a
 //! Native Linux Host owner SIGKILL, proves retained streaming process-handle
-//! continuity plus keyed captured exec / state / inventory / stats / kill,
-//! without inventing an exit status.
+//! continuity, filesystem continuity via public `transfer_file` (upload before
+//! kill, download after reattach on the same generation), plus keyed captured
+//! exec / state / inventory / stats / kill, without inventing an exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v3`.
+//! Schema `a3s.box.linux-native-live-session.v4`.
 //!
 //! Honest scope (anti-overfit):
 //! - Live Host-reopen is Native-Linux-driver-only today.
 //! - `retained_stream_handle_proven` is set only when the same
 //!   `start_process` handle continues stdin/output/signal after owner reopen.
+//! - `retained_filesystem_proven` is set only when upload-before-kill bytes
+//!   match download-after-reattach on the same Box generation.
 //! - Fixture `process_restart` continuity is never claimed
 //!   (`fixture_stream_continuity_claimed` stays false).
 //! - Does **not** claim KVM MicroVM Live continuity and does **not** close
@@ -52,14 +55,17 @@ mod qualification {
         BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionBackend,
         ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
         ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
-        ExecutionSessionManager, ExecutionState, IsolationClass as BoxIsolationClass, NetworkMode,
-        OperationId, ReconcileOutcome, ResourceConfig, StreamType,
+        ExecutionSessionManager, ExecutionState, FileOp, FileRequest,
+        IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
+        ResourceConfig, StreamType,
     };
     use a3s_box_runtime::{
         LocalExecutionManager, ManagedExecutionStore, ManagedRuntimeRoute,
         NativeLinuxOciMigrationConfig, OciRuntimeBinding,
     };
     use a3s_oci_sdk::{DriverKind, IsolationClass as OciIsolationClass};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use serde::Serialize;
     use serde_json::Value;
 
@@ -73,7 +79,7 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v3";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v4";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
@@ -81,6 +87,8 @@ mod qualification {
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
+    const FS_GUEST_PATH: &str = "/tmp/.a3s-box-native-live-fs.bin";
+    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv4\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -120,6 +128,13 @@ mod qualification {
         /// Set only when the same streaming `start_process` handle continues
         /// after a real Native Linux owner SIGKILL + Live reopen.
         retained_stream_handle_proven: bool,
+        /// Upload before owner SIGKILL via public Box `transfer_file`.
+        file_upload_before_kill: bool,
+        /// Download after Live reopen matches the pre-kill upload payload.
+        file_download_after_reattach: bool,
+        /// Aggregate: upload before kill + exact download match after reattach
+        /// on the same Running generation (no invented stop).
+        retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
         /// Always false: B2 still requires utility-VM Live as well.
@@ -176,6 +191,9 @@ mod qualification {
                 kvm_microvm_live_claimed: false,
                 utility_vm_claimed: false,
                 retained_stream_handle_proven: false,
+                file_upload_before_kill: false,
+                file_download_after_reattach: false,
+                retained_filesystem_proven: false,
                 fixture_stream_continuity_claimed: false,
                 b2_process_session_recovery_closed: false,
                 supervised_create_required: true,
@@ -401,6 +419,14 @@ mod qualification {
         .await?;
         report.keyed_captured_exec_before_owner_kill = true;
 
+        prove_file_upload_before_kill(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+        )
+        .await?;
+        report.file_upload_before_kill = true;
+
         let owner = load_owner_record(&inputs.host_root)?;
         report.owner_before_kill = Some(owner.clone());
         let recovery = load_live_recovery(&inputs.host_root, &owner, &binding)?;
@@ -622,6 +648,23 @@ mod qualification {
         )?;
         report.exit_code_absent_after_reopen = true;
 
+        prove_file_download_after_reattach(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+        )
+        .await?;
+        report.file_download_after_reattach = true;
+        report.retained_filesystem_proven = report.file_upload_before_kill
+            && report.file_download_after_reattach
+            && report.reconciled_ready_after_reopen
+            && report.observed_running_after_reopen
+            && report.exit_code_absent_after_reopen;
+        require(
+            report.retained_filesystem_proven,
+            "Live retained filesystem evidence failed its completeness audit",
+        )?;
+
         let inventory_after = manager
             .list_processes(&reservation.execution_id, reservation.generation)
             .await?;
@@ -753,6 +796,118 @@ mod qualification {
             format!(
                 "keyed captured exec `{request_id}` stdout drifted: {:?}",
                 String::from_utf8_lossy(&output.stdout)
+            ),
+        )?;
+        Ok(())
+    }
+
+
+    async fn prove_file_upload_before_kill(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<(), AnyError> {
+        let response = manager
+            .transfer_file(
+                execution_id,
+                generation,
+                FileRequest {
+                    op: FileOp::Upload,
+                    guest_path: FS_GUEST_PATH.to_string(),
+                    data: Some(STANDARD.encode(FS_PAYLOAD)),
+                    user: None,
+                    max_bytes: None,
+                },
+            )
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "Live retained file upload before owner SIGKILL failed: {error}"
+                ))
+            })?;
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained file upload before owner SIGKILL reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        require(
+            response.size == FS_PAYLOAD.len() as u64,
+            format!(
+                "Live retained file upload size mismatch: got {} expected {}",
+                response.size,
+                FS_PAYLOAD.len()
+            ),
+        )?;
+        Ok(())
+    }
+
+    async fn prove_file_download_after_reattach(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<(), AnyError> {
+        // Downloads can hit retryable Unavailable briefly after Host reopen.
+        let request = FileRequest {
+            op: FileOp::Download,
+            guest_path: FS_GUEST_PATH.to_string(),
+            data: None,
+            user: None,
+            max_bytes: Some(FS_PAYLOAD.len() as u64),
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let response = loop {
+            match manager
+                .transfer_file(execution_id, generation, request.clone())
+                .await
+            {
+                Ok(response) => break response,
+                Err(ExecutionManagerError::Unavailable(message)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure(format!(
+                            "Live retained file download after reopen failed: execution backend unavailable: {message}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    return Err(failure(format!(
+                        "Live retained file download after reopen failed: {error}"
+                    )));
+                }
+            }
+        };
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained file download after reopen reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        let decoded = response
+            .data
+            .as_deref()
+            .map(|value| STANDARD.decode(value))
+            .transpose()
+            .map_err(|error| {
+                failure(format!(
+                    "Live retained file download was not base64: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                failure("Live retained file download omitted payload data".to_string())
+            })?;
+        require(
+            decoded == FS_PAYLOAD,
+            "Live retained file download did not match the pre-SIGKILL upload payload",
+        )?;
+        require(
+            response.size == FS_PAYLOAD.len() as u64,
+            format!(
+                "Live retained file download size mismatch: got {} expected {}",
+                response.size,
+                FS_PAYLOAD.len()
             ),
         )?;
         Ok(())

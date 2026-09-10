@@ -6,6 +6,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Observation harness `a3s.box.linux-native-live-session.v4` extends the
+  Native Linux live-session gate with filesystem continuity across owner
+  SIGKILL via public Box `transfer_file` (upload before kill, download after
+  reattach on the same generation; `retained_filesystem_proven`). Keeps
+  retained streaming handle proof from v3. Does **not** close B2
+  (`b2_process_session_recovery_closed` stays false) and does not claim
+  fixture `process_restart` continuity. **Existing-host WSL2 greened** on
+  OCI `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: report SHA-256
+  `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`.
+
 - Existing-host WSL2 `/dev/kvm` greened `a3s.box.linux-kvm-live-session.v1`
   (`retained_stream_handle_proven=true`, `kvm_microvm_live_claimed=true`) on
   Box `0a6ce8d7…` + OCI `f532e2d…` (report SHA-256
@@ -24,8 +34,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
-- Bump pinned OCI Runtime to `f532e2d818cc302849a7c92653ca8256e3ba277e` (KVM
-  Live retained exec I/O across Host reopen).
+- Bump pinned OCI Runtime to `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`
+  (Native Live filesystem continuity, OCI-Runtime #290). Prior pin
+  `f532e2d818cc302849a7c92653ca8256e3ba277e` covered KVM Live retained exec I/O.
 
 ### Fixed
 

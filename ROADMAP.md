@@ -464,11 +464,28 @@ retain process or filesystem sessions after its owner dies.
     Prior v2 (manager-drop) evidence on OCI
     `07e653f9fb594e7454f6f732f3d3ceb80928b254` remains keyed-capture /
     live-kill only (`614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`).
+  - [x] Observation harness `a3s.box.linux-native-live-session.v4`
+    (`linux-native-live-session-qualification`) extends v3 with filesystem
+    continuity across owner SIGKILL via public Box `transfer_file` (upload
+    before kill, download after reattach on the same generation;
+    `retained_filesystem_proven` / `file_upload_before_kill` /
+    `file_download_after_reattach`). Keeps retained streaming handle proof.
+    Requires OCI pin `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live
+    filesystem, OCI-Runtime #290). Does **not** close B2
+    (`b2_process_session_recovery_closed` stays false) and does not claim
+    fixture `process_restart` continuity.
   - [x] Retained streaming process-handle continuity on a real Native Linux
-    owner restart (v3 harness path above; fixture `process_restart` remains
+    owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close B2
     (`b2_process_session_recovery_closed` stays false until the plan's full
     B2 criteria are met).
+  - [x] Retained filesystem continuity on a real Native Linux owner restart
+    (v4 harness path above). **Existing-host WSL2 evidence** on OCI
+    `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: report SHA-256
+    `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
+    (`status=passed`, `retained_filesystem_proven=true`,
+    `retained_stream_handle_proven=true`; B2 / fixture / KVM / utility-VM
+    claims stay false). Box tip SHA `7d633b15cfb4f23c092c666a0a13aadb25eccdfd`.
   - [x] KVM MicroVM Live process-session continuity via observation harness
     `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
     with `A3S_OCI_KVM_SESSION_OWNER=1`, Box manager retained across Host Service
