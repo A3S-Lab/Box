@@ -73,8 +73,7 @@ impl LocalExecutionManager {
                     if self.release_execution_resources(&record).await.is_err() {
                         return Err(stop_error);
                     }
-                    let terminal =
-                        startup_terminal_state(observation.state, observation.exit_code);
+                    let terminal = startup_terminal_state(observation.state, observation.exit_code);
                     self.transition(
                         &record,
                         ManagedExecutionState::Pausing,
