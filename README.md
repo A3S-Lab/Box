@@ -336,11 +336,14 @@ Service SIGKILL, proves retained streaming `start_process` handle continuity
 filesystem continuity via public `transfer_file` (upload before kill,
 download after reattach on the same generation;
 `retained_filesystem_proven`). Fixture continuity stays unclaimed
-(`fixture_stream_continuity_claimed` stays false). B2 stays open
-(`b2_process_session_recovery_closed` stays false). Pin OCI Runtime at
+(`fixture_stream_continuity_claimed` stays false). Together with Native Live
+v4, this closes the ROADMAP process-session recovery parent; harness reports
+still keep `b2_process_session_recovery_closed=false` (reports never
+self-certify B2 close). Pin OCI Runtime at
 `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (KVM Live filesystem #289).
 Existing-host WSL2 `/dev/kvm` evidence report SHA-256 `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`
-(`retained_filesystem_proven=true`; B2 stays false).
+(`retained_filesystem_proven=true`). Does not flip default create Host-bound
+policy or cutover.
 
 ### Exercise Native Linux live-session Host reopen (observation)
 
@@ -374,11 +377,15 @@ download after reattach on the same generation;
 `retained_filesystem_proven`). It continues authentic Live keyed captured exec
 plus state/inventory/stats/kill without inventing an exit status. Fixture
 `process_restart` is never claimed as driver evidence
-(`fixture_stream_continuity_claimed` stays false). B2 stays open until
-utility-VM Live also lands (`b2_process_session_recovery_closed` stays false).
-It does not claim KVM MicroVM Live continuity. Pin OCI Runtime at
-`61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live filesystem #290). Existing-host WSL2 evidence report
-SHA-256 `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818` (`retained_filesystem_proven=true`; B2 stays false).
+(`fixture_stream_continuity_claimed` stays false). Together with KVM MicroVM
+Live v2, this closes the ROADMAP process-session recovery parent; harness
+reports still keep `b2_process_session_recovery_closed=false` (reports never
+self-certify B2 close). It does not alone claim KVM MicroVM Live continuity.
+Pin OCI Runtime at `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live
+filesystem #290). Existing-host WSL2 evidence report SHA-256
+`3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
+(`retained_filesystem_proven=true`). Does not flip default create Host-bound
+policy or cutover.
 
 ### Exercise the qualification-only WHPX handoff on Windows
 

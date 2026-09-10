@@ -17,9 +17,9 @@
 //!   match download-after-reattach on the same Box generation.
 //! - Fixture `process_restart` continuity is never claimed
 //!   (`fixture_stream_continuity_claimed` stays false).
-//! - Does **not** claim KVM MicroVM Live continuity and does **not** close
-//!   Box B2 / OCI R6 (`b2_process_session_recovery_closed` stays false until
-//!   utility-VM Live also lands).
+//! - Does **not** claim KVM MicroVM Live continuity. Harness reports keep
+//!   `b2_process_session_recovery_closed=false` by design (individual reports
+//!   never self-certify ROADMAP B2 / OCI R6 close).
 
 #[cfg(not(all(
     target_os = "linux",
@@ -137,7 +137,7 @@ mod qualification {
         retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
-        /// Always false: B2 still requires utility-VM Live as well.
+        /// Always false: harness reports never self-certify ROADMAP B2 close.
         b2_process_session_recovery_closed: bool,
         supervised_create_required: bool,
         supervised_create_enabled: bool,

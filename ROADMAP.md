@@ -430,8 +430,24 @@ retain process or filesystem sessions after its owner dies.
   exact-generation, replay-safe resource intent and no socket fallback.
 - [x] Route the remaining socket-oriented CLI projections (`attach` and init
   stdout/stderr log projection) through the persisted OCI route.
-- [ ] Prove process-session recovery across an out-of-process runtime-service
+- [x] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
+  **Closed** by aggregated existing-host WSL2 evidence on Box
+  `5f74b5c2356aca534bf35fa5b4d80043c95a691c` + OCI
+  `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: Native Live v4 stream+filesystem
+  report SHA-256
+  `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
+  (`retained_stream_handle_proven=true`, `retained_filesystem_proven=true`)
+  and KVM MicroVM Live v2 stream+filesystem report SHA-256
+  `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`
+  (`retained_stream_handle_proven=true`, `retained_filesystem_proven=true`,
+  `kvm_microvm_live_claimed=true`). That satisfies W2's Native + one
+  utility-VM driver matrix for live process, I/O, and filesystem reattach.
+  Harness report schemas keep `b2_process_session_recovery_closed=false` by
+  design (individual reports never self-certify B2 close). Does **not** flip
+  default create Host-bound policy, cutover, HostRuntimeService registration,
+  fixture `process_restart` continuity, fresh-host promotion, or broader
+  Utility-VM product claims beyond the observation-scoped KVM MicroVM gate.
   - [x] Observation harness `a3s.box.linux-native-live-session.v2`
     (`linux-native-live-session-qualification` drop-manager path): supervised
     create + Host owner SIGKILL + Live rebind with keyed captured exec
@@ -476,9 +492,9 @@ retain process or filesystem sessions after its owner dies.
     fixture `process_restart` continuity.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
-    non-driver evidence). Does **not** alone close B2
-    (`b2_process_session_recovery_closed` stays false until the plan's full
-    B2 criteria are met).
+    non-driver evidence). Does **not** alone close the parent (needs KVM
+    MicroVM Live siblings); harness reports keep
+    `b2_process_session_recovery_closed=false`.
   - [x] Retained filesystem continuity on a real Native Linux owner restart
     (v4 harness path above). **Existing-host WSL2 evidence** on OCI
     `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: report SHA-256
@@ -538,8 +554,12 @@ recreation, and terminal-exit races. The cross-platform deterministic owner
 contract now keeps the original Box process stream and input handle alive,
 exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
-one exec dispatch. Native Linux and utility-VM driver reattachment on real
-hosts remains part of the unchecked exit gate. The production Linux smoke now
+one exec dispatch. Native Linux and KVM MicroVM Live reattachment on real
+hosts is checklist-closed under the process-session recovery parent above
+(existing-host WSL2 digests); harness reports still keep
+`b2_process_session_recovery_closed=false`, and default create Host-bound
+policy, cutover, fresh-host promotion, and broader Utility-VM product claims
+remain open. The production Linux smoke now
 drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
 route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
 CLI `top`, `stats`, `cp`, live update, attach, and init-log projections now

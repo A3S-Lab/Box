@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Close ROADMAP B2 process-session recovery parent after aggregated
+  existing-host WSL2 Native Live v4 + KVM MicroVM Live v2 greening (Box
+  `5f74b5c2…` / OCI `61f77712…`; report SHA-256
+  `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818` and
+  `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`).
+  Harness schemas keep `b2_process_session_recovery_closed=false` by design
+  (reports never self-certify B2 close). Does **not** flip default create
+  Host-bound policy, cutover, HostRuntimeService registration, fixture
+  continuity, fresh-host promotion, or broader Utility-VM product claims.
+
 ### Added
 
 - Observation harness `a3s.box.linux-kvm-live-session.v2` extends the
