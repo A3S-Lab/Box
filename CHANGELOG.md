@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Existing-host WSL2 `/dev/kvm` greened `a3s.box.linux-kvm-live-session.v1`
+  (`retained_stream_handle_proven=true`, `kvm_microvm_live_claimed=true`) on
+  Box `0a6ce8d7…` + OCI `f532e2d…` (report SHA-256
+  `d3d4f3c81659ba646ebb5218bc57db9bb77d765284713d5d41900001848e705e`).
+  `b2_process_session_recovery_closed` stays false.
+
 - Linux KVM MicroVM live-session observation harness
   (`linux-kvm-live-session-qualification`, schema
   `a3s.box.linux-kvm-live-session.v1`) with local runner

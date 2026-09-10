@@ -469,16 +469,19 @@ retain process or filesystem sessions after its owner dies.
     non-driver evidence). Does **not** alone close B2
     (`b2_process_session_recovery_closed` stays false until the plan's full
     B2 criteria are met).
-  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (Utility-VM
-    Live remains open; KVM Host reopen stopped-only path is superseded by the
-    observation harness below but `/dev/kvm` green evidence is still pending).
-  - [ ] Observation harness `a3s.box.linux-kvm-live-session.v1`
-    (`linux-kvm-live-session-qualification`) landed with local runner and
-    report verifier. Requires `A3S_OCI_KVM_SESSION_OWNER=1`, keeps the Box
-    manager across Host Service SIGKILL/restart, and sets
-    `kvm_microvm_live_claimed` only when retained streaming handle continuity
-    passes. Does **not** close B2 (`b2_process_session_recovery_closed` stays
-    false) and does **not** promote Utility-VM Live until `/dev/kvm` green.
+  - [x] KVM MicroVM Live process-session continuity via observation harness
+    `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
+    with `A3S_OCI_KVM_SESSION_OWNER=1`, Box manager retained across Host Service
+    SIGKILL/restart, and `kvm_microvm_live_claimed` only when retained streaming
+    handle continuity passes. **Existing-host WSL2 `/dev/kvm` greened** on Box
+    `0a6ce8d73d1030d08676beef6521487d562bc842` + OCI
+    `f532e2d818cc302849a7c92653ca8256e3ba277e`: report SHA-256
+    `d3d4f3c81659ba646ebb5218bc57db9bb77d765284713d5d41900001848e705e`
+    (`status=passed`, `retained_stream_handle_proven=true`,
+    `kvm_microvm_live_claimed=true`). Does **not** alone close B2
+    (`b2_process_session_recovery_closed` stays false; fixture continuity stays
+    false). Broader Utility-VM product claims beyond this KVM MicroVM gate remain
+    observation-scoped.
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
