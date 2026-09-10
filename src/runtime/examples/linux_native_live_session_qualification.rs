@@ -399,14 +399,9 @@ mod qualification {
         report.owner_before_kill = Some(owner.clone());
         let recovery = load_live_recovery(&inputs.host_root, &owner, &binding)?;
         report.recovery_schema_version = Some(recovery.schema_version.clone());
-        let supervisor = recovery
-            .session_supervisor
-            .clone()
-            .ok_or_else(|| {
-                failure(
-                    "recovery record lacks sessionSupervisor; Live path unavailable (fail-closed)",
-                )
-            })?;
+        let supervisor = recovery.session_supervisor.clone().ok_or_else(|| {
+            failure("recovery record lacks sessionSupervisor; Live path unavailable (fail-closed)")
+        })?;
         report.session_supervisor_recorded = true;
         report.supervisor_before_kill = Some(supervisor.clone());
         report.launcher_before_kill = Some(recovery.launcher.clone());
@@ -511,9 +506,10 @@ mod qualification {
             "process inventory was empty after Live reopen",
         )?;
         report.inventory_after_reopen_non_empty = true;
-        let init_continuous = inventory_after.processes.iter().any(|process| {
-            process.process_id == "init" && process.pid == Some(recovery.init.pid)
-        });
+        let init_continuous = inventory_after
+            .processes
+            .iter()
+            .any(|process| process.process_id == "init" && process.pid == Some(recovery.init.pid));
         require(
             init_continuous,
             format!(
@@ -552,7 +548,10 @@ mod qualification {
         let stop_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let status = reconnected.inspect(&reservation.execution_id).await?;
-            if matches!(status.state, ExecutionState::Stopped | ExecutionState::Failed) {
+            if matches!(
+                status.state,
+                ExecutionState::Stopped | ExecutionState::Failed
+            ) {
                 break;
             }
             if tokio::time::Instant::now() >= stop_deadline {
@@ -678,14 +677,12 @@ mod qualification {
         )?;
         let config = NativeLinuxOciMigrationConfig::new(inputs.host_root.clone())?
             .with_artifacts(inputs.runtime_path.clone(), inputs.agent_path.clone())?;
-        Ok(
-            LocalExecutionManager::with_native_linux_oci_migration(
-                &inputs.state_path,
-                &inputs.home_dir,
-                config,
-            )
-            .await?,
+        Ok(LocalExecutionManager::with_native_linux_oci_migration(
+            &inputs.state_path,
+            &inputs.home_dir,
+            config,
         )
+        .await?)
     }
 
     fn qualification_request(image: &str) -> CreateExecutionRequest {
@@ -703,7 +700,8 @@ mod qualification {
                 cmd: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
-                    "printf 'a3s-box-native-live-session\\n'; while :; do sleep 60; done".to_string(),
+                    "printf 'a3s-box-native-live-session\\n'; while :; do sleep 60; done"
+                        .to_string(),
                 ],
                 network: NetworkMode::None,
                 persistent: false,
@@ -845,7 +843,8 @@ mod qualification {
         let pid = value
             .get("pid")
             .and_then(Value::as_u64)
-            .ok_or_else(|| failure(format!("recovery.{field} lacks pid")))? as u32;
+            .ok_or_else(|| failure(format!("recovery.{field} lacks pid")))?
+            as u32;
         let start_time_ticks = value
             .get("startTimeTicks")
             .and_then(Value::as_u64)
@@ -880,7 +879,10 @@ mod qualification {
         Ok(Some(fields[19].parse()?))
     }
 
-    fn require_live_identity(label: &str, identity: &ProcessIdentityReport) -> Result<(), AnyError> {
+    fn require_live_identity(
+        label: &str,
+        identity: &ProcessIdentityReport,
+    ) -> Result<(), AnyError> {
         require(identity.pid > 0 && identity.start_time_ticks > 0, {
             format!("{label} has an invalid process identity")
         })?;
