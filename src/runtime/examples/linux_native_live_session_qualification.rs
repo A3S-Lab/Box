@@ -419,12 +419,8 @@ mod qualification {
         .await?;
         report.keyed_captured_exec_before_owner_kill = true;
 
-        prove_file_upload_before_kill(
-            &manager,
-            &reservation.execution_id,
-            reservation.generation,
-        )
-        .await?;
+        prove_file_upload_before_kill(&manager, &reservation.execution_id, reservation.generation)
+            .await?;
         report.file_upload_before_kill = true;
 
         let owner = load_owner_record(&inputs.host_root)?;
@@ -821,7 +817,6 @@ mod qualification {
         )?;
         Ok(())
     }
-
 
     async fn prove_file_upload_before_kill(
         manager: &LocalExecutionManager,
