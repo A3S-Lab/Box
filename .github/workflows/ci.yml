@@ -73,8 +73,8 @@ jobs:
           )
           found=0
           for pattern in "${removed_patterns[@]}"; do
-            # Word-regexp: refuse bare E2B/compat tokens without matching hex
-            # substrings inside git SHAs (e.g. OCI pin …e2bbb9a…).
+            # Word-regexp so hex digraph collisions inside git SHAs do not
+            # trip the banned remote-compat token list below.
             if git grep -n -I -w -F -e "$pattern" -- \
               .github compat deploy docs scripts sdk src README.md \
               ':(exclude,glob)**/Cargo.lock'; then
