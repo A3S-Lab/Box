@@ -332,9 +332,12 @@ sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBO
   --home /tmp/a3s-box-native-live-session-home
 ```
 
-Schema `a3s.box.linux-native-live-session.v1` SIGKILLs the Native Linux Host
+Schema `a3s.box.linux-native-live-session.v2` SIGKILLs the Native Linux Host
 owner while a Sandbox generation is live, rebinds, and continues authentic Live
-state/inventory/stats/kill without inventing an exit status. It does not claim
+keyed captured exec plus state/inventory/stats/kill without inventing an exit
+status. The harness drops the Box manager before owner death, so it does not
+prove retained streaming process-handle continuity (that remains the
+fixture-only `process_restart` contract) and keeps B2 open. It does not claim
 KVM MicroVM Live continuity or close utility-VM B2/R6.
 
 ### Exercise the qualification-only WHPX handoff on Windows

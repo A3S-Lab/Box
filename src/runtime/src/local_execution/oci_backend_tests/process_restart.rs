@@ -1,3 +1,13 @@
+//! Cross-process retained-backend recovery against a durable **fixture** owner.
+//!
+//! `retained_backend_recovers_after_runtime_owner_process_restart` proves the
+//! Box client contract: one create/start/exec, expose `Unavailable` on owner
+//! death, reconnect, continue stdin/output/signal/wait on the same process
+//! handle. That is **not** real Native Linux or utility-VM driver evidence and
+//! must not be cited as closing ROADMAP B2. Real-driver Live observation lives
+//! in `linux-native-live-session-qualification` (fresh manager + keyed exec;
+//! no retained-stream claim).
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -686,6 +696,19 @@ fn process_endpoint(directory: &tempfile::TempDir) -> (OsString, OciRuntimeEndpo
     let path = directory.path().join("runtime-owner.sock");
     let endpoint = OciRuntimeEndpoint::unix_socket(path.clone()).expect("valid Unix endpoint");
     (path.into_os_string(), endpoint)
+}
+
+#[test]
+fn process_restart_module_docs_refuse_b2_overclaim() {
+    let docs = include_str!("process_restart.rs");
+    assert!(
+        docs.contains("must not be cited as closing ROADMAP B2"),
+        "process_restart must keep an explicit anti-overfit B2 disclaimer"
+    );
+    assert!(
+        docs.contains("linux-native-live-session-qualification"),
+        "process_restart must point reviewers at the real-driver observation gate"
+    );
 }
 
 #[tokio::test]

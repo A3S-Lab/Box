@@ -4,13 +4,18 @@
 //! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
 //! Linux Host owner while a generation is running, rebinds through a
 //! replacement owner, and continues authentic Live process-session ops
-//! (state, inventory, stats, kill) without inventing an exit status.
+//! (keyed captured exec, state, inventory, stats, kill) without inventing an
+//! exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v1`.
+//! Schema `a3s.box.linux-native-live-session.v2`.
 //!
-//! Honest scope: Live Host-reopen is Native-Linux-driver-only today. This gate
-//! does **not** claim KVM MicroVM Live continuity (KVM Host reopen remains
-//! stopped-only / recreate). Utility-VM remains unchecked for B2/R6 close.
+//! Honest scope (anti-overfit):
+//! - Live Host-reopen is Native-Linux-driver-only today.
+//! - This harness **drops** the Box manager before owner SIGKILL, so it does
+//!   **not** prove retained streaming process-handle continuity (that remains
+//!   the fixture-only contract in `oci_backend_tests::process_restart`).
+//! - It does **not** claim KVM MicroVM Live continuity (KVM Host reopen remains
+//!   stopped-only / recreate) and does **not** close Box B2 / OCI R6.
 
 #[cfg(not(all(
     target_os = "linux",
@@ -30,13 +35,10 @@ async fn main() {
     qualification::main().await;
 }
 
-#[cfg_attr(
-    not(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )),
-    allow(dead_code)
-)]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod qualification {
     use std::collections::BTreeMap;
     use std::error::Error;
@@ -46,10 +48,10 @@ mod qualification {
     use std::time::Duration;
 
     use a3s_box_core::{
-        BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionGeneration, ExecutionId,
-        ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionState,
-        IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
-        ResourceConfig,
+        BoxConfig, CreateExecutionRequest, ExecRequest, ExecutionBackend, ExecutionGeneration,
+        ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
+        ExecutionSessionManager, ExecutionState, IsolationClass as BoxIsolationClass, NetworkMode,
+        OperationId, ReconcileOutcome, ResourceConfig,
     };
     use a3s_box_runtime::{
         LocalExecutionManager, ManagedExecutionStore, ManagedRuntimeRoute,
@@ -69,8 +71,11 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v1";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v2";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
+    const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
+    const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
+    const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -107,6 +112,12 @@ mod qualification {
         driver_target: &'static str,
         kvm_microvm_live_claimed: bool,
         utility_vm_claimed: bool,
+        /// Always false: this harness drops the Box manager before owner death.
+        retained_stream_handle_proven: bool,
+        /// Always false: fixture `process_restart` continuity is not this gate.
+        fixture_stream_continuity_claimed: bool,
+        /// Always false: B2 still requires real-driver retained-stream + utility-VM.
+        b2_process_session_recovery_closed: bool,
         supervised_create_required: bool,
         supervised_create_enabled: bool,
         session_supervisor_recorded: bool,
@@ -117,6 +128,7 @@ mod qualification {
         runtime_binding: Option<OciRuntimeBinding>,
         observed_running_before_owner_kill: bool,
         inventory_before_owner_kill_non_empty: bool,
+        keyed_captured_exec_before_owner_kill: bool,
         owner_before_kill: Option<ProcessIdentityReport>,
         supervisor_before_kill: Option<ProcessIdentityReport>,
         launcher_before_kill: Option<ProcessIdentityReport>,
@@ -134,6 +146,7 @@ mod qualification {
         init_pid_continuous_after_reopen: bool,
         exit_code_absent_after_reopen: bool,
         stats_after_reopen: bool,
+        keyed_captured_exec_after_reopen: bool,
         live_kill_after_reopen: bool,
         removed: bool,
     }
@@ -156,6 +169,9 @@ mod qualification {
                 driver_target: "native-linux-shared-host-kernel",
                 kvm_microvm_live_claimed: false,
                 utility_vm_claimed: false,
+                retained_stream_handle_proven: false,
+                fixture_stream_continuity_claimed: false,
+                b2_process_session_recovery_closed: false,
                 supervised_create_required: true,
                 supervised_create_enabled: false,
                 session_supervisor_recorded: false,
@@ -166,6 +182,7 @@ mod qualification {
                 runtime_binding: None,
                 observed_running_before_owner_kill: false,
                 inventory_before_owner_kill_non_empty: false,
+                keyed_captured_exec_before_owner_kill: false,
                 owner_before_kill: None,
                 supervisor_before_kill: None,
                 launcher_before_kill: None,
@@ -183,6 +200,7 @@ mod qualification {
                 init_pid_continuous_after_reopen: false,
                 exit_code_absent_after_reopen: false,
                 stats_after_reopen: false,
+                keyed_captured_exec_after_reopen: false,
                 live_kill_after_reopen: false,
                 removed: false,
             }
@@ -368,6 +386,15 @@ mod qualification {
         )?;
         report.inventory_before_owner_kill_non_empty = true;
 
+        prove_keyed_captured_exec(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_EXEC_BEFORE,
+        )
+        .await?;
+        report.keyed_captured_exec_before_owner_kill = true;
+
         let owner = load_owner_record(&inputs.host_root)?;
         report.owner_before_kill = Some(owner.clone());
         let recovery = load_live_recovery(&inputs.host_root, &owner, &binding)?;
@@ -507,6 +534,15 @@ mod qualification {
         )?;
         report.stats_after_reopen = true;
 
+        prove_keyed_captured_exec(
+            &reconnected,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_EXEC_AFTER,
+        )
+        .await?;
+        report.keyed_captured_exec_after_reopen = true;
+
         // Authentic Live kill of the still-running generation (not an invented stop).
         reconnected
             .kill(&reservation.execution_id, reservation.generation)
@@ -545,6 +581,56 @@ mod qualification {
                 .join(reservation.execution_id.as_str())
                 .exists(),
             "Box directory remained after deletion",
+        )?;
+        Ok(())
+    }
+
+    async fn prove_keyed_captured_exec(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request_id: &str,
+    ) -> Result<(), AnyError> {
+        let output = manager
+            .execute(
+                execution_id,
+                generation,
+                ExecRequest {
+                    request_id: Some(request_id.to_string()),
+                    cmd: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "printf 'live-session-keyed-ok\\n'".into(),
+                    ],
+                    timeout_ns: 30_000_000_000,
+                    env: Vec::new(),
+                    working_dir: Some("/".into()),
+                    rootfs: None,
+                    stdin: None,
+                    stdin_streaming: false,
+                    user: None,
+                    streaming: false,
+                },
+            )
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "keyed captured exec `{request_id}` failed on Live generation: {error}"
+                ))
+            })?;
+        require(
+            output.exit_code == 0,
+            format!(
+                "keyed captured exec `{request_id}` exited {} instead of 0",
+                output.exit_code
+            ),
+        )?;
+        require(
+            output.stdout == KEYED_EXEC_MARKER,
+            format!(
+                "keyed captured exec `{request_id}` stdout drifted: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            ),
         )?;
         Ok(())
     }
