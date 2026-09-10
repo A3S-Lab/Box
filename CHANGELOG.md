@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Native Linux live-session v3 streaming `start_process` omits one-shot
+  `request_id` (OCI rejects keyed ids on streaming sessions; matches the
+  `process_restart` fixture contract).
 - Kill completion no longer invents `128+signal` exit codes **or**
   `stopped_by_user` for `AlreadyStopped` / vanished-runtime / NotFound paths.
   Only a true `Killed` outcome uses `KillTerminal` (user stop) and may derive
