@@ -27,6 +27,8 @@ All notable changes to A3S Box will be documented in this file.
   `Pausing`/`Resuming` when inspect shows terminal `Stopped`/`Failed`. The
   authenticated exit is published immediately with an Unavailable refusal,
   matching cold-path honesty instead of deferring only to later reconcile.
+  The same immediate `Failed` publish applies when warm pause/resume inspect
+  returns NotFound (vanished runtime).
 
 ### Changed
 

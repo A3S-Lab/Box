@@ -171,6 +171,21 @@ impl LocalExecutionManager {
                     observation.state, observation.exit_code
                 )));
             }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // Vanished runtime during warm pause must not leave Pausing.
+                self.release_execution_resources(&record).await?;
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Pausing,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(
+                    "warm pause observed a vanished generation; refusing to leave Pausing"
+                        .to_string(),
+                ));
+            }
             _ => {}
         }
         Ok(None)
@@ -382,6 +397,21 @@ impl LocalExecutionManager {
                     "warm resume observed a terminal generation (state {:?}, exit {:?}); refusing to leave Resuming",
                     observation.state, observation.exit_code
                 )));
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // Vanished runtime during warm resume must not leave Resuming.
+                self.release_execution_resources(&record).await?;
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(
+                    "warm resume observed a vanished generation; refusing to leave Resuming"
+                        .to_string(),
+                ));
             }
             _ => {}
         }

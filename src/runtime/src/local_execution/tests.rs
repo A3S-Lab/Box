@@ -1312,6 +1312,86 @@ async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
 }
 
 #[tokio::test]
+async fn vanished_runtime_during_warm_pause_publishes_failed_not_pausing() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-pause-vanished");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-pause-vanished-create"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(running.execution_id.as_str());
+    }
+    backend.fail_pause.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Pausing")
+        ),
+        "expected Unavailable refusing stuck Pausing, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Pausing when warm-pause inspect is NotFound"
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn vanished_runtime_during_warm_resume_publishes_failed_not_resuming() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-resume-vanished");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-resume-vanished-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(paused.execution_id.as_str());
+    }
+    backend.fail_resume.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Resuming")
+        ),
+        "expected Unavailable refusing stuck Resuming, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Resuming when warm-resume inspect is NotFound"
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
 async fn crashed_generation_during_warm_pause_publishes_failed_not_pausing() {
     let (_directory, manager, backend) = harness();
     let mut create = request("warm-pause-crash");
