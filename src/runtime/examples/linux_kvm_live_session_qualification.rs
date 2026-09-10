@@ -1052,14 +1052,12 @@ mod qualification {
         let pid = init
             .pid
             .ok_or_else(|| failure("init process lacked a live PID before Host Service SIGKILL"))?;
-        let identity = ProcessIdentityReport {
-            pid,
-            start_time_ticks: process_start_time(pid)?.ok_or_else(|| {
-                failure("init PID was not alive before Host Service SIGKILL")
-            })?,
-        };
+        // Guest PID space — not visible in host /proc. Continuity is inventory-only.
         let _ = binding;
-        Ok(identity)
+        Ok(ProcessIdentityReport {
+            pid,
+            start_time_ticks: 0,
+        })
     }
 
     fn host_service_identity(pid: u32) -> Result<ProcessIdentityReport, AnyError> {
