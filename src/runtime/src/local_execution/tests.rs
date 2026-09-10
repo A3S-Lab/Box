@@ -43,6 +43,8 @@ struct FakeBackend {
     fail_kill: AtomicBool,
     fail_kill_after_effect: AtomicBool,
     omit_kill_exit_code: AtomicBool,
+    /// Simulate vanished runtime: AlreadyStopped with no authenticated exit.
+    already_stopped_without_exit: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
@@ -264,15 +266,40 @@ impl LocalExecutionBackend for FakeBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        if self.already_stopped_without_exit.load(Ordering::Relaxed) {
+            self.kills.fetch_add(1, Ordering::Relaxed);
+            *self.last_kill_signal.lock().unwrap() = Some(
+                record
+                    .stop_signal
+                    .as_deref()
+                    .map(a3s_box_core::vmm::parse_signal_name),
+            );
+            *self.last_kill_timeout.lock().unwrap() = Some(record.stop_timeout);
+            let mut executions = self.executions.lock().unwrap();
+            if let Some(execution) = executions.get_mut(&record.id) {
+                execution.state = ExecutionState::Stopped;
+                execution.exit_code = None;
+            }
+            return Ok(LocalExecutionTermination {
+                outcome: KillOutcome::AlreadyStopped,
+                exit_code: None,
+            });
+        }
         let outcome = self.kill(record).await?;
-        let exit_code = if self.omit_kill_exit_code.load(Ordering::Relaxed) {
-            None
-        } else {
-            record
+        let recorded_exit = self
+            .executions
+            .lock()
+            .unwrap()
+            .get(&record.id)
+            .and_then(|execution| execution.exit_code);
+        let exit_code = match outcome {
+            KillOutcome::AlreadyStopped => recorded_exit,
+            KillOutcome::Killed if self.omit_kill_exit_code.load(Ordering::Relaxed) => None,
+            KillOutcome::Killed => record
                 .stop_signal
                 .as_deref()
                 .map(a3s_box_core::vmm::parse_signal_name)
-                .map(|signal| 128 + signal)
+                .map(|signal| 128 + signal),
         };
         Ok(LocalExecutionTermination { outcome, exit_code })
     }
@@ -1502,11 +1529,10 @@ async fn kill_is_generation_fenced_and_idempotent() {
 #[tokio::test]
 async fn option_aware_kill_persists_authoritative_backend_exit_code() {
     let (_directory, manager, _backend) = harness();
+    let mut create = request("sandbox-exit-status");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("sandbox-exit-status"),
-            &operation("operation-exit-status"),
-        )
+        .create_and_start(create, &operation("operation-exit-status"))
         .await
         .unwrap();
 
@@ -1530,11 +1556,10 @@ async fn option_aware_kill_persists_authoritative_backend_exit_code() {
 async fn option_aware_kill_derives_exit_code_when_backend_cannot_reap_it() {
     let (_directory, manager, backend) = harness();
     backend.omit_kill_exit_code.store(true, Ordering::Relaxed);
+    let mut create = request("sandbox-signaled-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("sandbox-signaled-exit"),
-            &operation("operation-signaled-exit"),
-        )
+        .create_and_start(create, &operation("operation-signaled-exit"))
         .await
         .unwrap();
 
@@ -1552,6 +1577,39 @@ async fn option_aware_kill_derives_exit_code_when_backend_cannot_reap_it() {
 
     let stopped = persisted(&manager, &running.execution_id);
     assert_eq!(stopped.exit_code, Some(137));
+}
+
+#[tokio::test]
+async fn already_stopped_kill_does_not_invent_signal_exit_code() {
+    let (_directory, manager, backend) = harness();
+    backend
+        .already_stopped_without_exit
+        .store(true, Ordering::Relaxed);
+    let mut create = request("already-stopped-no-invent");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("operation-already-stopped-no-invent"))
+        .await
+        .unwrap();
+
+    let outcome = manager
+        .kill_with_options(
+            &running.execution_id,
+            running.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, KillOutcome::AlreadyStopped);
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        stopped.exit_code, None,
+        "AlreadyStopped without runtime evidence must not invent 128+signal"
+    );
 }
 
 #[tokio::test]
@@ -1617,8 +1675,10 @@ async fn startup_reconciliation_reports_the_secondary_inspection_error() {
 async fn option_aware_kill_persists_intent_and_replays_it_after_a_crash() {
     let (directory, manager, backend) = harness();
     let create_operation = operation("operation-option-aware-kill");
+    let mut create = request("option-aware-kill");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("option-aware-kill"), &create_operation)
+        .create_and_start(create, &create_operation)
         .await
         .unwrap();
     let options = KillExecutionOptions {

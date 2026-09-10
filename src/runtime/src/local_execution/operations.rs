@@ -352,7 +352,8 @@ impl LocalExecutionManager {
         match self.backend.kill_with_status(&backend_record).await {
             Ok(termination) => {
                 self.release_execution_resources(&record).await?;
-                let exit_code = kill_terminal_exit_code(options, termination.exit_code);
+                let exit_code =
+                    kill_terminal_exit_code(termination.outcome, options, termination.exit_code);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
@@ -364,7 +365,7 @@ impl LocalExecutionManager {
             }
             Err(ExecutionManagerError::NotFound(_)) => {
                 self.release_execution_resources(&record).await?;
-                let exit_code = kill_terminal_exit_code(options, None);
+                let exit_code = kill_terminal_exit_code(KillOutcome::AlreadyStopped, options, None);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
@@ -386,22 +387,22 @@ impl LocalExecutionManager {
         record: BoxRecord,
         options: KillExecutionOptions,
     ) -> Option<KillOutcome> {
-        let observed_exit_code = match self.backend.inspect(&record).await {
-            Err(ExecutionManagerError::NotFound(_)) => None,
+        let (outcome, observed_exit_code) = match self.backend.inspect(&record).await {
+            Err(ExecutionManagerError::NotFound(_)) => (KillOutcome::AlreadyStopped, None),
             Ok(observation)
                 if matches!(
                     observation.state,
                     ExecutionState::Stopped | ExecutionState::Failed
                 ) =>
             {
-                observation.exit_code
+                (KillOutcome::Killed, observation.exit_code)
             }
             _ => return None,
         };
         if self.release_execution_resources(&record).await.is_err() {
             return None;
         }
-        let exit_code = kill_terminal_exit_code(options, observed_exit_code);
+        let exit_code = kill_terminal_exit_code(outcome, options, observed_exit_code);
         self.transition(
             &record,
             ManagedExecutionState::Killing,
@@ -410,17 +411,25 @@ impl LocalExecutionManager {
         )
         .await
         .ok()?;
-        Some(KillOutcome::Killed)
+        Some(outcome)
     }
 }
 
 fn kill_terminal_exit_code(
+    outcome: KillOutcome,
     options: KillExecutionOptions,
     observed_exit_code: Option<i32>,
 ) -> Option<i32> {
-    observed_exit_code.or_else(|| {
-        options
+    if let Some(exit_code) = observed_exit_code {
+        return Some(exit_code);
+    }
+    match outcome {
+        // Only invent 128+signal when a kill was actually applied and the
+        // backend could not reap an authenticated status. AlreadyStopped /
+        // vanished-runtime paths must leave exit absent (no fabricated evidence).
+        KillOutcome::Killed => options
             .signal
-            .and_then(|signal| 128_i32.checked_add(signal))
-    })
+            .and_then(|signal| 128_i32.checked_add(signal)),
+        KillOutcome::AlreadyStopped => None,
+    }
 }
