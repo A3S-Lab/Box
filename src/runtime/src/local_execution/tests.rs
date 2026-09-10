@@ -1392,6 +1392,122 @@ async fn vanished_runtime_during_warm_resume_publishes_failed_not_resuming() {
 }
 
 #[tokio::test]
+async fn observe_pausing_stopped_without_exit_publishes_failed_not_clean_stopped() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-pausing-stopped-create");
+    let mut create = request("observe-pausing-stopped");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+            RuntimeUpdate::PauseClaim {
+                keep_memory: true,
+                operation_id: operation("observe-pausing-stopped-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, /* unused when we clear */ 0);
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(running.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Stopped;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Failed,
+        "in-flight Pausing + Stopped without exit must not invent clean Stopped"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed)
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn observe_killing_stopped_with_exit_attributes_stopped_by_user() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-killing-exit-create");
+    let mut create = request("observe-killing-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Killing,
+            RuntimeUpdate::KillClaim(KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, 137);
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Stopped);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(record.exit_code, Some(137));
+    assert!(
+        record.stopped_by_user,
+        "pending Killing with authenticated Stopped exit must use KillTerminal attribution"
+    );
+}
+
+#[tokio::test]
+async fn observe_stable_running_stopped_without_exit_stays_stopped() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("observe-running-stopped");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("observe-running-stopped-create"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(running.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Stopped;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Stopped,
+        "stable Running owner-loss Stopped without exit must not be reclassified as Failed"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
 async fn crashed_generation_during_warm_pause_publishes_failed_not_pausing() {
     let (_directory, manager, backend) = harness();
     let mut create = request("warm-pause-crash");

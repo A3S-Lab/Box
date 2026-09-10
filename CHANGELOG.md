@@ -29,6 +29,12 @@ All notable changes to A3S Box will be documented in this file.
   matching cold-path honesty instead of deferring only to later reconcile.
   The same immediate `Failed` publish applies when warm pause/resume inspect
   returns NotFound (vanished runtime).
+- Inspect/reconcile `observe_record` terminal projection for **in-flight**
+  lifecycles now uses `startup_terminal_state` (Stopped without exit → `Failed`,
+  not invented clean `Stopped`). Pending `Killing` with an authenticated Stopped
+  exit uses `KillTerminal` so `stopped_by_user` matches `finish_kill`. Stable
+  `Running`/`Paused` owner-loss Stopped-without-exit stays `Stopped` (OCI
+  semantics).
 
 ### Changed
 

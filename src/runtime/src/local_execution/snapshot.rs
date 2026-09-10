@@ -156,7 +156,7 @@ impl LocalExecutionManager {
         let restored = self
             .get(&execution_id)
             .await?
-            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id))?;
+            .ok_or(ExecutionManagerError::NotFound(execution_id))?;
         Ok(Some(lease_from_record(&restored)?))
     }
 
