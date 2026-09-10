@@ -76,6 +76,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Restore `100755` on live-session / elevate / KVM qualification shell scripts
+  after main regressions left them `100644` (`missing executable
+  …/elevate-linux-sandbox-owner.sh` before the v4 gate could run).
 - Sandbox CI Verify cleanup tears down the live-session host-root owner and
   reaps elevate/launcher leftovers whose argv still reference the live-session
   home, so leftover pgrep does not fail after a greened live-session gate.
