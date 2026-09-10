@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: f532e2d818cc302849a7c92653ca8256e3ba277e
+  A3S_OCI_RUNTIME_REV: 61f77712e420c176dfc1a5d7ba2457e8c8299dcf
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -675,7 +675,7 @@ jobs:
             echo "::error title=Local SDK smoke failure::$diagnostic"
           fi
           exit "$status"
-      - name: Qualify Native Linux live-session retained-stream (v3)
+      - name: Qualify Native Linux live-session retained-stream+fs (v4)
         env:
           LIVE_SESSION_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
         run: |
@@ -691,7 +691,7 @@ jobs:
           install -m 755 "$A3S_BOX_SHIM_BINARY" "$staging/a3s-box-shim"
           install -m 755 "$A3S_BOX_GUEST_INIT_BINARY" "$staging/a3s-box-guest-init"
           install -m 755 "$example_bin" "$staging/linux-native-live-session-qualification"
-          report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v3.json"
+          report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v4.json"
           rm -f "$report"
           # Root entry matches the local gate: prepare cgroup/home, then the
           # script setpriv-execs the example. Do not treat a missing report as
@@ -708,12 +708,12 @@ jobs:
               --oci-sha "$A3S_OCI_RUNTIME_REV"
           python3 "$GITHUB_WORKSPACE/scripts/verify-linux-native-live-session-report.py" \
             "$report"
-      - name: Upload Native Linux live-session v3 evidence
+      - name: Upload Native Linux live-session v4 evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: a3s-box-linux-native-live-session-v3-${{ matrix.platform }}
-          path: ${{ runner.temp }}/a3s-box-linux-native-live-session-v3.json
+          name: a3s-box-linux-native-live-session-v4-${{ matrix.platform }}
+          path: ${{ runner.temp }}/a3s-box-linux-native-live-session-v4.json
           if-no-files-found: warn
           retention-days: 14
       - name: Upload native OCI owner-recovery evidence

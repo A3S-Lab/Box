@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v3 reports.
+"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v4 reports.
 
-Retained-stream proof is required. B2, fixture continuity, KVM MicroVM Live,
-and utility-VM claims must stay false — this gate does not close those.
+Retained-stream and retained-filesystem proofs are required. B2, fixture
+continuity, KVM MicroVM Live, and utility-VM claims must stay false — this gate
+does not close those.
 """
 
 from __future__ import annotations
@@ -12,7 +13,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-native-live-session.v3"
+SCHEMA = "a3s.box.linux-native-live-session.v4"
+REQUIRED_TRUE = (
+    "retained_stream_handle_proven",
+    "file_upload_before_kill",
+    "file_download_after_reattach",
+    "retained_filesystem_proven",
+)
 FORBIDDEN = (
     "fixture_stream_continuity_claimed",
     "b2_process_session_recovery_closed",
@@ -27,8 +34,9 @@ def evaluate(report: dict) -> list[str]:
         failures.append(f"schema_version={report.get('schema_version')!r}")
     if report.get("status") != "passed":
         failures.append(f"status={report.get('status')!r} error={report.get('error')!r}")
-    if report.get("retained_stream_handle_proven") is not True:
-        failures.append("retained_stream_handle_proven is not true")
+    for required in REQUIRED_TRUE:
+        if report.get(required) is not True:
+            failures.append(f"{required} is not true")
     for forbidden in FORBIDDEN:
         if report.get(forbidden):
             failures.append(f"{forbidden} must stay false")
@@ -39,8 +47,9 @@ def passing_report() -> dict:
     report = {
         "schema_version": SCHEMA,
         "status": "passed",
-        "retained_stream_handle_proven": True,
     }
+    for required in REQUIRED_TRUE:
+        report[required] = True
     for forbidden in FORBIDDEN:
         report[forbidden] = False
     return report
@@ -51,20 +60,34 @@ def self_test() -> int:
         print("self-test: passing report was rejected", file=sys.stderr)
         return 1
     bad_cases = [
-        {"schema_version": "v2", "status": "passed", "retained_stream_handle_proven": True},
+        {"schema_version": "v3", "status": "passed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "failed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "passed", "retained_stream_handle_proven": False},
         {
             "schema_version": SCHEMA,
             "status": "passed",
             "retained_stream_handle_proven": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
             "b2_process_session_recovery_closed": True,
         },
         {
             "schema_version": SCHEMA,
             "status": "passed",
             "retained_stream_handle_proven": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
             "fixture_stream_continuity_claimed": True,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": False,
+            "retained_filesystem_proven": True,
         },
     ]
     for case in bad_cases:
@@ -106,7 +129,8 @@ def main(argv: list[str]) -> int:
             print(f"  {item}", file=sys.stderr)
         return 1
     print(
-        "live-session v3 retained-stream proven; B2/fixture/KVM/utility-VM claims remain false"
+        "live-session v4 retained-stream+filesystem proven; "
+        "B2/fixture/KVM/utility-VM claims remain false"
     )
     return 0
 

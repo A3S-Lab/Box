@@ -335,17 +335,19 @@ sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBO
   --home /tmp/a3s-box-native-live-session-home
 ```
 
-Schema `a3s.box.linux-native-live-session.v3` keeps the Box manager across a
+Schema `a3s.box.linux-native-live-session.v4` keeps the Box manager across a
 Native Linux Host owner SIGKILL, proves retained streaming `start_process`
 handle continuity when the path passes (`retained_stream_handle_proven`), and
-continues authentic Live keyed captured exec plus state/inventory/stats/kill
-without inventing an exit status. Existing-host WSL2 evidence on OCI
-`7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9`: report SHA-256
-`bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`. Fixture
+proves filesystem continuity via public `transfer_file` (upload before kill,
+download after reattach on the same generation;
+`retained_filesystem_proven`). It continues authentic Live keyed captured exec
+plus state/inventory/stats/kill without inventing an exit status. Fixture
 `process_restart` is never claimed as driver evidence
 (`fixture_stream_continuity_claimed` stays false). B2 stays open until
 utility-VM Live also lands (`b2_process_session_recovery_closed` stays false).
-It does not claim KVM MicroVM Live continuity.
+It does not claim KVM MicroVM Live continuity. Pin OCI Runtime at
+`61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live filesystem #290). Existing-host WSL2 evidence report
+SHA-256 `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818` (`retained_filesystem_proven=true`; B2 stays false).
 
 ### Exercise the qualification-only WHPX handoff on Windows
 

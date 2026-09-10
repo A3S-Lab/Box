@@ -186,7 +186,7 @@ export A3S_BOX_CI_SANDBOX_GID="${gid}"
 export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
 export A3S_BOX_CI_SETPRIV_WRAPPER="${SETPRIV_WRAPPER}"
 
-echo "running Native Linux live-session qualification v3"
+echo "running Native Linux live-session qualification v4"
 echo "  home=${A3S_HOME}"
 echo "  host-root=${HOST_ROOT}"
 echo "  image=${IMAGE}"
