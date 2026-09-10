@@ -1378,6 +1378,16 @@ impl OciLocalExecutionBackend {
         self
     }
 
+    /// No-op off Linux+vm: native Host owner respawn is Linux Sandbox only.
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    pub fn with_native_linux_owner_recovery(
+        self,
+        _service_root: impl Into<PathBuf>,
+        _artifacts: crate::sandbox::CertifiedA3sOci,
+    ) -> Self {
+        self
+    }
+
     #[cfg(all(feature = "vm", target_os = "linux"))]
     async fn ensure_native_linux_owner(&self) -> ExecutionManagerResult<()> {
         let Some(recovery) = self.native_linux_owner.as_ref() else {
