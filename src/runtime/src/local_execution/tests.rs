@@ -394,7 +394,10 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         external_sandbox_id: external_id.to_string(),
         config: BoxConfig {
             image: "alpine:3.20".to_string(),
-            isolation: ExecutionIsolation::Sandbox,
+            // FakeBackend lifecycle contracts are isolation-policy checks, not
+            // Linux Sandbox drivers. Default MicroVM so Windows hosts execute
+            // the same honesty/recovery assertions instead of failing create.
+            isolation: ExecutionIsolation::Microvm,
             network: NetworkMode::None,
             resources: a3s_box_core::ResourceConfig {
                 vcpus: 1,
@@ -409,6 +412,12 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         policy: Default::default(),
         rootfs_snapshot_id: None,
     }
+}
+
+fn sandbox_request(external_id: &str) -> CreateExecutionRequest {
+    let mut request = request(external_id);
+    request.config.isolation = ExecutionIsolation::Sandbox;
+    request
 }
 
 fn operation(value: &str) -> OperationId {
@@ -2723,11 +2732,15 @@ fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, 
     std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
     let (directory, manager, backend) = harness();
     let running = manager
-        .create_and_start(request("snapshot-source"), &operation("snapshot-create"))
+        .create_and_start(
+            sandbox_request("snapshot-source"),
+            &operation("snapshot-create"),
+        )
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "captured-state");
@@ -2781,12 +2794,13 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("snapshot-image-config"),
+            sandbox_request("snapshot-image-config"),
             &operation("snapshot-image-config-create"),
         )
         .await
@@ -2824,11 +2838,15 @@ async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config()
     assert_eq!(image_config.user.as_deref(), Some("1000:1000"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn paused_snapshot_remains_paused_and_does_not_resume() {
     let (_directory, manager, backend) = harness();
     let running = manager
-        .create_and_start(request("paused-source"), &operation("paused-create"))
+        .create_and_start(
+            sandbox_request("paused-source"),
+            &operation("paused-create"),
+        )
         .await
         .unwrap();
     let paused = manager
@@ -2854,12 +2872,13 @@ async fn paused_snapshot_remains_paused_and_does_not_resume() {
     assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_only_paused_snapshot_uses_the_quiescent_rootfs_without_a_runtime() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("cold-paused-source"),
+            sandbox_request("cold-paused-source"),
             &operation("cold-paused-create"),
         )
         .await
@@ -2913,12 +2932,13 @@ async fn filesystem_only_paused_snapshot_uses_the_quiescent_rootfs_without_a_run
     assert!(!record.managed_execution.unwrap().paused_with_memory);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cold_paused_snapshot_cleanup_failure_remains_recoverable() {
     let (_directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("cold-snapshot-cleanup"),
+            sandbox_request("cold-snapshot-cleanup"),
             &operation("cold-snapshot-cleanup-create"),
         )
         .await
@@ -2970,12 +2990,13 @@ async fn cold_paused_snapshot_cleanup_failure_remains_recoverable() {
     assert!(!record.managed_execution.unwrap().paused_with_memory);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_failure_restores_running_state_at_the_same_generation() {
     let (_directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("missing-rootfs"),
+            sandbox_request("missing-rootfs"),
             &operation("missing-rootfs-create"),
         )
         .await
@@ -3016,7 +3037,7 @@ async fn special_file_snapshot_failure_resumes_running_source() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("special-file-source"),
+            sandbox_request("special-file-source"),
             &operation("special-file-create"),
         )
         .await
@@ -3147,11 +3168,15 @@ async fn legacy_snapshot_without_image_config_is_rejected_before_reservation() {
         .is_none());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
     let (_directory, manager, _backend) = harness();
     let running = manager
-        .create_and_start(request("delete-source"), &operation("delete-source-create"))
+        .create_and_start(
+            sandbox_request("delete-source"),
+            &operation("delete-source-create"),
+        )
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "delete-state");
@@ -3160,7 +3185,7 @@ async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
         .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap();
-    let mut restored_request = request("restored-reservation");
+    let mut restored_request = sandbox_request("restored-reservation");
     restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
     let restored = manager
         .create(restored_request, &operation("restored-reservation-create"))
@@ -3187,12 +3212,13 @@ async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
         .unwrap());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_delete_and_restored_reservation_are_atomic() {
     let (_directory, manager, _backend) = harness();
     let running = manager
         .create_and_start(
-            request("atomic-delete-source"),
+            sandbox_request("atomic-delete-source"),
             &operation("atomic-delete-source-create"),
         )
         .await
@@ -3206,7 +3232,7 @@ async fn snapshot_delete_and_restored_reservation_are_atomic() {
             .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
             .await
             .unwrap();
-        let mut restored_request = request(&format!("atomic-restored-{index}"));
+        let mut restored_request = sandbox_request(&format!("atomic-restored-{index}"));
         restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
         let create_operation = operation(&format!("atomic-restored-create-{index}"));
         let create_manager = manager.clone();

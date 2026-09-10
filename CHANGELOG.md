@@ -26,6 +26,15 @@ All notable changes to A3S Box will be documented in this file.
   authenticated exit is published immediately with an Unavailable refusal,
   matching cold-path honesty instead of deferring only to later reconcile.
 
+### Changed
+
+- Local FakeBackend lifecycle unit tests default create isolation to MicroVM so
+  Windows hosts run the same pause/resume/kill/reconcile honesty contracts
+  instead of failing at create with Linux-only Sandbox rejection. Explicit
+  Sandbox negatives (Windows reject-Sandbox) still force Sandbox. Filesystem
+  snapshot contracts that require the Sandbox backend stay Linux-gated with
+  explicit `sandbox_request`.
+
 ### Added
 
 - Native Linux live-session observation harness:
