@@ -76,6 +76,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Restore Native live-session CI harness to matched-cred `run-linux-sandbox-ci`
+  (probe-cgroup migrate + staged sandbox-oci-launcher + `$ORIGIN/lib`), instead
+  of elevating the whole example. Elevating the example left `geteuid()==0`,
+  skipped owner SETPRIV_WRAPPER, and failed closed on cgroup v2 delegation /
+  Unix peer auth after the filesystem v4 merge.
 - Restore `100755` on live-session / elevate / KVM qualification shell scripts
   after main regressions left them `100644` (`missing executable
   …/elevate-linux-sandbox-owner.sh` before the v4 gate could run).
