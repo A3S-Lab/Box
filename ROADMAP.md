@@ -4,6 +4,26 @@ Status: **Active migration**
 
 Primary execution dependency: **A3S OCI Runtime through `a3s-oci-sdk`**
 
+## A3S Cloud substrate obligations
+
+**Status as of 2026-09-10.**
+
+Cloud Wave 1 treats Box as the sole node-local execution and image-build
+provider (`BX0`). Product availability claims stay provisional until this gate
+exits. Portfolio detail:
+[Cloud foundations roadmap](https://github.com/A3S-Lab/Cloud/blob/main/docs/project-roadmaps/foundations-and-execution.md)
+and
+[architecture optimization roadmap](https://github.com/A3S-Lab/Cloud/blob/main/docs/architecture-optimization-roadmap.md).
+
+| Priority | This repository must deliver | Forbidden |
+| --- | --- | --- |
+| `BX0.3` | Sandbox + hardware MicroVM/TEE isolation and attestation evidence | Silent isolation downgrade; Docker execution fallback |
+| `BX0.4`–`BX0.5` | Digest-pinned Task/Service lifecycle, build, recovery, cleanup, clean-host EXIT | Treating historical `R0`/`N0`/`D0`/`E0` as Box-current |
+| Pairing | Re-certify against the locked Runtime revision after each slice | Product semantics, placement, or a second node channel |
+
+Monorepo index:
+[cloud-substrate-dependency-roadmap.md](https://github.com/A3S-Lab/a3s/blob/main/docs/cloud-substrate-dependency-roadmap.md).
+
 ## Product Contract
 
 A3S Box is the local product engine for Linux OCI workloads. It owns the
@@ -449,8 +469,19 @@ retain process or filesystem sessions after its owner dies.
     non-driver evidence). Does **not** alone close B2
     (`b2_process_session_recovery_closed` stays false until the plan's full
     B2 criteria are met).
-  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
-    reopen remains stopped-only / recreate today).
+  - [x] KVM MicroVM Live process-session continuity via observation harness
+    `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
+    with `A3S_OCI_KVM_SESSION_OWNER=1`, Box manager retained across Host Service
+    SIGKILL/restart, and `kvm_microvm_live_claimed` only when retained streaming
+    handle continuity passes. **Existing-host WSL2 `/dev/kvm` greened** on Box
+    `0a6ce8d73d1030d08676beef6521487d562bc842` + OCI
+    `f532e2d818cc302849a7c92653ca8256e3ba277e`: report SHA-256
+    `d3d4f3c81659ba646ebb5218bc57db9bb77d765284713d5d41900001848e705e`
+    (`status=passed`, `retained_stream_handle_proven=true`,
+    `kvm_microvm_live_claimed=true`). Does **not** alone close B2
+    (`b2_process_session_recovery_closed` stays false; fixture continuity stays
+    false). Broader Utility-VM product claims beyond this KVM MicroVM gate remain
+    observation-scoped.
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
