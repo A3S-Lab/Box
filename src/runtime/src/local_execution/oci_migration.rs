@@ -255,7 +255,11 @@ impl LocalExecutionManager {
                 provider = provider.with_pull_progress_fn(progress.clone());
             }
             let provider = Arc::new(provider);
-            let oci = Arc::new(OciLocalExecutionBackend::connect(endpoint, provider).await?);
+            let oci = Arc::new(
+                OciLocalExecutionBackend::connect(endpoint, provider)
+                    .await?
+                    .with_native_linux_owner_recovery(config.service_root(), artifacts.clone()),
+            );
             Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
                 home_dir,

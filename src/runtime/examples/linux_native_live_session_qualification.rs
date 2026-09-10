@@ -429,7 +429,10 @@ mod qualification {
                         "-c".into(),
                         "printf 'live-session-stream-ok\\n'; while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done".into(),
                     ],
-                    timeout_ns: 30_000_000_000,
+                    // Must outlive owner-gone wait + Host respawn + supervisor
+                    // reattach (30s) + reconcile; a 30s watchdog poisons the
+                    // retained stream before Live reopen completes.
+                    timeout_ns: 600_000_000_000,
                     env: Vec::new(),
                     working_dir: Some("/".into()),
                     rootfs: None,

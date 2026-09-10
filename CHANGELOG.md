@@ -6,9 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Native Linux retained-manager Live reopen respawns the identity-fenced OCI
+  Host on `inspect`/`reconcile` Unavailable (`with_native_linux_owner_recovery`).
+  Without that, the SDK only reconnects to a dead socket and the session
+  supervisor's 30s reattach window expires before a replacement Host arrives.
 - Native Linux live-session v3 streaming `start_process` omits one-shot
   `request_id` (OCI rejects keyed ids on streaming sessions; matches the
-  `process_restart` fixture contract).
+  `process_restart` fixture contract) and uses a long exec timeout so the
+  retained-stream watchdog cannot poison the handle during owner respawn.
 - Kill completion no longer invents `128+signal` exit codes **or**
   `stopped_by_user` for `AlreadyStopped` / vanished-runtime / NotFound paths.
   Only a true `Killed` outcome uses `KillTerminal` (user stop) and may derive
