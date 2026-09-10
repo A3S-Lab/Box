@@ -311,6 +311,35 @@ phase 2 can SIGKILL/restart the Host Service. This remains qualification-only
 evidence; it does not promote the public KVM candidate or change default
 MicroVM routing.
 
+### Exercise Native Linux live-session Host reopen (observation)
+
+Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
+delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
+run the root-owned runner. It mirrors Sandbox CI: matched-cred setpriv for the
+example and `A3S_BOX_CI_SETPRIV_WRAPPER=run-linux-sandbox-ci.sh` so the Native
+Linux owner can elevate for device-policy bootstrap:
+
+```bash
+cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release
+sudo ./scripts/prepare-linux-sandbox-ci-host.sh
+sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT,A3S_BOX_CI_PROBE_CGROUP \
+  ./scripts/linux-native-live-session-qualification.sh \
+  --box-bin /absolute/path/to/bin \
+  --a3s-oci /absolute/path/to/a3s-oci \
+  --a3s-oci-agent /absolute/path/to/a3s-oci-agent \
+  --image alpine:3.20 \
+  --report /absolute/path/to/live-session-report.json \
+  --home /tmp/a3s-box-native-live-session-home
+```
+
+Schema `a3s.box.linux-native-live-session.v2` SIGKILLs the Native Linux Host
+owner while a Sandbox generation is live, rebinds, and continues authentic Live
+keyed captured exec plus state/inventory/stats/kill without inventing an exit
+status. The harness drops the Box manager before owner death, so it does not
+prove retained streaming process-handle continuity (that remains the
+fixture-only `process_restart` contract) and keeps B2 open. It does not claim
+KVM MicroVM Live continuity or close utility-VM B2/R6.
+
 ### Exercise the qualification-only WHPX handoff on Windows
 
 Start the pinned OCI Runtime `box-whpx-qualification-service` with its shim,

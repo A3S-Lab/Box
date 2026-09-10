@@ -8,11 +8,15 @@ use a3s_box_core::{
     ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, OperationId,
 };
 
+use super::create::startup_terminal_state;
 use super::record::lease_from_record;
 use super::support::{
     managed_state, paused_with_memory, require_generation, required_handle, state_conflict,
 };
-use super::{LocalExecutionHandle, LocalExecutionManager, ManagedExecutionState, RuntimeUpdate};
+use super::{
+    LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation, ManagedExecutionState,
+    RuntimeUpdate,
+};
 use crate::{BoxRecord, BoxStateStore, ManagedExecutionOperation, SnapshotStore};
 
 impl LocalExecutionManager {
@@ -92,6 +96,14 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        // Recover must restore source state for non-Sandbox claims without
+        // surfacing create-time Conflict as a failed reconcile.
+        if let Some(lease) = self
+            .abort_non_sandbox_snapshotting_if_needed(record.clone())
+            .await?
+        {
+            return Ok(lease);
+        }
         self.drive_snapshot(record)
             .await
             .map(|snapshot| snapshot.lease)
@@ -105,16 +117,67 @@ impl LocalExecutionManager {
             return Ok(record);
         }
         let execution_id = ExecutionId::new(record.id.clone())?;
+        // Inspect/stabilize reports restored status; do not fail the caller with
+        // the Sandbox-only Conflict after a successful abort restore.
+        if self
+            .abort_non_sandbox_snapshotting_if_needed(record.clone())
+            .await?
+            .is_some()
+        {
+            return self
+                .get(&execution_id)
+                .await?
+                .ok_or(ExecutionManagerError::NotFound(execution_id));
+        }
         self.drive_snapshot(record).await?;
         self.get(&execution_id)
             .await?
             .ok_or(ExecutionManagerError::NotFound(execution_id))
     }
 
+    async fn abort_non_sandbox_snapshotting_if_needed(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
+        if managed_state(&record)? != ManagedExecutionState::Snapshotting {
+            return Ok(None);
+        }
+        if record
+            .managed_execution
+            .as_ref()
+            .is_some_and(|metadata| metadata.plan.backend.is_sandbox())
+        {
+            return Ok(None);
+        }
+        let (_, source_state, _) = snapshot_operation(&record)?;
+        self.abort_non_sandbox_snapshot(&record, source_state)
+            .await?;
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        let restored = self
+            .get(&execution_id)
+            .await?
+            .ok_or(ExecutionManagerError::NotFound(execution_id))?;
+        Ok(Some(lease_from_record(&restored)?))
+    }
+
     async fn drive_snapshot(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionSnapshot> {
         let (snapshot_id, source_state, freezer_applied) = snapshot_operation(&record)?;
         let mut record = record;
         let execution_id = ExecutionId::new(record.id.clone())?;
+        if !record
+            .managed_execution
+            .as_ref()
+            .is_some_and(|metadata| metadata.plan.backend.is_sandbox())
+        {
+            // create_snapshot refuses non-Sandbox backends before claiming.
+            // Recover/reconcile must not invent a published snapshot either.
+            self.abort_non_sandbox_snapshot(&record, source_state)
+                .await?;
+            return Err(ExecutionManagerError::Conflict {
+                execution_id,
+                message: "filesystem snapshots currently require the Sandbox backend".to_string(),
+            });
+        }
         if source_state == ManagedExecutionState::Paused
             && !paused_with_memory(&record, &execution_id)?
         {
@@ -209,6 +272,88 @@ impl LocalExecutionManager {
             state: execution_state(source_state)?,
             lease: lease_from_record(&completed)?,
         })
+    }
+
+    async fn abort_non_sandbox_snapshot(
+        &self,
+        record: &BoxRecord,
+        source_state: ManagedExecutionState,
+    ) -> ExecutionManagerResult<()> {
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        // Cold pause deliberately has no live provider process. Treat missing
+        // runtime evidence as restore-to-Paused, not invented Failed/Terminal.
+        let cold_paused_source = source_state == ManagedExecutionState::Paused
+            && !paused_with_memory(record, &execution_id)?;
+        match self.backend.inspect(record).await {
+            Ok(observation) => {
+                observation.validate(&execution_id)?;
+                if cold_paused_source {
+                    return self
+                        .abort_cold_paused_non_sandbox_snapshot(record, observation)
+                        .await;
+                }
+                let handle = required_handle(&observation, &execution_id)?;
+                self.restore_snapshot_source_state(record, source_state, handle)
+                    .await?;
+                Ok(())
+            }
+            Err(ExecutionManagerError::NotFound(_)) if cold_paused_source => {
+                self.restore_cold_paused_after_non_sandbox_abort(record)
+                    .await
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                self.release_execution_resources(record).await?;
+                self.transition(
+                    record,
+                    ManagedExecutionState::Snapshotting,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn abort_cold_paused_non_sandbox_snapshot(
+        &self,
+        record: &BoxRecord,
+        observation: LocalExecutionObservation,
+    ) -> ExecutionManagerResult<()> {
+        match observation.state {
+            ExecutionState::Failed | ExecutionState::Stopped if observation.exit_code.is_some() => {
+                // Authenticated terminal evidence is not a successful cold pause.
+                self.release_execution_resources(record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    record,
+                    ManagedExecutionState::Snapshotting,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                Ok(())
+            }
+            _ => {
+                self.restore_cold_paused_after_non_sandbox_abort(record)
+                    .await
+            }
+        }
+    }
+
+    async fn restore_cold_paused_after_non_sandbox_abort(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<()> {
+        self.complete_transition(
+            record,
+            ManagedExecutionState::Snapshotting,
+            ManagedExecutionState::Paused,
+            RuntimeUpdate::ColdPause,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn drive_cold_paused_snapshot(

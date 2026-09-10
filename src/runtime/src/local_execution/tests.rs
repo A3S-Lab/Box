@@ -43,8 +43,11 @@ struct FakeBackend {
     fail_kill: AtomicBool,
     fail_kill_after_effect: AtomicBool,
     omit_kill_exit_code: AtomicBool,
+    /// Simulate vanished runtime: AlreadyStopped with no authenticated exit.
+    already_stopped_without_exit: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
+    fail_resume: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
     last_kill_signal: Mutex<Option<Option<i32>>>,
     last_kill_timeout: Mutex<Option<Option<u64>>>,
@@ -190,6 +193,11 @@ impl LocalExecutionBackend for FakeBackend {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         self.resumes.fetch_add(1, Ordering::Relaxed);
+        if self.fail_resume.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake resume is unavailable".to_string(),
+            ));
+        }
         let mut executions = self.executions.lock().unwrap();
         let execution = executions
             .get_mut(&record.id)
@@ -264,15 +272,40 @@ impl LocalExecutionBackend for FakeBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        if self.already_stopped_without_exit.load(Ordering::Relaxed) {
+            self.kills.fetch_add(1, Ordering::Relaxed);
+            *self.last_kill_signal.lock().unwrap() = Some(
+                record
+                    .stop_signal
+                    .as_deref()
+                    .map(a3s_box_core::vmm::parse_signal_name),
+            );
+            *self.last_kill_timeout.lock().unwrap() = Some(record.stop_timeout);
+            let mut executions = self.executions.lock().unwrap();
+            if let Some(execution) = executions.get_mut(&record.id) {
+                execution.state = ExecutionState::Stopped;
+                execution.exit_code = None;
+            }
+            return Ok(LocalExecutionTermination {
+                outcome: KillOutcome::AlreadyStopped,
+                exit_code: None,
+            });
+        }
         let outcome = self.kill(record).await?;
-        let exit_code = if self.omit_kill_exit_code.load(Ordering::Relaxed) {
-            None
-        } else {
-            record
+        let recorded_exit = self
+            .executions
+            .lock()
+            .unwrap()
+            .get(&record.id)
+            .and_then(|execution| execution.exit_code);
+        let exit_code = match outcome {
+            KillOutcome::AlreadyStopped => recorded_exit,
+            KillOutcome::Killed if self.omit_kill_exit_code.load(Ordering::Relaxed) => None,
+            KillOutcome::Killed => record
                 .stop_signal
                 .as_deref()
                 .map(a3s_box_core::vmm::parse_signal_name)
-                .map(|signal| 128 + signal)
+                .map(|signal| 128 + signal),
         };
         Ok(LocalExecutionTermination { outcome, exit_code })
     }
@@ -361,7 +394,10 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         external_sandbox_id: external_id.to_string(),
         config: BoxConfig {
             image: "alpine:3.20".to_string(),
-            isolation: ExecutionIsolation::Sandbox,
+            // FakeBackend lifecycle contracts are isolation-policy checks, not
+            // Linux Sandbox drivers. Default MicroVM so Windows hosts execute
+            // the same honesty/recovery assertions instead of failing create.
+            isolation: ExecutionIsolation::Microvm,
             network: NetworkMode::None,
             resources: a3s_box_core::ResourceConfig {
                 vcpus: 1,
@@ -376,6 +412,12 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         policy: Default::default(),
         rootfs_snapshot_id: None,
     }
+}
+
+fn sandbox_request(external_id: &str) -> CreateExecutionRequest {
+    let mut request = request(external_id);
+    request.config.isolation = ExecutionIsolation::Sandbox;
+    request
 }
 
 fn operation(value: &str) -> OperationId {
@@ -1243,11 +1285,10 @@ async fn filesystem_only_pause_restarts_the_runtime_and_preserves_generation_fen
 #[tokio::test]
 async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-failure");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("cold-pause-failure"),
-            &operation("cold-pause-failure-create"),
-        )
+        .create_and_start(create, &operation("cold-pause-failure-create"))
         .await
         .unwrap();
     backend.fail_kill.store(true, Ordering::Relaxed);
@@ -1271,13 +1312,410 @@ async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
 }
 
 #[tokio::test]
+async fn vanished_runtime_during_warm_pause_publishes_failed_not_pausing() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-pause-vanished");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-pause-vanished-create"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(running.execution_id.as_str());
+    }
+    backend.fail_pause.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Pausing")
+        ),
+        "expected Unavailable refusing stuck Pausing, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Pausing when warm-pause inspect is NotFound"
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn vanished_runtime_during_warm_resume_publishes_failed_not_resuming() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-resume-vanished");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-resume-vanished-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(paused.execution_id.as_str());
+    }
+    backend.fail_resume.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Resuming")
+        ),
+        "expected Unavailable refusing stuck Resuming, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Resuming when warm-resume inspect is NotFound"
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn observe_pausing_stopped_without_exit_publishes_failed_not_clean_stopped() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-pausing-stopped-create");
+    let mut create = request("observe-pausing-stopped");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+            RuntimeUpdate::PauseClaim {
+                keep_memory: true,
+                operation_id: operation("observe-pausing-stopped-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, /* unused when we clear */ 0);
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(running.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Stopped;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Failed,
+        "in-flight Pausing + Stopped without exit must not invent clean Stopped"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed)
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn observe_killing_stopped_with_exit_attributes_stopped_by_user() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-killing-exit-create");
+    let mut create = request("observe-killing-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Killing,
+            RuntimeUpdate::KillClaim(KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, 137);
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Stopped);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(record.exit_code, Some(137));
+    assert!(
+        record.stopped_by_user,
+        "pending Killing with authenticated Stopped exit must use KillTerminal attribution"
+    );
+}
+
+#[tokio::test]
+async fn observe_stable_running_stopped_without_exit_stays_stopped() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("observe-running-stopped");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("observe-running-stopped-create"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(running.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Stopped;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Stopped,
+        "stable Running owner-loss Stopped without exit must not be reclassified as Failed"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(record.exit_code, None);
+    assert!(!record.stopped_by_user);
+}
+
+#[tokio::test]
+async fn crashed_generation_during_warm_pause_publishes_failed_not_pausing() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-pause-crash");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-pause-crash-create"))
+        .await
+        .unwrap();
+    backend.fail_externally(&running.execution_id, 19);
+    backend.fail_pause.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Pausing")
+        ),
+        "expected Unavailable refusing stuck Pausing, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Pausing over a crashed warm-pause generation"
+    );
+    assert_eq!(record.exit_code, Some(19));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Failed
+    );
+}
+
+#[tokio::test]
+async fn terminal_generation_during_warm_resume_publishes_stopped_not_resuming() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-resume-terminal");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-resume-terminal-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    backend.stop_externally(&paused.execution_id, 23);
+    backend.fail_resume.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Resuming")
+        ),
+        "expected Unavailable refusing stuck Resuming, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not leave Resuming over a terminal warm-resume generation"
+    );
+    assert_eq!(record.exit_code, Some(23));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&paused.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn stopped_generation_with_exit_during_cold_pause_publishes_stopped_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-stopped-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-pause-stopped-exit-create"))
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, 29);
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to publish Paused")
+        ),
+        "expected Unavailable refusing Paused over terminal Stopped, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not invent Paused over Stopped with authenticated exit"
+    );
+    assert_eq!(record.exit_code, Some(29));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-crash");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-pause-crash-create"))
+        .await
+        .unwrap();
+    backend.fail_externally(&running.execution_id, 17);
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to publish Paused")
+        ),
+        "expected Unavailable refusing Paused for failed generation, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not invent Paused over a crashed generation"
+    );
+    assert_eq!(record.exit_code, Some(17));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Failed
+    );
+}
+
+#[tokio::test]
+async fn terminal_generation_during_cold_resume_publishes_stopped_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-resume-terminal");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-resume-terminal-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(17);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to publish Paused")
+        ),
+        "expected Unavailable refusing Paused, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not invent Paused over a terminal cold-resume generation"
+    );
+    assert_eq!(record.exit_code, Some(17));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&paused.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
 async fn failed_filesystem_only_resume_remains_retryable_without_advancing_generation() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("cold-resume-failure");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("cold-resume-failure"),
-            &operation("cold-resume-failure-create"),
-        )
+        .create_and_start(create, &operation("cold-resume-failure-create"))
         .await
         .unwrap();
     let paused = manager
@@ -1450,8 +1888,10 @@ async fn reconcile_publishes_a_cold_resume_started_before_record_commit() {
 #[tokio::test]
 async fn ambiguous_pause_error_uses_backend_evidence_and_publishes_success() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("sandbox-1");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("sandbox-1"), &operation("operation-1"))
+        .create_and_start(create, &operation("operation-1"))
         .await
         .unwrap();
     backend
@@ -1475,8 +1915,10 @@ async fn ambiguous_pause_error_uses_backend_evidence_and_publishes_success() {
 #[tokio::test]
 async fn kill_is_generation_fenced_and_idempotent() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("sandbox-1");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("sandbox-1"), &operation("operation-1"))
+        .create_and_start(create, &operation("operation-1"))
         .await
         .unwrap();
 
@@ -1502,11 +1944,10 @@ async fn kill_is_generation_fenced_and_idempotent() {
 #[tokio::test]
 async fn option_aware_kill_persists_authoritative_backend_exit_code() {
     let (_directory, manager, _backend) = harness();
+    let mut create = request("sandbox-exit-status");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("sandbox-exit-status"),
-            &operation("operation-exit-status"),
-        )
+        .create_and_start(create, &operation("operation-exit-status"))
         .await
         .unwrap();
 
@@ -1530,11 +1971,10 @@ async fn option_aware_kill_persists_authoritative_backend_exit_code() {
 async fn option_aware_kill_derives_exit_code_when_backend_cannot_reap_it() {
     let (_directory, manager, backend) = harness();
     backend.omit_kill_exit_code.store(true, Ordering::Relaxed);
+    let mut create = request("sandbox-signaled-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("sandbox-signaled-exit"),
-            &operation("operation-signaled-exit"),
-        )
+        .create_and_start(create, &operation("operation-signaled-exit"))
         .await
         .unwrap();
 
@@ -1552,6 +1992,75 @@ async fn option_aware_kill_derives_exit_code_when_backend_cannot_reap_it() {
 
     let stopped = persisted(&manager, &running.execution_id);
     assert_eq!(stopped.exit_code, Some(137));
+}
+
+#[tokio::test]
+async fn already_stopped_kill_does_not_invent_signal_exit_code() {
+    let (_directory, manager, backend) = harness();
+    backend
+        .already_stopped_without_exit
+        .store(true, Ordering::Relaxed);
+    let mut create = request("already-stopped-no-invent");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("operation-already-stopped-no-invent"))
+        .await
+        .unwrap();
+
+    let outcome = manager
+        .kill_with_options(
+            &running.execution_id,
+            running.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, KillOutcome::AlreadyStopped);
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        stopped.exit_code, None,
+        "AlreadyStopped without runtime evidence must not invent 128+signal"
+    );
+    assert!(
+        !stopped.stopped_by_user,
+        "AlreadyStopped / vanished-runtime must not invent stopped_by_user via KillTerminal"
+    );
+}
+
+#[tokio::test]
+async fn not_found_kill_does_not_invent_stopped_by_user() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("kill-not-found-no-user-stop");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("operation-kill-not-found-no-user-stop"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(running.execution_id.as_str());
+    }
+
+    let outcome = manager
+        .kill(&running.execution_id, running.generation)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, KillOutcome::AlreadyStopped);
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, None);
+    assert!(
+        !stopped.stopped_by_user,
+        "NotFound kill cleanup must not invent stopped_by_user"
+    );
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
 }
 
 #[tokio::test]
@@ -1617,8 +2126,10 @@ async fn startup_reconciliation_reports_the_secondary_inspection_error() {
 async fn option_aware_kill_persists_intent_and_replays_it_after_a_crash() {
     let (directory, manager, backend) = harness();
     let create_operation = operation("operation-option-aware-kill");
+    let mut create = request("option-aware-kill");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("option-aware-kill"), &create_operation)
+        .create_and_start(create, &create_operation)
         .await
         .unwrap();
     let options = KillExecutionOptions {
@@ -2456,11 +2967,15 @@ fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, 
     std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
     let (directory, manager, backend) = harness();
     let running = manager
-        .create_and_start(request("snapshot-source"), &operation("snapshot-create"))
+        .create_and_start(
+            sandbox_request("snapshot-source"),
+            &operation("snapshot-create"),
+        )
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "captured-state");
@@ -2514,12 +3029,13 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("snapshot-image-config"),
+            sandbox_request("snapshot-image-config"),
             &operation("snapshot-image-config-create"),
         )
         .await
@@ -2557,11 +3073,15 @@ async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config()
     assert_eq!(image_config.user.as_deref(), Some("1000:1000"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn paused_snapshot_remains_paused_and_does_not_resume() {
     let (_directory, manager, backend) = harness();
     let running = manager
-        .create_and_start(request("paused-source"), &operation("paused-create"))
+        .create_and_start(
+            sandbox_request("paused-source"),
+            &operation("paused-create"),
+        )
         .await
         .unwrap();
     let paused = manager
@@ -2587,12 +3107,13 @@ async fn paused_snapshot_remains_paused_and_does_not_resume() {
     assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn filesystem_only_paused_snapshot_uses_the_quiescent_rootfs_without_a_runtime() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("cold-paused-source"),
+            sandbox_request("cold-paused-source"),
             &operation("cold-paused-create"),
         )
         .await
@@ -2646,12 +3167,13 @@ async fn filesystem_only_paused_snapshot_uses_the_quiescent_rootfs_without_a_run
     assert!(!record.managed_execution.unwrap().paused_with_memory);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cold_paused_snapshot_cleanup_failure_remains_recoverable() {
     let (_directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("cold-snapshot-cleanup"),
+            sandbox_request("cold-snapshot-cleanup"),
             &operation("cold-snapshot-cleanup-create"),
         )
         .await
@@ -2703,12 +3225,13 @@ async fn cold_paused_snapshot_cleanup_failure_remains_recoverable() {
     assert!(!record.managed_execution.unwrap().paused_with_memory);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_failure_restores_running_state_at_the_same_generation() {
     let (_directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("missing-rootfs"),
+            sandbox_request("missing-rootfs"),
             &operation("missing-rootfs-create"),
         )
         .await
@@ -2749,7 +3272,7 @@ async fn special_file_snapshot_failure_resumes_running_source() {
     let (directory, manager, backend) = harness();
     let running = manager
         .create_and_start(
-            request("special-file-source"),
+            sandbox_request("special-file-source"),
             &operation("special-file-create"),
         )
         .await
@@ -2793,11 +3316,227 @@ async fn special_file_snapshot_failure_resumes_running_source() {
 }
 
 #[tokio::test]
+async fn microvm_snapshot_reconcile_refuses_sandbox_only_publish() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-snapshot-refuse-create");
+    let running = manager
+        .create_and_start(request("microvm-snapshot-refuse"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "must-not-snapshot");
+    let snapshot_id = ExecutionSnapshotId::new("microvm-refused-snapshot").unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .plan
+            .backend
+            .is_sandbox(),
+        "test requires a non-Sandbox generation"
+    );
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Running,
+                operation_id: operation("microvm-snapshot-refuse-freezer"),
+            },
+        )
+        .await
+        .unwrap();
+    backend.pause(&claimed, true).await.unwrap();
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let outcome = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect("non-Sandbox Snapshotting must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(lease) = outcome else {
+        panic!("expected Ready lease after non-Sandbox snapshot abort, got {outcome:?}");
+    };
+    assert_eq!(lease.execution_id, running.execution_id);
+    assert_eq!(lease.generation, running.generation);
+    assert!(
+        restarted
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "must not publish a filesystem snapshot for a non-Sandbox generation"
+    );
+    assert_eq!(
+        persisted(&restarted, &running.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Running),
+        "must restore Running instead of leaving Snapshotting or inventing success"
+    );
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    // Inspect must report restored Running, not fail with create-time Conflict.
+    let status = restarted.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Running);
+}
+
+#[tokio::test]
+async fn microvm_cold_paused_snapshot_reconcile_restores_paused_not_failed() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-cold-snapshot-refuse-create");
+    let running = manager
+        .create_and_start(request("microvm-cold-snapshot-refuse"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "cold-must-not-snapshot");
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("microvm-cold-refused-snapshot").unwrap();
+    let record = persisted(&manager, &paused.execution_id);
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .plan
+            .backend
+            .is_sandbox(),
+        "test requires a non-Sandbox generation"
+    );
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .paused_with_memory,
+        "test requires cold-paused source state"
+    );
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Paused,
+                operation_id: operation("microvm-cold-snapshot-refuse-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    // MicroVM cold pause has no live provider process; NotFound is expected.
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(paused.execution_id.as_str());
+    }
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let outcome = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect("cold-paused non-Sandbox Snapshotting must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(lease) = outcome else {
+        panic!("expected Ready lease after cold-paused snapshot abort, got {outcome:?}");
+    };
+    assert_eq!(lease.execution_id, paused.execution_id);
+    assert!(
+        restarted
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "must not publish a filesystem snapshot for a non-Sandbox generation"
+    );
+    let restored = persisted(&restarted, &paused.execution_id);
+    assert_eq!(
+        restored.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused),
+        "cold-paused abort must restore Paused, not invent Failed/Terminal"
+    );
+    assert!(!restored.managed_execution.unwrap().paused_with_memory);
+    assert_eq!(restored.exit_code, None);
+    assert!(!restored.stopped_by_user);
+}
+
+#[tokio::test]
+async fn microvm_cold_paused_snapshot_reconcile_restores_paused_without_live_handle() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-cold-snapshot-stopped-create");
+    let running = manager
+        .create_and_start(request("microvm-cold-snapshot-stopped"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(
+        &manager,
+        &running.execution_id,
+        "cold-stopped-must-not-snapshot",
+    );
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("microvm-cold-stopped-refused").unwrap();
+    let record = persisted(&manager, &paused.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Paused,
+                operation_id: operation("microvm-cold-snapshot-stopped-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    // FakeBackend cold pause leaves a Stopped observation without a live handle.
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let outcome = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect("Stopped-without-exit cold pause must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(_) = outcome else {
+        panic!("expected Ready lease after cold-paused snapshot abort, got {outcome:?}");
+    };
+    assert!(restarted
+        .filesystem_snapshot_size(&snapshot_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        persisted(&restarted, &paused.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Paused),
+        "Stopped-without-exit cold pause must restore Paused, not fail required_handle"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn reconcile_recovers_a_crash_after_snapshot_pause() {
     let (directory, manager, backend) = harness();
     let create_operation = operation("recovered-snapshot-create");
     let running = manager
-        .create_and_start(request("recovered-source"), &create_operation)
+        .create_and_start(sandbox_request("recovered-source"), &create_operation)
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "recovered-state");
@@ -2880,11 +3619,15 @@ async fn legacy_snapshot_without_image_config_is_rejected_before_reservation() {
         .is_none());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
     let (_directory, manager, _backend) = harness();
     let running = manager
-        .create_and_start(request("delete-source"), &operation("delete-source-create"))
+        .create_and_start(
+            sandbox_request("delete-source"),
+            &operation("delete-source-create"),
+        )
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "delete-state");
@@ -2893,7 +3636,7 @@ async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
         .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap();
-    let mut restored_request = request("restored-reservation");
+    let mut restored_request = sandbox_request("restored-reservation");
     restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
     let restored = manager
         .create(restored_request, &operation("restored-reservation-create"))
@@ -2920,12 +3663,13 @@ async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
         .unwrap());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn snapshot_delete_and_restored_reservation_are_atomic() {
     let (_directory, manager, _backend) = harness();
     let running = manager
         .create_and_start(
-            request("atomic-delete-source"),
+            sandbox_request("atomic-delete-source"),
             &operation("atomic-delete-source-create"),
         )
         .await
@@ -2939,7 +3683,7 @@ async fn snapshot_delete_and_restored_reservation_are_atomic() {
             .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
             .await
             .unwrap();
-        let mut restored_request = request(&format!("atomic-restored-{index}"));
+        let mut restored_request = sandbox_request(&format!("atomic-restored-{index}"));
         restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
         let create_operation = operation(&format!("atomic-restored-create-{index}"));
         let create_manager = manager.clone();

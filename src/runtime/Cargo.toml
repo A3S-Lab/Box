@@ -26,6 +26,11 @@ name = "linux-kvm-oci-qualification"
 path = "examples/linux_kvm_oci_qualification.rs"
 required-features = ["vm"]
 
+[[example]]
+name = "linux-native-live-session-qualification"
+path = "examples/linux_native_live_session_qualification.rs"
+required-features = ["vm"]
+
 [features]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []

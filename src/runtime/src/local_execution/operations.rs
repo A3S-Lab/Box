@@ -3,6 +3,7 @@ use a3s_box_core::{
     KillExecutionOptions, KillOutcome,
 };
 
+use super::create::startup_terminal_state;
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
 use super::support::{
@@ -35,8 +36,9 @@ impl LocalExecutionManager {
                 lease_from_record(&paused)
             }
             Err(error) => match self.resolve_pause_error(record).await {
-                Some(lease) => Ok(lease),
-                None => Err(error),
+                Ok(Some(lease)) => Ok(lease),
+                Ok(None) => Err(error),
+                Err(resolved) => Err(resolved),
             },
         }
     }
@@ -52,12 +54,37 @@ impl LocalExecutionManager {
             Err(stop_error) => match self.backend.inspect(&record).await {
                 Err(ExecutionManagerError::NotFound(_)) => true,
                 Ok(observation)
+                    if observation.state == ExecutionState::Stopped
+                        && observation.exit_code.is_none() =>
+                {
+                    // Clean stop without an authenticated exit: treat as a
+                    // successful filesystem-only pause (lost-response safe).
+                    true
+                }
+                Ok(observation)
                     if matches!(
                         observation.state,
                         ExecutionState::Stopped | ExecutionState::Failed
                     ) =>
                 {
-                    true
+                    // Terminal evidence (Failed, or Stopped with exit) is not a
+                    // successful cold pause. Publish the terminal state and
+                    // refuse inventing Paused (which would drop the exit).
+                    if self.release_execution_resources(&record).await.is_err() {
+                        return Err(stop_error);
+                    }
+                    let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                    self.transition(
+                        &record,
+                        ManagedExecutionState::Pausing,
+                        terminal,
+                        RuntimeUpdate::Terminal(observation.exit_code),
+                    )
+                    .await?;
+                    return Err(ExecutionManagerError::Unavailable(format!(
+                        "filesystem-only pause observed a terminal generation (state {:?}, exit {:?}); refusing to publish Paused",
+                        observation.state, observation.exit_code
+                    )));
                 }
                 Ok(observation) if observation.state == ExecutionState::Running => {
                     let _ = self
@@ -88,9 +115,12 @@ impl LocalExecutionManager {
         Ok(lease)
     }
 
-    async fn resolve_pause_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
+    async fn resolve_pause_error(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
         let Ok(id) = execution_id(&record) else {
-            return None;
+            return Ok(None);
         };
         match self.backend.inspect(&record).await {
             Ok(observation) if observation.state == ExecutionState::Paused => {
@@ -103,9 +133,8 @@ impl LocalExecutionManager {
                                 ManagedExecutionState::Paused,
                                 handle,
                             )
-                            .await
-                            .ok()?;
-                        return lease_from_record(&paused).ok();
+                            .await?;
+                        return Ok(Some(lease_from_record(&paused)?));
                     }
                 }
             }
@@ -119,9 +148,47 @@ impl LocalExecutionManager {
                     )
                     .await;
             }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed warm pause must not leave
+                // the generation stuck in Pausing (or invent Paused later).
+                observation.validate(&id)?;
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Pausing,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "warm pause observed a terminal generation (state {:?}, exit {:?}); refusing to leave Pausing",
+                    observation.state, observation.exit_code
+                )));
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // Vanished runtime during warm pause must not leave Pausing.
+                self.release_execution_resources(&record).await?;
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Pausing,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(
+                    "warm pause observed a vanished generation; refusing to leave Pausing"
+                        .to_string(),
+                ));
+            }
             _ => {}
         }
-        None
+        Ok(None)
     }
 
     pub(super) async fn finish_resume(
@@ -146,8 +213,9 @@ impl LocalExecutionManager {
                 lease_from_record(&running)
             }
             Err(error) => match self.resolve_resume_error(record).await {
-                Some(lease) => Ok(lease),
-                None => Err(error),
+                Ok(Some(lease)) => Ok(lease),
+                Ok(None) => Err(error),
+                Err(resolved) => Err(resolved),
             },
         }
     }
@@ -230,10 +298,29 @@ impl LocalExecutionManager {
             Ok(observation)
                 if matches!(
                     observation.state,
-                    ExecutionState::Created
-                        | ExecutionState::Paused
-                        | ExecutionState::Stopped
-                        | ExecutionState::Failed
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed cold resume must not invent
+                // a retryable Paused generation (drops authenticated exit).
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                Err(ExecutionManagerError::Unavailable(format!(
+                    "filesystem-only resume observed a terminal generation (state {:?}, exit {:?}); refusing to publish Paused",
+                    observation.state, observation.exit_code
+                )))
+            }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Created | ExecutionState::Paused
                 ) =>
             {
                 self.rollback_cold_resume(&record).await?;
@@ -255,9 +342,12 @@ impl LocalExecutionManager {
         Ok(())
     }
 
-    async fn resolve_resume_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
+    async fn resolve_resume_error(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
         let Ok(id) = execution_id(&record) else {
-            return None;
+            return Ok(None);
         };
         match self.backend.inspect(&record).await {
             Ok(observation) if observation.state == ExecutionState::Running => {
@@ -270,9 +360,8 @@ impl LocalExecutionManager {
                                 ManagedExecutionState::Running,
                                 handle,
                             )
-                            .await
-                            .ok()?;
-                        return lease_from_record(&running).ok();
+                            .await?;
+                        return Ok(Some(lease_from_record(&running)?));
                     }
                 }
             }
@@ -286,9 +375,47 @@ impl LocalExecutionManager {
                     )
                     .await;
             }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed warm resume must not leave
+                // the generation stuck in Resuming (drops authenticated exit).
+                observation.validate(&id)?;
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "warm resume observed a terminal generation (state {:?}, exit {:?}); refusing to leave Resuming",
+                    observation.state, observation.exit_code
+                )));
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // Vanished runtime during warm resume must not leave Resuming.
+                self.release_execution_resources(&record).await?;
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(
+                    "warm resume observed a vanished generation; refusing to leave Resuming"
+                        .to_string(),
+                ));
+            }
             _ => {}
         }
-        None
+        Ok(None)
     }
 
     pub(super) async fn finish_resource_update(
@@ -352,24 +479,25 @@ impl LocalExecutionManager {
         match self.backend.kill_with_status(&backend_record).await {
             Ok(termination) => {
                 self.release_execution_resources(&record).await?;
-                let exit_code = kill_terminal_exit_code(options, termination.exit_code);
+                let exit_code =
+                    kill_terminal_exit_code(termination.outcome, options, termination.exit_code);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(exit_code),
+                    kill_runtime_update(termination.outcome, exit_code),
                 )
                 .await?;
                 Ok(termination.outcome)
             }
             Err(ExecutionManagerError::NotFound(_)) => {
                 self.release_execution_resources(&record).await?;
-                let exit_code = kill_terminal_exit_code(options, None);
+                let exit_code = kill_terminal_exit_code(KillOutcome::AlreadyStopped, options, None);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(exit_code),
+                    kill_runtime_update(KillOutcome::AlreadyStopped, exit_code),
                 )
                 .await?;
                 Ok(KillOutcome::AlreadyStopped)
@@ -386,41 +514,83 @@ impl LocalExecutionManager {
         record: BoxRecord,
         options: KillExecutionOptions,
     ) -> Option<KillOutcome> {
-        let observed_exit_code = match self.backend.inspect(&record).await {
-            Err(ExecutionManagerError::NotFound(_)) => None,
-            Ok(observation)
-                if matches!(
-                    observation.state,
-                    ExecutionState::Stopped | ExecutionState::Failed
-                ) =>
-            {
-                observation.exit_code
+        match self.backend.inspect(&record).await {
+            Err(ExecutionManagerError::NotFound(_)) => {
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                let exit_code = kill_terminal_exit_code(KillOutcome::AlreadyStopped, options, None);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Stopped,
+                    kill_runtime_update(KillOutcome::AlreadyStopped, exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::AlreadyStopped)
             }
-            _ => return None,
-        };
-        if self.release_execution_resources(&record).await.is_err() {
-            return None;
+            Ok(observation) if observation.state == ExecutionState::Failed => {
+                // Crash evidence is not a user stop. Preserve exit without
+                // marking stopped_by_user via KillTerminal.
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::AlreadyStopped)
+            }
+            Ok(observation) if observation.state == ExecutionState::Stopped => {
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                let exit_code =
+                    kill_terminal_exit_code(KillOutcome::Killed, options, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Stopped,
+                    RuntimeUpdate::KillTerminal(exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::Killed)
+            }
+            _ => None,
         }
-        let exit_code = kill_terminal_exit_code(options, observed_exit_code);
-        self.transition(
-            &record,
-            ManagedExecutionState::Killing,
-            ManagedExecutionState::Stopped,
-            RuntimeUpdate::KillTerminal(exit_code),
-        )
-        .await
-        .ok()?;
-        Some(KillOutcome::Killed)
+    }
+}
+
+fn kill_runtime_update(outcome: KillOutcome, exit_code: Option<i32>) -> RuntimeUpdate {
+    match outcome {
+        // Only a kill that was applied attributes stopped_by_user.
+        KillOutcome::Killed => RuntimeUpdate::KillTerminal(exit_code),
+        // AlreadyStopped / vanished-runtime cleanup must not invent user-stop.
+        KillOutcome::AlreadyStopped => RuntimeUpdate::Terminal(exit_code),
     }
 }
 
 fn kill_terminal_exit_code(
+    outcome: KillOutcome,
     options: KillExecutionOptions,
     observed_exit_code: Option<i32>,
 ) -> Option<i32> {
-    observed_exit_code.or_else(|| {
-        options
+    if let Some(exit_code) = observed_exit_code {
+        return Some(exit_code);
+    }
+    match outcome {
+        // Only invent 128+signal when a kill was actually applied and the
+        // backend could not reap an authenticated status. AlreadyStopped /
+        // vanished-runtime paths must leave exit absent (no fabricated evidence).
+        KillOutcome::Killed => options
             .signal
-            .and_then(|signal| 128_i32.checked_add(signal))
-    })
+            .and_then(|signal| 128_i32.checked_add(signal)),
+        KillOutcome::AlreadyStopped => None,
+    }
 }

@@ -4,8 +4,71 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Kill completion no longer invents `128+signal` exit codes **or**
+  `stopped_by_user` for `AlreadyStopped` / vanished-runtime / NotFound paths.
+  Only a true `Killed` outcome uses `KillTerminal` (user stop) and may derive
+  a signal exit when the reap is missing; owner-loss cleanup uses `Terminal`
+  so exit stays absent and user-stop is not fabricated. Contract tests cover
+  the no-invent paths and use MicroVM isolation so they run on Windows hosts
+  as well as Linux.
+- Filesystem-only (cold) pause no longer publishes `Paused` when stop fails and
+  inspect shows `Failed`, or `Stopped` with an authenticated exit. Those
+  generations become `Failed`/`Stopped` with the observed exit. Lost-response
+  kill reconciliation likewise publishes crash `Failed` via `Terminal` (not
+  user `KillTerminal` / `stopped_by_user`). Clean `Stopped` without exit after
+  a failed stop response remains a successful cold pause.
+- Filesystem-only (cold) resume no longer rolls terminal `Stopped`/`Failed`
+  evidence back to retryable `Paused` (which dropped the exit). Terminal
+  generations are published with `Terminal` evidence; `Created`/`Paused`/
+  `NotFound` remain retryable rollbacks.
+- Warm (in-memory) pause/resume no longer leaves a generation stuck in
+  `Pausing`/`Resuming` when inspect shows terminal `Stopped`/`Failed`. The
+  authenticated exit is published immediately with an Unavailable refusal,
+  matching cold-path honesty instead of deferring only to later reconcile.
+  The same immediate `Failed` publish applies when warm pause/resume inspect
+  returns NotFound (vanished runtime).
+- Inspect/reconcile `observe_record` terminal projection for **in-flight**
+  lifecycles now uses `startup_terminal_state` (Stopped without exit → `Failed`,
+  not invented clean `Stopped`). Pending `Killing` with an authenticated Stopped
+  exit uses `KillTerminal` so `stopped_by_user` matches `finish_kill`. Stable
+  `Running`/`Paused` owner-loss Stopped-without-exit stays `Stopped` (OCI
+  semantics).
+
+### Changed
+
+- Local FakeBackend lifecycle unit tests default create isolation to MicroVM so
+  Windows hosts run the same pause/resume/kill/reconcile honesty contracts
+  instead of failing at create with Linux-only Sandbox rejection. Explicit
+  Sandbox negatives (Windows reject-Sandbox) still force Sandbox. Filesystem
+  snapshot contracts that require the Sandbox backend stay Linux-gated with
+  explicit `sandbox_request`. Snapshot recover/reconcile now also refuses to
+  publish Sandbox-only filesystem snapshots on non-Sandbox generations (no
+  invent-via-recover), restoring the source state instead. Cold-paused
+  non-Sandbox abort restores `Paused` when inspect is NotFound or
+  Stopped-without-exit (cold pause has no live provider by design); it no
+  longer invents `Failed`/`Terminal` for that expected absence. Recover,
+  reconcile, and inspect/stabilize treat that abort as a successful restore
+  (Ready / restored status) rather than failing the caller with the
+  create-time Sandbox-only Conflict after state was already repaired.
+
 ### Added
 
+- Native Linux live-session observation harness:
+  `linux-native-live-session-qualification` example plus
+  `scripts/linux-native-live-session-qualification.sh`. Schema
+  `a3s.box.linux-native-live-session.v2` requires
+  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
+  Linux Host owner while a Sandbox generation is live, rebinds through a
+  replacement owner, and continues authentic Live keyed captured exec plus
+  state/inventory/stats/kill without inventing an exit status. Honest scope:
+  Native-Linux-driver Live Host-reopen and **fresh-manager** keyed exec only;
+  report fields keep `retained_stream_handle_proven`,
+  `fixture_stream_continuity_claimed`, and `b2_process_session_recovery_closed`
+  false so fixture `process_restart` continuity is never over-claimed. Does not
+  claim KVM MicroVM Live continuity or close the utility-VM half of Box B2 /
+  OCI R6. Default create stays Host-bound.
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
   `scripts/linux-kvm-oci-qualification.sh`. Schema

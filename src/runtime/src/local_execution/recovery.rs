@@ -225,21 +225,11 @@ impl LocalExecutionManager {
                 Ok((record, ExecutionState::Paused))
             }
             (_, ExecutionState::Stopped) | (_, ExecutionState::Failed) => {
-                let target = if observation.state == ExecutionState::Stopped {
-                    ManagedExecutionState::Stopped
-                } else {
-                    ManagedExecutionState::Failed
-                };
+                let (target, update, visible) =
+                    observe_terminal_projection(internal, observation.state, observation.exit_code);
                 self.release_execution_resources(&record).await?;
-                let record = self
-                    .transition(
-                        &record,
-                        internal,
-                        target,
-                        RuntimeUpdate::Terminal(observation.exit_code),
-                    )
-                    .await?;
-                Ok((record, observation.state))
+                let record = self.transition(&record, internal, target, update).await?;
+                Ok((record, visible))
             }
             _ => Err(ExecutionManagerError::Internal(format!(
                 "persisted state {internal} disagrees with backend state {:?} for {id}",
@@ -308,4 +298,74 @@ impl LocalExecutionManager {
             .await
             .map(ReconcileOutcome::Ready)
     }
+}
+
+fn in_flight_lifecycle(state: ManagedExecutionState) -> bool {
+    matches!(
+        state,
+        ManagedExecutionState::Starting
+            | ManagedExecutionState::Pausing
+            | ManagedExecutionState::Resuming
+            | ManagedExecutionState::Killing
+            | ManagedExecutionState::RestartStopping
+            | ManagedExecutionState::RestartStarting
+            | ManagedExecutionState::UpdatingResources
+            | ManagedExecutionState::Snapshotting
+    )
+}
+
+fn observe_terminal_projection(
+    internal: ManagedExecutionState,
+    backend_state: ExecutionState,
+    exit_code: Option<i32>,
+) -> (ManagedExecutionState, RuntimeUpdate, ExecutionState) {
+    if !in_flight_lifecycle(internal) {
+        // Stable Running/Paused owner-loss may publish Stopped without an
+        // authenticated exit; do not reclassify that as Failed here.
+        let target = if backend_state == ExecutionState::Stopped {
+            ManagedExecutionState::Stopped
+        } else {
+            ManagedExecutionState::Failed
+        };
+        return (target, RuntimeUpdate::Terminal(exit_code), backend_state);
+    }
+
+    if internal == ManagedExecutionState::Killing {
+        return match backend_state {
+            ExecutionState::Failed => (
+                ManagedExecutionState::Failed,
+                RuntimeUpdate::Terminal(exit_code),
+                ExecutionState::Failed,
+            ),
+            ExecutionState::Stopped if exit_code.is_some() => (
+                ManagedExecutionState::Stopped,
+                RuntimeUpdate::KillTerminal(exit_code),
+                ExecutionState::Stopped,
+            ),
+            // Stopped without exit while Killing matches AlreadyStopped cleanup:
+            // no invented signal exit and no invented stopped_by_user.
+            ExecutionState::Stopped => (
+                ManagedExecutionState::Stopped,
+                RuntimeUpdate::Terminal(None),
+                ExecutionState::Stopped,
+            ),
+            other => (
+                startup_terminal_state(other, exit_code),
+                RuntimeUpdate::Terminal(exit_code),
+                if other == ExecutionState::Stopped && exit_code.is_some() {
+                    ExecutionState::Stopped
+                } else {
+                    ExecutionState::Failed
+                },
+            ),
+        };
+    }
+
+    let target = startup_terminal_state(backend_state, exit_code);
+    let visible = if target == ManagedExecutionState::Stopped {
+        ExecutionState::Stopped
+    } else {
+        ExecutionState::Failed
+    };
+    (target, RuntimeUpdate::Terminal(exit_code), visible)
 }
