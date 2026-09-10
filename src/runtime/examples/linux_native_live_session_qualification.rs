@@ -51,9 +51,9 @@ mod qualification {
     use a3s_box_core::{
         BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionBackend,
         ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
-        ExecutionManagerError, ExecutionProcessSignal, ExecutionSessionManager, ExecutionState,
-        IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
-        ResourceConfig, StreamType,
+        ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
+        ExecutionSessionManager, ExecutionState, IsolationClass as BoxIsolationClass, NetworkMode,
+        OperationId, ReconcileOutcome, ResourceConfig, StreamType,
     };
     use a3s_box_runtime::{
         LocalExecutionManager, ManagedExecutionStore, ManagedRuntimeRoute,
@@ -470,6 +470,12 @@ mod qualification {
                     "streaming stdin write before owner SIGKILL failed: {error}"
                 ))
             })?;
+        expect_stream_echo(
+            &mut process,
+            STREAM_ECHO_BEFORE,
+            "before owner SIGKILL",
+        )
+        .await?;
 
         // Keep the Box manager: retained-handle continuity is the v3 gate.
         sigkill_identity(&owner)?;
@@ -487,10 +493,7 @@ mod qualification {
 
         let disconnect = process.next_event().await;
         require(
-            matches!(
-                disconnect,
-                Err(ExecutionManagerError::Unavailable(_))
-            ),
+            matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))),
             format!(
                 "retained stream must surface Unavailable on owner death, got {disconnect:?}"
             ),
@@ -564,6 +567,12 @@ mod qualification {
                     "retained streaming stdin after owner reopen failed: {error}"
                 ))
             })?;
+        expect_stream_echo(
+            &mut process,
+            STREAM_ECHO_AFTER,
+            "after owner reopen",
+        )
+        .await?;
         input.close_stdin().await.map_err(|error| {
             failure(format!(
                 "retained streaming close_stdin after owner reopen failed: {error}"
@@ -752,6 +761,53 @@ mod qualification {
             ),
         )?;
         Ok(())
+    }
+
+    async fn expect_stream_echo(
+        process: &mut impl ExecutionProcessStream,
+        line: &[u8],
+        phase: &str,
+    ) -> Result<(), AnyError> {
+        let payload = line.strip_suffix(b"\n").unwrap_or(line);
+        let expected = format!("echo:{}\n", String::from_utf8_lossy(payload));
+        let expected_bytes = expected.as_bytes();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), process.next_event())
+                .await
+                .map_err(|_| failure(format!("timed out waiting for stream echo {phase}")))?
+                .map_err(|error| {
+                    failure(format!(
+                        "streaming process failed while waiting for echo {phase}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| failure(format!("streaming process ended before echo {phase}")))?;
+            match event {
+                ExecEvent::Chunk(chunk)
+                    if chunk.stream == StreamType::Stdout && chunk.data == expected_bytes =>
+                {
+                    return Ok(());
+                }
+                ExecEvent::Chunk(chunk) if chunk.stream == StreamType::Stdout => {
+                    return Err(failure(format!(
+                        "streaming stdout drifted {phase}: {:?}",
+                        String::from_utf8_lossy(&chunk.data)
+                    )));
+                }
+                ExecEvent::FlushAck => {}
+                ExecEvent::Exit(exit) => {
+                    return Err(failure(format!(
+                        "streaming process exited before echo {phase}: {exit:?}"
+                    )));
+                }
+                ExecEvent::Chunk(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(failure(format!(
+                    "deadline exceeded waiting for stream echo {phase}"
+                )));
+            }
+        }
     }
 
     async fn wait_until_running(
