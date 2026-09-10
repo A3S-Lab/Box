@@ -20,6 +20,10 @@ All notable changes to A3S Box will be documented in this file.
   evidence back to retryable `Paused` (which dropped the exit). Terminal
   generations are published with `Terminal` evidence; `Created`/`Paused`/
   `NotFound` remain retryable rollbacks.
+- Warm (in-memory) pause/resume no longer leaves a generation stuck in
+  `Pausing`/`Resuming` when inspect shows terminal `Stopped`/`Failed`. The
+  authenticated exit is published immediately with an Unavailable refusal,
+  matching cold-path honesty instead of deferring only to later reconcile.
 
 ### Added
 

@@ -36,8 +36,9 @@ impl LocalExecutionManager {
                 lease_from_record(&paused)
             }
             Err(error) => match self.resolve_pause_error(record).await {
-                Some(lease) => Ok(lease),
-                None => Err(error),
+                Ok(Some(lease)) => Ok(lease),
+                Ok(None) => Err(error),
+                Err(resolved) => Err(resolved),
             },
         }
     }
@@ -100,9 +101,12 @@ impl LocalExecutionManager {
         Ok(lease)
     }
 
-    async fn resolve_pause_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
+    async fn resolve_pause_error(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
         let Ok(id) = execution_id(&record) else {
-            return None;
+            return Ok(None);
         };
         match self.backend.inspect(&record).await {
             Ok(observation) if observation.state == ExecutionState::Paused => {
@@ -115,9 +119,8 @@ impl LocalExecutionManager {
                                 ManagedExecutionState::Paused,
                                 handle,
                             )
-                            .await
-                            .ok()?;
-                        return lease_from_record(&paused).ok();
+                            .await?;
+                        return Ok(Some(lease_from_record(&paused)?));
                     }
                 }
             }
@@ -131,9 +134,32 @@ impl LocalExecutionManager {
                     )
                     .await;
             }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed warm pause must not leave
+                // the generation stuck in Pausing (or invent Paused later).
+                observation.validate(&id)?;
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Pausing,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "warm pause observed a terminal generation (state {:?}, exit {:?}); refusing to leave Pausing",
+                    observation.state, observation.exit_code
+                )));
+            }
             _ => {}
         }
-        None
+        Ok(None)
     }
 
     pub(super) async fn finish_resume(
@@ -158,8 +184,9 @@ impl LocalExecutionManager {
                 lease_from_record(&running)
             }
             Err(error) => match self.resolve_resume_error(record).await {
-                Some(lease) => Ok(lease),
-                None => Err(error),
+                Ok(Some(lease)) => Ok(lease),
+                Ok(None) => Err(error),
+                Err(resolved) => Err(resolved),
             },
         }
     }
@@ -286,9 +313,12 @@ impl LocalExecutionManager {
         Ok(())
     }
 
-    async fn resolve_resume_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
+    async fn resolve_resume_error(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
         let Ok(id) = execution_id(&record) else {
-            return None;
+            return Ok(None);
         };
         match self.backend.inspect(&record).await {
             Ok(observation) if observation.state == ExecutionState::Running => {
@@ -301,9 +331,8 @@ impl LocalExecutionManager {
                                 ManagedExecutionState::Running,
                                 handle,
                             )
-                            .await
-                            .ok()?;
-                        return lease_from_record(&running).ok();
+                            .await?;
+                        return Ok(Some(lease_from_record(&running)?));
                     }
                 }
             }
@@ -317,9 +346,32 @@ impl LocalExecutionManager {
                     )
                     .await;
             }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed warm resume must not leave
+                // the generation stuck in Resuming (drops authenticated exit).
+                observation.validate(&id)?;
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "warm resume observed a terminal generation (state {:?}, exit {:?}); refusing to leave Resuming",
+                    observation.state, observation.exit_code
+                )));
+            }
             _ => {}
         }
-        None
+        Ok(None)
     }
 
     pub(super) async fn finish_resource_update(

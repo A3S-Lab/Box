@@ -47,6 +47,7 @@ struct FakeBackend {
     already_stopped_without_exit: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
+    fail_resume: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
     last_kill_signal: Mutex<Option<Option<i32>>>,
     last_kill_timeout: Mutex<Option<Option<u64>>>,
@@ -192,6 +193,11 @@ impl LocalExecutionBackend for FakeBackend {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         self.resumes.fetch_add(1, Ordering::Relaxed);
+        if self.fail_resume.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake resume is unavailable".to_string(),
+            ));
+        }
         let mut executions = self.executions.lock().unwrap();
         let execution = executions
             .get_mut(&record.id)
@@ -1297,6 +1303,88 @@ async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
 }
 
 #[tokio::test]
+async fn crashed_generation_during_warm_pause_publishes_failed_not_pausing() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-pause-crash");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-pause-crash-create"))
+        .await
+        .unwrap();
+    backend.fail_externally(&running.execution_id, 19);
+    backend.fail_pause.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Pausing")
+        ),
+        "expected Unavailable refusing stuck Pausing, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not leave Pausing over a crashed warm-pause generation"
+    );
+    assert_eq!(record.exit_code, Some(19));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Failed
+    );
+}
+
+#[tokio::test]
+async fn terminal_generation_during_warm_resume_publishes_stopped_not_resuming() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("warm-resume-terminal");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("warm-resume-terminal-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    backend.stop_externally(&paused.execution_id, 23);
+    backend.fail_resume.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to leave Resuming")
+        ),
+        "expected Unavailable refusing stuck Resuming, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not leave Resuming over a terminal warm-resume generation"
+    );
+    assert_eq!(record.exit_code, Some(23));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&paused.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
 async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
     let (_directory, manager, backend) = harness();
     let mut create = request("cold-pause-crash");
@@ -1556,8 +1644,10 @@ async fn reconcile_publishes_a_cold_resume_started_before_record_commit() {
 #[tokio::test]
 async fn ambiguous_pause_error_uses_backend_evidence_and_publishes_success() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("sandbox-1");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("sandbox-1"), &operation("operation-1"))
+        .create_and_start(create, &operation("operation-1"))
         .await
         .unwrap();
     backend
