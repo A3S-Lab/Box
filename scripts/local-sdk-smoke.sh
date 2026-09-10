@@ -249,7 +249,9 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
     candidates = list(root.glob("c-*/recovery.json"))
     assert len(candidates) == 1, f"expected one live recovery record below {root}, found {len(candidates)}"
     recovery = read_private_json(candidates[0])
-    expected_fields = {
+    # OCI pin 07e653f+ writes a3s.oci.native-linux-recovery.v6. Optional Live
+    # reopen inventory fields are omitted when empty (skip_serializing_if).
+    required_fields = {
         "schemaVersion",
         "target",
         "configDigest",
@@ -259,10 +261,15 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
         "cgroup",
         "intelRdt",
     }
-    assert set(recovery) == expected_fields, (
-        f"unexpected native recovery fields: {sorted(recovery)}"
+    optional_fields = {"sessionSupervisor", "execs"}
+    actual_fields = set(recovery)
+    assert required_fields <= actual_fields, (
+        f"missing native recovery fields: {sorted(required_fields - actual_fields)}"
     )
-    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v3", (
+    assert actual_fields <= required_fields | optional_fields, (
+        f"unexpected native recovery fields: {sorted(actual_fields - required_fields - optional_fields)}"
+    )
+    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v6", (
         f"unexpected native recovery schema: {recovery['schemaVersion']}"
     )
     config_digest = recovery["configDigest"]
@@ -275,6 +282,20 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
     assert recovery["target"]["id"] == container_id
     assert int(recovery["owner"]["pid"]) == int(owner["pid"])
     assert int(recovery["owner"]["startTimeTicks"]) == int(owner["pid_start_time"])
+    if os.environ.get("A3S_OCI_NATIVE_SESSION_SUPERVISOR") == "1":
+        assert "sessionSupervisor" in recovery, (
+            "supervised create must persist sessionSupervisor in recovery.v6"
+        )
+        require_live_identity("OCI session supervisor", recovery["sessionSupervisor"])
+    if "execs" in recovery:
+        assert isinstance(recovery["execs"], list), "recovery.execs must be a list"
+        for exec_record in recovery["execs"]:
+            assert {"processId", "identity", "terminal"} <= set(exec_record), (
+                f"incomplete recovery exec record: {sorted(exec_record)}"
+            )
+            assert set(exec_record) <= {"processId", "identity", "terminal", "helper"}, (
+                f"unexpected recovery exec fields: {sorted(exec_record)}"
+            )
     return candidates[0], recovery
 
 

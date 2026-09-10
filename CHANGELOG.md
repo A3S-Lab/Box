@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Local SDK smoke / `check-oci-pins` now assert
+  `a3s.oci.native-linux-recovery.v6` to match the pinned OCI Runtime
+  (`07e653f9…`). The previous `v3` assertion failed the Sandbox pin gate after
+  #296 and rejected honest Live reopen fields (`sessionSupervisor`, `execs`)
+  that v6 may serialize.
 - Native Linux retained-manager Live reopen respawns the identity-fenced OCI
   Host on `inspect`/`reconcile` Unavailable (`with_native_linux_owner_recovery`).
   Without that, the SDK only reconnects to a dead socket and the session
