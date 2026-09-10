@@ -11,7 +11,9 @@ All notable changes to A3S Box will be documented in this file.
   `elevate-linux-sandbox-owner.sh` only as the owner `SETPRIV_WRAPPER`. Elevating
   the example itself left `geteuid()==0`, skipped owner elevation, and CI failed
   with SDK connect Broken pipe inside the launch-ready wait. Stage/preserve
-  `a3s-box-sandbox-oci-launcher` across sudo into the live-session home.
+  `a3s-box-sandbox-oci-launcher` across sudo into the live-session home, and
+  stage the packaged `lib/` tree beside `a3s-box-shim` (`$ORIGIN/lib` / libkrun)
+  so the managed OCI log worker does not die on dlopen.
 - Mark live-session / elevate / KVM qualification shell scripts executable in
   git (`100755`). Sandbox CI on Linux checkouts was failing closed with
   `missing executable …/elevate-linux-sandbox-owner.sh` before the v3 gate ran.

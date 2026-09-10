@@ -169,6 +169,18 @@ elif [[ ! -x "${HOME_DIR}/bin/a3s-box-shim" ]]; then
   echo "missing ${BOX_BIN}/a3s-box-shim" >&2
   exit 2
 fi
+# Shim/box resolve libkrun via DT_RUNPATH $ORIGIN/lib (package-no-kvm layout).
+if [[ -d "${BOX_BIN}/lib" ]]; then
+  mkdir -p "${HOME_DIR}/bin/lib"
+  cp -a "${BOX_BIN}/lib"/. "${HOME_DIR}/bin/lib/"
+  chown -R "${uid}:${gid}" "${HOME_DIR}/bin/lib"
+elif [[ ! -d "${HOME_DIR}/bin/lib" ]]; then
+  echo "missing ${BOX_BIN}/lib (required beside a3s-box-shim for \$ORIGIN/lib)" >&2
+  exit 2
+fi
+if [[ -x "${BOX_BIN}/a3s-box" ]]; then
+  install -o "${uid}" -g "${gid}" -m 755 "${BOX_BIN}/a3s-box" "${HOME_DIR}/bin/a3s-box"
+fi
 if [[ -x "${BOX_BIN}/a3s-box-guest-init" ]]; then
   install -o "${uid}" -g "${gid}" -m 755 "${BOX_BIN}/a3s-box-guest-init" "${HOME_DIR}/bin/a3s-box-guest-init"
 fi

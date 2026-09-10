@@ -693,6 +693,12 @@ jobs:
           install -m 755 "$A3S_BOX_SHIM_BINARY" "$staging/a3s-box-shim"
           install -m 755 "$A3S_BOX_GUEST_INIT_BINARY" "$staging/a3s-box-guest-init"
           install -m 755 "$A3S_BOX_SANDBOX_OCI_LAUNCHER" "$staging/a3s-box-sandbox-oci-launcher"
+          # Packaged shim/box use DT_RUNPATH $ORIGIN/lib for libkrun; copy the
+          # sibling lib tree or the managed OCI log worker dies on dlopen.
+          package_lib="$(dirname "$A3S_BOX_SHIM_BINARY")/lib"
+          test -d "$package_lib"
+          mkdir -p "$staging/lib"
+          cp -a "$package_lib"/. "$staging/lib/"
           install -m 755 "$example_bin" "$staging/linux-native-live-session-qualification"
           report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v3.json"
           rm -f "$report"
