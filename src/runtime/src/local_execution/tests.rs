@@ -3240,19 +3240,15 @@ async fn microvm_snapshot_reconcile_refuses_sandbox_only_publish() {
         directory.path().join("home"),
         backend.clone(),
     );
-    let error = restarted
+    let outcome = restarted
         .reconcile(&create_operation)
         .await
-        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
-
-    assert!(
-        matches!(
-            error,
-            ExecutionManagerError::Conflict { ref message, .. }
-                if message.contains("Sandbox backend")
-        ),
-        "expected Sandbox-backend Conflict, got {error:?}"
-    );
+        .expect("non-Sandbox Snapshotting must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(lease) = outcome else {
+        panic!("expected Ready lease after non-Sandbox snapshot abort, got {outcome:?}");
+    };
+    assert_eq!(lease.execution_id, running.execution_id);
+    assert_eq!(lease.generation, running.generation);
     assert!(
         restarted
             .filesystem_snapshot_size(&snapshot_id)
@@ -3269,6 +3265,9 @@ async fn microvm_snapshot_reconcile_refuses_sandbox_only_publish() {
         "must restore Running instead of leaving Snapshotting or inventing success"
     );
     assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    // Inspect must report restored Running, not fail with create-time Conflict.
+    let status = restarted.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Running);
 }
 
 #[tokio::test]
@@ -3328,19 +3327,14 @@ async fn microvm_cold_paused_snapshot_reconcile_restores_paused_not_failed() {
         directory.path().join("home"),
         backend.clone(),
     );
-    let error = restarted
+    let outcome = restarted
         .reconcile(&create_operation)
         .await
-        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
-
-    assert!(
-        matches!(
-            error,
-            ExecutionManagerError::Conflict { ref message, .. }
-                if message.contains("Sandbox backend")
-        ),
-        "expected Sandbox-backend Conflict, got {error:?}"
-    );
+        .expect("cold-paused non-Sandbox Snapshotting must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(lease) = outcome else {
+        panic!("expected Ready lease after cold-paused snapshot abort, got {outcome:?}");
+    };
+    assert_eq!(lease.execution_id, paused.execution_id);
     assert!(
         restarted
             .filesystem_snapshot_size(&snapshot_id)
@@ -3399,19 +3393,13 @@ async fn microvm_cold_paused_snapshot_reconcile_restores_paused_without_live_han
         directory.path().join("home"),
         backend.clone(),
     );
-    let error = restarted
+    let outcome = restarted
         .reconcile(&create_operation)
         .await
-        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
-
-    assert!(
-        matches!(
-            error,
-            ExecutionManagerError::Conflict { ref message, .. }
-                if message.contains("Sandbox backend")
-        ),
-        "expected Sandbox-backend Conflict, got {error:?}"
-    );
+        .expect("Stopped-without-exit cold pause must restore without inventing a snapshot");
+    let ReconcileOutcome::Ready(_) = outcome else {
+        panic!("expected Ready lease after cold-paused snapshot abort, got {outcome:?}");
+    };
     assert!(restarted
         .filesystem_snapshot_size(&snapshot_id)
         .await

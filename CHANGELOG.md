@@ -42,7 +42,10 @@ All notable changes to A3S Box will be documented in this file.
   invent-via-recover), restoring the source state instead. Cold-paused
   non-Sandbox abort restores `Paused` when inspect is NotFound or
   Stopped-without-exit (cold pause has no live provider by design); it no
-  longer invents `Failed`/`Terminal` for that expected absence.
+  longer invents `Failed`/`Terminal` for that expected absence. Recover,
+  reconcile, and inspect/stabilize treat that abort as a successful restore
+  (Ready / restored status) rather than failing the caller with the
+  create-time Sandbox-only Conflict after state was already repaired.
 
 ### Added
 

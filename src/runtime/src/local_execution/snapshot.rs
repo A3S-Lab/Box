@@ -96,6 +96,14 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        // Recover must restore source state for non-Sandbox claims without
+        // surfacing create-time Conflict as a failed reconcile.
+        if let Some(lease) = self
+            .abort_non_sandbox_snapshotting_if_needed(record.clone())
+            .await?
+        {
+            return Ok(lease);
+        }
         self.drive_snapshot(record)
             .await
             .map(|snapshot| snapshot.lease)
@@ -109,10 +117,47 @@ impl LocalExecutionManager {
             return Ok(record);
         }
         let execution_id = ExecutionId::new(record.id.clone())?;
+        // Inspect/stabilize reports restored status; do not fail the caller with
+        // the Sandbox-only Conflict after a successful abort restore.
+        if self
+            .abort_non_sandbox_snapshotting_if_needed(record.clone())
+            .await?
+            .is_some()
+        {
+            return self
+                .get(&execution_id)
+                .await?
+                .ok_or(ExecutionManagerError::NotFound(execution_id));
+        }
         self.drive_snapshot(record).await?;
         self.get(&execution_id)
             .await?
             .ok_or(ExecutionManagerError::NotFound(execution_id))
+    }
+
+    async fn abort_non_sandbox_snapshotting_if_needed(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<Option<ExecutionLease>> {
+        if managed_state(&record)? != ManagedExecutionState::Snapshotting {
+            return Ok(None);
+        }
+        if record
+            .managed_execution
+            .as_ref()
+            .is_some_and(|metadata| metadata.plan.backend.is_sandbox())
+        {
+            return Ok(None);
+        }
+        let (_, source_state, _) = snapshot_operation(&record)?;
+        self.abort_non_sandbox_snapshot(&record, source_state)
+            .await?;
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        let restored = self
+            .get(&execution_id)
+            .await?
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id))?;
+        Ok(Some(lease_from_record(&restored)?))
     }
 
     async fn drive_snapshot(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionSnapshot> {
