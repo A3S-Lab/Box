@@ -259,10 +259,15 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
         "cgroup",
         "intelRdt",
     }
-    assert set(recovery) == expected_fields, (
-        f"unexpected native recovery fields: {sorted(recovery)}"
+    optional_fields = {"sessionSupervisor", "execs"}
+    actual_fields = set(recovery)
+    assert expected_fields <= actual_fields, (
+        f"missing native recovery fields: {sorted(expected_fields - actual_fields)}"
     )
-    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v3", (
+    assert actual_fields <= expected_fields | optional_fields, (
+        f"unexpected native recovery fields: {sorted(actual_fields - expected_fields - optional_fields)}"
+    )
+    assert recovery["schemaVersion"] == "a3s.oci.native-linux-recovery.v6", (
         f"unexpected native recovery schema: {recovery['schemaVersion']}"
     )
     config_digest = recovery["configDigest"]
