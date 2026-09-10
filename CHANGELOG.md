@@ -4,6 +4,29 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Existing-host WSL2 `/dev/kvm` greened `a3s.box.linux-kvm-live-session.v1`
+  (`retained_stream_handle_proven=true`, `kvm_microvm_live_claimed=true`) on
+  Box `0a6ce8d7…` + OCI `f532e2d…` (report SHA-256
+  `d3d4f3c81659ba646ebb5218bc57db9bb77d765284713d5d41900001848e705e`).
+  `b2_process_session_recovery_closed` stays false.
+
+- Linux KVM MicroVM live-session observation harness
+  (`linux-kvm-live-session-qualification`, schema
+  `a3s.box.linux-kvm-live-session.v1`) with local runner
+  `scripts/linux-kvm-live-session-qualification.sh` and report verifier
+  `scripts/verify-linux-kvm-live-session-report.py`. Exercises
+  `A3S_OCI_KVM_SESSION_OWNER=1`, retained streaming handle continuity across
+  Host Service SIGKILL/restart, and sets `kvm_microvm_live_claimed` only when
+  `retained_stream_handle_proven`. Does **not** close B2 or claim utility-VM
+  Live; `/dev/kvm` green evidence remains pending.
+
+### Changed
+
+- Bump pinned OCI Runtime to `f532e2d818cc302849a7c92653ca8256e3ba277e` (KVM
+  Live retained exec I/O across Host reopen).
+
 ### Fixed
 
 - Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
