@@ -419,7 +419,13 @@ retain process or filesystem sessions after its owner dies.
     invented exit). Requires `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`. Drops the
     Box manager before owner death, so it does **not** prove retained streaming
     handle continuity and does **not** close B2. Does not close utility-VM Live
-    or default create Host-bound policy.
+    or default create Host-bound policy. **Existing-host WSL2 evidence** on OCI
+    `07e653f9fb594e7454f6f732f3d3ceb80928b254` / Box tip that ran the harness:
+    report SHA-256
+    `614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`
+    (`status=passed`, `keyed_captured_exec_after_reopen=true`,
+    `live_kill_after_reopen=true`, `removed=true`; retained-stream / B2 /
+    fixture / KVM / utility-VM claims stay false).
   - [ ] Retained streaming process-handle continuity on a real Native Linux
     owner restart (fixture-only today in `process_restart`).
   - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
