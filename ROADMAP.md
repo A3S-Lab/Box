@@ -424,28 +424,31 @@ retain process or filesystem sessions after its owner dies.
     (`status=passed`, `keyed_captured_exec_after_reopen=true`,
     `live_kill_after_reopen=true`, `removed=true`; retained-stream / B2 /
     fixture / KVM / utility-VM claims stay false).
-  - [ ] Observation harness `a3s.box.linux-native-live-session.v3`
+  - [x] Observation harness `a3s.box.linux-native-live-session.v3`
     (`linux-native-live-session-qualification`) for Native Linux Sandbox with
     supervised create + Host owner SIGKILL + Live rebind while retaining the
-    Box manager. Intended proof: retained streaming `start_process` handle
-    continuity (Unavailable on owner death → reconcile Ready → same-handle
+    Box manager. Proves retained streaming `start_process` handle continuity
+    (Unavailable on owner death → reconcile Ready → same-handle
     stdin/signal/Exit) plus keyed captured exec before/after, state/inventory/
     stats/kill; no invented exit. Requires `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`.
     Sets `retained_stream_handle_proven=true` **only** when that path passes;
     keeps `fixture_stream_continuity_claimed` and
     `b2_process_session_recovery_closed` false. Does not close utility-VM /
-    KVM MicroVM Live or default create Host-bound policy. SDK Local
-    Sandbox CI runs this gate and fail-closes unless
-    `retained_stream_handle_proven` is true while B2/fixture/KVM/utility-VM
-    claims stay false. Prior v2 (manager-
-    drop) evidence on OCI
+    KVM MicroVM Live or default create Host-bound policy. **Existing-host
+    WSL2 evidence** on Box `2c304534beafa6d9284000d992494a780082f3aa` + OCI
+    `7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9`: report SHA-256
+    `bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`
+    (`status=passed`, `retained_stream_handle_proven=true`,
+    `keyed_captured_exec_after_reopen=true`, `live_kill_after_reopen=true`,
+    `removed=true`; B2 / fixture / KVM / utility-VM claims stay false).
+    Prior v2 (manager-drop) evidence on OCI
     `07e653f9fb594e7454f6f732f3d3ceb80928b254` remains keyed-capture /
-    live-kill only (`614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`);
-    **v3 retained-stream evidence pending a green Linux qualification report**
-    — do not treat the harness code alone as B2 closure.
-  - [ ] Retained streaming process-handle continuity on a real Native Linux
+    live-kill only (`614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`).
+  - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3 harness path above; fixture `process_restart` remains
-    non-driver evidence).
+    non-driver evidence). Does **not** alone close B2
+    (`b2_process_session_recovery_closed` stays false until the plan's full
+    B2 criteria are met).
   - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
     reopen remains stopped-only / recreate today).
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse

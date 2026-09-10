@@ -249,7 +249,7 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
     candidates = list(root.glob("c-*/recovery.json"))
     assert len(candidates) == 1, f"expected one live recovery record below {root}, found {len(candidates)}"
     recovery = read_private_json(candidates[0])
-    # OCI pin 07e653f+ writes a3s.oci.native-linux-recovery.v6. Optional Live
+    # OCI pin 7001ce5+ writes a3s.oci.native-linux-recovery.v6. Optional Live
     # reopen inventory fields are omitted when empty (skip_serializing_if).
     required_fields = {
         "schemaVersion",
