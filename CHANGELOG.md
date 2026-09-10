@@ -35,7 +35,9 @@ All notable changes to A3S Box will be documented in this file.
   instead of failing at create with Linux-only Sandbox rejection. Explicit
   Sandbox negatives (Windows reject-Sandbox) still force Sandbox. Filesystem
   snapshot contracts that require the Sandbox backend stay Linux-gated with
-  explicit `sandbox_request`.
+  explicit `sandbox_request`. Snapshot recover/reconcile now also refuses to
+  publish Sandbox-only filesystem snapshots on non-Sandbox generations (no
+  invent-via-recover), restoring the source state instead.
 
 ### Added
 

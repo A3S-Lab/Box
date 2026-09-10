@@ -3120,11 +3120,84 @@ async fn special_file_snapshot_failure_resumes_running_source() {
 }
 
 #[tokio::test]
+async fn microvm_snapshot_reconcile_refuses_sandbox_only_publish() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-snapshot-refuse-create");
+    let running = manager
+        .create_and_start(request("microvm-snapshot-refuse"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "must-not-snapshot");
+    let snapshot_id = ExecutionSnapshotId::new("microvm-refused-snapshot").unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .plan
+            .backend
+            .is_sandbox(),
+        "test requires a non-Sandbox generation"
+    );
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Running,
+                operation_id: operation("microvm-snapshot-refuse-freezer"),
+            },
+        )
+        .await
+        .unwrap();
+    backend.pause(&claimed, true).await.unwrap();
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let error = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Conflict { ref message, .. }
+                if message.contains("Sandbox backend")
+        ),
+        "expected Sandbox-backend Conflict, got {error:?}"
+    );
+    assert!(
+        restarted
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "must not publish a filesystem snapshot for a non-Sandbox generation"
+    );
+    assert_eq!(
+        persisted(&restarted, &running.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Running),
+        "must restore Running instead of leaving Snapshotting or inventing success"
+    );
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn reconcile_recovers_a_crash_after_snapshot_pause() {
     let (directory, manager, backend) = harness();
     let create_operation = operation("recovered-snapshot-create");
     let running = manager
-        .create_and_start(request("recovered-source"), &create_operation)
+        .create_and_start(sandbox_request("recovered-source"), &create_operation)
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "recovered-state");

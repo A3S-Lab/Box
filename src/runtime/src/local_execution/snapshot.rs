@@ -115,6 +115,20 @@ impl LocalExecutionManager {
         let (snapshot_id, source_state, freezer_applied) = snapshot_operation(&record)?;
         let mut record = record;
         let execution_id = ExecutionId::new(record.id.clone())?;
+        if !record
+            .managed_execution
+            .as_ref()
+            .is_some_and(|metadata| metadata.plan.backend.is_sandbox())
+        {
+            // create_snapshot refuses non-Sandbox backends before claiming.
+            // Recover/reconcile must not invent a published snapshot either.
+            self.abort_non_sandbox_snapshot(&record, source_state)
+                .await?;
+            return Err(ExecutionManagerError::Conflict {
+                execution_id,
+                message: "filesystem snapshots currently require the Sandbox backend".to_string(),
+            });
+        }
         if source_state == ManagedExecutionState::Paused
             && !paused_with_memory(&record, &execution_id)?
         {
@@ -209,6 +223,35 @@ impl LocalExecutionManager {
             state: execution_state(source_state)?,
             lease: lease_from_record(&completed)?,
         })
+    }
+
+    async fn abort_non_sandbox_snapshot(
+        &self,
+        record: &BoxRecord,
+        source_state: ManagedExecutionState,
+    ) -> ExecutionManagerResult<()> {
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        match self.backend.inspect(record).await {
+            Ok(observation) => {
+                observation.validate(&execution_id)?;
+                let handle = required_handle(&observation, &execution_id)?;
+                self.restore_snapshot_source_state(record, source_state, handle)
+                    .await?;
+                Ok(())
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                self.release_execution_resources(record).await?;
+                self.transition(
+                    record,
+                    ManagedExecutionState::Snapshotting,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn drive_cold_paused_snapshot(
