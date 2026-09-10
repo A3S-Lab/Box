@@ -121,6 +121,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Align CI/release A3S_OCI_RUNTIME_REV with the Cargo 3s-oci-sdk pin (9d6eeb).
+
 - Linux Sandbox `native-linux-service` owners now migrate into a child of the
   empty delegated cgroup root before exec, matching host-service composition.
   Advertised Runtime profiles can start when the CI harness lives in a sibling
