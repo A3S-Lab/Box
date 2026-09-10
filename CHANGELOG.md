@@ -30,12 +30,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Restore the OCI Runtime pin to `402949c2` (last CI-green with Sandbox R17
+  PR #268). Hosted SDK Local Sandbox fails on `35c3370` with
+  `rootless exec timed out` in OCI `native-linux-smoke`; keep KVM requal
+  bumps observation-only until that smoke is green on GitHub-hosted runners.
 - Align CI/release `A3S_OCI_RUNTIME_REV` with the Cargo `a3s-oci-sdk` pin
-  (`35c3370`). Subsequent OCI requal bumps updated Cargo only and left
-  workflow pins on `f9d6eeb`, breaking `scripts/check-oci-pins.sh` on `main`.
-- Accept OCI native Linux recovery schema
-  `a3s.oci.native-linux-recovery.v6` in `scripts/local-sdk-smoke.sh` so the
-  pin check and SDK Local Sandbox gate match the Cargo OCI Runtime revision.
+  (`402949c2`) and keep recovery smoke on `a3s.oci.native-linux-recovery.v3`.
 - Bump the pinned OCI Runtime revision to
   `35c3370d5aefc1d10c30b77c899044c26865c8c6` (PR #266: new exec after Host
   reopen). Migration stays opt-in via `A3S_BOX_OCI_MIGRATION`; default
