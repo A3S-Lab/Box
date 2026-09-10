@@ -186,6 +186,18 @@ export A3S_BOX_CI_SANDBOX_GID="${gid}"
 export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
 export A3S_BOX_CI_SETPRIV_WRAPPER="${SETPRIV_WRAPPER}"
 
+# Harness process must sit in a writable cgroup with cpu/memory/pids before
+# create (capability probe reads /proc/self). Same migration as
+# run-linux-sandbox-ci.sh. Elevate then unsets PROBE so the Native owner is not
+# launched into the harness probe leaf.
+if [[ -n "${probe}" ]]; then
+  if [[ ! -w "${probe}/cgroup.procs" ]]; then
+    echo "A3S_BOX_CI_PROBE_CGROUP is not writable: ${probe}" >&2
+    exit 2
+  fi
+  printf 0 >"${probe}/cgroup.procs"
+fi
+
 echo "running Native Linux live-session qualification v3"
 echo "  home=${A3S_HOME}"
 echo "  host-root=${HOST_ROOT}"
@@ -193,6 +205,8 @@ echo "  image=${IMAGE}"
 echo "  box-sha=${BOX_SHA}"
 echo "  oci-sha=${OCI_SHA}"
 echo "  report=${REPORT}"
+echo "  probe-cgroup=${probe:-none}"
+echo "  delegated-cgroup=${delegated}"
 echo "  matched-creds setpriv + SETPRIV_WRAPPER=${SETPRIV_WRAPPER}"
 echo "  note: Live Host-reopen is Native Linux only; KVM MicroVM Live is not claimed"
 

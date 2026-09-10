@@ -695,9 +695,13 @@ jobs:
           install -m 755 "$example_bin" "$staging/linux-native-live-session-qualification"
           report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v3.json"
           rm -f "$report"
+          # Re-prepare cgroup tree after earlier Sandbox steps may have left
+          # controllers/procs dirty. Local gate does the same: prepare, then run.
+          bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sandbox-ci-host.sh"
           # Root entry matches the local gate: prepare cgroup/home, then the
-          # script setpriv-execs the example. Do not treat a missing report as
-          # retained-stream proof, and refuse B2 / fixture / KVM claims.
+          # script migrates into probe and setpriv-execs the example. Do not
+          # treat a missing report as retained-stream proof, and refuse B2 /
+          # fixture / KVM claims.
           sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT,A3S_BOX_CI_PROBE_CGROUP \
             bash "$GITHUB_WORKSPACE/scripts/linux-native-live-session-qualification.sh" \
               --box-bin "$staging" \

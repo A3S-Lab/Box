@@ -9,6 +9,12 @@ All notable changes to A3S Box will be documented in this file.
 - Mark live-session / elevate / KVM qualification shell scripts executable in
   git (`100755`). Sandbox CI on Linux checkouts was failing closed with
   `missing executable …/elevate-linux-sandbox-owner.sh` before the v3 gate ran.
+- Native live-session qualification migrates the harness into
+  `A3S_BOX_CI_PROBE_CGROUP` before setpriv (same as `run-linux-sandbox-ci.sh`)
+  so create's cgroup capability probe sees cpu/memory/pids. Without that, CI
+  failed immediately with delegated-cgroup Unavailable after the exec-bit fix.
+  SDK Local Sandbox also re-runs `prepare-linux-sandbox-ci-host.sh` immediately
+  before the v3 gate.
 - Format anti-compat grep uses word-regexp so OCI pin SHAs that contain the
   hex digraph collision for the banned remote-compat token do not false-positive
   as a reintroduced compatibility surface. Comments in that gate avoid spelling
