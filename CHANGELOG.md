@@ -88,8 +88,12 @@ All notable changes to A3S Box will be documented in this file.
   reaps elevate/launcher leftovers whose argv still reference the live-session
   home, so leftover pgrep does not fail after a greened live-session gate.
 - Keyed captured exec after Host reopen retries OCI retryable `Unavailable`
-  (short `printf` can reap before recovery identity capture on aarch64) with
-  distinct request ids so a partial first attempt cannot collide.
+  (short `printf` can reap before recovery identity capture) with the **same**
+  request_id so prepare-exec reconciles a partial journal. Distinct
+  `{id}.retry-N` keys orphaned `active_operation` claims and blocked
+  generation delete (`A3S OCI delete rejected … owned by an active mutation`).
+- Disarm the detached OCI exec timeout watchdog when `Exit` is observed so it
+  cannot later claim a signal mutation against a finished process.
 
 - Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
   `while read`) so Kill after Host reopen still targets a live retained handle

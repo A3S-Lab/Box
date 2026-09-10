@@ -754,8 +754,10 @@ mod qualification {
         request_id: &str,
     ) -> Result<(), AnyError> {
         // Short printf payloads can fully reap before OCI captures recovery
-        // identity after Host reopen (retryable Unavailable). Retry instead of
-        // inventing longer sleeps or weaker assertions.
+        // identity after Host reopen (retryable Unavailable). Retry the same
+        // request_id so prepare-exec reconciles the partial journal instead of
+        // minting `{id}.retry-N` process identities that orphan active_operation
+        // claims and block generation delete.
         let request = ExecRequest {
             request_id: Some(request_id.to_string()),
             cmd: vec![
@@ -773,16 +775,9 @@ mod qualification {
             streaming: false,
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        let mut attempt: u32 = 0;
         let output = loop {
-            attempt = attempt.saturating_add(1);
-            let mut attempt_request = request.clone();
-            if attempt > 1 {
-                // Avoid colliding with a partially-registered first attempt key.
-                attempt_request.request_id = Some(format!("{request_id}.retry-{attempt}"));
-            }
             match manager
-                .execute(execution_id, generation, attempt_request)
+                .execute(execution_id, generation, request.clone())
                 .await
             {
                 Ok(output) => break output,
