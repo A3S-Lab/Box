@@ -427,7 +427,10 @@ mod qualification {
                     cmd: vec![
                         "/bin/sh".into(),
                         "-c".into(),
-                        "printf 'live-session-stream-ok\\n'; while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done".into(),
+                        // Stay alive after stdin EOF so close_stdin + Kill both exercise
+                        // the retained handle (a plain `while read` exits on EOF and
+                        // makes Kill fail closed as not-live).
+                        "printf 'live-session-stream-ok\\n'; while true; do if IFS= read -r line; then printf 'echo:%s\\n' \"$line\"; else while true; do sleep 3600; done; fi; done".into(),
                     ],
                     // Must outlive owner-gone wait + Host respawn + supervisor
                     // reattach (30s) + reconcile; a 30s watchdog poisons the
