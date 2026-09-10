@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=402949c2d73cabdf5b959113806db9108e918cf1#402949c2d73cabdf5b959113806db9108e918cf1"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=07e653f9fb594e7454f6f732f3d3ceb80928b254#07e653f9fb594e7454f6f732f3d3ceb80928b254"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -284,7 +284,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.3.1"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=402949c2d73cabdf5b959113806db9108e918cf1#402949c2d73cabdf5b959113806db9108e918cf1"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=07e653f9fb594e7454f6f732f3d3ceb80928b254#07e653f9fb594e7454f6f732f3d3ceb80928b254"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
@@ -1216,7 +1216,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1356,7 +1356,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes 2.0.4",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1991,7 +1991,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3247,7 +3247,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3799,7 +3799,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4841,7 +4841,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.11.0",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

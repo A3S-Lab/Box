@@ -93,6 +93,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Bump the pinned OCI Runtime revision to
+  `07e653f9fb594e7454f6f732f3d3ceb80928b254` (supervised try_wait zombie reap,
+  supervisor BrokenPipe reattach, zombie recovery identity, exec pidfd before
+  START, live exec capture deposit routing). Existing-host WSL2 matched-creds +
+  elevate Native live-session v2 report SHA-256
+  `614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`
+  (`status=passed`, keyed exec before/after reopen, live kill, removed).
+  Align CI/release `A3S_OCI_RUNTIME_REV` with the Cargo `a3s-oci-sdk` pin.
+  Does **not** close B2 retained-stream, default supervised create, MicroVM
+  cutover, fresh-host, or AArch64.
 - Restore the OCI Runtime pin to `402949c2` (last CI-green with Sandbox R17
   PR #268). Hosted SDK Local Sandbox fails on `35c3370` with
   `rootless exec timed out` in OCI `native-linux-smoke`; keep KVM requal
