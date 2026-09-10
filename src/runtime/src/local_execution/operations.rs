@@ -51,13 +51,24 @@ impl LocalExecutionManager {
             Ok(_) | Err(ExecutionManagerError::NotFound(_)) => true,
             Err(stop_error) => match self.backend.inspect(&record).await {
                 Err(ExecutionManagerError::NotFound(_)) => true,
-                Ok(observation)
-                    if matches!(
-                        observation.state,
-                        ExecutionState::Stopped | ExecutionState::Failed
-                    ) =>
-                {
-                    true
+                Ok(observation) if observation.state == ExecutionState::Stopped => true,
+                Ok(observation) if observation.state == ExecutionState::Failed => {
+                    // A crashed generation is not a successful cold pause. Publish
+                    // Failed with the authenticated exit and refuse Paused.
+                    if self.release_execution_resources(&record).await.is_err() {
+                        return Err(stop_error);
+                    }
+                    self.transition(
+                        &record,
+                        ManagedExecutionState::Pausing,
+                        ManagedExecutionState::Failed,
+                        RuntimeUpdate::Terminal(observation.exit_code),
+                    )
+                    .await?;
+                    return Err(ExecutionManagerError::Unavailable(format!(
+                        "filesystem-only pause observed a failed generation (exit {:?}); refusing to publish Paused",
+                        observation.exit_code
+                    )));
                 }
                 Ok(observation) if observation.state == ExecutionState::Running => {
                     let _ = self
@@ -387,31 +398,56 @@ impl LocalExecutionManager {
         record: BoxRecord,
         options: KillExecutionOptions,
     ) -> Option<KillOutcome> {
-        let (outcome, observed_exit_code) = match self.backend.inspect(&record).await {
-            Err(ExecutionManagerError::NotFound(_)) => (KillOutcome::AlreadyStopped, None),
-            Ok(observation)
-                if matches!(
-                    observation.state,
-                    ExecutionState::Stopped | ExecutionState::Failed
-                ) =>
-            {
-                (KillOutcome::Killed, observation.exit_code)
+        match self.backend.inspect(&record).await {
+            Err(ExecutionManagerError::NotFound(_)) => {
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                let exit_code = kill_terminal_exit_code(KillOutcome::AlreadyStopped, options, None);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Stopped,
+                    RuntimeUpdate::KillTerminal(exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::AlreadyStopped)
             }
-            _ => return None,
-        };
-        if self.release_execution_resources(&record).await.is_err() {
-            return None;
+            Ok(observation) if observation.state == ExecutionState::Failed => {
+                // Crash evidence is not a user stop. Preserve exit without
+                // marking stopped_by_user via KillTerminal.
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::AlreadyStopped)
+            }
+            Ok(observation) if observation.state == ExecutionState::Stopped => {
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                let exit_code =
+                    kill_terminal_exit_code(KillOutcome::Killed, options, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Stopped,
+                    RuntimeUpdate::KillTerminal(exit_code),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::Killed)
+            }
+            _ => None,
         }
-        let exit_code = kill_terminal_exit_code(outcome, options, observed_exit_code);
-        self.transition(
-            &record,
-            ManagedExecutionState::Killing,
-            ManagedExecutionState::Stopped,
-            RuntimeUpdate::KillTerminal(exit_code),
-        )
-        .await
-        .ok()?;
-        Some(outcome)
     }
 }
 

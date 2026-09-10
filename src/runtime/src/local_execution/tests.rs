@@ -1270,11 +1270,10 @@ async fn filesystem_only_pause_restarts_the_runtime_and_preserves_generation_fen
 #[tokio::test]
 async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-failure");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("cold-pause-failure"),
-            &operation("cold-pause-failure-create"),
-        )
+        .create_and_start(create, &operation("cold-pause-failure-create"))
         .await
         .unwrap();
     backend.fail_kill.store(true, Ordering::Relaxed);
@@ -1295,6 +1294,45 @@ async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
         running.generation
     );
     assert!(record.managed_execution.unwrap().paused_with_memory);
+}
+
+#[tokio::test]
+async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-crash");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-pause-crash-create"))
+        .await
+        .unwrap();
+    backend.fail_externally(&running.execution_id, 17);
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("failed generation")
+        ),
+        "expected Unavailable for failed generation, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed),
+        "must not invent Paused over a crashed generation"
+    );
+    assert_eq!(record.exit_code, Some(17));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Failed
+    );
 }
 
 #[tokio::test]

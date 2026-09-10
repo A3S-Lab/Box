@@ -12,6 +12,10 @@ All notable changes to A3S Box will be documented in this file.
   `exit_code` absent so inspect/recovery honesty is preserved. Contract tests
   cover the no-invent path and use MicroVM isolation so they run on Windows
   hosts as well as Linux.
+- Filesystem-only (cold) pause no longer publishes `Paused` when stop fails and
+  inspect shows `Failed`. The generation becomes `Failed` with the authenticated
+  exit code. Lost-response kill reconciliation likewise publishes crash `Failed`
+  via `Terminal` (not user `KillTerminal` / `stopped_by_user`).
 
 ### Added
 
