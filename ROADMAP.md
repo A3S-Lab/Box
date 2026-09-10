@@ -4,6 +4,26 @@ Status: **Active migration**
 
 Primary execution dependency: **A3S OCI Runtime through `a3s-oci-sdk`**
 
+## A3S Cloud substrate obligations
+
+**Status as of 2026-09-10.**
+
+Cloud Wave 1 treats Box as the sole node-local execution and image-build
+provider (`BX0`). Product availability claims stay provisional until this gate
+exits. Portfolio detail:
+[Cloud foundations roadmap](https://github.com/A3S-Lab/Cloud/blob/main/docs/project-roadmaps/foundations-and-execution.md)
+and
+[architecture optimization roadmap](https://github.com/A3S-Lab/Cloud/blob/main/docs/architecture-optimization-roadmap.md).
+
+| Priority | This repository must deliver | Forbidden |
+| --- | --- | --- |
+| `BX0.3` | Sandbox + hardware MicroVM/TEE isolation and attestation evidence | Silent isolation downgrade; Docker execution fallback |
+| `BX0.4`–`BX0.5` | Digest-pinned Task/Service lifecycle, build, recovery, cleanup, clean-host EXIT | Treating historical `R0`/`N0`/`D0`/`E0` as Box-current |
+| Pairing | Re-certify against the locked Runtime revision after each slice | Product semantics, placement, or a second node channel |
+
+Monorepo index:
+[cloud-substrate-dependency-roadmap.md](https://github.com/A3S-Lab/a3s/blob/main/docs/cloud-substrate-dependency-roadmap.md).
+
 ## Product Contract
 
 A3S Box is the local product engine for Linux OCI workloads. It owns the
@@ -166,7 +186,7 @@ later lifecycle, session, observability, filesystem, restart, and cleanup calls
 use that record-level choice and never fall back after an error. Records written
 before this field are recovered from an exact OCI binding or the absence of a
 Box-owned exec endpoint. The pinned OCI Runtime revision
-`807d87e9ecbb27add773ad32a2318cd66c1f562c` is the exact source for the Rust
+`878f8414cef3b85bef1b51fe6735017b25828252` is the exact source for the Rust
 SDK dependency, CI-built runtime and agent, and release artifacts. It retains
 the matching long-lived, multi-container Native Linux host owner, the
 generation-safe bundle handoff used by the preparation context above, and
@@ -195,11 +215,8 @@ startup across processes, records the exact PID start identity and pinned
 runtime/agent paths plus SHA-256 digests, refuses an unowned socket or live
 artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
 bridge and async Rust SDK constructor honor the explicit
-`A3S_BOX_OCI_MIGRATION=sandbox` Sandbox opt-in and the qualification-only
-`A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path that requires an explicit
-`A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`. No setting means
-no owner probe or startup and preserves the legacy route. Core lifecycle,
-run/exec/PTY, wait,
+`A3S_BOX_OCI_MIGRATION=sandbox` opt-in; no setting means no owner probe or
+startup and preserves the legacy route. Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
 lanes now pass the Rust, Python, TypeScript, and Go Sandbox suites through this
@@ -308,23 +325,6 @@ later gates.
     profile.
   - [x] Run the Box-owned bundle through a real Windows WHPX create/start/wait/
     delete gate and retain machine-readable evidence in blocking CI.
-- [x] Add the Linux KVM qualification-only vertical-slice executable and local
-  runner (`linux-kvm-oci-qualification`,
-  `scripts/linux-kvm-oci-qualification.sh`) that prove create replay, Box
-  manager reopen, start, exact exit status, delete replay, residual cleanup,
-  and Host Service SIGKILL/restart (stopped-only reconcile, no invented exit
-  status) against `box-kvm-qualification-service` when service restart inputs
-  are available. Existing-host WSL2 evidence with OCI pin
-  `35c3370d5aefc1d10c30b77c899044c26865c8c6` retained report SHA-256
-  `de79aab7db7676e08543dbe011019cae5f7ccb32b315756f3b4a7a7f9b7ae5ed` for
-  schema `a3s.box.linux-kvm-oci-qualification.v2` (exact exit `23` plus Host
-  Service restart → stopped-only, no invented exit). Prior evidence on
-  `dddd8e96`/`019b2d2`, `d4a05290`/`fdaf2e7`, `2357b38f`/`f9d6eeb`,
-  `8ad0a66b`/`f5118ff`, `c0cf2617`/`26ab488`, `3d1f073b`/`7d27d1`,
-  `3122b6f8`/`49d409`, `5431090f`/`f14c940`, `a318f4ec`/`60b1888`,
-  `d57739f0`/`95d624f`, `8b2804c5`/`3cea73d7`, and `e0fd63db`/`01786abf`
-  remains historical. This does not close fresh-host promotion, AArch64
-  promotion, live-session gate, or default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
@@ -412,50 +412,6 @@ retain process or filesystem sessions after its owner dies.
   stdout/stderr log projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
-  - [x] Observation harness `a3s.box.linux-native-live-session.v2`
-    (`linux-native-live-session-qualification` drop-manager path): supervised
-    create + Host owner SIGKILL + Live rebind with keyed captured exec
-    before/after reopen, state/inventory/stats/kill; no invented exit. Requires
-    `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`. Drops the Box manager before owner
-    death, so it does **not** prove retained streaming handle continuity and
-    does **not** close B2. **Existing-host WSL2 evidence** on OCI
-    `07e653f9fb594e7454f6f732f3d3ceb80928b254`: report SHA-256
-    `614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`
-    (`status=passed`, `keyed_captured_exec_after_reopen=true`,
-    `live_kill_after_reopen=true`, `removed=true`; retained-stream / B2 /
-    fixture / KVM / utility-VM claims stay false).
-  - [x] Observation harness `a3s.box.linux-native-live-session.v3`
-    (`linux-native-live-session-qualification`) for Native Linux Sandbox with
-    supervised create + Host owner SIGKILL + Live rebind while retaining the
-    Box manager. Proves retained streaming `start_process` handle continuity
-    (Unavailable on owner death → reconcile Ready → same-handle
-    stdin/signal/Exit) plus keyed captured exec before/after, state/inventory/
-    stats/kill; no invented exit. Requires `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`.
-    Sets `retained_stream_handle_proven=true` **only** when that path passes;
-    keeps `fixture_stream_continuity_claimed` and
-    `b2_process_session_recovery_closed` false. Does not close utility-VM /
-    KVM MicroVM Live or default create Host-bound policy. **Existing-host
-    WSL2 evidence** on Box `2c304534beafa6d9284000d992494a780082f3aa` + OCI
-    `7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9`: report SHA-256
-    `bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`
-    (`status=passed`, `retained_stream_handle_proven=true`,
-    `keyed_captured_exec_after_reopen=true`, `live_kill_after_reopen=true`,
-    `removed=true`; B2 / fixture / KVM / utility-VM claims stay false).
-    Prior v2 (manager-drop) evidence on OCI
-    `07e653f9fb594e7454f6f732f3d3ceb80928b254` remains keyed-capture /
-    live-kill only (`614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`).
-  - [x] Retained streaming process-handle continuity on a real Native Linux
-    owner restart (v3 harness path above; fixture `process_restart` remains
-    non-driver evidence). Does **not** alone close B2
-    (`b2_process_session_recovery_closed` stays false until the plan's full
-    B2 criteria are met).
-  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
-    reopen remains stopped-only / recreate today).
-- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
-  inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
-  `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
-  terminal or Failed-on-vanish instead of stuck transitional states; snapshot
-  recover refuses Sandbox-only publish on non-Sandbox generations.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
@@ -486,12 +442,6 @@ share that exact route. The init-log worker starts before runtime start,
 retains an exact endpoint and generation, reconnects after runtime-service
 owner replacement, and must publish final drain evidence before deletion.
 
-The standalone CRI adapter now reconciles persisted sandboxes to `NotReady`
-after a service restart, marks containers without a live VM exited, reclaims
-their bridge-network endpoints, and removes leaked CRI rootfs trees. This is
-resource-safe restart reconciliation, not process-session reattachment; the
-real native-driver recovery gate below remains open.
-
 ### B3 - Storage And Networking Attachments
 
 - [ ] Keep image distribution, builds, named volumes, snapshots, and commits in
@@ -510,28 +460,7 @@ The production provider accepts explicit bind/named/tmpfs mounts and now plans
 image-declared anonymous volumes without creating execution artifacts. Bundle
 preparation must reproduce the exact persisted plan before Runtime mutation;
 name collisions, ownership drift, duplicate destinations, and unsafe identities
-fail closed. Image content accounting, cross-process index refresh, per-digest
-content publication/removal locking, cache-key confinement, and volume cleanup
-are now covered by focused race and recovery tests. Warm-pool initial fill and
-replenishment share a configurable `max_concurrent_boots` limit (default `2`),
-so startup parallelism has an explicit host resource budget; the pool daemon
-shares that limiter across image pools and on-demand misses, and failed
-background replenishment retries use capped exponential backoff. B3 lazy pool
-initialization is serialized per exact image/resource shape, while
-different shapes may initialize concurrently; shutdown fencing prevents a
-late initializer from publishing a pool after drain begins. Lazy first-use
-creation waits for one ready VM and fills the remaining idle target in the
-background. Compose startup prefetches unique service images with a bounded
-two-way pull fan-out before creating networks or VMs, so independent Dify image
-downloads do not add serial registry latency while a failed pull leaves no
-partial project resources. The `a3s_box_warm_pool_initial_fill_duration_seconds`
-histogram records first-ready latency for lazy pools and complete fill time for
-eager pools. Compose health-dependency convergence polls at 500ms while leaving
-the health worker cadence and caller timeout unchanged; detached workers also
-probe immediately after `start_period` rather than waiting an extra interval.
-The complete
-B3 storage/network qualification gate remains open, and production CPU and
-tail-latency measurements remain an open gate.
+fail closed. The complete B3 storage/network qualification gate remains open.
 
 Exit gate: image, volume, snapshot, commit, copy, bridge/service networking,
 and cleanup suites pass without Box accessing a runtime-owned VM handle or
@@ -551,11 +480,6 @@ guest endpoint.
 Exit gate: Compose and the supported CRI profiles use the same runtime path as
 the CLI and SDK, with no duplicate lifecycle store or runtime subprocess
 adapter.
-
-The current optional CRI adapter additionally owns its Unix-socket takeover
-check and explicitly stops its streaming listener during shutdown. These
-hardening steps reduce split-brain and port-leak failures, but do not satisfy
-the unified-adapter or OCI Runtime-owned shim gates.
 
 ### B5 - Legacy Runtime Removal
 
@@ -604,3 +528,22 @@ OCI Runtime commits must be pushed before Box advances its pinned SDK revision.
 The A3S monorepo updates both gitlinks only after the cross-repository contract
 and focused integration suites pass. Completed work moves to `CHANGELOG.md`;
 this file retains only current milestones and release gates.
+
+### Applet / Desktop UiHost boundary (P4)
+
+`a3s-box` executes strong-isolation **backends** (OCI/microVM) when Use binds
+Tool/Service generations that need them. It is **not** the Applet page shell:
+Desktop renders Use-installed UI via sandboxed WebView + Code `UiBinding`.
+Package HTML must never call the Box CLI directly. See
+[`docs/applet-backend-boundary.md`](docs/applet-backend-boundary.md) and monorepo
+[`docs/desktop-applet-plugin-path.md`](../../docs/desktop-applet-plugin-path.md)
+(P4).
+
+**Exit checklist**
+
+- [x] Boundary document published
+- [x] Core/runtime contract tests forbid UiHost/WebView/Applet page markers
+- [x] Backends remain existing OCI/MicroVM + `a3s_runtime_driver` (no
+  Applet-specific launch class)
+- Monorepo verify: `just test::applet-non-desktop` (includes Box
+  `applet_boundary` tracks)
