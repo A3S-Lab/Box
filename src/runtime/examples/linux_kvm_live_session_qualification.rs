@@ -456,7 +456,8 @@ mod qualification {
         report.init_before_kill = Some(init.clone());
         require_live_identity("KVM session-owner", &live_binding.session_owner)?;
         require_live_identity("KVM shim", &live_binding.shim)?;
-        require_live_identity("MicroVM init", &init)?;
+        // Guest init PID is not a host /proc identity — continuity is proven via
+        // process inventory before/after Host reopen, not host PID liveness.
 
         let mut process = manager
             .start_process(
@@ -527,8 +528,9 @@ mod qualification {
         report.supervisor_survived_owner_kill = true;
         require_live_identity("KVM shim after Host Service SIGKILL", &live_binding.shim)?;
         report.launcher_survived_owner_kill = true;
-        require_live_identity("MicroVM init after Host Service SIGKILL", &init)?;
-        report.init_survived_owner_kill = true;
+        // Guest init is not visible on the host; continuous inventory PID after
+        // reopen is the authentic MicroVM init survival proof.
+        let _ = &init;
 
         let disconnect = process.next_event().await;
         require(
@@ -680,6 +682,7 @@ mod qualification {
             ),
         )?;
         report.init_pid_continuous_after_reopen = true;
+        report.init_survived_owner_kill = true;
 
         let stats = manager
             .stats(&reservation.execution_id, reservation.generation)
