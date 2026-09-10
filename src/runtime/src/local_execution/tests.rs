@@ -1394,6 +1394,45 @@ async fn terminal_generation_during_warm_resume_publishes_stopped_not_resuming()
 }
 
 #[tokio::test]
+async fn stopped_generation_with_exit_during_cold_pause_publishes_stopped_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-pause-stopped-exit");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-pause-stopped-exit-create"))
+        .await
+        .unwrap();
+    backend.stop_externally(&running.execution_id, 29);
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to publish Paused")
+        ),
+        "expected Unavailable refusing Paused over terminal Stopped, got {error:?}"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not invent Paused over Stopped with authenticated exit"
+    );
+    assert_eq!(record.exit_code, Some(29));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
 async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
     let (_directory, manager, backend) = harness();
     let mut create = request("cold-pause-crash");
@@ -1414,9 +1453,9 @@ async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
         matches!(
             error,
             ExecutionManagerError::Unavailable(ref message)
-                if message.contains("failed generation")
+                if message.contains("refusing to publish Paused")
         ),
-        "expected Unavailable for failed generation, got {error:?}"
+        "expected Unavailable refusing Paused for failed generation, got {error:?}"
     );
     let record = persisted(&manager, &running.execution_id);
     assert_eq!(

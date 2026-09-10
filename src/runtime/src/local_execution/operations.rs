@@ -53,23 +53,38 @@ impl LocalExecutionManager {
             Ok(_) | Err(ExecutionManagerError::NotFound(_)) => true,
             Err(stop_error) => match self.backend.inspect(&record).await {
                 Err(ExecutionManagerError::NotFound(_)) => true,
-                Ok(observation) if observation.state == ExecutionState::Stopped => true,
-                Ok(observation) if observation.state == ExecutionState::Failed => {
-                    // A crashed generation is not a successful cold pause. Publish
-                    // Failed with the authenticated exit and refuse Paused.
+                Ok(observation)
+                    if observation.state == ExecutionState::Stopped
+                        && observation.exit_code.is_none() =>
+                {
+                    // Clean stop without an authenticated exit: treat as a
+                    // successful filesystem-only pause (lost-response safe).
+                    true
+                }
+                Ok(observation)
+                    if matches!(
+                        observation.state,
+                        ExecutionState::Stopped | ExecutionState::Failed
+                    ) =>
+                {
+                    // Terminal evidence (Failed, or Stopped with exit) is not a
+                    // successful cold pause. Publish the terminal state and
+                    // refuse inventing Paused (which would drop the exit).
                     if self.release_execution_resources(&record).await.is_err() {
                         return Err(stop_error);
                     }
+                    let terminal =
+                        startup_terminal_state(observation.state, observation.exit_code);
                     self.transition(
                         &record,
                         ManagedExecutionState::Pausing,
-                        ManagedExecutionState::Failed,
+                        terminal,
                         RuntimeUpdate::Terminal(observation.exit_code),
                     )
                     .await?;
                     return Err(ExecutionManagerError::Unavailable(format!(
-                        "filesystem-only pause observed a failed generation (exit {:?}); refusing to publish Paused",
-                        observation.exit_code
+                        "filesystem-only pause observed a terminal generation (state {:?}, exit {:?}); refusing to publish Paused",
+                        observation.state, observation.exit_code
                     )));
                 }
                 Ok(observation) if observation.state == ExecutionState::Running => {
