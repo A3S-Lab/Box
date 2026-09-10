@@ -79,7 +79,6 @@ mod qualification {
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
     const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
-    const STREAM_EXEC_BEFORE: &str = "a3s.box.live-session.stream.before-owner-kill";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
 
@@ -422,7 +421,9 @@ mod qualification {
                 &reservation.execution_id,
                 reservation.generation,
                 ExecRequest {
-                    request_id: Some(STREAM_EXEC_BEFORE.to_string()),
+                    // Streaming sessions are not one-shot keyed ops; request_id
+                    // is reserved for captured exec replay (see oci_session).
+                    request_id: None,
                     cmd: vec![
                         "/bin/sh".into(),
                         "-c".into(),
