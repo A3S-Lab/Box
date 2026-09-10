@@ -73,9 +73,6 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
-- Bump pinned OCI Runtime / `a3s-oci-sdk` to
-  `f532e2d818cc302849a7c92653ca8256e3ba277e` (KVM Live retained exec I/O) and
-  align CI/release `A3S_OCI_RUNTIME_REV`.
 - Local FakeBackend lifecycle unit tests default create isolation to MicroVM so
   Windows hosts run the same pause/resume/kill/reconcile honesty contracts
   instead of failing at create with Linux-only Sandbox rejection. Explicit
@@ -93,21 +90,6 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
-- KVM MicroVM live-session observation harness:
-  `linux-kvm-live-session-qualification` example plus
-  `scripts/linux-kvm-live-session-qualification.sh` and
-  `scripts/verify-linux-kvm-live-session-report.py`. Schema
-  `a3s.box.linux-kvm-live-session.v1` requires
-  `A3S_OCI_KVM_SESSION_OWNER=1` on Host Service (first + replacement), keeps
-  the Box manager across Host SIGKILL, and is intended to prove retained
-  streaming `start_process` continuity (Unavailable → Live Ready →
-  same-handle stdin/signal/Exit) plus keyed captured exec / inventory /
-  stats / kill without inventing an exit.
-  `retained_stream_handle_proven` and `kvm_microvm_live_claimed` flip true
-  only when that path passes; `fixture_stream_continuity_claimed` and
-  `b2_process_session_recovery_closed` stay false. Does not overload the
-  stopped-only `linux-kvm-oci-qualification` schema. ROADMAP Utility-VM /
-  KVM Live item stays open until `/dev/kvm` green evidence.
 - Native Linux live-session observation harness:
   `linux-native-live-session-qualification` example plus
   `scripts/linux-native-live-session-qualification.sh`. Schema
