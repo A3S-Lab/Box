@@ -342,7 +342,11 @@ handle continuity when the path passes (`retained_stream_handle_proven`), and
 continues authentic Live keyed captured exec plus state/inventory/stats/kill
 without inventing an exit status. Existing-host WSL2 evidence on OCI
 `7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9`: report SHA-256
-`bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`. Fixture
+`bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`. SDK Local
+Sandbox CI (linux-x86_64) evidence on OCI
+`f532e2d818cc302849a7c92653ca8256e3ba277e`: report SHA-256
+`6d1cde0e3882616dd6e15ec5864003f55aa85c4c7075124ea055787fb4d291d1`
+(`status=passed`, `retained_stream_handle_proven=true`). Fixture
 `process_restart` is never claimed as driver evidence
 (`fixture_stream_continuity_claimed` stays false). B2 stays open until
 utility-VM Live also lands (`b2_process_session_recovery_closed` stays false).
