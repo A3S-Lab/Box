@@ -486,8 +486,9 @@ retain process or filesystem sessions after its owner dies.
     before kill, download after reattach on the same generation;
     `retained_filesystem_proven` / `file_upload_before_kill` /
     `file_download_after_reattach`). Keeps retained streaming handle proof.
-    Requires OCI pin `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live
-    filesystem, OCI-Runtime #290). Does **not** close B2
+    Requires OCI pin `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip;
+    Native Live filesystem landed in OCI-Runtime #290 / prior pin
+    `61f77712…`). Does **not** close B2
     (`b2_process_session_recovery_closed` stays false) and does not claim
     fixture `process_restart` continuity.
   - [x] Retained streaming process-handle continuity on a real Native Linux
@@ -497,11 +498,12 @@ retain process or filesystem sessions after its owner dies.
     `b2_process_session_recovery_closed=false`.
   - [x] Retained filesystem continuity on a real Native Linux owner restart
     (v4 harness path above). **Existing-host WSL2 evidence** on OCI
-    `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: report SHA-256
-    `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
+    `05a3b2bddff0668703caafc48f38514a139ee81a`: report SHA-256
+    `9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd`
     (`status=passed`, `retained_filesystem_proven=true`,
     `retained_stream_handle_proven=true`; B2 / fixture / KVM / utility-VM
-    claims stay false). Box tip SHA `7d633b15cfb4f23c092c666a0a13aadb25eccdfd`.
+    claims stay false). Prior pin `61f77712…` evidence SHA-256
+    `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`.
   - [x] KVM MicroVM Live process-session continuity via observation harness
     `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
     with `A3S_OCI_KVM_SESSION_OWNER=1`, Box manager retained across Host Service
@@ -522,12 +524,15 @@ retain process or filesystem sessions after its owner dies.
     `retained_filesystem_proven` / `file_upload_before_kill` /
     `file_download_after_reattach`). Keeps retained streaming handle proof
     and `kvm_microvm_live_claimed`. Requires OCI pin
-    `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (KVM Live filesystem,
-    OCI-Runtime #289). Does **not** close B2
-    (`b2_process_session_recovery_closed` stays false) and does not claim
-    fixture `process_restart` continuity. Does not flip cutover /
-    HostRuntimeService registration. **Existing-host WSL2 `/dev/kvm`
-    greened** report SHA-256 `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f` (`retained_filesystem_proven=true`; B2 stays false).
+    `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; KVM Live
+    filesystem landed in OCI-Runtime #289 / prior pin `61f77712…`). Does
+    **not** close B2 (`b2_process_session_recovery_closed` stays false) and
+    does not claim fixture `process_restart` continuity. Does not flip
+    cutover / HostRuntimeService registration. **Existing-host WSL2 `/dev/kvm`
+    greened** report SHA-256 `2fe8c2cb53ab6f8a30f8c736cfdc04f41c9fe766b9830dc94d44f09de17454d7`
+    (`retained_filesystem_proven=true`; B2 stays false). Prior pin
+    `61f77712…` evidence SHA-256
+    `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`.
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish

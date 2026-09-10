@@ -6,6 +6,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Bump pinned OCI Runtime to `05a3b2bddff0668703caafc48f38514a139ee81a`
+  (OCI main tip). Re-greened existing-host WSL2 Native Live v4 report SHA-256
+  `9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd` and KVM
+  MicroVM Live v2 report SHA-256
+  `2fe8c2cb53ab6f8a30f8c736cfdc04f41c9fe766b9830dc94d44f09de17454d7`
+  (`retained_stream_handle_proven=true`, `retained_filesystem_proven=true`;
+  KVM also `kvm_microvm_live_claimed=true`). Harness reports keep
+  `b2_process_session_recovery_closed=false`. Does **not** flip cutover,
+  HostRuntimeService registration, fixture continuity, or default create
+  Host-bound policy. Prior pin was
+  `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`.
+
 - Close ROADMAP B2 process-session recovery parent after aggregated
   existing-host WSL2 Native Live v4 + KVM MicroVM Live v2 greening (Box
   `5f74b5c2…` / OCI `61f77712…`; report SHA-256

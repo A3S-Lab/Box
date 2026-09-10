@@ -340,8 +340,9 @@ download after reattach on the same generation;
 v4, this closes the ROADMAP process-session recovery parent; harness reports
 still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). Pin OCI Runtime at
-`61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (KVM Live filesystem #289).
-Existing-host WSL2 `/dev/kvm` evidence report SHA-256 `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`
+`05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on
+`61f77712…` / KVM Live filesystem #289).
+Existing-host WSL2 `/dev/kvm` evidence report SHA-256 `2fe8c2cb53ab6f8a30f8c736cfdc04f41c9fe766b9830dc94d44f09de17454d7`
 (`retained_filesystem_proven=true`). Does not flip default create Host-bound
 policy or cutover.
 
@@ -381,9 +382,10 @@ plus state/inventory/stats/kill without inventing an exit status. Fixture
 Live v2, this closes the ROADMAP process-session recovery parent; harness
 reports still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). It does not alone claim KVM MicroVM Live continuity.
-Pin OCI Runtime at `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (Native Live
-filesystem #290). Existing-host WSL2 evidence report SHA-256
-`3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
+Pin OCI Runtime at `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip;
+prior greening on `61f77712…` / Native Live filesystem #290). Existing-host
+WSL2 evidence report SHA-256
+`9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd`
 (`retained_filesystem_proven=true`). Does not flip default create Host-bound
 policy or cutover.
 
