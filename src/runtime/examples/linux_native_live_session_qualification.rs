@@ -757,33 +757,54 @@ mod qualification {
         generation: ExecutionGeneration,
         request_id: &str,
     ) -> Result<(), AnyError> {
-        let output = manager
-            .execute(
-                execution_id,
-                generation,
-                ExecRequest {
-                    request_id: Some(request_id.to_string()),
-                    cmd: vec![
-                        "/bin/sh".into(),
-                        "-c".into(),
-                        "printf 'live-session-keyed-ok\\n'".into(),
-                    ],
-                    timeout_ns: 30_000_000_000,
-                    env: Vec::new(),
-                    working_dir: Some("/".into()),
-                    rootfs: None,
-                    stdin: None,
-                    stdin_streaming: false,
-                    user: None,
-                    streaming: false,
-                },
-            )
-            .await
-            .map_err(|error| {
-                failure(format!(
-                    "keyed captured exec `{request_id}` failed on Live generation: {error}"
-                ))
-            })?;
+        // Short printf payloads can fully reap before OCI captures recovery
+        // identity after Host reopen (retryable Unavailable). Retry instead of
+        // inventing longer sleeps or weaker assertions.
+        let request = ExecRequest {
+            request_id: Some(request_id.to_string()),
+            cmd: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'live-session-keyed-ok\\n'".into(),
+            ],
+            timeout_ns: 30_000_000_000,
+            env: Vec::new(),
+            working_dir: Some("/".into()),
+            rootfs: None,
+            stdin: None,
+            stdin_streaming: false,
+            user: None,
+            streaming: false,
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        let output = loop {
+            attempt = attempt.saturating_add(1);
+            let mut attempt_request = request.clone();
+            if attempt > 1 {
+                // Avoid colliding with a partially-registered first attempt key.
+                attempt_request.request_id = Some(format!("{request_id}.retry-{attempt}"));
+            }
+            match manager
+                .execute(execution_id, generation, attempt_request)
+                .await
+            {
+                Ok(output) => break output,
+                Err(ExecutionManagerError::Unavailable(message)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure(format!(
+                            "keyed captured exec `{request_id}` failed on Live generation: execution backend unavailable: {message}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    return Err(failure(format!(
+                        "keyed captured exec `{request_id}` failed on Live generation: {error}"
+                    )));
+                }
+            }
+        };
         require(
             output.exit_code == 0,
             format!(
