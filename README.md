@@ -315,9 +315,12 @@ MicroVM routing.
 
 Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
 delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
-run the root-owned runner. It mirrors Sandbox CI: matched-cred setpriv for the
-example and `A3S_BOX_CI_SETPRIV_WRAPPER=run-linux-sandbox-ci.sh` so the Native
-Linux owner can elevate for device-policy bootstrap:
+run the root-owned runner. It mirrors Sandbox CI: the runner starts as root,
+then `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`,
+sandbox `ruid`) and the same wrapper is exported as
+`A3S_BOX_CI_SETPRIV_WRAPPER` so the Native Linux owner can elevate for
+device-policy bootstrap. SDK Local Sandbox CI runs this gate and fail-closes
+on a missing or dishonest report; it still does not close B2.
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release
@@ -332,13 +335,17 @@ sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBO
   --home /tmp/a3s-box-native-live-session-home
 ```
 
-Schema `a3s.box.linux-native-live-session.v2` SIGKILLs the Native Linux Host
-owner while a Sandbox generation is live, rebinds, and continues authentic Live
-keyed captured exec plus state/inventory/stats/kill without inventing an exit
-status. The harness drops the Box manager before owner death, so it does not
-prove retained streaming process-handle continuity (that remains the
-fixture-only `process_restart` contract) and keeps B2 open. It does not claim
-KVM MicroVM Live continuity or close utility-VM B2/R6.
+Schema `a3s.box.linux-native-live-session.v3` keeps the Box manager across a
+Native Linux Host owner SIGKILL, proves retained streaming `start_process`
+handle continuity when the path passes (`retained_stream_handle_proven`), and
+continues authentic Live keyed captured exec plus state/inventory/stats/kill
+without inventing an exit status. Existing-host WSL2 evidence on OCI
+`7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9`: report SHA-256
+`bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`. Fixture
+`process_restart` is never claimed as driver evidence
+(`fixture_stream_continuity_claimed` stays false). B2 stays open until
+utility-VM Live also lands (`b2_process_session_recovery_closed` stays false).
+It does not claim KVM MicroVM Live continuity.
 
 ### Exercise the qualification-only WHPX handoff on Windows
 

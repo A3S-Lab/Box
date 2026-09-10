@@ -6,6 +6,22 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
+  `while read`) so Kill after Host reopen still targets a live retained handle
+  instead of failing as not-live under start-time identity.
+- Local SDK smoke / `check-oci-pins` now assert
+  `a3s.oci.native-linux-recovery.v6` to match the pinned OCI Runtime
+  (`7001ce5…`). The previous `v3` assertion failed the Sandbox pin gate after
+  #296 and rejected honest Live reopen fields (`sessionSupervisor`, `execs`)
+  that v6 may serialize.
+- Native Linux retained-manager Live reopen respawns the identity-fenced OCI
+  Host on `inspect`/`reconcile` Unavailable (`with_native_linux_owner_recovery`).
+  Without that, the SDK only reconnects to a dead socket and the session
+  supervisor's 30s reattach window expires before a replacement Host arrives.
+- Native Linux live-session v3 streaming `start_process` omits one-shot
+  `request_id` (OCI rejects keyed ids on streaming sessions; matches the
+  `process_restart` fixture contract) and uses a long exec timeout so the
+  retained-stream watchdog cannot poison the handle during owner respawn.
 - Kill completion no longer invents `128+signal` exit codes **or**
   `stopped_by_user` for `AlreadyStopped` / vanished-runtime / NotFound paths.
   Only a true `Killed` outcome uses `KillTerminal` (user stop) and may derive
@@ -58,17 +74,21 @@ All notable changes to A3S Box will be documented in this file.
 - Native Linux live-session observation harness:
   `linux-native-live-session-qualification` example plus
   `scripts/linux-native-live-session-qualification.sh`. Schema
-  `a3s.box.linux-native-live-session.v2` requires
-  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
-  Linux Host owner while a Sandbox generation is live, rebinds through a
-  replacement owner, and continues authentic Live keyed captured exec plus
-  state/inventory/stats/kill without inventing an exit status. Honest scope:
-  Native-Linux-driver Live Host-reopen and **fresh-manager** keyed exec only;
-  report fields keep `retained_stream_handle_proven`,
-  `fixture_stream_continuity_claimed`, and `b2_process_session_recovery_closed`
-  false so fixture `process_restart` continuity is never over-claimed. Does not
-  claim KVM MicroVM Live continuity or close the utility-VM half of Box B2 /
-  OCI R6. Default create stays Host-bound.
+  `a3s.box.linux-native-live-session.v3` requires
+  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across Host
+  owner SIGKILL, and is intended to prove retained streaming `start_process`
+  handle continuity (Unavailable → Live reopen → same-handle stdin/signal/Exit)
+  plus keyed captured exec / state / inventory / stats / kill without inventing
+  an exit. `retained_stream_handle_proven` flips true only when that path
+  passes; `fixture_stream_continuity_claimed` and
+  `b2_process_session_recovery_closed` stay false. Does not claim KVM MicroVM
+  Live continuity or close utility-VM B2/R6. Default create stays Host-bound.
+  Existing-host WSL2 matched-creds + elevate report SHA-256
+  `bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02` on Box
+  `2c304534…` + OCI `7001ce5…` (`status=passed`,
+  `retained_stream_handle_proven=true`). Does **not** set
+  `b2_process_session_recovery_closed` or claim KVM/utility-VM Live /
+  default supervised create.
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
   `scripts/linux-kvm-oci-qualification.sh`. Schema
@@ -94,15 +114,19 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Bump the pinned OCI Runtime revision to
-  `07e653f9fb594e7454f6f732f3d3ceb80928b254` (supervised try_wait zombie reap,
-  supervisor BrokenPipe reattach, zombie recovery identity, exec pidfd before
-  START, live exec capture deposit routing). Existing-host WSL2 matched-creds +
-  elevate Native live-session v2 report SHA-256
+  `7001ce5a4c32cd6e2bbb9a833fc45fd05d2318c9` (per-process Live stdin deposits
+  after Host reopen, PR #279). Existing-host WSL2 matched-creds + elevate
+  Native live-session v3 report SHA-256
+  `bc36ff5b895b6320b57322328f78910be82eddfb2203b97bd2c86455b1929d02`
+  (`status=passed`, `retained_stream_handle_proven=true`, keyed exec
+  before/after reopen, live kill, removed). Align CI/release
+  `A3S_OCI_RUNTIME_REV` with the Cargo `a3s-oci-sdk` pin. Does **not** close
+  B2 (`b2_process_session_recovery_closed` stays false), default supervised
+  create, MicroVM cutover, fresh-host, or AArch64.
+- Prior pin `07e653f9fb594e7454f6f732f3d3ceb80928b254` greened live-session v2
+  (manager-drop) report SHA-256
   `614dcb5dc08572fb9d6166c2ed00f736db4e7508b145283a047569eeb89323db`
-  (`status=passed`, keyed exec before/after reopen, live kill, removed).
-  Align CI/release `A3S_OCI_RUNTIME_REV` with the Cargo `a3s-oci-sdk` pin.
-  Does **not** close B2 retained-stream, default supervised create, MicroVM
-  cutover, fresh-host, or AArch64.
+  (keyed exec / live kill only; no retained-stream claim).
 - Restore the OCI Runtime pin to `402949c2` (last CI-green with Sandbox R17
   PR #268). Hosted SDK Local Sandbox fails on `35c3370` with
   `rootless exec timed out` in OCI `native-linux-smoke`; keep KVM requal

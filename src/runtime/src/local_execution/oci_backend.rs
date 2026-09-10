@@ -1312,11 +1312,22 @@ impl OciLifecycleAdapter {
     }
 }
 
+/// Retained-manager recovery: respawn the identity-fenced native Linux OCI owner
+/// when the Host process dies without dropping the Box manager.
+#[cfg(all(feature = "vm", target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct NativeLinuxOwnerRecovery {
+    service_root: PathBuf,
+    artifacts: crate::sandbox::CertifiedA3sOci,
+}
+
 /// Opt-in canonical local-execution backend over one A3S OCI host service.
 #[derive(Clone)]
 pub struct OciLocalExecutionBackend {
     adapter: OciLifecycleAdapter,
     provider: Arc<dyn OciBundleProvider>,
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    native_linux_owner: Option<Arc<NativeLinuxOwnerRecovery>>,
 }
 
 impl OciLocalExecutionBackend {
@@ -1329,6 +1340,8 @@ impl OciLocalExecutionBackend {
         Ok(Self {
             adapter: OciLifecycleAdapter::from_client(endpoint, client)?,
             provider,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            native_linux_owner: None,
         })
     }
 
@@ -1340,7 +1353,63 @@ impl OciLocalExecutionBackend {
         Ok(Self {
             adapter: OciLifecycleAdapter::connect(endpoint).await?,
             provider,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            native_linux_owner: None,
         })
+    }
+
+    /// Enable identity-fenced owner respawn for retained-manager Live reopen.
+    ///
+    /// Construction already calls [`super::oci_owner::ensure_native_linux_oci_owner`].
+    /// Without this recovery handle, `reconcile`/`inspect` only reconnect the SDK
+    /// transport to a dead socket and never spawn a replacement Host — so v3
+    /// retained-stream reopen stays Unavailable while the session supervisor's
+    /// 30s reattach window expires.
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    pub fn with_native_linux_owner_recovery(
+        mut self,
+        service_root: impl Into<PathBuf>,
+        artifacts: crate::sandbox::CertifiedA3sOci,
+    ) -> Self {
+        self.native_linux_owner = Some(Arc::new(NativeLinuxOwnerRecovery {
+            service_root: service_root.into(),
+            artifacts,
+        }));
+        self
+    }
+
+    /// No-op off Linux+vm: native Host owner respawn is Linux Sandbox only.
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    pub fn with_native_linux_owner_recovery(
+        self,
+        _service_root: impl Into<PathBuf>,
+        _artifacts: crate::sandbox::CertifiedA3sOci,
+    ) -> Self {
+        self
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    async fn ensure_native_linux_owner(&self) -> ExecutionManagerResult<()> {
+        let Some(recovery) = self.native_linux_owner.as_ref() else {
+            return Ok(());
+        };
+        let endpoint = super::oci_owner::ensure_native_linux_oci_owner(
+            &recovery.service_root,
+            &recovery.artifacts,
+        )
+        .await?;
+        if endpoint != self.adapter.endpoint {
+            return Err(ExecutionManagerError::Internal(format!(
+                "native Linux OCI owner recovery returned a different endpoint ({endpoint:?}) than the retained SDK binding ({:?})",
+                self.adapter.endpoint
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    async fn ensure_native_linux_owner(&self) -> ExecutionManagerResult<()> {
+        Ok(())
     }
 
     pub(super) fn metadata<'a>(
@@ -1717,7 +1786,17 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         let execution_id = self.execution_id(record)?;
         let metadata = self.metadata(record)?;
         let had_binding = self.binding(record)?.is_some();
-        let Some((mut runtime, mut binding)) = self.current_runtime(record).await? else {
+        let runtime_binding = match self.current_runtime(record).await {
+            Ok(value) => value,
+            Err(ExecutionManagerError::Unavailable(_)) => {
+                // Retained manager: respawn the Host under the same socket path
+                // so the next SDK call can reconnect and Live-recover.
+                self.ensure_native_linux_owner().await?;
+                self.current_runtime(record).await?
+            }
+            Err(error) => return Err(error),
+        };
+        let Some((mut runtime, mut binding)) = runtime_binding else {
             if had_binding {
                 self.provider.cleanup(record).await?;
             }

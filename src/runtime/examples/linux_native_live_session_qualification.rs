@@ -1,21 +1,22 @@
 //! Destructive live-session qualification for Box over Native Linux OCI.
 //!
 //! Exercises the public Box Sandbox path with
-//! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
-//! Linux Host owner while a generation is running, rebinds through a
-//! replacement owner, and continues authentic Live process-session ops
-//! (keyed captured exec, state, inventory, stats, kill) without inventing an
-//! exit status.
+//! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across a
+//! Native Linux Host owner SIGKILL, proves retained streaming process-handle
+//! continuity plus keyed captured exec / state / inventory / stats / kill,
+//! without inventing an exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v2`.
+//! Schema `a3s.box.linux-native-live-session.v3`.
 //!
 //! Honest scope (anti-overfit):
 //! - Live Host-reopen is Native-Linux-driver-only today.
-//! - This harness **drops** the Box manager before owner SIGKILL, so it does
-//!   **not** prove retained streaming process-handle continuity (that remains
-//!   the fixture-only contract in `oci_backend_tests::process_restart`).
-//! - It does **not** claim KVM MicroVM Live continuity (KVM Host reopen remains
-//!   stopped-only / recreate) and does **not** close Box B2 / OCI R6.
+//! - `retained_stream_handle_proven` is set only when the same
+//!   `start_process` handle continues stdin/output/signal after owner reopen.
+//! - Fixture `process_restart` continuity is never claimed
+//!   (`fixture_stream_continuity_claimed` stays false).
+//! - Does **not** claim KVM MicroVM Live continuity and does **not** close
+//!   Box B2 / OCI R6 (`b2_process_session_recovery_closed` stays false until
+//!   utility-VM Live also lands).
 
 #[cfg(not(all(
     target_os = "linux",
@@ -48,10 +49,11 @@ mod qualification {
     use std::time::Duration;
 
     use a3s_box_core::{
-        BoxConfig, CreateExecutionRequest, ExecRequest, ExecutionBackend, ExecutionGeneration,
-        ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
+        BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionBackend,
+        ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
+        ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
         ExecutionSessionManager, ExecutionState, IsolationClass as BoxIsolationClass, NetworkMode,
-        OperationId, ReconcileOutcome, ResourceConfig,
+        OperationId, ReconcileOutcome, ResourceConfig, StreamType,
     };
     use a3s_box_runtime::{
         LocalExecutionManager, ManagedExecutionStore, ManagedRuntimeRoute,
@@ -71,11 +73,14 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v2";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v3";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
     const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
+    const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
+    const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
+    const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -112,11 +117,12 @@ mod qualification {
         driver_target: &'static str,
         kvm_microvm_live_claimed: bool,
         utility_vm_claimed: bool,
-        /// Always false: this harness drops the Box manager before owner death.
+        /// Set only when the same streaming `start_process` handle continues
+        /// after a real Native Linux owner SIGKILL + Live reopen.
         retained_stream_handle_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
-        /// Always false: B2 still requires real-driver retained-stream + utility-VM.
+        /// Always false: B2 still requires utility-VM Live as well.
         b2_process_session_recovery_closed: bool,
         supervised_create_required: bool,
         supervised_create_enabled: bool,
@@ -410,7 +416,70 @@ mod qualification {
         require_live_identity("launcher", &recovery.launcher)?;
         require_live_identity("init", &recovery.init)?;
 
-        drop(manager);
+        let mut process = manager
+            .start_process(
+                &reservation.execution_id,
+                reservation.generation,
+                ExecRequest {
+                    // Streaming sessions are not one-shot keyed ops; request_id
+                    // is reserved for captured exec replay (see oci_session).
+                    request_id: None,
+                    cmd: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        // Stay alive after stdin EOF so close_stdin + Kill both exercise
+                        // the retained handle (a plain `while read` exits on EOF and
+                        // makes Kill fail closed as not-live).
+                        "printf 'live-session-stream-ok\\n'; while true; do if IFS= read -r line; then printf 'echo:%s\\n' \"$line\"; else while true; do sleep 3600; done; fi; done".into(),
+                    ],
+                    // Must outlive owner-gone wait + Host respawn + supervisor
+                    // reattach (30s) + reconcile; a 30s watchdog poisons the
+                    // retained stream before Live reopen completes.
+                    timeout_ns: 600_000_000_000,
+                    env: Vec::new(),
+                    working_dir: Some("/".into()),
+                    rootfs: None,
+                    stdin: None,
+                    stdin_streaming: true,
+                    user: None,
+                    streaming: true,
+                },
+            )
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "streaming start_process before owner SIGKILL failed: {error}"
+                ))
+            })?;
+        let input = process.input();
+        let first_event = process
+            .next_event()
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "streaming process failed before first chunk: {error}"
+                ))
+            })?
+            .ok_or_else(|| failure("streaming process ended before the marker chunk"))?;
+        require(
+            matches!(
+                &first_event,
+                ExecEvent::Chunk(chunk)
+                    if chunk.stream == StreamType::Stdout && chunk.data == STREAM_MARKER
+            ),
+            format!("streaming process first chunk drifted: {first_event:?}"),
+        )?;
+        input
+            .write_stdin(STREAM_ECHO_BEFORE)
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "streaming stdin write before owner SIGKILL failed: {error}"
+                ))
+            })?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_BEFORE, "before owner SIGKILL").await?;
+
+        // Keep the Box manager: retained-handle continuity is the v3 gate.
         sigkill_identity(&owner)?;
         report.owner_sigkilled = true;
         wait_identity_gone("OCI owner", &owner, Duration::from_secs(30))?;
@@ -424,11 +493,16 @@ mod qualification {
         require_live_identity("init after owner SIGKILL", &recovery.init)?;
         report.init_survived_owner_kill = true;
 
-        let reconnected = connect(inputs).await?;
+        let disconnect = process.next_event().await;
+        require(
+            matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))),
+            format!("retained stream must surface Unavailable on owner death, got {disconnect:?}"),
+        )?;
+
         let mut outcome = None;
         let reconcile_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         while outcome.is_none() {
-            match reconnected.reconcile(operation_id).await {
+            match manager.reconcile(operation_id).await {
                 Ok(value) => outcome = Some(value),
                 Err(ExecutionManagerError::Unavailable(_)) => {
                     if tokio::time::Instant::now() >= reconcile_deadline {
@@ -485,7 +559,57 @@ mod qualification {
         report.owner_rebound = true;
         report.owner_after_reopen = Some(replacement_owner);
 
-        wait_until_running(&reconnected, &reservation.execution_id, report, false).await?;
+        input
+            .write_stdin(STREAM_ECHO_AFTER)
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "retained streaming stdin after owner reopen failed: {error}"
+                ))
+            })?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_AFTER, "after owner reopen").await?;
+        input.close_stdin().await.map_err(|error| {
+            failure(format!(
+                "retained streaming close_stdin after owner reopen failed: {error}"
+            ))
+        })?;
+        input
+            .send_signal(ExecutionProcessSignal::Kill)
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "retained streaming signal after owner reopen failed: {error}"
+                ))
+            })?;
+        let mut saw_exit = false;
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match process.next_event().await {
+                Ok(Some(ExecEvent::Exit(_))) => {
+                    saw_exit = true;
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(failure(format!(
+                        "retained streaming drain after owner reopen failed: {error}"
+                    )));
+                }
+            }
+            if tokio::time::Instant::now() >= drain_deadline {
+                return Err(failure(
+                    "timed out draining retained streaming process after owner reopen",
+                ));
+            }
+        }
+        require(
+            saw_exit,
+            "retained streaming process did not publish Exit after reopen signal",
+        )?;
+        report.retained_stream_handle_proven = true;
+
+        wait_until_running(&manager, &reservation.execution_id, report, false).await?;
         let after = store
             .get(&reservation.execution_id)?
             .ok_or_else(|| failure("Box record missing after Live reopen"))?;
@@ -498,7 +622,7 @@ mod qualification {
         )?;
         report.exit_code_absent_after_reopen = true;
 
-        let inventory_after = reconnected
+        let inventory_after = manager
             .list_processes(&reservation.execution_id, reservation.generation)
             .await?;
         require(
@@ -519,7 +643,7 @@ mod qualification {
         )?;
         report.init_pid_continuous_after_reopen = true;
 
-        let stats = reconnected
+        let stats = manager
             .stats(&reservation.execution_id, reservation.generation)
             .await?;
         require(
@@ -531,7 +655,7 @@ mod qualification {
         report.stats_after_reopen = true;
 
         prove_keyed_captured_exec(
-            &reconnected,
+            &manager,
             &reservation.execution_id,
             reservation.generation,
             KEYED_EXEC_AFTER,
@@ -540,14 +664,14 @@ mod qualification {
         report.keyed_captured_exec_after_reopen = true;
 
         // Authentic Live kill of the still-running generation (not an invented stop).
-        reconnected
+        manager
             .kill(&reservation.execution_id, reservation.generation)
             .await?;
         report.live_kill_after_reopen = true;
 
         let stop_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
-            let status = reconnected.inspect(&reservation.execution_id).await?;
+            let status = manager.inspect(&reservation.execution_id).await?;
             if matches!(
                 status.state,
                 ExecutionState::Stopped | ExecutionState::Failed
@@ -562,13 +686,13 @@ mod qualification {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        report.removed = reconnected
+        report.removed = manager
             .remove(&reservation.execution_id, reservation.generation)
             .await?;
         require(report.removed, "terminal Box generation was not removed")?;
         require(
             matches!(
-                reconnected.reconcile(operation_id).await?,
+                manager.reconcile(operation_id).await?,
                 ReconcileOutcome::Absent
             ),
             "removed Box operation remained reconcilable",
@@ -632,6 +756,53 @@ mod qualification {
             ),
         )?;
         Ok(())
+    }
+
+    async fn expect_stream_echo(
+        process: &mut dyn ExecutionProcessStream,
+        line: &[u8],
+        phase: &str,
+    ) -> Result<(), AnyError> {
+        let payload = line.strip_suffix(b"\n").unwrap_or(line);
+        let expected = format!("echo:{}\n", String::from_utf8_lossy(payload));
+        let expected_bytes = expected.as_bytes();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), process.next_event())
+                .await
+                .map_err(|_| failure(format!("timed out waiting for stream echo {phase}")))?
+                .map_err(|error| {
+                    failure(format!(
+                        "streaming process failed while waiting for echo {phase}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| failure(format!("streaming process ended before echo {phase}")))?;
+            match event {
+                ExecEvent::Chunk(chunk)
+                    if chunk.stream == StreamType::Stdout && chunk.data == expected_bytes =>
+                {
+                    return Ok(());
+                }
+                ExecEvent::Chunk(chunk) if chunk.stream == StreamType::Stdout => {
+                    return Err(failure(format!(
+                        "streaming stdout drifted {phase}: {:?}",
+                        String::from_utf8_lossy(&chunk.data)
+                    )));
+                }
+                ExecEvent::FlushAck => {}
+                ExecEvent::Exit(exit) => {
+                    return Err(failure(format!(
+                        "streaming process exited before echo {phase}: {exit:?}"
+                    )));
+                }
+                ExecEvent::Chunk(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(failure(format!(
+                    "deadline exceeded waiting for stream echo {phase}"
+                )));
+            }
+        }
     }
 
     async fn wait_until_running(
