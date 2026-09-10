@@ -1671,8 +1671,10 @@ async fn ambiguous_pause_error_uses_backend_evidence_and_publishes_success() {
 #[tokio::test]
 async fn kill_is_generation_fenced_and_idempotent() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("sandbox-1");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(request("sandbox-1"), &operation("operation-1"))
+        .create_and_start(create, &operation("operation-1"))
         .await
         .unwrap();
 
@@ -1778,6 +1780,42 @@ async fn already_stopped_kill_does_not_invent_signal_exit_code() {
     assert_eq!(
         stopped.exit_code, None,
         "AlreadyStopped without runtime evidence must not invent 128+signal"
+    );
+    assert!(
+        !stopped.stopped_by_user,
+        "AlreadyStopped / vanished-runtime must not invent stopped_by_user via KillTerminal"
+    );
+}
+
+#[tokio::test]
+async fn not_found_kill_does_not_invent_stopped_by_user() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("kill-not-found-no-user-stop");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("operation-kill-not-found-no-user-stop"))
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(running.execution_id.as_str());
+    }
+
+    let outcome = manager
+        .kill(&running.execution_id, running.generation)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, KillOutcome::AlreadyStopped);
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, None);
+    assert!(
+        !stopped.stopped_by_user,
+        "NotFound kill cleanup must not invent stopped_by_user"
+    );
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
     );
 }
 

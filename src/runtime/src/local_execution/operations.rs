@@ -441,7 +441,7 @@ impl LocalExecutionManager {
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(exit_code),
+                    kill_runtime_update(termination.outcome, exit_code),
                 )
                 .await?;
                 Ok(termination.outcome)
@@ -453,7 +453,7 @@ impl LocalExecutionManager {
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(exit_code),
+                    kill_runtime_update(KillOutcome::AlreadyStopped, exit_code),
                 )
                 .await?;
                 Ok(KillOutcome::AlreadyStopped)
@@ -480,7 +480,7 @@ impl LocalExecutionManager {
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(exit_code),
+                    kill_runtime_update(KillOutcome::AlreadyStopped, exit_code),
                 )
                 .await
                 .ok()?;
@@ -520,6 +520,15 @@ impl LocalExecutionManager {
             }
             _ => None,
         }
+    }
+}
+
+fn kill_runtime_update(outcome: KillOutcome, exit_code: Option<i32>) -> RuntimeUpdate {
+    match outcome {
+        // Only a kill that was applied attributes stopped_by_user.
+        KillOutcome::Killed => RuntimeUpdate::KillTerminal(exit_code),
+        // AlreadyStopped / vanished-runtime cleanup must not invent user-stop.
+        KillOutcome::AlreadyStopped => RuntimeUpdate::Terminal(exit_code),
     }
 }
 
