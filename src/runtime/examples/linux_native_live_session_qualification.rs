@@ -471,7 +471,7 @@ mod qualification {
                 ))
             })?;
         expect_stream_echo(
-            &mut process,
+            process.as_mut(),
             STREAM_ECHO_BEFORE,
             "before owner SIGKILL",
         )
@@ -568,7 +568,7 @@ mod qualification {
                 ))
             })?;
         expect_stream_echo(
-            &mut process,
+            process.as_mut(),
             STREAM_ECHO_AFTER,
             "after owner reopen",
         )
@@ -764,7 +764,7 @@ mod qualification {
     }
 
     async fn expect_stream_echo(
-        process: &mut impl ExecutionProcessStream,
+        process: &mut dyn ExecutionProcessStream,
         line: &[u8],
         phase: &str,
     ) -> Result<(), AnyError> {
