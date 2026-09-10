@@ -31,11 +31,6 @@ name = "linux-native-live-session-qualification"
 path = "examples/linux_native_live_session_qualification.rs"
 required-features = ["vm"]
 
-[[example]]
-name = "linux-kvm-live-session-qualification"
-path = "examples/linux_kvm_live_session_qualification.rs"
-required-features = ["vm"]
-
 [features]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []

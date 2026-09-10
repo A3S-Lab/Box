@@ -450,19 +450,7 @@ retain process or filesystem sessions after its owner dies.
     (`b2_process_session_recovery_closed` stays false until the plan's full
     B2 criteria are met).
   - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
-    reopen remains stopped-only / recreate by default). Observation harness
-    `a3s.box.linux-kvm-live-session.v1`
-    (`linux-kvm-live-session-qualification` +
-    `scripts/linux-kvm-live-session-qualification.sh`) has landed: MicroVM
-    isolation via `with_linux_kvm_oci_qualification`, Host Service with
-    `A3S_OCI_KVM_SESSION_OWNER=1`, retained-manager stream continuity
-    (Unavailable → Ready → same-handle stdin/signal/Exit), keyed exec /
-    inventory / stats / kill, no invented exit.
-    `retained_stream_handle_proven` / `kvm_microvm_live_claimed` flip true
-    only when the stream path passes;
-    `fixture_stream_continuity_claimed` and
-    `b2_process_session_recovery_closed` stay false. Leave unchecked until
-    greened on existing-host `/dev/kvm` evidence.
+    reopen remains stopped-only / recreate today).
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
