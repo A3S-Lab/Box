@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Native live-session qualification setpriv-execs the example via
+  `run-linux-sandbox-ci.sh` (matched `euid==ruid`) and keeps
+  `elevate-linux-sandbox-owner.sh` only as the owner `SETPRIV_WRAPPER`. Elevating
+  the example itself left `geteuid()==0`, skipped owner elevation, and CI failed
+  with SDK connect Broken pipe inside the launch-ready wait. Stage/preserve
+  `a3s-box-sandbox-oci-launcher` across sudo into the live-session home.
 - Mark live-session / elevate / KVM qualification shell scripts executable in
   git (`100755`). Sandbox CI on Linux checkouts was failing closed with
   `missing executable …/elevate-linux-sandbox-owner.sh` before the v3 gate ran.
@@ -13,8 +19,8 @@ All notable changes to A3S Box will be documented in this file.
   `A3S_BOX_CI_PROBE_CGROUP` before setpriv (same as `run-linux-sandbox-ci.sh`)
   so create's cgroup capability probe sees cpu/memory/pids. Without that, CI
   failed immediately with delegated-cgroup Unavailable after the exec-bit fix.
-  SDK Local Sandbox also re-runs `prepare-linux-sandbox-ci-host.sh` immediately
-  before the v3 gate.
+  Do not re-run `prepare-linux-sandbox-ci-host.sh` mid-job: `rm -rf` of the
+  busy `/sys/fs/cgroup/a3s-box-ci` tree fails closed.
 - Format anti-compat grep uses word-regexp so OCI pin SHAs that contain the
   hex digraph collision for the banned remote-compat token do not false-positive
   as a reintroduced compatibility surface. Comments in that gate avoid spelling
@@ -67,6 +73,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Bump pinned OCI Runtime / `a3s-oci-sdk` to
+  `f532e2d818cc302849a7c92653ca8256e3ba277e` (KVM Live retained exec I/O) and
+  align CI/release `A3S_OCI_RUNTIME_REV`.
 - Local FakeBackend lifecycle unit tests default create isolation to MicroVM so
   Windows hosts run the same pause/resume/kill/reconcile honesty contracts
   instead of failing at create with Linux-only Sandbox rejection. Explicit
@@ -84,6 +93,21 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- KVM MicroVM live-session observation harness:
+  `linux-kvm-live-session-qualification` example plus
+  `scripts/linux-kvm-live-session-qualification.sh` and
+  `scripts/verify-linux-kvm-live-session-report.py`. Schema
+  `a3s.box.linux-kvm-live-session.v1` requires
+  `A3S_OCI_KVM_SESSION_OWNER=1` on Host Service (first + replacement), keeps
+  the Box manager across Host SIGKILL, and is intended to prove retained
+  streaming `start_process` continuity (Unavailable → Live Ready →
+  same-handle stdin/signal/Exit) plus keyed captured exec / inventory /
+  stats / kill without inventing an exit.
+  `retained_stream_handle_proven` and `kvm_microvm_live_claimed` flip true
+  only when that path passes; `fixture_stream_continuity_claimed` and
+  `b2_process_session_recovery_closed` stay false. Does not overload the
+  stopped-only `linux-kvm-oci-qualification` schema. ROADMAP Utility-VM /
+  KVM Live item stays open until `/dev/kvm` green evidence.
 - Native Linux live-session observation harness:
   `linux-native-live-session-qualification` example plus
   `scripts/linux-native-live-session-qualification.sh`. Schema

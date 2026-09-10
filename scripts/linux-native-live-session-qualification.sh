@@ -96,6 +96,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOX_REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OCI_REPO_CANDIDATE="$(cd "${BOX_REPO}/../oci-runtime" 2>/dev/null && pwd || true)"
+HARNESS_WRAPPER="${SCRIPT_DIR}/run-linux-sandbox-ci.sh"
 SETPRIV_WRAPPER="${SCRIPT_DIR}/elevate-linux-sandbox-owner.sh"
 
 if [[ -z "$BOX_SHA" ]]; then
@@ -128,7 +129,13 @@ fi
 require_abs "--host-root" "${HOST_ROOT}"
 
 EXAMPLE_BIN="${BOX_BIN}/linux-native-live-session-qualification"
-for path in "${BOX_BIN}/a3s-box" "${EXAMPLE_BIN}" "${A3S_OCI}" "${A3S_OCI_AGENT}" "${SETPRIV_WRAPPER}"; do
+for path in \
+  "${BOX_BIN}/a3s-box" \
+  "${EXAMPLE_BIN}" \
+  "${A3S_OCI}" \
+  "${A3S_OCI_AGENT}" \
+  "${HARNESS_WRAPPER}" \
+  "${SETPRIV_WRAPPER}"; do
   if [[ ! -x "$path" ]]; then
     echo "missing executable ${path}" >&2
     exit 2
@@ -165,6 +172,17 @@ fi
 if [[ -x "${BOX_BIN}/a3s-box-guest-init" ]]; then
   install -o "${uid}" -g "${gid}" -m 755 "${BOX_BIN}/a3s-box-guest-init" "${HOME_DIR}/bin/a3s-box-guest-init"
 fi
+if [[ -x "${BOX_BIN}/a3s-box-sandbox-oci-launcher" ]]; then
+  install -o "${uid}" -g "${gid}" -m 755 \
+    "${BOX_BIN}/a3s-box-sandbox-oci-launcher" \
+    "${HOME_DIR}/bin/a3s-box-sandbox-oci-launcher"
+  export A3S_BOX_SANDBOX_OCI_LAUNCHER="${HOME_DIR}/bin/a3s-box-sandbox-oci-launcher"
+elif [[ -n "${A3S_BOX_SANDBOX_OCI_LAUNCHER:-}" && -x "${A3S_BOX_SANDBOX_OCI_LAUNCHER}" ]]; then
+  export A3S_BOX_SANDBOX_OCI_LAUNCHER
+else
+  echo "missing a3s-box-sandbox-oci-launcher (box-bin or A3S_BOX_SANDBOX_OCI_LAUNCHER)" >&2
+  exit 2
+fi
 install -o "${uid}" -g "${gid}" -m 755 "${A3S_OCI}" "${HOME_DIR}/bin/a3s-oci"
 install -o "${uid}" -g "${gid}" -m 755 "${A3S_OCI_AGENT}" "${HOME_DIR}/bin/a3s-oci-agent"
 
@@ -186,10 +204,10 @@ export A3S_BOX_CI_SANDBOX_GID="${gid}"
 export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
 export A3S_BOX_CI_SETPRIV_WRAPPER="${SETPRIV_WRAPPER}"
 
-# Harness process must sit in a writable cgroup with cpu/memory/pids before
-# create (capability probe reads /proc/self). Same migration as
-# run-linux-sandbox-ci.sh. Elevate then unsets PROBE so the Native owner is not
-# launched into the harness probe leaf.
+# Harness must sit in a writable cgroup with cpu/memory/pids before create
+# (capability probe reads /proc/self). run-linux-sandbox-ci.sh migrates again
+# under matched creds; elevate-linux-sandbox-owner.sh unsets PROBE so the Native
+# owner is not launched into the harness probe leaf.
 if [[ -n "${probe}" ]]; then
   if [[ ! -w "${probe}/cgroup.procs" ]]; then
     echo "A3S_BOX_CI_PROBE_CGROUP is not writable: ${probe}" >&2
@@ -207,7 +225,12 @@ echo "  oci-sha=${OCI_SHA}"
 echo "  report=${REPORT}"
 echo "  probe-cgroup=${probe:-none}"
 echo "  delegated-cgroup=${delegated}"
-echo "  matched-creds setpriv + SETPRIV_WRAPPER=${SETPRIV_WRAPPER}"
+echo "  sandbox-oci-launcher=${A3S_BOX_SANDBOX_OCI_LAUNCHER}"
+echo "  harness=${HARNESS_WRAPPER} (matched creds)"
+echo "  owner-wrapper=${SETPRIV_WRAPPER}"
 echo "  note: Live Host-reopen is Native Linux only; KVM MicroVM Live is not claimed"
 
-exec bash "${SETPRIV_WRAPPER}" "${EXAMPLE_BIN}"
+# Do not elevate the example itself: euid=0 on the harness skips the owner
+# SETPRIV_WRAPPER and breaks Unix SDK peer auth (Broken pipe on first frame).
+# Match Sandbox CI: matched-cred harness + elevate only for the owner child.
+exec bash "${HARNESS_WRAPPER}" "${EXAMPLE_BIN}"

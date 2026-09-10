@@ -315,17 +315,18 @@ MicroVM routing.
 
 Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
 delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
-run the root-owned runner. It mirrors Sandbox CI: the runner starts as root,
-then `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`,
-sandbox `ruid`) and the same wrapper is exported as
-`A3S_BOX_CI_SETPRIV_WRAPPER` so the Native Linux owner can elevate for
-device-policy bootstrap. SDK Local Sandbox CI runs this gate and fail-closes
-on a missing or dishonest report; it still does not close B2.
+run the root-owned runner. It mirrors Sandbox CI: matched-cred setpriv for the
+example via `run-linux-sandbox-ci.sh` (`euid==ruid`), with
+`elevate-linux-sandbox-owner.sh` as `A3S_BOX_CI_SETPRIV_WRAPPER` so only the
+Native Linux owner elevates for device-policy bootstrap. Elevating the example
+itself skips that wrapper and breaks Unix SDK peer auth. SDK Local Sandbox CI
+runs this gate and fail-closes on a missing or dishonest report; it still does
+not close B2.
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release
 sudo ./scripts/prepare-linux-sandbox-ci-host.sh
-sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT,A3S_BOX_CI_PROBE_CGROUP \
+sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT,A3S_BOX_CI_PROBE_CGROUP,A3S_BOX_SANDBOX_OCI_LAUNCHER \
   ./scripts/linux-native-live-session-qualification.sh \
   --box-bin /absolute/path/to/bin \
   --a3s-oci /absolute/path/to/a3s-oci \
