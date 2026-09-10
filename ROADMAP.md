@@ -485,7 +485,7 @@ retain process or filesystem sessions after its owner dies.
     `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`
     (`status=passed`, `retained_filesystem_proven=true`,
     `retained_stream_handle_proven=true`; B2 / fixture / KVM / utility-VM
-    claims stay false).
+    claims stay false). Box tip SHA `7d633b15cfb4f23c092c666a0a13aadb25eccdfd`.
   - [x] KVM MicroVM Live process-session continuity via observation harness
     `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
     with `A3S_OCI_KVM_SESSION_OWNER=1`, Box manager retained across Host Service
