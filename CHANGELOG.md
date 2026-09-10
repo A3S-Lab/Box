@@ -58,17 +58,17 @@ All notable changes to A3S Box will be documented in this file.
 - Native Linux live-session observation harness:
   `linux-native-live-session-qualification` example plus
   `scripts/linux-native-live-session-qualification.sh`. Schema
-  `a3s.box.linux-native-live-session.v2` requires
-  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
-  Linux Host owner while a Sandbox generation is live, rebinds through a
-  replacement owner, and continues authentic Live keyed captured exec plus
-  state/inventory/stats/kill without inventing an exit status. Honest scope:
-  Native-Linux-driver Live Host-reopen and **fresh-manager** keyed exec only;
-  report fields keep `retained_stream_handle_proven`,
-  `fixture_stream_continuity_claimed`, and `b2_process_session_recovery_closed`
-  false so fixture `process_restart` continuity is never over-claimed. Does not
-  claim KVM MicroVM Live continuity or close the utility-VM half of Box B2 /
-  OCI R6. Default create stays Host-bound.
+  `a3s.box.linux-native-live-session.v3` requires
+  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across Host
+  owner SIGKILL, and is intended to prove retained streaming `start_process`
+  handle continuity (Unavailable → Live reopen → same-handle stdin/signal/Exit)
+  plus keyed captured exec / state / inventory / stats / kill without inventing
+  an exit. `retained_stream_handle_proven` flips true only when that path
+  passes; `fixture_stream_continuity_claimed` and
+  `b2_process_session_recovery_closed` stay false. Does not claim KVM MicroVM
+  Live continuity or close utility-VM B2/R6. Default create stays Host-bound.
+  Green Linux qualification report is still required before treating the
+  retained-stream ROADMAP checkbox as closed.
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
   `scripts/linux-kvm-oci-qualification.sh`. Schema
