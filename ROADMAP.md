@@ -424,6 +424,11 @@ retain process or filesystem sessions after its owner dies.
     owner restart (fixture-only today in `process_restart`).
   - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
     reopen remains stopped-only / recreate today).
+- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
+  inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
+  `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
+  terminal or Failed-on-vanish instead of stuck transitional states; snapshot
+  recover refuses Sandbox-only publish on non-Sandbox generations.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
