@@ -948,35 +948,36 @@ mod qualification {
         runtime_root: &Path,
         binding: &OciRuntimeBinding,
     ) -> Result<KvmLiveBindingSnapshot, AnyError> {
+        // OCI publishes under shares/<container-id>/<generation>/ — walk
+        // recursively. containerId in the JSON may be absent at publish time.
         let shares_root = runtime_root.join("shares");
         let target_id = binding.target.id.as_str();
         let mut candidates = Vec::new();
-        if shares_root.is_dir() {
-            for entry in std::fs::read_dir(&shares_root)? {
-                let entry = entry?;
-                let path = entry.path().join(KVM_LIVE_BINDING_FILE);
-                if !path.is_file() {
-                    continue;
-                }
-                let value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-                let container_id = value
-                    .get("containerId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if container_id == target_id {
-                    candidates.push(path);
-                }
+        walk_for_live_binding(&shares_root, &mut candidates)?;
+        let matched: Vec<_> = candidates
+            .into_iter()
+            .filter(|path| {
+                path.components()
+                    .any(|component| component.as_os_str() == target_id)
+            })
+            .collect();
+        let path = match matched.as_slice() {
+            [path] => path.clone(),
+            [] => {
+                return Err(failure(format!(
+                    "expected one KVM Live binding under {} for container {target_id}, found 0",
+                    shares_root.display()
+                )));
             }
-        }
-        require(
-            candidates.len() == 1,
-            format!(
-                "expected one KVM Live binding under {}, found {}",
-                shares_root.display(),
-                candidates.len()
-            ),
-        )?;
-        let value: Value = serde_json::from_slice(&std::fs::read(&candidates[0])?)?;
+            paths => {
+                return Err(failure(format!(
+                    "expected one KVM Live binding under {} for container {target_id}, found {}",
+                    shares_root.display(),
+                    paths.len()
+                )));
+            }
+        };
+        let value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         let schema_version = value
             .get("schemaVersion")
             .and_then(Value::as_str)
@@ -991,6 +992,30 @@ mod qualification {
             session_owner: identity_from_binding(&value, "sessionOwner")?,
             shim: identity_from_binding(&value, "shim")?,
         })
+    }
+
+    fn walk_for_live_binding(root: &Path, found: &mut Vec<PathBuf>) -> Result<(), AnyError> {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(failure(format!(
+                    "failed to enumerate {}: {error}",
+                    root.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                walk_for_live_binding(&path, found)?;
+            } else if entry.file_name() == KVM_LIVE_BINDING_FILE {
+                found.push(path);
+            }
+        }
+        Ok(())
     }
 
     fn identity_from_binding(value: &Value, field: &str) -> Result<ProcessIdentityReport, AnyError> {
