@@ -1336,13 +1336,54 @@ async fn crashed_generation_during_cold_pause_publishes_failed_not_paused() {
 }
 
 #[tokio::test]
+async fn terminal_generation_during_cold_resume_publishes_stopped_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let mut create = request("cold-resume-terminal");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &operation("cold-resume-terminal-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(17);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Unavailable(ref message)
+                if message.contains("refusing to publish Paused")
+        ),
+        "expected Unavailable refusing Paused, got {error:?}"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped),
+        "must not invent Paused over a terminal cold-resume generation"
+    );
+    assert_eq!(record.exit_code, Some(17));
+    assert!(!record.stopped_by_user);
+    assert_eq!(
+        manager.inspect(&paused.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
 async fn failed_filesystem_only_resume_remains_retryable_without_advancing_generation() {
     let (_directory, manager, backend) = harness();
+    let mut create = request("cold-resume-failure");
+    create.config.isolation = ExecutionIsolation::Microvm;
     let running = manager
-        .create_and_start(
-            request("cold-resume-failure"),
-            &operation("cold-resume-failure-create"),
-        )
+        .create_and_start(create, &operation("cold-resume-failure-create"))
         .await
         .unwrap();
     let paused = manager

@@ -16,6 +16,10 @@ All notable changes to A3S Box will be documented in this file.
   inspect shows `Failed`. The generation becomes `Failed` with the authenticated
   exit code. Lost-response kill reconciliation likewise publishes crash `Failed`
   via `Terminal` (not user `KillTerminal` / `stopped_by_user`).
+- Filesystem-only (cold) resume no longer rolls terminal `Stopped`/`Failed`
+  evidence back to retryable `Paused` (which dropped the exit). Terminal
+  generations are published with `Terminal` evidence; `Created`/`Paused`/
+  `NotFound` remain retryable rollbacks.
 
 ### Added
 

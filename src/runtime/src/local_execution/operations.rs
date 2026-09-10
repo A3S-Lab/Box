@@ -3,6 +3,7 @@ use a3s_box_core::{
     KillExecutionOptions, KillOutcome,
 };
 
+use super::create::startup_terminal_state;
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
 use super::support::{
@@ -241,10 +242,29 @@ impl LocalExecutionManager {
             Ok(observation)
                 if matches!(
                     observation.state,
-                    ExecutionState::Created
-                        | ExecutionState::Paused
-                        | ExecutionState::Stopped
-                        | ExecutionState::Failed
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                // Terminal evidence after a failed cold resume must not invent
+                // a retryable Paused generation (drops authenticated exit).
+                self.release_execution_resources(&record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Resuming,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                Err(ExecutionManagerError::Unavailable(format!(
+                    "filesystem-only resume observed a terminal generation (state {:?}, exit {:?}); refusing to publish Paused",
+                    observation.state, observation.exit_code
+                )))
+            }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Created | ExecutionState::Paused
                 ) =>
             {
                 self.rollback_cold_resume(&record).await?;
