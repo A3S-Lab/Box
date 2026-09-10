@@ -469,8 +469,16 @@ retain process or filesystem sessions after its owner dies.
     non-driver evidence). Does **not** alone close B2
     (`b2_process_session_recovery_closed` stays false until the plan's full
     B2 criteria are met).
-  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
-    reopen remains stopped-only / recreate today).
+  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (Utility-VM
+    Live remains open; KVM Host reopen stopped-only path is superseded by the
+    observation harness below but `/dev/kvm` green evidence is still pending).
+  - [ ] Observation harness `a3s.box.linux-kvm-live-session.v1`
+    (`linux-kvm-live-session-qualification`) landed with local runner and
+    report verifier. Requires `A3S_OCI_KVM_SESSION_OWNER=1`, keeps the Box
+    manager across Host Service SIGKILL/restart, and sets
+    `kvm_microvm_live_claimed` only when retained streaming handle continuity
+    passes. Does **not** close B2 (`b2_process_session_recovery_closed` stays
+    false) and does **not** promote Utility-VM Live until `/dev/kvm` green.
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
