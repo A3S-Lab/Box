@@ -30,6 +30,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Align CI/release `A3S_OCI_RUNTIME_REV` with the Cargo `a3s-oci-sdk` pin
+  (`35c3370`). Subsequent OCI requal bumps updated Cargo only and left
+  workflow pins on `f9d6eeb`, breaking `scripts/check-oci-pins.sh` on `main`.
 - Bump the pinned OCI Runtime revision to
   `35c3370d5aefc1d10c30b77c899044c26865c8c6` (PR #266: new exec after Host
   reopen). Migration stays opt-in via `A3S_BOX_OCI_MIGRATION`; default
