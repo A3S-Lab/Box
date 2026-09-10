@@ -8,11 +8,15 @@ use a3s_box_core::{
     ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, OperationId,
 };
 
+use super::create::startup_terminal_state;
 use super::record::lease_from_record;
 use super::support::{
     managed_state, paused_with_memory, require_generation, required_handle, state_conflict,
 };
-use super::{LocalExecutionHandle, LocalExecutionManager, ManagedExecutionState, RuntimeUpdate};
+use super::{
+    LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation, ManagedExecutionState,
+    RuntimeUpdate,
+};
 use crate::{BoxRecord, BoxStateStore, ManagedExecutionOperation, SnapshotStore};
 
 impl LocalExecutionManager {
@@ -231,13 +235,26 @@ impl LocalExecutionManager {
         source_state: ManagedExecutionState,
     ) -> ExecutionManagerResult<()> {
         let execution_id = ExecutionId::new(record.id.clone())?;
+        // Cold pause deliberately has no live provider process. Treat missing
+        // runtime evidence as restore-to-Paused, not invented Failed/Terminal.
+        let cold_paused_source = source_state == ManagedExecutionState::Paused
+            && !paused_with_memory(record, &execution_id)?;
         match self.backend.inspect(record).await {
             Ok(observation) => {
                 observation.validate(&execution_id)?;
+                if cold_paused_source {
+                    return self
+                        .abort_cold_paused_non_sandbox_snapshot(record, observation)
+                        .await;
+                }
                 let handle = required_handle(&observation, &execution_id)?;
                 self.restore_snapshot_source_state(record, source_state, handle)
                     .await?;
                 Ok(())
+            }
+            Err(ExecutionManagerError::NotFound(_)) if cold_paused_source => {
+                self.restore_cold_paused_after_non_sandbox_abort(record)
+                    .await
             }
             Err(ExecutionManagerError::NotFound(_)) => {
                 self.release_execution_resources(record).await?;
@@ -252,6 +269,46 @@ impl LocalExecutionManager {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn abort_cold_paused_non_sandbox_snapshot(
+        &self,
+        record: &BoxRecord,
+        observation: LocalExecutionObservation,
+    ) -> ExecutionManagerResult<()> {
+        match observation.state {
+            ExecutionState::Failed | ExecutionState::Stopped if observation.exit_code.is_some() => {
+                // Authenticated terminal evidence is not a successful cold pause.
+                self.release_execution_resources(record).await?;
+                let terminal = startup_terminal_state(observation.state, observation.exit_code);
+                self.transition(
+                    record,
+                    ManagedExecutionState::Snapshotting,
+                    terminal,
+                    RuntimeUpdate::Terminal(observation.exit_code),
+                )
+                .await?;
+                Ok(())
+            }
+            _ => {
+                self.restore_cold_paused_after_non_sandbox_abort(record)
+                    .await
+            }
+        }
+    }
+
+    async fn restore_cold_paused_after_non_sandbox_abort(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<()> {
+        self.complete_transition(
+            record,
+            ManagedExecutionState::Snapshotting,
+            ManagedExecutionState::Paused,
+            RuntimeUpdate::ColdPause,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn drive_cold_paused_snapshot(

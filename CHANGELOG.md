@@ -39,7 +39,10 @@ All notable changes to A3S Box will be documented in this file.
   snapshot contracts that require the Sandbox backend stay Linux-gated with
   explicit `sandbox_request`. Snapshot recover/reconcile now also refuses to
   publish Sandbox-only filesystem snapshots on non-Sandbox generations (no
-  invent-via-recover), restoring the source state instead.
+  invent-via-recover), restoring the source state instead. Cold-paused
+  non-Sandbox abort restores `Paused` when inspect is NotFound or
+  Stopped-without-exit (cold pause has no live provider by design); it no
+  longer invents `Failed`/`Terminal` for that expected absence.
 
 ### Added
 

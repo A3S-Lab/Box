@@ -3271,6 +3271,161 @@ async fn microvm_snapshot_reconcile_refuses_sandbox_only_publish() {
     assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn microvm_cold_paused_snapshot_reconcile_restores_paused_not_failed() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-cold-snapshot-refuse-create");
+    let running = manager
+        .create_and_start(request("microvm-cold-snapshot-refuse"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "cold-must-not-snapshot");
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("microvm-cold-refused-snapshot").unwrap();
+    let record = persisted(&manager, &paused.execution_id);
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .plan
+            .backend
+            .is_sandbox(),
+        "test requires a non-Sandbox generation"
+    );
+    assert!(
+        !record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .paused_with_memory,
+        "test requires cold-paused source state"
+    );
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Paused,
+                operation_id: operation("microvm-cold-snapshot-refuse-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    // MicroVM cold pause has no live provider process; NotFound is expected.
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        executions.remove(paused.execution_id.as_str());
+    }
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let error = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Conflict { ref message, .. }
+                if message.contains("Sandbox backend")
+        ),
+        "expected Sandbox-backend Conflict, got {error:?}"
+    );
+    assert!(
+        restarted
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "must not publish a filesystem snapshot for a non-Sandbox generation"
+    );
+    let restored = persisted(&restarted, &paused.execution_id);
+    assert_eq!(
+        restored.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused),
+        "cold-paused abort must restore Paused, not invent Failed/Terminal"
+    );
+    assert!(!restored.managed_execution.unwrap().paused_with_memory);
+    assert_eq!(restored.exit_code, None);
+    assert!(!restored.stopped_by_user);
+}
+
+#[tokio::test]
+async fn microvm_cold_paused_snapshot_reconcile_restores_paused_without_live_handle() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("microvm-cold-snapshot-stopped-create");
+    let running = manager
+        .create_and_start(request("microvm-cold-snapshot-stopped"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(
+        &manager,
+        &running.execution_id,
+        "cold-stopped-must-not-snapshot",
+    );
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("microvm-cold-stopped-refused").unwrap();
+    let record = persisted(&manager, &paused.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Paused,
+                operation_id: operation("microvm-cold-snapshot-stopped-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    // FakeBackend cold pause leaves a Stopped observation without a live handle.
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let error = restarted
+        .reconcile(&create_operation)
+        .await
+        .expect_err("non-Sandbox Snapshotting must not invent a published snapshot");
+
+    assert!(
+        matches!(
+            error,
+            ExecutionManagerError::Conflict { ref message, .. }
+                if message.contains("Sandbox backend")
+        ),
+        "expected Sandbox-backend Conflict, got {error:?}"
+    );
+    assert!(restarted
+        .filesystem_snapshot_size(&snapshot_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        persisted(&restarted, &paused.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Paused),
+        "Stopped-without-exit cold pause must restore Paused, not fail required_handle"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn reconcile_recovers_a_crash_after_snapshot_pause() {
