@@ -6,6 +6,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Native Linux live-session observation harness:
+  `linux-native-live-session-qualification` example plus
+  `scripts/linux-native-live-session-qualification.sh`. Schema
+  `a3s.box.linux-native-live-session.v1` requires
+  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, SIGKILLs the out-of-process Native
+  Linux Host owner while a Sandbox generation is live, rebinds through a
+  replacement owner, and continues authentic Live state/inventory/stats/kill
+  without inventing an exit status. Honest scope: Native-Linux-driver Live
+  Host-reopen only; does not claim KVM MicroVM Live continuity or close the
+  utility-VM half of Box B2 / OCI R6. Default create stays Host-bound.
 - Linux qualification-only MicroVM OCI vertical-slice gate:
   `linux-kvm-oci-qualification` example plus
   `scripts/linux-kvm-oci-qualification.sh`. Schema

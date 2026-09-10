@@ -412,6 +412,14 @@ retain process or filesystem sessions after its owner dies.
   stdout/stderr log projection) through the persisted OCI route.
 - [ ] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
+  - [x] Observation harness `a3s.box.linux-native-live-session.v1`
+    (`linux-native-live-session-qualification`) for Native Linux Sandbox with
+    supervised create + Host owner SIGKILL + Live rebind
+    (state/inventory/stats/kill; no invented exit). Requires
+    `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`. Does not close utility-VM Live or
+    default create Host-bound policy.
+  - [ ] Utility-VM / KVM MicroVM Live process-session continuity (KVM Host
+    reopen remains stopped-only / recreate today).
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
