@@ -311,6 +311,37 @@ phase 2 can SIGKILL/restart the Host Service. This remains qualification-only
 evidence; it does not promote the public KVM candidate or change default
 MicroVM routing.
 
+### Exercise KVM MicroVM live-session Host reopen (observation)
+
+Opt-in Live path only (`A3S_OCI_KVM_SESSION_OWNER=1`). Distinct from the
+stopped-only `linux-kvm-oci-qualification` gate. Build and run:
+
+```bash
+cargo build -p a3s-box-runtime --example linux-kvm-live-session-qualification --release
+# place the example beside a3s-box, then:
+./scripts/linux-kvm-live-session-qualification.sh \
+  --box-bin /absolute/path/to/bin \
+  --a3s-oci /absolute/path/to/a3s-oci \
+  --service-root /run/a3s/oci-kvm-box-live \
+  --shim /absolute/path/to/isolated-libkrun-shim \
+  --system-image-manifest /absolute/path/to/system-image.json \
+  --image alpine:3.20 \
+  --report /absolute/path/to/kvm-live-session-report.json \
+  --home /tmp/a3s-box-kvm-live-session-home
+```
+
+Schema `a3s.box.linux-kvm-live-session.v2` keeps the Box manager across Host
+Service SIGKILL, proves retained streaming `start_process` handle continuity
+(`retained_stream_handle_proven` / `kvm_microvm_live_claimed`), and proves
+filesystem continuity via public `transfer_file` (upload before kill,
+download after reattach on the same generation;
+`retained_filesystem_proven`). Fixture continuity stays unclaimed
+(`fixture_stream_continuity_claimed` stays false). B2 stays open
+(`b2_process_session_recovery_closed` stays false). Pin OCI Runtime at
+`61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (KVM Live filesystem #289).
+Existing-host WSL2 `/dev/kvm` evidence report SHA-256 `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`
+(`retained_filesystem_proven=true`; B2 stays false).
+
 ### Exercise Native Linux live-session Host reopen (observation)
 
 Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
