@@ -3,8 +3,9 @@
 #
 # Starts box-kvm-qualification-service with A3S_OCI_KVM_SESSION_OWNER=1, then
 # runs the destructive live-session qualification: retained streaming handle
-# continuity across Host Service SIGKILL/restart, keyed captured exec, inventory,
-# stats, and Live kill without inventing exit status.
+# continuity across Host Service SIGKILL/restart, filesystem continuity via
+# transfer_file (upload before kill, download after reattach), keyed captured
+# exec, inventory, stats, and Live kill without inventing exit status.
 #
 # Observation-only. Does not claim fresh-host or AArch64 promotion.
 
@@ -199,7 +200,7 @@ export A3S_BOX_KVM_LIVE_SESSION_SERVICE_SHIM="${SHIM}"
 export A3S_BOX_KVM_LIVE_SESSION_SERVICE_MANIFEST="${MANIFEST}"
 export A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG="${SERVICE_LOG}"
 
-echo "running Linux KVM live-session qualification v1"
+echo "running Linux KVM live-session qualification v2"
 echo "  home=${A3S_HOME}"
 echo "  service-root=${SERVICE_ROOT}"
 echo "  service-pid=${SERVICE_PID}"

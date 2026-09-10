@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v1 reports.
+"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v2 reports.
 
-Retained-stream proof and kvm_microvm_live_claimed are required together.
-B2, fixture continuity, and utility-VM claims must stay false.
+Retained-stream proof, retained-filesystem proof, and kvm_microvm_live_claimed
+are required together. B2, fixture continuity, and utility-VM claims must stay
+false.
 """
 
 from __future__ import annotations
@@ -12,7 +13,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-kvm-live-session.v1"
+SCHEMA = "a3s.box.linux-kvm-live-session.v2"
+REQUIRED_TRUE = (
+    "retained_stream_handle_proven",
+    "kvm_microvm_live_claimed",
+    "file_upload_before_kill",
+    "file_download_after_reattach",
+    "retained_filesystem_proven",
+)
 FORBIDDEN = (
     "fixture_stream_continuity_claimed",
     "b2_process_session_recovery_closed",
@@ -26,10 +34,9 @@ def evaluate(report: dict) -> list[str]:
         failures.append(f"schema_version={report.get('schema_version')!r}")
     if report.get("status") != "passed":
         failures.append(f"status={report.get('status')!r} error={report.get('error')!r}")
-    if report.get("retained_stream_handle_proven") is not True:
-        failures.append("retained_stream_handle_proven is not true")
-    if report.get("kvm_microvm_live_claimed") is not True:
-        failures.append("kvm_microvm_live_claimed is not true")
+    for required in REQUIRED_TRUE:
+        if report.get(required) is not True:
+            failures.append(f"{required} is not true")
     if report.get("kvm_microvm_live_claimed") != report.get("retained_stream_handle_proven"):
         failures.append("kvm_microvm_live_claimed must match retained_stream_handle_proven")
     for forbidden in FORBIDDEN:
@@ -42,9 +49,9 @@ def passing_report() -> dict:
     report = {
         "schema_version": SCHEMA,
         "status": "passed",
-        "retained_stream_handle_proven": True,
-        "kvm_microvm_live_claimed": True,
     }
+    for required in REQUIRED_TRUE:
+        report[required] = True
     for forbidden in FORBIDDEN:
         report[forbidden] = False
     return report
@@ -55,20 +62,59 @@ def self_test() -> int:
         print("self-test: passing report was rejected", file=sys.stderr)
         return 1
     bad_cases = [
-        {"schema_version": "v1", "status": "passed", "retained_stream_handle_proven": True, "kvm_microvm_live_claimed": True},
-        {"schema_version": SCHEMA, "status": "failed", "retained_stream_handle_proven": True, "kvm_microvm_live_claimed": True},
-        {"schema_version": SCHEMA, "status": "passed", "retained_stream_handle_proven": False, "kvm_microvm_live_claimed": False},
+        {
+            "schema_version": "a3s.box.linux-kvm-live-session.v1",
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "failed",
+            "retained_stream_handle_proven": True,
+            "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": False,
+            "kvm_microvm_live_claimed": False,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+        },
         {
             "schema_version": SCHEMA,
             "status": "passed",
             "retained_stream_handle_proven": True,
             "kvm_microvm_live_claimed": False,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
         },
         {
             "schema_version": SCHEMA,
             "status": "passed",
             "retained_stream_handle_proven": True,
             "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": False,
+            "retained_filesystem_proven": True,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
             "b2_process_session_recovery_closed": True,
         },
         {
@@ -76,6 +122,9 @@ def self_test() -> int:
             "status": "passed",
             "retained_stream_handle_proven": True,
             "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
             "fixture_stream_continuity_claimed": True,
         },
         {
@@ -83,6 +132,9 @@ def self_test() -> int:
             "status": "passed",
             "retained_stream_handle_proven": True,
             "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
             "utility_vm_claimed": True,
         },
     ]
@@ -125,7 +177,7 @@ def main(argv: list[str]) -> int:
             print(f"  {item}", file=sys.stderr)
         return 1
     print(
-        "kvm live-session v1 retained-stream and kvm_microvm_live proven; "
+        "kvm live-session v2 retained-stream+filesystem and kvm_microvm_live proven; "
         "B2/fixture/utility-VM claims remain false"
     )
     return 0

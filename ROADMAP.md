@@ -499,6 +499,19 @@ retain process or filesystem sessions after its owner dies.
     (`b2_process_session_recovery_closed` stays false; fixture continuity stays
     false). Broader Utility-VM product claims beyond this KVM MicroVM gate remain
     observation-scoped.
+  - [x] Observation harness `a3s.box.linux-kvm-live-session.v2`
+    (`linux-kvm-live-session-qualification`) extends v1 with filesystem
+    continuity across Host Service SIGKILL via public Box `transfer_file`
+    (upload before kill, download after reattach on the same generation;
+    `retained_filesystem_proven` / `file_upload_before_kill` /
+    `file_download_after_reattach`). Keeps retained streaming handle proof
+    and `kvm_microvm_live_claimed`. Requires OCI pin
+    `61f77712e420c176dfc1a5d7ba2457e8c8299dcf` (KVM Live filesystem,
+    OCI-Runtime #289). Does **not** close B2
+    (`b2_process_session_recovery_closed` stays false) and does not claim
+    fixture `process_restart` continuity. Does not flip cutover /
+    HostRuntimeService registration. **Existing-host WSL2 `/dev/kvm`
+    greened** report SHA-256 `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f` (`retained_filesystem_proven=true`; B2 stays false).
 - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
