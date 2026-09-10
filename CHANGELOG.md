@@ -36,7 +36,11 @@ All notable changes to A3S Box will be documented in this file.
   with SDK connect Broken pipe inside the launch-ready wait. Stage/preserve
   `a3s-box-sandbox-oci-launcher` across sudo into the live-session home, and
   stage the packaged `lib/` tree beside `a3s-box-shim` (`$ORIGIN/lib` / libkrun)
-  so the managed OCI log worker does not die on dlopen.
+  so the managed OCI log worker does not die on dlopen. Keyed captured exec
+  after Host reopen retries OCI retryable Unavailable (short `printf` can reap
+  before recovery identity capture on aarch64). Sandbox CI cleanup tears down
+  the live-session host-root owner so leftover launcher processes do not fail
+  the leftover pgrep.
 - Mark live-session / elevate / KVM qualification shell scripts executable in
   git (`100755`). Sandbox CI on Linux checkouts was failing closed with
   `missing executable …/elevate-linux-sandbox-owner.sh` before the v3 gate ran.

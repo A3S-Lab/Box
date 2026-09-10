@@ -803,8 +803,50 @@ jobs:
               else:
                   raise RuntimeError("OCI owner remained after SIGKILL")
           PY
-          if pgrep -f 'a3s-box-shim|a3s-oci.*native-linux-.*service|a3s-oci-agent' >/dev/null; then
-            ps aux | grep -E 'a3s-box-shim|a3s-oci.*native-linux-.*service|a3s-oci-agent' | grep -v grep
+          # Live-session uses a dedicated host root under RUNNER_TEMP; tear that
+          # owner down too so leftover sandbox-oci-launcher processes do not fail
+          # the leftover pgrep below.
+          live_owner="$RUNNER_TEMP/a3s-box-native-live-session-home/oci-host/box-owner.json"
+          if [[ -f "$live_owner" ]]; then
+            sudo python3 - "$live_owner" <<'PY' || cleanup_status=1
+          import json
+          import os
+          import pathlib
+          import signal
+          import sys
+          import time
+
+          record_path = pathlib.Path(sys.argv[1])
+          if not record_path.exists():
+              raise SystemExit(0)
+          record = json.loads(record_path.read_text(encoding="utf-8"))
+          pid = int(record["pid"])
+          expected_start = int(record["pid_start_time"])
+          stat_path = pathlib.Path(f"/proc/{pid}/stat")
+          if not stat_path.exists():
+              raise SystemExit(0)
+          raw = stat_path.read_text(encoding="utf-8")
+          actual_start = int(raw[raw.rfind(")") + 2:].split()[19])
+          if actual_start != expected_start:
+              raise RuntimeError("refusing to signal a reused live-session OCI owner PID")
+          os.kill(pid, signal.SIGTERM)
+          for _ in range(200):
+              if not stat_path.exists():
+                  break
+              time.sleep(0.05)
+          else:
+              os.kill(pid, signal.SIGKILL)
+              for _ in range(100):
+                  if not stat_path.exists():
+                      break
+                  time.sleep(0.05)
+              else:
+                  raise RuntimeError("live-session OCI owner remained after SIGKILL")
+          PY
+            sudo rm -rf "$RUNNER_TEMP/a3s-box-native-live-session-home" || cleanup_status=1
+          fi
+          if pgrep -f 'a3s-box-shim|a3s-box-sandbox-oci-launcher|a3s-oci.*native-linux-.*service|a3s-oci-agent|elevate-linux-sandbox-owner' >/dev/null; then
+            ps aux | grep -E 'a3s-box-shim|a3s-box-sandbox-oci-launcher|a3s-oci.*native-linux-.*service|a3s-oci-agent|elevate-linux-sandbox-owner' | grep -v grep || true
             cleanup_status=1
           fi
           if mountpoint -q "$A3S_HOME/runtime-secrets"; then
