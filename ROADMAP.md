@@ -315,16 +315,16 @@ later gates.
   and Host Service SIGKILL/restart (stopped-only reconcile, no invented exit
   status) against `box-kvm-qualification-service` when service restart inputs
   are available. Existing-host WSL2 evidence with OCI pin
-  `fdaf2e712aac2e165c8fb7aa53eb6a96dc462522` retained report SHA-256
-  `0746d5c2ee0f059d7a653fbc82294693f85aaeb59e901460c6688f1477d7668d` for
+  `019b2d2ee8729886392eae77972d3cc9eaa51bbe` retained report SHA-256
+  `532d1195251a927175d6a55212368f460920be1da682ef2f30209bfcc27873a4` for
   schema `a3s.box.linux-kvm-oci-qualification.v2` (exact exit `23` plus Host
   Service restart → stopped-only, no invented exit). Prior evidence on
-  `2357b38f`/`f9d6eeb`, `8ad0a66b`/`f5118ff`, `c0cf2617`/`26ab488`,
-  `3d1f073b`/`7d27d1`, `3122b6f8`/`49d409`, `5431090f`/`f14c940`,
-  `a318f4ec`/`60b1888`, `d57739f0`/`95d624f`, `8b2804c5`/`3cea73d7`, and
-  `e0fd63db`/`01786abf` remains historical. This does not close fresh-host
-  promotion, AArch64 promotion, live-session gate, or default MicroVM
-  cutover.
+  `d4a05290`/`fdaf2e7`, `2357b38f`/`f9d6eeb`, `8ad0a66b`/`f5118ff`,
+  `c0cf2617`/`26ab488`, `3d1f073b`/`7d27d1`, `3122b6f8`/`49d409`,
+  `5431090f`/`f14c940`, `a318f4ec`/`60b1888`, `d57739f0`/`95d624f`,
+  `8b2804c5`/`3cea73d7`, and `e0fd63db`/`01786abf` remains historical. This
+  does not close fresh-host promotion, AArch64 promotion, live-session gate,
+  or default MicroVM cutover.
 
 Exit gate: the same minimal bundle completes an exact, replay-safe lifecycle
 through Box on Linux and Windows, including Box and runtime process restart.
