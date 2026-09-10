@@ -843,6 +843,20 @@ jobs:
               else:
                   raise RuntimeError("live-session OCI owner remained after SIGKILL")
           PY
+            # Identity-fenced owner kill can leave the elevate/sudo supervisor and
+            # launcher argv matching the live-session home. Reap those by path
+            # before the leftover pgrep, then remove the home tree.
+            if pgrep -f 'a3s-box-native-live-session-home' >/dev/null; then
+              sudo pkill -TERM -f 'a3s-box-native-live-session-home' || true
+              for _ in $(seq 1 40); do
+                pgrep -f 'a3s-box-native-live-session-home' >/dev/null || break
+                sleep 0.05
+              done
+              if pgrep -f 'a3s-box-native-live-session-home' >/dev/null; then
+                sudo pkill -KILL -f 'a3s-box-native-live-session-home' || true
+                sleep 0.2
+              fi
+            fi
             sudo rm -rf "$RUNNER_TEMP/a3s-box-native-live-session-home" || cleanup_status=1
           fi
           if pgrep -f 'a3s-box-shim|a3s-box-sandbox-oci-launcher|a3s-oci.*native-linux-.*service|a3s-oci-agent|elevate-linux-sandbox-owner' >/dev/null; then

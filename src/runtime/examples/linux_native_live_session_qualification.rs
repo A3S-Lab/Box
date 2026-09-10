@@ -3,15 +3,18 @@
 //! Exercises the public Box Sandbox path with
 //! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across a
 //! Native Linux Host owner SIGKILL, proves retained streaming process-handle
-//! continuity plus keyed captured exec / state / inventory / stats / kill,
-//! without inventing an exit status.
+//! continuity, filesystem continuity via public `transfer_file` (upload before
+//! kill, download after reattach on the same generation), plus keyed captured
+//! exec / state / inventory / stats / kill, without inventing an exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v3`.
+//! Schema `a3s.box.linux-native-live-session.v4`.
 //!
 //! Honest scope (anti-overfit):
 //! - Live Host-reopen is Native-Linux-driver-only today.
 //! - `retained_stream_handle_proven` is set only when the same
 //!   `start_process` handle continues stdin/output/signal after owner reopen.
+//! - `retained_filesystem_proven` is set only when upload-before-kill bytes
+//!   match download-after-reattach on the same Box generation.
 //! - Fixture `process_restart` continuity is never claimed
 //!   (`fixture_stream_continuity_claimed` stays false).
 //! - Does **not** claim KVM MicroVM Live continuity and does **not** close
@@ -52,14 +55,17 @@ mod qualification {
         BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionBackend,
         ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
         ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
-        ExecutionSessionManager, ExecutionState, IsolationClass as BoxIsolationClass, NetworkMode,
-        OperationId, ReconcileOutcome, ResourceConfig, StreamType,
+        ExecutionSessionManager, ExecutionState, FileOp, FileRequest,
+        IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
+        ResourceConfig, StreamType,
     };
     use a3s_box_runtime::{
         LocalExecutionManager, ManagedExecutionStore, ManagedRuntimeRoute,
         NativeLinuxOciMigrationConfig, OciRuntimeBinding,
     };
     use a3s_oci_sdk::{DriverKind, IsolationClass as OciIsolationClass};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use serde::Serialize;
     use serde_json::Value;
 
@@ -73,7 +79,7 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v3";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v4";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
@@ -81,6 +87,8 @@ mod qualification {
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
+    const FS_GUEST_PATH: &str = "/tmp/.a3s-box-native-live-fs.bin";
+    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv4\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -734,9 +742,16 @@ mod qualification {
             streaming: false,
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut attempt: u32 = 0;
         let output = loop {
+            attempt = attempt.saturating_add(1);
+            let mut attempt_request = request.clone();
+            if attempt > 1 {
+                // Avoid colliding with a partially-registered first attempt key.
+                attempt_request.request_id = Some(format!("{request_id}.retry-{attempt}"));
+            }
             match manager
-                .execute(execution_id, generation, request.clone())
+                .execute(execution_id, generation, attempt_request)
                 .await
             {
                 Ok(output) => break output,
