@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Kill completion no longer invents `128+signal` exit codes for
+  `AlreadyStopped` / vanished-runtime paths. Only a true `Killed` outcome with a
+  missing reap may derive a signal exit; owner-loss and NotFound cleanup leave
+  `exit_code` absent so inspect/recovery honesty is preserved. Contract tests
+  cover the no-invent path and use MicroVM isolation so they run on Windows
+  hosts as well as Linux.
+
 ### Added
 
 - Native Linux live-session observation harness:
