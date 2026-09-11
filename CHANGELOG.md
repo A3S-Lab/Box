@@ -13,6 +13,13 @@ All notable changes to A3S Box will be documented in this file.
   a caller-provided `request_id` to avoid orphan journals. Does **not** flip
   B2 harness close, fixture continuity, or hosted-KVM claims.
 
+- OCI process `write_stdin` retries once on retryable `Unavailable` with the
+  **same** mutation sequence (captured initial stdin and streaming input).
+  Lost responses after the Runtime journals the write no longer require the
+  caller to replay identical bytes, and a different payload on that identity
+  still Conflicts. Does **not** flip B2 harness close, fixture continuity,
+  or hosted-KVM claims.
+
 - Go / Python / TypeScript SDKs cover Unavailable → `request_id` /
   `requestId` / `RequestID` round-trips (bridge decode + omit-path command
   retry reuse). Does **not** auto-retry commands inside language SDKs or flip

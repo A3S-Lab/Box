@@ -805,14 +805,18 @@ impl ExecutionProcessInput for OciProcessInput {
             )));
         }
         let context = self.context(state.next_mutation, "write-stdin")?;
-        self.client
-            .write_stdin(WriteStdinRequest {
-                context,
-                process: self.process.clone(),
-                data: data.to_vec(),
-            })
-            .await
-            .map_err(|error| sdk_error("write stdin", error))?;
+        // Sequence identity is assigned before the call. A lost retryable
+        // response must replay that same mutation, not mint the next sequence.
+        let request = WriteStdinRequest {
+            context,
+            process: self.process.clone(),
+            data: data.to_vec(),
+        };
+        match self.client.write_stdin(request.clone()).await {
+            Err(error) if error.retryable => self.client.write_stdin(request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("write stdin", error))?;
         Self::advance(&mut state)
     }
 

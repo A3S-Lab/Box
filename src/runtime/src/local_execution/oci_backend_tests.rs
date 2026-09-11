@@ -2258,6 +2258,9 @@ async fn captured_exec_replays_after_lost_response_within_one_execute() {
         streaming: false,
     };
     service.fail_exec_after_effect.store(true, Ordering::SeqCst);
+    service
+        .fail_stdin_after_effect
+        .store(true, Ordering::SeqCst);
 
     let output = manager
         .execute(&lease.execution_id, lease.generation, exec)
@@ -2319,9 +2322,11 @@ async fn captured_exec_replays_after_lost_response_within_one_execute() {
         .is_some_and(|set| set.is_empty()));
     assert_eq!(service.processes.lock().expect("process lock").len(), 1);
     let stdin = service.stdin_requests();
-    assert_eq!(stdin.len(), 1);
+    assert_eq!(stdin.len(), 2);
+    assert_eq!(stdin[0], stdin[1]);
     assert_eq!(stdin[0].data, b"probe input");
     assert_eq!(stdin[0].process.container, calls[0].container);
+    assert_eq!(service.stdin_effects().len(), 1);
     assert_eq!(service.close_stdin_requests().len(), 1);
 }
 
@@ -3250,19 +3255,15 @@ async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control()
     input
         .write_stdin(b"replayed input")
         .await
-        .expect_err("stdin response is intentionally lost");
+        .expect("inner Unavailable retry recovers the stdin mutation");
     input
         .write_stdin(b"changed input")
         .await
-        .expect_err("changed retry content must retain and conflict on the same mutation");
-    input
-        .write_stdin(b"replayed input")
-        .await
-        .expect("same stdin mutation replays");
+        .expect("next stdin mutation after recovered write");
     input
         .write_stdin(b"next input")
         .await
-        .expect("next stdin mutation");
+        .expect("following stdin mutation");
     input.close_stdin().await.expect("close stdin");
     input
         .send_signal(ExecutionProcessSignal::Kill)
@@ -3288,11 +3289,9 @@ async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control()
     assert_eq!(terminal.expect("terminal status").exit_code, 137);
     let stdin_calls = service.stdin_requests();
     assert_eq!(stdin_calls.len(), 4);
-    assert_eq!(
-        stdin_calls[0].context.operation_id,
-        stdin_calls[1].context.operation_id
-    );
-    assert_eq!(
+    assert_eq!(stdin_calls[0], stdin_calls[1]);
+    assert_eq!(stdin_calls[0].data, b"replayed input");
+    assert_ne!(
         stdin_calls[1].context.operation_id,
         stdin_calls[2].context.operation_id
     );
@@ -3300,7 +3299,7 @@ async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control()
         stdin_calls[2].context.operation_id,
         stdin_calls[3].context.operation_id
     );
-    assert_eq!(service.stdin_effects().len(), 2);
+    assert_eq!(service.stdin_effects().len(), 3);
     assert_eq!(service.close_stdin_requests().len(), 1);
     let signals = service.signal_process_requests();
     assert_eq!(signals.len(), 1);
@@ -3310,6 +3309,51 @@ async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control()
         Some(RUNTIME_GENERATION)
     );
     assert!(!service.wait_process_requests().is_empty());
+}
+
+#[tokio::test]
+async fn stdin_journal_rejects_payload_drift_on_the_same_operation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("stdin-journal", ExecutionIsolation::Sandbox),
+            &box_operation("stdin-journal-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut request = box_exec_request(None);
+    request.streaming = true;
+    request.stdin_streaming = true;
+    let process = manager
+        .start_process(&lease.execution_id, lease.generation, request)
+        .await
+        .expect("start streaming exec");
+    process
+        .input()
+        .write_stdin(b"committed input")
+        .await
+        .expect("initial stdin");
+
+    let committed = service.stdin_requests()[0].clone();
+    let mut drifted = committed.clone();
+    drifted.data = b"different input".to_vec();
+    let error = service
+        .write_stdin(drifted)
+        .await
+        .expect_err("changed payload must conflict on the committed mutation");
+    assert_eq!(error.code, ErrorCode::Conflict);
+    service
+        .write_stdin(committed)
+        .await
+        .expect("identical replay remains one effect");
+    assert_eq!(service.stdin_effects().len(), 1);
 }
 
 #[tokio::test]
