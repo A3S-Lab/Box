@@ -16,6 +16,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- OCI process `close_stdin` and `signal_process` retry once on retryable
+  `Unavailable` with the **same** mutation sequence (parity with
+  `write_stdin`). Lost responses after the Runtime journals the mutation
+  recover inside one call; drifted content on that identity still Conflicts.
+  Does **not** add `resize` journals, pause/resume inspect recovery, flip B2
+  harness close, fixture continuity, or hosted-KVM claims.
+
 - One-shot OCI `exec` retries once on retryable `Unavailable` with the **same**
   process-journal identity (parity with file upload / mutating filesystem),
   including omit-path minted `managed-exec-*` seeds. Lost responses after the

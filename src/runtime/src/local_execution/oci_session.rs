@@ -832,13 +832,17 @@ impl ExecutionProcessInput for OciProcessInput {
             return Ok(());
         }
         let context = self.context(state.next_mutation, "close-stdin")?;
-        self.client
-            .close_stdin(CloseStdinRequest {
-                context,
-                process: self.process.clone(),
-            })
-            .await
-            .map_err(|error| sdk_error("close stdin", error))?;
+        // Sequence identity is assigned before the call. A lost retryable
+        // response must replay that same mutation, not mint the next sequence.
+        let request = CloseStdinRequest {
+            context,
+            process: self.process.clone(),
+        };
+        match self.client.close_stdin(request.clone()).await {
+            Err(error) if error.retryable => self.client.close_stdin(request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("close stdin", error))?;
         Self::advance(&mut state)?;
         state.stdin_closed = true;
         Ok(())
@@ -852,14 +856,18 @@ impl ExecutionProcessInput for OciProcessInput {
         let mut state = self.state.lock().await;
         let number = signal.linux_number();
         let context = self.context(state.next_mutation, "signal-process")?;
-        self.client
-            .signal_process(SignalProcessRequest {
-                context,
-                process: self.process.clone(),
-                signal: Signal::new(number).map_err(|error| sdk_error("signal process", error))?,
-            })
-            .await
-            .map_err(|error| sdk_error("signal process", error))?;
+        // Sequence identity is assigned before the call. A lost retryable
+        // response must replay that same mutation, not mint the next sequence.
+        let request = SignalProcessRequest {
+            context,
+            process: self.process.clone(),
+            signal: Signal::new(number).map_err(|error| sdk_error("signal process", error))?,
+        };
+        match self.client.signal_process(request.clone()).await {
+            Err(error) if error.retryable => self.client.signal_process(request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("signal process", error))?;
         Self::advance(&mut state)
     }
 
