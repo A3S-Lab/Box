@@ -17,9 +17,14 @@ pub(super) struct ManagedLiveUpdate {
 
 /// Select the canonical managed path without allowing an OCI record to fall
 /// back to a compatibility socket after an unavailable or interrupted call.
+///
+/// `operation_seed` is the caller-stable identity used only when minting a
+/// **new** update operation. Pending and completed matching updates keep their
+/// durable `operation_id` (do not invent `{id}.retry-N`).
 pub(super) fn resolve(
     record: &crate::state::BoxRecord,
     update: &ResourceUpdate,
+    operation_seed: &str,
 ) -> Result<Option<ManagedLiveUpdate>, String> {
     let Some(metadata) = record
         .managed_execution
@@ -40,8 +45,7 @@ pub(super) fn resolve(
             }) {
                 completed.operation_id.clone()
             } else {
-                OperationId::new(format!("cli-update-{}", uuid::Uuid::new_v4()))
-                    .map_err(|error| error.to_string())?
+                OperationId::new(operation_seed.to_string()).map_err(|error| error.to_string())?
             }
         }
         ManagedExecutionState::UpdatingResources => match metadata.pending_operation.as_ref() {
@@ -107,11 +111,21 @@ pub(super) async fn apply(
         .await
         .map(|_| ())
         .map_err(|error| {
-            format!(
+            let message = format!(
                 "failed to apply managed live resource update to {}: {error}; no CLI policy changes were persisted and the exact-generation operation can be retried safely",
                 target.box_name
-            )
+            );
+            annotate_update_unavailable(message, target.operation_id.as_str())
         })
+}
+
+fn annotate_update_unavailable(message: String, request_id: &str) -> String {
+    let unavailable = message.to_ascii_lowercase().contains("unavailable");
+    if unavailable {
+        format!("{message} (reuse --request-id {request_id})")
+    } else {
+        message
+    }
 }
 
 #[cfg(test)]
@@ -242,18 +256,22 @@ mod tests {
     #[test]
     fn persisted_oci_route_selects_exact_generation_managed_update() {
         let record = managed_oci_record(ManagedExecutionState::Running);
-        let target = resolve(&record, &cpu_share_update(512)).unwrap().unwrap();
+        let target = resolve(&record, &cpu_share_update(512), "cli-update-seed-1")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(target.execution_id.as_str(), record.id);
         assert_eq!(target.generation, ExecutionGeneration::new(7).unwrap());
         assert_eq!(target.update.cpu_shares, Some(512));
-        assert!(target.operation_id.as_str().starts_with("cli-update-"));
+        assert_eq!(target.operation_id.as_str(), "cli-update-seed-1");
     }
 
     #[tokio::test]
     async fn managed_update_dispatches_exact_identity_and_partial_intent() {
         let record = managed_oci_record(ManagedExecutionState::Running);
-        let target = resolve(&record, &cpu_share_update(512)).unwrap().unwrap();
+        let target = resolve(&record, &cpu_share_update(512), "cli-update-seed-2")
+            .unwrap()
+            .unwrap();
         let metadata = record.managed_execution.as_ref().unwrap();
         let manager = RecordingExecutionManager {
             call: std::sync::Mutex::new(None),
@@ -284,7 +302,11 @@ mod tests {
             None,
         );
 
-        assert!(resolve(&record, &cpu_share_update(512)).unwrap().is_none());
+        assert!(
+            resolve(&record, &cpu_share_update(512), "cli-update-unused")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -298,7 +320,9 @@ mod tests {
                 update: pending_update.clone(),
             });
 
-        let target = resolve(&record, &cpu_share_update(1024)).unwrap().unwrap();
+        let target = resolve(&record, &cpu_share_update(1024), "cli-update-ignored-seed")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(target.operation_id, pending_id);
         assert_eq!(target.update, pending_update);
@@ -313,7 +337,7 @@ mod tests {
                 update: to_execution_resource_update(&cpu_share_update(512)),
             });
 
-        let error = resolve(&record, &cpu_share_update(1024)).unwrap_err();
+        let error = resolve(&record, &cpu_share_update(1024), "cli-update-unused").unwrap_err();
 
         assert!(error.contains("different live resource update in progress"));
         assert!(error.contains("retry that update"));
@@ -334,7 +358,9 @@ mod tests {
             update: completed_update,
         });
 
-        let target = resolve(&record, &cpu_share_update(2048)).unwrap().unwrap();
+        let target = resolve(&record, &cpu_share_update(2048), "cli-update-ignored-seed")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(target.operation_id, completed_id);
     }
@@ -353,10 +379,12 @@ mod tests {
             update: to_execution_resource_update(&cpu_share_update(2048)),
         });
 
-        let target = resolve(&record, &cpu_share_update(2048)).unwrap().unwrap();
+        let target = resolve(&record, &cpu_share_update(2048), "cli-update-fresh-seed")
+            .unwrap()
+            .unwrap();
 
         assert_ne!(target.operation_id, completed_id);
-        assert!(target.operation_id.as_str().starts_with("cli-update-"));
+        assert_eq!(target.operation_id.as_str(), "cli-update-fresh-seed");
     }
 
     #[test]
@@ -393,9 +421,28 @@ mod tests {
     fn paused_managed_update_does_not_fall_back_to_legacy_transport() {
         let record = managed_oci_record(ManagedExecutionState::Paused);
 
-        let error = resolve(&record, &cpu_share_update(512)).unwrap_err();
+        let error = resolve(&record, &cpu_share_update(512), "cli-update-unused").unwrap_err();
 
         assert!(error.contains("while it is paused"));
         assert!(error.contains("retry"));
+    }
+
+    #[test]
+    fn annotate_update_unavailable_surfaces_request_id() {
+        let annotated = annotate_update_unavailable(
+            "failed: Unavailable(response lost)".to_string(),
+            "cli-update-abc",
+        );
+        assert!(
+            annotated.contains("reuse --request-id cli-update-abc"),
+            "{annotated}"
+        );
+    }
+
+    #[test]
+    fn annotate_update_non_unavailable_keeps_message() {
+        let annotated =
+            annotate_update_unavailable("failed: invalid limits".to_string(), "cli-update-abc");
+        assert!(!annotated.contains("reuse --request-id"), "{annotated}");
     }
 }
