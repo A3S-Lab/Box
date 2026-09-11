@@ -147,6 +147,12 @@ pub struct ComposeExecArgs {
     #[arg(short = 'u', long)]
     pub user: Option<String>,
 
+    /// Stable process-journal identity for one-shot exec retries after
+    /// retryable Unavailable. Omit to mint a `cli-exec-*` id. Incompatible
+    /// with `-t`/`--tty`.
+    #[arg(long = "request-id")]
+    pub request_id: Option<String>,
+
     /// Command and arguments
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
@@ -357,6 +363,7 @@ pub async fn execute_exec(
         interactive: args.interactive,
         tty: args.tty,
         user: args.user,
+        request_id: args.request_id,
         cmd: args.command,
     })
     .await
