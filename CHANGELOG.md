@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- CLI `exec` / `compose exec` accept optional `--request-id` and mint a
+  `cli-exec-*` identity when omitted, so one-shot keyed-exec retries after
+  retryable `Unavailable` can reuse the same process-journal key (parity with
+  SDK `request_id` / `requestId` / `RunRequestID`). Unavailable errors annotate
+  `reuse --request-id <id>`. `--request-id` is rejected with `-t`/`--tty`.
+  Does **not** flip B2 harness close, fixture continuity, or hosted-KVM claims.
+  Does **not** widen guest `ExecOutput` wire fields.
+
 ### Fixed
 
 - One-shot OCI `exec` retries once on retryable `Unavailable` with the **same**

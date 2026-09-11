@@ -14,6 +14,7 @@ use crate::resolve;
 use crate::state::StateFile;
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const MAX_EXEC_REQUEST_ID_BYTES: usize = 512;
 
 #[derive(Args)]
 pub struct ExecArgs {
@@ -43,6 +44,12 @@ pub struct ExecArgs {
     /// Run the command as a specific user (supported: root, UID, UID:GID)
     #[arg(short = 'u', long)]
     pub user: Option<String>,
+
+    /// Stable process-journal identity for one-shot exec retries after
+    /// retryable Unavailable. Omit to mint a `cli-exec-*` id. Incompatible
+    /// with `-t`/`--tty` (streaming sessions reject one-shot request ids).
+    #[arg(long = "request-id")]
+    pub request_id: Option<String>,
 
     /// Command and arguments to execute
     #[arg(last = true, required = true)]
@@ -99,6 +106,10 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // If -t is specified, use interactive PTY mode
     if args.tty {
+        if args.request_id.is_some() {
+            return Err("Cannot use --request-id with -t/--tty".into());
+        }
+
         #[cfg(windows)]
         return Err(crate::platform::unsupported_command(
             "exec --tty",
@@ -114,6 +125,8 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let timeout_ns = timeout_secs_to_ns(args.timeout);
+    let request_id = resolve_exec_request_id(args.request_id)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     // Read stdin if interactive mode
     let stdin_data = if args.interactive {
@@ -130,7 +143,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let request = ExecRequest {
-        request_id: None,
+        request_id: Some(request_id.clone()),
         cmd: args.cmd,
         timeout_ns,
         env: args.envs,
@@ -142,7 +155,10 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         streaming: false,
     };
 
-    let output = execute_captured(record, request).await?;
+    let output = match execute_captured(record, request).await {
+        Ok(output) => output,
+        Err(error) => return Err(annotate_unavailable_with_request_id(error, &request_id)),
+    };
     // Record that an exec happened (best-effort) before the exit-code branch
     // below may std::process::exit. The container command's own exit code is
     // separate from whether the exec was delivered.
@@ -222,6 +238,49 @@ fn timeout_secs_to_ns(timeout_secs: u64) -> u64 {
         // Cap absurd values at u64::MAX ns instead of overflowing into a tiny
         // timeout in release builds.
         timeout_secs.saturating_mul(NANOS_PER_SECOND)
+    }
+}
+
+fn validate_exec_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_EXEC_REQUEST_ID_BYTES
+        || request_id.contains('\0')
+    {
+        return Err(
+            "--request-id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn resolve_exec_request_id(request_id: Option<String>) -> Result<String, String> {
+    match request_id {
+        Some(request_id) => {
+            validate_exec_request_id(&request_id)?;
+            Ok(request_id)
+        }
+        None => Ok(format!("cli-exec-{}", uuid::Uuid::new_v4().simple())),
+    }
+}
+
+fn annotate_unavailable_with_request_id(
+    error: Box<dyn std::error::Error>,
+    request_id: &str,
+) -> Box<dyn std::error::Error> {
+    use a3s_box_core::ExecutionManagerError;
+
+    let unavailable = error
+        .downcast_ref::<ExecutionManagerError>()
+        .is_some_and(|error| matches!(error, ExecutionManagerError::Unavailable(_)))
+        || error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("unavailable");
+    if unavailable {
+        format!("{error} (reuse --request-id {request_id})").into()
+    } else {
+        error
     }
 }
 
@@ -537,9 +596,17 @@ pub(crate) async fn run_pty_session(
     exit_code
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::ExecutionManagerError;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct ExecCli {
+        #[command(flatten)]
+        exec: ExecArgs,
+    }
 
     #[test]
     fn timeout_secs_to_ns_uses_default_for_zero() {
@@ -557,5 +624,64 @@ mod tests {
     #[test]
     fn timeout_secs_to_ns_saturates_large_values() {
         assert_eq!(timeout_secs_to_ns(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn resolve_exec_request_id_mints_cli_prefix_when_omitted() {
+        let minted = resolve_exec_request_id(None).expect("mint");
+        assert!(
+            minted.starts_with("cli-exec-"),
+            "unexpected minted id: {minted}"
+        );
+        assert!(validate_exec_request_id(&minted).is_ok());
+    }
+
+    #[test]
+    fn resolve_exec_request_id_rejects_invalid_ids() {
+        assert!(resolve_exec_request_id(Some(String::new())).is_err());
+        assert!(resolve_exec_request_id(Some("bad\0id".to_string())).is_err());
+        assert!(resolve_exec_request_id(Some("x".repeat(513))).is_err());
+        assert_eq!(
+            resolve_exec_request_id(Some("caller-stable-exec-1".to_string())).as_deref(),
+            Ok("caller-stable-exec-1")
+        );
+    }
+
+    #[test]
+    fn annotate_unavailable_surfaces_request_id_for_retry() {
+        let error: Box<dyn std::error::Error> =
+            ExecutionManagerError::Unavailable("response lost".to_string()).into();
+        let annotated = annotate_unavailable_with_request_id(error, "cli-exec-abc");
+        let message = annotated.to_string();
+        assert!(message.contains("unavailable"), "{message}");
+        assert!(
+            message.contains("reuse --request-id cli-exec-abc"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn annotate_non_unavailable_keeps_original_error() {
+        let error: Box<dyn std::error::Error> =
+            ExecutionManagerError::InvalidRequest("bad argv".to_string()).into();
+        let annotated = annotate_unavailable_with_request_id(error, "cli-exec-abc");
+        let message = annotated.to_string();
+        assert!(message.contains("bad argv"), "{message}");
+        assert!(!message.contains("reuse --request-id"), "{message}");
+    }
+
+    #[test]
+    fn clap_parses_request_id_for_one_shot_exec() {
+        let cli = ExecCli::try_parse_from([
+            "exec",
+            "demo",
+            "--request-id",
+            "caller-stable-exec-1",
+            "--",
+            "true",
+        ])
+        .expect("parse exec");
+        assert_eq!(cli.exec.request_id.as_deref(), Some("caller-stable-exec-1"));
+        assert!(!cli.exec.tty);
     }
 }

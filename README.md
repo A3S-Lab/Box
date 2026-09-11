@@ -185,6 +185,8 @@ a3s-box run -d --name web --memory 1g -p 8080:80 nginx:alpine
 a3s-box ps
 a3s-box logs -f web
 a3s-box exec web -- nginx -v
+# Stable keyed-exec identity for Unavailable retries (omit to mint cli-exec-*):
+# a3s-box exec web --request-id caller-stable-exec-1 -- true
 a3s-box stop web
 a3s-box rm web
 ```
