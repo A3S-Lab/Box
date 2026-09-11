@@ -76,6 +76,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- KVM MicroVM live-session keyed captured exec retries OCI retryable
+  `Unavailable` with the **same** `request_id` (parity with Native Live #300).
+  Distinct `{id}.retry-N` keys orphan `active_operation` claims and can block
+  generation delete after Host reopen. Does **not** flip
+  `b2_process_session_recovery_closed`, fixture continuity, or hosted-KVM
+  claims without `/dev/kvm`.
+- Disarm the detached OCI exec timeout watchdog as soon as `wait_process`
+  observes a terminal status (not only when `Exit` is later popped), so a
+  dropped stream cannot race a late timeout SIGKILL claim against a finished
+  process. Detached futures that still wait for timeout keep the watchdog.
+
 - Native live-session v4 CI on OCI `05a3b2b…` (#300): restore matched-cred
   harness, `100755` scripts, Verify cleanup, same-request_id keyed-exec
   retries (orphan `{id}.retry-N` journals blocked generation delete), and

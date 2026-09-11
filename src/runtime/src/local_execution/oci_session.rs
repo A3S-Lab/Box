@@ -1048,7 +1048,12 @@ impl ExecutionProcessStream for OciProcessStream {
                     })
                     .await
                 {
-                    Ok(status) => self.status = Some(status),
+                    Ok(status) => {
+                        self.status = Some(status);
+                        // Process is terminal: disarm before Exit is popped so a
+                        // dropped stream cannot race a late timeout SIGKILL claim.
+                        self.watchdog.store(WATCHDOG_FINISHED, Ordering::SeqCst);
+                    }
                     Err(error) if error.code == ErrorCode::DeadlineExceeded => {}
                     Err(error) => return Err(sdk_error("wait process", error)),
                 }

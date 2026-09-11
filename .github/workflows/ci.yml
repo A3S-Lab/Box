@@ -34,6 +34,36 @@ jobs:
         run: bash scripts/check-oci-pins.sh
       - name: Verify live-session report honesty checker
         run: python3 scripts/verify-linux-native-live-session-report.py --self-test
+      - name: Enforce live-session script +x and keyed-exec retry identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            scripts/elevate-linux-sandbox-owner.sh \
+            scripts/linux-native-live-session-qualification.sh \
+            scripts/linux-kvm-live-session-qualification.sh
+          do
+            mode="$(git ls-files -s -- "$path" | awk '{print $1}')"
+            if [[ "$mode" != "100755" ]]; then
+              echo "expected 100755 for $path, got ${mode:-missing}"
+              exit 1
+            fi
+          done
+          # Same-request_id Unavailable retries (Native #300 / KVM parity): refuse
+          # resurrecting orphan `{id}.retry-N` process journals.
+          for path in \
+            src/runtime/examples/linux_native_live_session_qualification.rs \
+            src/runtime/examples/linux_kvm_live_session_qualification.rs
+          do
+            if ! grep -Fq 'Retry the same' "$path"; then
+              echo "$path must retry keyed captured exec with the same request_id"
+              exit 1
+            fi
+            if grep -Eq 'retry-\{attempt\}|format!\("\{request_id\}\.retry' "$path"; then
+              echo "$path must not mint distinct {id}.retry-N keyed exec identities"
+              exit 1
+            fi
+          done
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
