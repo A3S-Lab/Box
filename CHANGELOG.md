@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- CLI `cp` mutators that use one-shot guest `exec` (chmod restore, directory
+  tar archive/extract) mint a `cli-cp-*` process-journal identity and annotate
+  retryable Unavailable with that id (parity with `exec --request-id`). Does
+  **not** flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - CLI `exec` / `compose exec` accept optional `--request-id` and mint a
   `cli-exec-*` identity when omitted, so one-shot keyed-exec retries after
   retryable `Unavailable` can reuse the same process-journal key (parity with
