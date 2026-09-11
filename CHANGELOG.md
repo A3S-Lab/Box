@@ -6,6 +6,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- CLI `container-update` accepts optional `--request-id` and mints a
+  `cli-update-*` identity when omitted. Managed OCI live Tier-2 updates use it
+  as the durable `operation_id` when minting a new update; legacy MicroVM live
+  updates pass it as the guest one-shot exec `request_id` so the guest replay
+  cache can reconcile lost responses. Unavailable / ambiguous transport errors
+  annotate `reuse --request-id <id>`. Pending or already-completed matching
+  managed updates keep their stored operation identity (no `{id}.retry-N`).
+  Does **not** flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - CLI `cp` mutators that use one-shot guest `exec` (chmod restore, directory
   tar archive/extract) mint a `cli-cp-*` process-journal identity and annotate
   retryable Unavailable with that id (parity with `exec --request-id`). Does

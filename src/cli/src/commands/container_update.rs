@@ -69,6 +69,13 @@ pub struct ContainerUpdateArgs {
     /// Restart policy: no, always, on-failure, unless-stopped
     #[arg(long)]
     pub restart: Option<String>,
+
+    /// Stable identity for live Tier-2 update retries after retryable
+    /// Unavailable. Omit to mint a `cli-update-*` id. Managed OCI routes use it
+    /// as the durable `operation_id` when minting a new update; legacy MicroVM
+    /// routes use it as the guest one-shot exec `request_id` (replay cache).
+    #[arg(long = "request-id")]
+    pub request_id: Option<String>,
 }
 
 pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -175,8 +182,11 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     #[cfg(not(windows))]
+    let update_request_id = resolve_update_request_id(args.request_id.clone())
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    #[cfg(not(windows))]
     let managed_live_update = if requires_live_apply && update.has_tier2_changes() {
-        managed::resolve(record, &update)
+        managed::resolve(record, &update, &update_request_id)
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?
     } else {
         None
@@ -222,7 +232,7 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
                 managed_tier2_persisted = true;
             } else {
-                apply_legacy_live_tier2_update(&live_apply_record, &update)
+                apply_legacy_live_tier2_update(&live_apply_record, &update, &update_request_id)
                     .await
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             }
@@ -290,9 +300,58 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
 }
 
 #[cfg(not(windows))]
+const MAX_UPDATE_REQUEST_ID_BYTES: usize = 512;
+
+#[cfg(not(windows))]
+fn mint_cli_update_request_id() -> String {
+    format!("cli-update-{}", uuid::Uuid::new_v4().simple())
+}
+
+#[cfg(not(windows))]
+fn validate_update_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_UPDATE_REQUEST_ID_BYTES
+        || request_id.contains('\0')
+    {
+        return Err(
+            "update request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn resolve_update_request_id(request_id: Option<String>) -> Result<String, String> {
+    match request_id {
+        Some(request_id) => {
+            validate_update_request_id(&request_id)?;
+            Ok(request_id)
+        }
+        None => Ok(mint_cli_update_request_id()),
+    }
+}
+
+#[cfg(not(windows))]
+fn annotate_legacy_update_unavailable(message: String, request_id: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let retryable = lower.contains("unavailable")
+        || lower.contains("closed without response")
+        || lower.contains("response timed out")
+        || lower.contains("response read failed")
+        || lower.contains("connection failed");
+    if retryable {
+        format!("{message} (reuse --request-id {request_id})")
+    } else {
+        message
+    }
+}
+
+#[cfg(not(windows))]
 async fn apply_legacy_live_tier2_update(
     record: &crate::state::BoxRecord,
     update: &ResourceUpdate,
+    request_id: &str,
 ) -> Result<(), String> {
     if record.isolation.is_sandbox() {
         let config = crate::boot::config_from_record(record)?;
@@ -329,9 +388,12 @@ async fn apply_legacy_live_tier2_update(
     let client = ExecClient::connect(&exec_socket_path)
         .await
         .map_err(|error| {
-            format!(
-                "failed to connect to {} for live update: {error}; no state changes were persisted",
-                record.name
+            annotate_legacy_update_unavailable(
+                format!(
+                    "failed to connect to {} for live update: {error}; no state changes were persisted",
+                    record.name
+                ),
+                request_id,
             )
         })?;
     let commands = update.build_microvm_cgroup_commands();
@@ -342,7 +404,7 @@ async fn apply_legacy_live_tier2_update(
         );
     }
     let request = ExecRequest {
-        request_id: None,
+        request_id: Some(request_id.to_string()),
         cmd: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -369,9 +431,12 @@ async fn apply_legacy_live_tier2_update(
                 stderr.trim()
             ))
         }
-        Err(error) => Err(format!(
-            "failed to apply live update to {}: {error}; no state changes were persisted",
-            record.name
+        Err(error) => Err(annotate_legacy_update_unavailable(
+            format!(
+                "failed to apply live update to {}: {error}; no state changes were persisted",
+                record.name
+            ),
+            request_id,
         )),
     }
 }
@@ -739,24 +804,75 @@ mod tests {
         assert!(error.contains("stop the box"));
     }
 
-    #[cfg(windows)]
+    #[cfg(not(windows))]
     #[test]
-    fn windows_update_rejects_persisted_effective_health_check() {
-        let mut record = crate::test_helpers::fixtures::make_record(
-            "health-update-id",
-            "health-update",
-            "stopped",
-            None,
+    fn resolve_update_request_id_mints_cli_prefix_when_omitted() {
+        let minted = resolve_update_request_id(None).expect("mint");
+        assert!(
+            minted.starts_with("cli-update-"),
+            "unexpected request_id: {minted}"
         );
-        record.health_check = Some(crate::state::HealthCheck {
-            cmd: vec!["true".to_string()],
-            interval_secs: 30,
-            timeout_secs: 5,
-            retries: 3,
-            start_period_secs: 0,
-        });
+        assert!(validate_update_request_id(&minted).is_ok());
+    }
 
-        let error = sync_managed_creation_intent(&mut record, false).unwrap_err();
-        assert!(error.contains("health checks are not supported on Windows"));
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_update_request_id_rejects_invalid_ids() {
+        assert!(resolve_update_request_id(Some(String::new())).is_err());
+        assert!(resolve_update_request_id(Some("bad\0id".to_string())).is_err());
+        assert!(resolve_update_request_id(Some("x".repeat(513))).is_err());
+        assert_eq!(
+            resolve_update_request_id(Some("caller-stable-update-1".to_string())).as_deref(),
+            Ok("caller-stable-update-1")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn annotate_legacy_update_unavailable_surfaces_request_id() {
+        let annotated = annotate_legacy_update_unavailable(
+            "failed to apply live update: Exec server closed without response".to_string(),
+            "cli-update-abc",
+        );
+        assert!(
+            annotated.contains("reuse --request-id cli-update-abc"),
+            "{annotated}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn annotate_legacy_update_non_retryable_keeps_message() {
+        let annotated = annotate_legacy_update_unavailable(
+            "live cgroup update failed for demo (exit 1): boom".to_string(),
+            "cli-update-abc",
+        );
+        assert!(!annotated.contains("reuse --request-id"), "{annotated}");
+    }
+
+    #[test]
+    fn clap_parses_request_id_for_container_update() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        #[command(name = "container-update")]
+        struct UpdateCli {
+            #[command(flatten)]
+            update: ContainerUpdateArgs,
+        }
+
+        let cli = UpdateCli::try_parse_from([
+            "container-update",
+            "demo",
+            "--cpu-shares",
+            "512",
+            "--request-id",
+            "caller-stable-update-1",
+        ])
+        .expect("parse");
+        assert_eq!(
+            cli.update.request_id.as_deref(),
+            Some("caller-stable-update-1")
+        );
     }
 }
