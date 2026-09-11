@@ -580,11 +580,12 @@ async fn command_run_reuses_stable_request_id_and_rejects_invalid_ids() {
         .await
         .unwrap();
 
-    let exec = runtime.exec_requests.lock().unwrap();
-    assert_eq!(exec.len(), 2);
-    assert_eq!(exec[0].request_id.as_deref(), Some("caller-stable-exec-1"));
-    assert_eq!(exec[1].request_id.as_deref(), Some("caller-stable-exec-1"));
-    drop(exec);
+    {
+        let exec = runtime.exec_requests.lock().unwrap();
+        assert_eq!(exec.len(), 2);
+        assert_eq!(exec[0].request_id.as_deref(), Some("caller-stable-exec-1"));
+        assert_eq!(exec[1].request_id.as_deref(), Some("caller-stable-exec-1"));
+    }
 
     let empty = sandbox
         .commands
