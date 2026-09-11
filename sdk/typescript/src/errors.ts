@@ -1,10 +1,18 @@
 export class A3SBoxError extends Error {
   readonly code: string
+  readonly requestId?: string
 
-  constructor(message: string, code = 'runtime_error') {
+  constructor(
+    message: string,
+    code = 'runtime_error',
+    options?: { requestId?: string }
+  ) {
     super(message)
     this.name = 'A3SBoxError'
     this.code = code
+    if (options?.requestId !== undefined) {
+      this.requestId = options.requestId
+    }
   }
 }
 

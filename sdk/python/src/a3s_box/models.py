@@ -12,6 +12,7 @@ class CommandResult:
     stderr: str
     exit_code: int
     truncated: bool = False
+    request_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

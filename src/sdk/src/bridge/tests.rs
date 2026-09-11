@@ -202,6 +202,50 @@ fn unsupported_runtime_capabilities_are_unavailable() {
 
     assert_eq!(failure.code, "unavailable");
     assert!(failure.message.contains("no TEE device"));
+    assert_eq!(failure.request_id, None);
+}
+
+#[test]
+fn command_unavailable_surfaces_request_id_on_bridge_error() {
+    let failure = BridgeFailure::from(ClientError::CommandUnavailable {
+        request_id: "sdk-command-abc".to_string(),
+        message: "prepare-exec interrupted".to_string(),
+    });
+    assert_eq!(failure.code, "unavailable");
+    assert_eq!(failure.request_id.as_deref(), Some("sdk-command-abc"));
+    assert!(failure.message.contains("prepare-exec"));
+}
+
+#[test]
+fn command_run_request_accepts_optional_request_id() {
+    let with_id: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"command_run",
+            "sandbox_id":"box-1",
+            "generation":1,
+            "argv":["true"],
+            "request_id":"caller-stable-exec-1"
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::CommandRun { request_id, .. } = with_id else {
+        panic!("expected command_run");
+    };
+    assert_eq!(request_id.as_deref(), Some("caller-stable-exec-1"));
+
+    let omitted: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"command_run",
+            "sandbox_id":"box-1",
+            "generation":1,
+            "argv":["true"]
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::CommandRun { request_id, .. } = omitted else {
+        panic!("expected command_run");
+    };
+    assert_eq!(request_id, None);
 }
 
 #[tokio::test]

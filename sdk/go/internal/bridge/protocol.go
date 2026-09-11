@@ -71,6 +71,7 @@ type Envelope struct {
 }
 
 type RemoteError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
 }

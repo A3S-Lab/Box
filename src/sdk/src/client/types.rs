@@ -10,6 +10,10 @@ pub enum ClientError {
     Runtime(#[from] a3s_box_core::error::BoxError),
     #[error("execution lifecycle error: {0}")]
     Execution(#[from] a3s_box_core::ExecutionManagerError),
+    /// Retryable command failure that already claimed process-journal
+    /// `request_id`. Callers must reuse that id on retry.
+    #[error("{message}")]
+    CommandUnavailable { request_id: String, message: String },
     #[error("validation error: {0}")]
     Validation(String),
     #[error("guest operation failed: {0}")]

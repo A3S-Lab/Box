@@ -6,9 +6,16 @@ from __future__ import annotations
 class A3SBoxError(RuntimeError):
     """Base error returned by the local A3S Box runtime."""
 
-    def __init__(self, message: str, *, code: str = "runtime_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "runtime_error",
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.request_id = request_id
 
 
 class A3SBoxNotInstalledError(A3SBoxError):

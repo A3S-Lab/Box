@@ -171,12 +171,17 @@ pub struct BridgeResponse {
 pub struct BridgeError {
     pub code: &'static str,
     pub message: String,
+    /// Present for retryable command_run Unavailable so callers can reuse the
+    /// same process-journal identity on retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug)]
 struct BridgeFailure {
     code: &'static str,
     message: String,
+    request_id: Option<String>,
 }
 
 impl BridgeResponse {
@@ -197,6 +202,7 @@ impl BridgeResponse {
             error: Some(BridgeError {
                 code: error.code,
                 message: error.message,
+                request_id: error.request_id,
             }),
         }
     }
@@ -210,6 +216,7 @@ pub async fn dispatch_json(input: &str) -> BridgeResponse {
             return BridgeResponse::failure(BridgeFailure {
                 code: "invalid_request",
                 message: format!("invalid SDK bridge request: {error}"),
+                request_id: None,
             })
         }
     };
@@ -219,6 +226,7 @@ pub async fn dispatch_json(input: &str) -> BridgeResponse {
             return BridgeResponse::failure(BridgeFailure {
                 code: "runtime_error",
                 message: format!("failed to configure local execution: {error}"),
+                request_id: None,
             })
         }
     };
@@ -670,6 +678,7 @@ async fn execute_request(
                 "stderr_base64": STANDARD.encode(output.stderr_bytes),
                 "exit_code": output.exit_code,
                 "truncated": output.truncated,
+                "request_id": output.request_id,
             }))
         }
         BridgeRequest::FileWrite {
@@ -863,6 +872,7 @@ fn serialize_value(value: impl Serialize) -> Result<Value, BridgeFailure> {
     serde_json::to_value(value).map_err(|error| BridgeFailure {
         code: "runtime_error",
         message: format!("failed to encode SDK bridge result: {error}"),
+        request_id: None,
     })
 }
 
@@ -916,6 +926,7 @@ fn bridge_encoding_failure(message: impl Into<String>) -> BridgeFailure {
     BridgeFailure {
         code: "runtime_error",
         message: format!("failed to encode SDK bridge result: {}", message.into()),
+        request_id: None,
     }
 }
 
@@ -968,6 +979,7 @@ fn invalid(message: impl Into<String>) -> BridgeFailure {
     BridgeFailure {
         code: "invalid_request",
         message: message.into(),
+        request_id: None,
     }
 }
 
@@ -975,44 +987,63 @@ fn conflict(message: impl Into<String>) -> BridgeFailure {
     BridgeFailure {
         code: "conflict",
         message: message.into(),
+        request_id: None,
     }
 }
 
 impl From<ClientError> for BridgeFailure {
     fn from(error: ClientError) -> Self {
-        let code = match &error {
-            ClientError::BoxNotFound(_) => "not_found",
-            ClientError::AmbiguousBoxQuery { .. } | ClientError::Validation(_) => "invalid_request",
-            ClientError::Execution(a3s_box_core::ExecutionManagerError::NotFound(_)) => "not_found",
-            ClientError::Execution(a3s_box_core::ExecutionManagerError::InvalidRequest(_)) => {
-                "invalid_request"
-            }
-            ClientError::Execution(a3s_box_core::ExecutionManagerError::Conflict { .. }) => {
-                "conflict"
-            }
-            ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(_)) => {
-                "unavailable"
-            }
-            ClientError::Runtime(BoxError::ConfigError(_) | BoxError::TeeConfig(_)) => {
-                "invalid_request"
-            }
-            ClientError::Runtime(BoxError::TeeNotSupported(_)) => "unavailable",
-            ClientError::Guest(message) => {
-                if message.to_ascii_lowercase().contains("not found") {
-                    "not_found"
-                } else {
-                    "runtime_error"
+        match error {
+            ClientError::CommandUnavailable {
+                request_id,
+                message,
+            } => Self {
+                code: "unavailable",
+                message,
+                request_id: Some(request_id),
+            },
+            error => {
+                let code = match &error {
+                    ClientError::BoxNotFound(_) => "not_found",
+                    ClientError::AmbiguousBoxQuery { .. } | ClientError::Validation(_) => {
+                        "invalid_request"
+                    }
+                    ClientError::Execution(a3s_box_core::ExecutionManagerError::NotFound(_)) => {
+                        "not_found"
+                    }
+                    ClientError::Execution(
+                        a3s_box_core::ExecutionManagerError::InvalidRequest(_),
+                    ) => "invalid_request",
+                    ClientError::Execution(a3s_box_core::ExecutionManagerError::Conflict {
+                        ..
+                    }) => "conflict",
+                    ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(_)) => {
+                        "unavailable"
+                    }
+                    ClientError::Runtime(BoxError::ConfigError(_) | BoxError::TeeConfig(_)) => {
+                        "invalid_request"
+                    }
+                    ClientError::Runtime(BoxError::TeeNotSupported(_)) => "unavailable",
+                    ClientError::Guest(message) => {
+                        if message.to_ascii_lowercase().contains("not found") {
+                            "not_found"
+                        } else {
+                            "runtime_error"
+                        }
+                    }
+                    ClientError::State(_)
+                    | ClientError::Runtime(_)
+                    | ClientError::Execution(a3s_box_core::ExecutionManagerError::Internal(_)) => {
+                        "runtime_error"
+                    }
+                    ClientError::CommandUnavailable { .. } => unreachable!(),
+                };
+                Self {
+                    code,
+                    message: error.to_string(),
+                    request_id: None,
                 }
             }
-            ClientError::State(_)
-            | ClientError::Runtime(_)
-            | ClientError::Execution(a3s_box_core::ExecutionManagerError::Internal(_)) => {
-                "runtime_error"
-            }
-        };
-        Self {
-            code,
-            message: error.to_string(),
         }
     }
 }

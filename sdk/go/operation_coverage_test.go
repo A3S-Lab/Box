@@ -214,7 +214,7 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "sandbox_remove":
 		return SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateRemoved, Isolation: IsolationMicroVM}, nil
 	case "command_run":
-		return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false}, nil
+		return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false, "request_id": "sdk-command-test"}, nil
 	case "file_write":
 		return WriteInfo{Path: "/tmp/value", Size: 5}, nil
 	case "file_read":

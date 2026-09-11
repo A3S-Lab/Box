@@ -354,7 +354,7 @@ func TestLifecycleWaitsForInFlightCommand(t *testing.T) {
 		case "command_run":
 			close(commandStarted)
 			<-releaseCommand
-			return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false}, nil
+			return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false, "request_id": "sdk-command-test"}, nil
 		case "sandbox_kill":
 			close(killReachedRuntime)
 			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateFailed, Isolation: IsolationMicroVM}, nil
@@ -395,6 +395,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 				"stderr_base64": base64.StdEncoding.EncodeToString([]byte("warning")),
 				"exit_code":     7,
 				"truncated":     true,
+				"request_id":    "caller-stable-exec-1",
 			}, nil
 		case "file_write":
 			data, err := base64.StdEncoding.DecodeString(stringValue(request["data_base64"]))
@@ -430,7 +431,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 		RunStdin(binaryOutput),
 		RunRequestID("caller-stable-exec-1"),
 	)
-	if err != nil || !reflect.DeepEqual(result.Stdout, binaryOutput) || result.ExitCode != 7 || !result.Truncated {
+	if err != nil || !reflect.DeepEqual(result.Stdout, binaryOutput) || result.ExitCode != 7 || !result.Truncated || result.RequestID != "caller-stable-exec-1" {
 		t.Fatalf("command result=%+v err=%v", result, err)
 	}
 	command := requestByOperation(t, runtime.Requests(), "command_run")

@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Command results and retryable `Unavailable` errors now surface the
+  process-journal `request_id` used for that one-shot exec (SDK-minted or
+  caller-provided). Omit-path callers can retry with the same identity after
+  a partial prepare-exec without inventing `{id}.retry-N`. Bridge
+  `command_run` success includes `request_id`; Unavailable bridge errors may
+  include `request_id`. Does **not** flip B2 harness close or auto-retry
+  commands inside the SDK.
+
 - Native SDKs expose an optional stable command `request_id` /
   `requestId` / `RunRequestID` so callers can retry retryable OCI
   `Unavailable` with the **same** process-journal identity. Defaults still

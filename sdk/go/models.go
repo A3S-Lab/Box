@@ -312,6 +312,7 @@ type CommandResult struct {
 	Stderr    []byte
 	ExitCode  int
 	Truncated bool
+	RequestID string
 }
 
 func (result CommandResult) StdoutString() string { return string(result.Stdout) }

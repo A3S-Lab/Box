@@ -307,10 +307,16 @@ def _decode_response(stdout: str, stderr: str, returncode: int) -> dict[str, Any
         if isinstance(raw_error, dict):
             code = str(raw_error.get("code", "runtime_error"))
             message = str(raw_error.get("message", "Local A3S Box request failed"))
+            request_id = raw_error.get("request_id")
+            if request_id is not None and not isinstance(request_id, str):
+                request_id = None
+            elif isinstance(request_id, str) and not request_id:
+                request_id = None
         else:
             code = "runtime_error"
             message = "Local A3S Box request failed"
-        raise A3SBoxError(message, code=code)
+            request_id = None
+        raise A3SBoxError(message, code=code, request_id=request_id)
     result = envelope.get("result")
     if not isinstance(result, dict):
         raise A3SBoxError(

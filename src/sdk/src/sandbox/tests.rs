@@ -46,6 +46,7 @@ struct RecordingRuntime {
     logs: Mutex<Vec<LogEntry>>,
     event_requests: Mutex<VecDeque<(ExecutionGeneration, ExecutionEventsRequest)>>,
     runtime_events: Mutex<Vec<ExecutionRuntimeEvent>>,
+    fail_next_execute: Mutex<bool>,
 }
 
 impl RecordingRuntime {
@@ -120,7 +121,12 @@ impl RecordingRuntime {
                     attributes: BTreeMap::new(),
                 },
             ]),
+            fail_next_execute: Mutex::new(false),
         }
+    }
+
+    fn fail_next_execute(&self) {
+        *self.fail_next_execute.lock().unwrap() = true;
     }
 
     fn execution_id() -> ExecutionId {
@@ -394,6 +400,11 @@ impl ExecutionSessionManager for RecordingRuntime {
         request: ExecRequest,
     ) -> ExecutionManagerResult<ExecOutput> {
         self.exec_requests.lock().unwrap().push(request);
+        if std::mem::replace(&mut *self.fail_next_execute.lock().unwrap(), false) {
+            return Err(ExecutionManagerError::Unavailable(
+                "prepare-exec interrupted".to_string(),
+            ));
+        }
         Ok(ExecOutput {
             stdout: b"42\n".to_vec(),
             stderr: Vec::new(),
@@ -608,6 +619,55 @@ async fn command_run_reuses_stable_request_id_and_rejects_invalid_ids() {
         .await
         .unwrap_err();
     assert!(matches!(oversized, ClientError::Validation(_)));
+}
+
+#[tokio::test]
+async fn command_run_unavailable_preserves_request_id_for_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    runtime.fail_next_execute();
+    let first = sandbox
+        .commands
+        .run_with_options("true", CommandRunOptions::default())
+        .await
+        .unwrap_err();
+    let ClientError::CommandUnavailable {
+        request_id,
+        message,
+    } = first
+    else {
+        panic!("expected CommandUnavailable, got {first:?}");
+    };
+    assert!(
+        request_id.starts_with("sdk-command-"),
+        "minted request_id missing: {request_id}"
+    );
+    assert!(message.contains("prepare-exec"));
+
+    let recovered = sandbox
+        .commands
+        .run_with_options(
+            "true",
+            CommandRunOptions::default().request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.request_id, request_id);
+    assert_eq!(recovered.exit_code, 0);
+
+    {
+        let exec = runtime.exec_requests.lock().unwrap();
+        assert_eq!(exec.len(), 2);
+        assert_eq!(exec[0].request_id.as_deref(), Some(request_id.as_str()));
+        assert_eq!(exec[1].request_id.as_deref(), Some(request_id.as_str()));
+    }
 }
 
 #[tokio::test]

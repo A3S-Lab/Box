@@ -363,11 +363,15 @@ def filesystem_snapshot_info(
 def command_result(result: Mapping[str, object]) -> CommandResult:
     stdout = decoded_base64(result.get("stdout_base64", ""), "stdout_base64")
     stderr = decoded_base64(result.get("stderr_base64", ""), "stderr_base64")
+    request_id = result.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        protocol_error("command_run result missing request_id")
     return CommandResult(
         stdout=stdout.decode(errors="replace"),
         stderr=stderr.decode(errors="replace"),
         exit_code=integer(result["exit_code"]),
         truncated=boolean(result.get("truncated", False)),
+        request_id=request_id,
     )
 
 

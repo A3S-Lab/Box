@@ -192,6 +192,9 @@ func decodeBridgeResponse(operation string, output []byte, result any) error {
 		if message == "" {
 			message = "local bridge request failed"
 		}
+		if envelope.Error.RequestID != "" {
+			return sdkErrorWithRequestID(operation, code, message, envelope.Error.RequestID, nil)
+		}
 		return sdkError(operation, code, message, nil)
 	}
 	trimmed := bytes.TrimSpace(envelope.Result)
