@@ -13,6 +13,11 @@ All notable changes to A3S Box will be documented in this file.
   a caller-provided `request_id` to avoid orphan journals. Does **not** flip
   B2 harness close, fixture continuity, or hosted-KVM claims.
 
+- Go / Python / TypeScript SDKs cover Unavailable → `request_id` /
+  `requestId` / `RequestID` round-trips (bridge decode + omit-path command
+  retry reuse). Does **not** auto-retry commands inside language SDKs or flip
+  B2 harness close.
+
 - Mutating OCI file upload and filesystem ops derive durable operation
   identity from `execution_id` + generation + request payload (same pattern as
   kill/delete), instead of minting a fresh `session-{uuid}` seed per call.

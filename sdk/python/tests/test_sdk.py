@@ -726,6 +726,69 @@ class SdkTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "bridge_protocol_error")
 
+    def test_unavailable_error_preserves_request_id_from_bridge(self) -> None:
+        envelope = json.dumps(
+            {
+                "protocol_version": BRIDGE_PROTOCOL_VERSION,
+                "ok": False,
+                "error": {
+                    "code": "unavailable",
+                    "message": "prepare-exec response was lost",
+                    "request_id": "sdk-command-abc",
+                },
+            }
+        )
+
+        with self.assertRaises(A3SBoxError) as raised:
+            _decode_response(envelope, "", 0)
+
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "sdk-command-abc")
+        self.assertIn("prepare-exec", str(raised.exception))
+
+    def test_command_unavailable_preserves_request_id_for_retry(self) -> None:
+        class UnavailableOnceRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self._fail_next_command = True
+
+            def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+                payload = dict(request)
+                if payload["operation"] != "sdk_capabilities":
+                    self.requests.append(payload)
+                if (
+                    payload["operation"] == "command_run"
+                    and self._fail_next_command
+                ):
+                    self._fail_next_command = False
+                    raise A3SBoxError(
+                        "prepare-exec response was lost",
+                        code="unavailable",
+                        request_id="sdk-command-minted-1",
+                    )
+                return response_for(payload)
+
+        runtime = UnavailableOnceRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.commands.run("true")
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "sdk-command-minted-1")
+
+        result = sandbox.commands.run(
+            "true",
+            request_id=raised.exception.request_id,
+        )
+        self.assertEqual(result.request_id, "sdk-command-minted-1")
+        commands = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "command_run"
+        ]
+        self.assertEqual(len(commands), 2)
+        self.assertNotIn("request_id", commands[0])
+        self.assertEqual(commands[1]["request_id"], "sdk-command-minted-1")
+
     def test_exports_native_local_clients(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)

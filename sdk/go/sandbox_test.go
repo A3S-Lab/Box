@@ -385,6 +385,73 @@ func TestLifecycleWaitsForInFlightCommand(t *testing.T) {
 	}
 }
 
+func TestCommandUnavailablePreservesRequestIDForRetry(t *testing.T) {
+	failOnce := true
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "command_run" {
+			return map[string]any{}, nil
+		}
+		if failOnce {
+			failOnce = false
+			return nil, sdkErrorWithRequestID(
+				"command_run",
+				CodeUnavailable,
+				"prepare-exec response was lost",
+				"sdk-command-minted-1",
+				nil,
+			)
+		}
+		requestID := stringValue(request["request_id"])
+		return map[string]any{
+			"stdout_base64": "",
+			"stderr_base64": "",
+			"exit_code":     0,
+			"truncated":     false,
+			"request_id":    requestID,
+		}, nil
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	_, err := sandbox.Run(context.Background(), Argv("true"))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var first *Error
+	if !errors.As(err, &first) || first.RequestID != "sdk-command-minted-1" {
+		t.Fatalf("expected minted request_id on Unavailable, got %#v", err)
+	}
+	result, err := sandbox.Run(
+		context.Background(),
+		Argv("true"),
+		RunRequestID(first.RequestID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestID != first.RequestID {
+		t.Fatalf("retry result request_id=%q, want %q", result.RequestID, first.RequestID)
+	}
+	commands := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "command_run" {
+			commands = append(commands, request)
+		}
+	}
+	if len(commands) != 2 {
+		t.Fatalf("expected two command_run calls, got %d", len(commands))
+	}
+	if commands[0]["request_id"] != nil {
+		t.Fatalf("omit-path first call should omit request_id, got %#v", commands[0]["request_id"])
+	}
+	if commands[1]["request_id"] != "sdk-command-minted-1" {
+		t.Fatalf("retry must reuse minted request_id, got %#v", commands[1]["request_id"])
+	}
+}
+
 func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 	binaryOutput := []byte{0xff, 0x00, 'A'}
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {

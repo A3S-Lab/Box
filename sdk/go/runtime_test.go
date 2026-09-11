@@ -50,20 +50,30 @@ func runBridgeHelper() {
 			fmt.Fprint(os.Stderr, "credential missing from stdin")
 			os.Exit(9)
 		}
-		writeHelperEnvelope(true, map[string]any{"accepted": true}, "", "")
+		writeHelperEnvelope(true, map[string]any{"accepted": true}, "", "", "")
 	case "error":
-		writeHelperEnvelope(false, nil, os.Getenv("A3S_BOX_GO_TEST_ERROR_CODE"), "bridge rejected request")
+		writeHelperEnvelope(
+			false,
+			nil,
+			os.Getenv("A3S_BOX_GO_TEST_ERROR_CODE"),
+			"bridge rejected request",
+			os.Getenv("A3S_BOX_GO_TEST_ERROR_REQUEST_ID"),
+		)
 	default:
-		writeHelperEnvelope(true, map[string]any{"value": "ok"}, "", "")
+		writeHelperEnvelope(true, map[string]any{"value": "ok"}, "", "", "")
 	}
 }
 
-func writeHelperEnvelope(ok bool, result any, code, message string) {
+func writeHelperEnvelope(ok bool, result any, code, message, requestID string) {
 	envelope := map[string]any{"protocol_version": bridge.ProtocolVersion, "ok": ok}
 	if ok {
 		envelope["result"] = result
 	} else {
-		envelope["error"] = map[string]string{"code": code, "message": message}
+		errorPayload := map[string]string{"code": code, "message": message}
+		if requestID != "" {
+			errorPayload["request_id"] = requestID
+		}
+		envelope["error"] = errorPayload
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(envelope)
 }
@@ -105,6 +115,24 @@ func TestLocalRuntimeSendsCredentialsOnlyThroughStdin(t *testing.T) {
 	}
 	if !result.Accepted {
 		t.Fatal("helper did not accept credentials")
+	}
+}
+
+func TestLocalRuntimeMapsUnavailableRequestID(t *testing.T) {
+	t.Setenv("A3S_BOX_GO_TEST_HELPER_MODE", "error")
+	t.Setenv("A3S_BOX_GO_TEST_ERROR_CODE", "unavailable")
+	t.Setenv("A3S_BOX_GO_TEST_ERROR_REQUEST_ID", "sdk-command-abc")
+	err := helperRuntime(t, 10*time.Second).Request(
+		context.Background(),
+		map[string]any{"operation": "command_run"},
+		&struct{}{},
+	)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.RequestID != "sdk-command-abc" {
+		t.Fatalf("expected request_id on Unavailable, got %#v", err)
 	}
 }
 
