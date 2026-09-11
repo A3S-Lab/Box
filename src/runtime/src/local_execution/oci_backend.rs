@@ -999,24 +999,28 @@ impl OciLifecycleAdapter {
         binding.validate_for(execution_id)?;
         self.require_operation(RuntimeOperation::Update, "update")
             .await?;
-        let updated = match self
-            .client
-            .update(UpdateRequest {
-                // The caller key and exact target define mutation identity.
-                // The runtime journals the full request and rejects reuse of
-                // this ID with changed resource content.
-                context: operation_context(
-                    operation_seed.as_str(),
-                    execution_generation,
-                    "update",
-                    &binding.target,
-                )?,
-                target: binding.target.clone(),
-                resources,
-            })
-            .await
-        {
+        let request = UpdateRequest {
+            // The caller key and exact target define mutation identity.
+            // The runtime journals the full request and rejects reuse of
+            // this ID with changed resource content.
+            context: operation_context(
+                operation_seed.as_str(),
+                execution_generation,
+                "update",
+                &binding.target,
+            )?,
+            target: binding.target.clone(),
+            resources,
+        };
+        let updated = match self.client.update(request.clone()).await {
             Ok(record) => record,
+            Err(error) if error.retryable => match self.client.update(request).await {
+                Ok(record) => record,
+                Err(error) if error.code == ErrorCode::NotFound => {
+                    return Err(ExecutionManagerError::NotFound(execution_id.clone()))
+                }
+                Err(error) => return Err(sdk_error("update", error)),
+            },
             Err(error) if error.code == ErrorCode::NotFound => {
                 return Err(ExecutionManagerError::NotFound(execution_id.clone()))
             }

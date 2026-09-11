@@ -20,6 +20,13 @@ All notable changes to A3S Box will be documented in this file.
   still Conflicts. Does **not** flip B2 harness close, fixture continuity,
   or hosted-KVM claims.
 
+- Live OCI resource `update` retries once on retryable `Unavailable` with the
+  **same** operation identity (parity with file/FS/exec/stdin). Lost responses
+  after the Runtime journals the mutation recover inside one
+  `update_resources()`; crash recovery still replays a persisted
+  `UpdatingResources` claim across manager reopen. Does **not** flip B2
+  harness close, fixture continuity, or hosted-KVM claims.
+
 - Go / Python / TypeScript SDKs cover Unavailable → `request_id` /
   `requestId` / `RequestID` round-trips (bridge decode + omit-path command
   retry reuse). Does **not** auto-retry commands inside language SDKs or flip

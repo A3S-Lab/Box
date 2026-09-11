@@ -4706,22 +4706,16 @@ async fn resource_update_persists_complete_intent_and_replays_locally() {
 }
 
 #[tokio::test]
-async fn lost_resource_update_response_recovers_with_the_same_runtime_mutation() {
+async fn lost_resource_update_response_recovers_within_one_update() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
     service
         .fail_update_after_effect
         .store(true, Ordering::SeqCst);
     let provider = Arc::new(FakeBundleProvider::default());
-    let endpoint = test_endpoint();
     let create_operation = box_operation("lost-update-create");
-    let first = manager(
-        &directory,
-        endpoint.clone(),
-        service.clone(),
-        provider.clone(),
-    );
-    let lease = first
+    let manager = manager(&directory, test_endpoint(), service.clone(), provider);
+    let lease = manager
         .create_and_start(
             request("lost-update", ExecutionIsolation::Sandbox),
             &create_operation,
@@ -4732,52 +4726,95 @@ async fn lost_resource_update_response_recovers_with_the_same_runtime_mutation()
         pids_limit: Some(72),
         ..Default::default()
     };
+    let operation = box_operation("lost-update-live");
 
-    first
+    let recovered = manager
         .update_resources(
             &lease.execution_id,
             lease.generation,
-            &box_operation("lost-update-live"),
+            &operation,
             update.clone(),
         )
         .await
-        .expect_err("first response is lost");
-    let claimed = persisted(&first, &lease.execution_id);
-    assert_eq!(
-        claimed.status,
-        ManagedExecutionState::UpdatingResources.as_status()
-    );
-    assert_eq!(service.update_effects().len(), 1);
-    let conflict = first
-        .update_resources(
-            &lease.execution_id,
-            lease.generation,
-            &box_operation("lost-update-live"),
-            ExecutionResourceUpdate {
-                pids_limit: Some(73),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect_err("pending operation identity cannot change content");
-    assert!(matches!(conflict, ExecutionManagerError::Conflict { .. }));
-    assert_eq!(service.update_requests().len(), 1);
-
-    let reopened = manager(&directory, endpoint, service.clone(), provider);
-    let outcome = reopened
-        .reconcile(&create_operation)
-        .await
-        .expect("resource update recovery");
-    assert!(matches!(outcome, ReconcileOutcome::Ready(_)));
-    let recovered = persisted(&reopened, &lease.execution_id);
-    assert_eq!(recovered.status, ManagedExecutionState::Running.as_status());
-    assert_eq!(recovered.resource_limits.pids_limit, Some(72));
+        .expect("inner Unavailable retry recovers resource update");
+    assert_eq!(recovered.generation, lease.generation);
+    let persisted = persisted(&manager, &lease.execution_id);
+    assert_eq!(persisted.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(persisted.resource_limits.pids_limit, Some(72));
     assert_eq!(service.update_requests().len(), 2);
     assert_eq!(service.update_effects().len(), 1);
     assert_eq!(
         service.update_requests()[0].context.operation_id,
         service.update_requests()[1].context.operation_id
     );
+
+    let conflict = manager
+        .update_resources(
+            &lease.execution_id,
+            lease.generation,
+            &operation,
+            ExecutionResourceUpdate {
+                pids_limit: Some(73),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("completed operation identity cannot change content");
+    assert!(matches!(conflict, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(service.update_requests().len(), 2);
+}
+
+#[tokio::test]
+async fn interrupted_resource_update_claim_replays_after_backend_reopen() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let provider = Arc::new(FakeBundleProvider::default());
+    let endpoint = test_endpoint();
+    let create_operation = box_operation("interrupted-update-create");
+    let first = manager(
+        &directory,
+        endpoint.clone(),
+        service.clone(),
+        provider.clone(),
+    );
+    let lease = first
+        .create_and_start(
+            request("interrupted-update", ExecutionIsolation::Sandbox),
+            &create_operation,
+        )
+        .await
+        .expect("initial launch");
+    let record = persisted(&first, &lease.execution_id);
+    let update = ExecutionResourceUpdate {
+        pids_limit: Some(88),
+        ..Default::default()
+    };
+    first
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::UpdatingResources,
+            RuntimeUpdate::ResourceUpdateClaim {
+                operation_id: box_operation("interrupted-update-live"),
+                update: update.clone(),
+            },
+        )
+        .await
+        .expect("persist resource update claim");
+    assert_eq!(service.update_requests().len(), 0);
+    drop(first);
+
+    let reopened = manager(&directory, endpoint, service.clone(), provider);
+    let outcome = reopened
+        .reconcile(&create_operation)
+        .await
+        .expect("resource update claim recovery");
+    assert!(matches!(outcome, ReconcileOutcome::Ready(_)));
+    let recovered = persisted(&reopened, &lease.execution_id);
+    assert_eq!(recovered.status, ManagedExecutionState::Running.as_status());
+    assert_eq!(recovered.resource_limits.pids_limit, Some(88));
+    assert_eq!(service.update_requests().len(), 1);
+    assert_eq!(service.update_effects().len(), 1);
 }
 
 #[tokio::test]
