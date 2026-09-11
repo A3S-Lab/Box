@@ -108,6 +108,12 @@ export interface CommandRunOptions {
   cwd?: string
   user?: string
   stdin?: string | Uint8Array
+  /**
+   * Stable one-shot exec identity for replay-safe retries after retryable
+   * Unavailable. When omitted, the Rust Sandbox facade mints a fresh id.
+   * Reuse the same id on retry; do not append `.retry-N`.
+   */
+  requestId?: string
 }
 
 export interface CommandResult {
@@ -930,6 +936,17 @@ export class Commands {
     if (options.timeoutMs !== undefined && options.timeoutMs <= 0) {
       throw new Error('timeoutMs must be greater than zero')
     }
+    if (options.requestId !== undefined) {
+      if (
+        options.requestId.length === 0 ||
+        options.requestId.length > 512 ||
+        options.requestId.includes('\0')
+      ) {
+        throw new Error(
+          'requestId must be a non-empty string of at most 512 bytes without NUL'
+        )
+      }
+    }
     const stdin =
       options.stdin === undefined
         ? undefined
@@ -946,6 +963,9 @@ export class Commands {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.user === undefined ? {} : { user: options.user }),
       ...(stdin === undefined ? {} : { stdin_base64: stdin }),
+      ...(options.requestId === undefined
+        ? {}
+        : { request_id: options.requestId }),
     })
     return {
       stdout: decodeBase64(result, 'stdout_base64').toString('utf8'),
@@ -972,6 +992,9 @@ export class Commands {
     }
     if (options.cwd !== undefined) builder = builder.cwd(options.cwd)
     if (options.user !== undefined) builder = builder.user(options.user)
+    if (options.requestId !== undefined) {
+      builder = builder.requestId(options.requestId)
+    }
     return builder.run()
   }
 }
@@ -1020,6 +1043,11 @@ export class ScriptBuilder {
 
   user(user: string): ScriptBuilder {
     this.options = { ...this.options, user }
+    return this
+  }
+
+  requestId(requestId: string): ScriptBuilder {
+    this.options = { ...this.options, requestId }
     return this
   }
 

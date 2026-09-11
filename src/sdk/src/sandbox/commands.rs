@@ -70,6 +70,11 @@ pub struct CommandRunOptions {
     pub cwd: Option<String>,
     pub user: Option<String>,
     pub stdin: Option<Vec<u8>>,
+    /// Stable one-shot exec identity for replay-safe retries after retryable
+    /// `Unavailable`. When omitted, the SDK mints a fresh `sdk-command-*` id.
+    /// Callers that retry the same command after a partial prepare-exec must
+    /// reuse the same id (do not append `.retry-N`).
+    pub request_id: Option<String>,
 }
 
 impl CommandRunOptions {
@@ -95,6 +100,11 @@ impl CommandRunOptions {
 
     pub fn stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(stdin.into());
+        self
+    }
+
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
         self
     }
 }
@@ -145,9 +155,16 @@ impl Commands {
             Some(timeout) => u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX),
             None => 0,
         };
+        let request_id = match options.request_id {
+            Some(request_id) => {
+                validate_command_request_id(&request_id)?;
+                request_id
+            }
+            None => format!("sdk-command-{}", uuid::Uuid::new_v4()),
+        };
         let (_, generation) = self.inner.active_execution()?;
         let request = ExecRequest {
-            request_id: Some(format!("sdk-command-{}", uuid::Uuid::new_v4())),
+            request_id: Some(request_id),
             cmd: command.into().into_argv()?,
             timeout_ns,
             env: options
@@ -178,4 +195,18 @@ impl Commands {
             stderr_bytes: output.stderr,
         })
     }
+}
+
+const MAX_COMMAND_REQUEST_ID_BYTES: usize = 512;
+
+fn validate_command_request_id(request_id: &str) -> Result<()> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_COMMAND_REQUEST_ID_BYTES
+        || request_id.contains('\0')
+    {
+        return Err(ClientError::Validation(
+            "sandbox command request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL".to_string(),
+        ));
+    }
+    Ok(())
 }

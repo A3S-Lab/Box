@@ -782,6 +782,7 @@ const result = await sandbox.commands.run("python -c 'print(6 * 7)'", {
   timeoutMs: 10_000,
   cwd: '/workspace',
   envs: { REQUEST: 'one' },
+  requestId: 'caller-stable-exec-1',
 })
 assert.equal(result.stdout, '42\n')
 assert.equal(result.stderr, '')
@@ -806,6 +807,7 @@ assert.deepEqual(command.argv, [
   "python -c 'print(6 * 7)'",
 ])
 assert.equal(command.generation, 1)
+assert.equal(command.request_id, 'caller-stable-exec-1')
 assert.equal(writeRequest.data_base64, Buffer.from('hello').toString('base64'))
 assert.equal(read.path, '/workspace/notes.txt')
 assert.equal(stat.operation, 'filesystem_stat')

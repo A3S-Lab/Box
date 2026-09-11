@@ -261,6 +261,10 @@ pub enum BridgeRequest {
         user: Option<String>,
         #[serde(default)]
         stdin_base64: Option<String>,
+        /// Stable one-shot exec identity for replay-safe retries after retryable
+        /// `Unavailable`. When omitted, the Rust Sandbox facade mints a fresh id.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     FileWrite {
         sandbox_id: String,

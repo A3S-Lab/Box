@@ -31,11 +31,12 @@ type runOptionFunc func(*runConfig)
 func (option runOptionFunc) applyRun(config *runConfig) { option(config) }
 
 type runConfig struct {
-	timeout *time.Duration
-	env     map[string]string
-	cwd     string
-	user    string
-	stdin   *[]byte
+	timeout   *time.Duration
+	env       map[string]string
+	cwd       string
+	user      string
+	stdin     *[]byte
+	requestID string
 }
 
 func RunTimeout(timeout time.Duration) RunOption {
@@ -62,6 +63,13 @@ func RunStdin(data []byte) RunOption {
 }
 
 func RunStdinString(data string) RunOption { return RunStdin([]byte(data)) }
+
+// RunRequestID sets a stable one-shot exec identity for replay-safe retries
+// after retryable Unavailable. Reuse the same id on retry; do not append
+// ".retry-N". When omitted, the Rust Sandbox facade mints a fresh id.
+func RunRequestID(requestID string) RunOption {
+	return runOptionFunc(func(config *runConfig) { config.requestID = requestID })
+}
 
 type Commands struct {
 	sandbox *Sandbox
@@ -103,6 +111,16 @@ func (commands *Commands) Run(
 	if config.timeout != nil && *config.timeout <= 0 {
 		return CommandResult{}, invalid(op, "command timeout must be greater than zero")
 	}
+	if config.requestID != "" {
+		if strings.TrimSpace(config.requestID) == "" ||
+			len(config.requestID) > 512 ||
+			strings.IndexByte(config.requestID, 0) >= 0 {
+			return CommandResult{}, invalid(
+				op,
+				"command request_id must be a non-empty string of at most 512 bytes without NUL",
+			)
+		}
+	}
 	if config.cwd != "" && strings.TrimSpace(config.cwd) == "" {
 		return CommandResult{}, invalid(op, "command working directory cannot be blank")
 	}
@@ -129,6 +147,9 @@ func (commands *Commands) Run(
 	}
 	if config.stdin != nil {
 		fields["stdin_base64"] = base64.StdEncoding.EncodeToString(*config.stdin)
+	}
+	if config.requestID != "" {
+		fields["request_id"] = config.requestID
 	}
 	var wire struct {
 		StdoutBase64 string `json:"stdout_base64"`

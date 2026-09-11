@@ -641,6 +641,7 @@ async fn execute_request(
             cwd,
             user,
             stdin_base64,
+            request_id,
         } => {
             let stdin = stdin_base64
                 .map(|encoded| {
@@ -660,6 +661,7 @@ async fn execute_request(
                         cwd,
                         user,
                         stdin,
+                        request_id,
                     },
                 )
                 .await?;

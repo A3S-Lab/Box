@@ -16,6 +16,7 @@ type ScriptBuilder struct {
 	env         map[string]string
 	cwd         string
 	user        string
+	requestID   string
 }
 
 func (sandbox *Sandbox) Script(source string) *ScriptBuilder {
@@ -64,6 +65,11 @@ func (builder *ScriptBuilder) User(user string) *ScriptBuilder {
 	return builder
 }
 
+func (builder *ScriptBuilder) RequestID(requestID string) *ScriptBuilder {
+	builder.requestID = requestID
+	return builder
+}
+
 func (builder *ScriptBuilder) Run(ctx context.Context) (CommandResult, error) {
 	const op = "command_run"
 	if builder == nil || builder.commands == nil {
@@ -75,7 +81,7 @@ func (builder *ScriptBuilder) Run(ctx context.Context) (CommandResult, error) {
 	if len(builder.interpreter.argv) == 0 || strings.TrimSpace(builder.interpreter.argv[0]) == "" {
 		return CommandResult{}, invalid(op, "script interpreter cannot be empty")
 	}
-	options := make([]RunOption, 0, len(builder.env)+4)
+	options := make([]RunOption, 0, len(builder.env)+5)
 	if builder.timeout != nil {
 		options = append(options, RunTimeout(*builder.timeout))
 	}
@@ -87,6 +93,9 @@ func (builder *ScriptBuilder) Run(ctx context.Context) (CommandResult, error) {
 	}
 	if builder.user != "" {
 		options = append(options, RunAs(builder.user))
+	}
+	if builder.requestID != "" {
+		options = append(options, RunRequestID(builder.requestID))
 	}
 	options = append(options, RunStdin(builder.source))
 	return builder.commands.Run(ctx, builder.interpreter, options...)

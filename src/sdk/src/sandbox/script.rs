@@ -51,6 +51,13 @@ impl ScriptBuilder {
         self
     }
 
+    /// Stable one-shot exec identity for replay-safe retries after retryable
+    /// `Unavailable`. Reuse the same id on retry; do not append `.retry-N`.
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.options.request_id = Some(request_id.into());
+        self
+    }
+
     pub async fn run(mut self) -> Result<CommandResult> {
         if self.source.is_empty() {
             return Err(ClientError::Validation(
