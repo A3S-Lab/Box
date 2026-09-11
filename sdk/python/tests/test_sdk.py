@@ -773,6 +773,7 @@ class SdkTests(unittest.TestCase):
                 timeout=10,
                 cwd="/workspace",
                 envs={"REQUEST": "one"},
+                request_id="caller-stable-exec-1",
             )
             self.assertEqual(result.stdout, "42\n")
             self.assertEqual(result.stderr, "")
@@ -792,6 +793,7 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(create["isolation"], "microvm")
         self.assertEqual(command["argv"], ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"])
         self.assertEqual(command["generation"], 1)
+        self.assertEqual(command["request_id"], "caller-stable-exec-1")
         self.assertEqual(write["data_base64"], base64.b64encode(b"hello").decode())
         self.assertEqual(read["path"], "/workspace/notes.txt")
         self.assertEqual(stat["operation"], "filesystem_stat")

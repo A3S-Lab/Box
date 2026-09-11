@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Native SDKs expose an optional stable command `request_id` /
+  `requestId` / `RunRequestID` so callers can retry retryable OCI
+  `Unavailable` with the **same** process-journal identity. Defaults still
+  mint a fresh `sdk-command-*` id. Bridge `command_run` accepts
+  `request_id`. Distinct `{id}.retry-N` keys remain forbidden (orphan
+  `active_operation` claims). Does **not** flip B2 harness close, fixture
+  continuity, or hosted-KVM claims.
+
 ### Changed
 
 - Bump pinned OCI Runtime to `05a3b2bddff0668703caafc48f38514a139ee81a`

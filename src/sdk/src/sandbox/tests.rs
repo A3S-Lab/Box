@@ -544,7 +544,69 @@ async fn local_sandbox_surface_supports_both_isolation_levels() {
 
         let exec = runtime.exec_requests.lock().unwrap();
         assert_eq!(exec[0].cmd, ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"]);
+        let minted = exec[0].request_id.as_deref().unwrap();
+        assert!(
+            minted.starts_with("sdk-command-"),
+            "default request_id should be SDK-minted: {minted}"
+        );
     }
+}
+
+#[tokio::test]
+async fn command_run_reuses_stable_request_id_and_rejects_invalid_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    sandbox
+        .commands
+        .run_with_options(
+            "true",
+            CommandRunOptions::default().request_id("caller-stable-exec-1"),
+        )
+        .await
+        .unwrap();
+    sandbox
+        .commands
+        .run_with_options(
+            "true",
+            CommandRunOptions::default().request_id("caller-stable-exec-1"),
+        )
+        .await
+        .unwrap();
+
+    let exec = runtime.exec_requests.lock().unwrap();
+    assert_eq!(exec.len(), 2);
+    assert_eq!(exec[0].request_id.as_deref(), Some("caller-stable-exec-1"));
+    assert_eq!(exec[1].request_id.as_deref(), Some("caller-stable-exec-1"));
+    drop(exec);
+
+    let empty = sandbox
+        .commands
+        .run_with_options("true", CommandRunOptions::default().request_id(""))
+        .await
+        .unwrap_err();
+    assert!(matches!(empty, ClientError::Validation(_)));
+
+    let nul = sandbox
+        .commands
+        .run_with_options("true", CommandRunOptions::default().request_id("bad\0id"))
+        .await
+        .unwrap_err();
+    assert!(matches!(nul, ClientError::Validation(_)));
+
+    let too_long = "x".repeat(513);
+    let oversized = sandbox
+        .commands
+        .run_with_options("true", CommandRunOptions::default().request_id(too_long))
+        .await
+        .unwrap_err();
+    assert!(matches!(oversized, ClientError::Validation(_)));
 }
 
 #[tokio::test]

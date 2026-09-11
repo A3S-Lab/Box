@@ -18,6 +18,7 @@ class _SyncCommands(Protocol):
         cwd: str | None = None,
         user: str | None = None,
         stdin: str | bytes | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         ...
 
@@ -32,6 +33,7 @@ class _AsyncCommands(Protocol):
         cwd: str | None = None,
         user: str | None = None,
         stdin: str | bytes | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         ...
 
@@ -55,6 +57,7 @@ class ScriptBuilder:
         self._envs: dict[str, str] = {}
         self._cwd: str | None = None
         self._user: str | None = None
+        self._request_id: str | None = None
 
     def interpreter(self, executable: str, *args: str) -> ScriptBuilder:
         self._interpreter = [executable, *args]
@@ -76,6 +79,10 @@ class ScriptBuilder:
         self._user = user
         return self
 
+    def request_id(self, request_id: str) -> ScriptBuilder:
+        self._request_id = request_id
+        return self
+
     def run(self) -> CommandResult:
         _validate_script(self._source, self._interpreter)
         return self._commands.run(
@@ -85,6 +92,7 @@ class ScriptBuilder:
             cwd=self._cwd,
             user=self._user,
             stdin=self._source,
+            request_id=self._request_id,
         )
 
 
@@ -107,6 +115,7 @@ class AsyncScriptBuilder:
         self._envs: dict[str, str] = {}
         self._cwd: str | None = None
         self._user: str | None = None
+        self._request_id: str | None = None
 
     def interpreter(self, executable: str, *args: str) -> AsyncScriptBuilder:
         self._interpreter = [executable, *args]
@@ -128,6 +137,10 @@ class AsyncScriptBuilder:
         self._user = user
         return self
 
+    def request_id(self, request_id: str) -> AsyncScriptBuilder:
+        self._request_id = request_id
+        return self
+
     async def run(self) -> CommandResult:
         _validate_script(self._source, self._interpreter)
         return await self._commands.run(
@@ -137,6 +150,7 @@ class AsyncScriptBuilder:
             cwd=self._cwd,
             user=self._user,
             stdin=self._source,
+            request_id=self._request_id,
         )
 
 

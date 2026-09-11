@@ -428,12 +428,13 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 		RunDirectory("/workspace"),
 		RunAs("1000"),
 		RunStdin(binaryOutput),
+		RunRequestID("caller-stable-exec-1"),
 	)
 	if err != nil || !reflect.DeepEqual(result.Stdout, binaryOutput) || result.ExitCode != 7 || !result.Truncated {
 		t.Fatalf("command result=%+v err=%v", result, err)
 	}
 	command := requestByOperation(t, runtime.Requests(), "command_run")
-	if command["timeout_ms"] != float64(1500) || command["generation"] != float64(9) {
+	if command["timeout_ms"] != float64(1500) || command["generation"] != float64(9) || command["request_id"] != "caller-stable-exec-1" {
 		t.Fatalf("unexpected command request: %#v", command)
 	}
 

@@ -117,6 +117,7 @@ def command_request(
     cwd: str | None,
     user: str | None,
     stdin: str | bytes | None,
+    request_id: str | None = None,
 ) -> dict[str, object]:
     argv = ["/bin/sh", "-lc", command] if isinstance(command, str) else list(command)
     if not argv:
@@ -139,4 +140,15 @@ def command_request(
     if stdin is not None:
         raw = stdin.encode() if isinstance(stdin, str) else stdin
         request["stdin_base64"] = base64.b64encode(raw).decode()
+    if request_id is not None:
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or len(request_id) > 512
+            or "\0" in request_id
+        ):
+            raise ValueError(
+                "request_id must be a non-empty string of at most 512 bytes without NUL"
+            )
+        request["request_id"] = request_id
     return request

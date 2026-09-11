@@ -834,6 +834,7 @@ class Commands:
         cwd: str | None = None,
         user: str | None = None,
         stdin: str | bytes | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         result = self._sandbox._runtime.request(
             _command_request(
@@ -844,6 +845,7 @@ class Commands:
                 cwd,
                 user,
                 stdin,
+                request_id,
             )
         )
         return _command_result(result)
@@ -859,6 +861,7 @@ class Commands:
         envs: Mapping[str, str] | None = None,
         cwd: str | None = None,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         script = self.script(source)
         if timeout is not None:
@@ -869,6 +872,8 @@ class Commands:
             script.cwd(cwd)
         if user is not None:
             script.user(user)
+        if request_id is not None:
+            script.request_id(request_id)
         return script.run()
 
 
@@ -1503,6 +1508,7 @@ class AsyncCommands:
         cwd: str | None = None,
         user: str | None = None,
         stdin: str | bytes | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         result = await self._sandbox._runtime.request(
             _command_request(
@@ -1513,6 +1519,7 @@ class AsyncCommands:
                 cwd,
                 user,
                 stdin,
+                request_id,
             )
         )
         return _command_result(result)
@@ -1528,6 +1535,7 @@ class AsyncCommands:
         envs: Mapping[str, str] | None = None,
         cwd: str | None = None,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> CommandResult:
         script = self.script(source)
         if timeout is not None:
@@ -1538,6 +1546,8 @@ class AsyncCommands:
             script.cwd(cwd)
         if user is not None:
             script.user(user)
+        if request_id is not None:
+            script.request_id(request_id)
         return await script.run()
 
 
