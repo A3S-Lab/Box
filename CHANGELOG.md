@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Mutating OCI file upload and filesystem ops derive durable operation
+  identity from `execution_id` + generation + request payload (same pattern as
+  kill/delete), instead of minting a fresh `session-{uuid}` seed per call.
+  Outer `Unavailable` retries of the same mutation now replay one effect
+  instead of orphaning `active_operation` claims or applying twice. Does
+  **not** flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 ### Added
 
 - Command results and retryable `Unavailable` errors now surface the
