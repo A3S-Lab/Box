@@ -363,7 +363,9 @@ async fn handle_exec_oneshot(
     }
 
     let exec_req = a3s_box_core::exec::ExecRequest {
-        request_id: None,
+        // Non-interactive oneshot keeps the sandbox VM; key the guest replay
+        // cache. Stdin/streaming paths stay unkeyed (guest rejects request_id).
+        request_id: Some(crate::exec_request_id::mint_cri_exec_request_id()),
         cmd: session.cmd.clone(),
         timeout_ns: a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
@@ -376,7 +378,13 @@ async fn handle_exec_oneshot(
     };
 
     let client = a3s_box_runtime::ExecClient::connect(Path::new(&session.exec_socket_path)).await?;
-    let output = client.exec_command(&exec_req).await?;
+    let output = match client.exec_command(&exec_req).await {
+        Ok(output) => output,
+        Err(error) if crate::exec_request_id::is_ambiguous_exec_transport(&error) => {
+            client.exec_command(&exec_req).await?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     // Send HTTP 200 with output
     let response_body = format!(

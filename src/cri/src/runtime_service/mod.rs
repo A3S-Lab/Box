@@ -2300,7 +2300,10 @@ impl RuntimeService for BoxRuntimeService {
         };
 
         let exec_request = a3s_box_core::exec::ExecRequest {
-            request_id: None,
+            // Mint once per ExecSync RPC. Guest journals this before response
+            // write; one in-call retry reuses the journal. Do not invent a
+            // kubelet-stable CRI wire field (cross-RPC retries mint a new id).
+            request_id: Some(crate::exec_request_id::mint_cri_exec_request_id()),
             cmd: req.cmd,
             timeout_ns,
             // Inherit the container's security envelope (A3S_SEC_*, e.g.
@@ -2325,10 +2328,16 @@ impl RuntimeService for BoxRuntimeService {
             user: container.user.clone(),
             streaming: false,
         };
-        let output = vm
-            .exec_request(&exec_request)
-            .await
-            .map_err(box_error_to_status)?;
+        let output = match vm.exec_request(&exec_request).await {
+            Ok(output) => output,
+            Err(error) if crate::exec_request_id::is_ambiguous_exec_transport(&error) => {
+                // Same request_id: guest replay cache reconciles a lost response.
+                vm.exec_request(&exec_request)
+                    .await
+                    .map_err(box_error_to_status)?
+            }
+            Err(error) => return Err(box_error_to_status(error)),
+        };
 
         Ok(Response::new(ExecSyncResponse {
             stdout: output.stdout,

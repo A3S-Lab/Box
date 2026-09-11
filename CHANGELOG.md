@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- CRI `ExecSync` and non-interactive streaming oneshot mint a `cri-exec-*`
+  guest one-shot identity and retry once on ambiguous transport loss with the
+  **same** id (guest replay cache). Streaming / SPDY / stdin sessions stay
+  unkeyed. Does **not** invent a kubelet-stable CRI wire field, flip B2 harness
+  close, fixture continuity, or hosted-KVM claims.
+
 - Warm-pool **lease** exec accepts optional `request_id` and mints a
   `cli-pool-*` guest one-shot identity when omitted, so retries on the **same
   lease VM** can reuse the guest replay cache. Ambiguous transport errors
