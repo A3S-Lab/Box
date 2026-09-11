@@ -16,6 +16,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- OCI container `kill` and `delete` retry once on retryable `Unavailable` with
+  the **same** durable operation identity. Replay relies on natural
+  idempotency (already-stopped kill / NotFound delete → success), not invented
+  FakeRuntime journals. Does **not** flip B2 harness close, fixture continuity,
+  or hosted-KVM claims.
+
 - OCI process `close_stdin` and `signal_process` retry once on retryable
   `Unavailable` with the **same** mutation sequence (parity with
   `write_stdin`). Lost responses after the Runtime journals the mutation

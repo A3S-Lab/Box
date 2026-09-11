@@ -99,7 +99,11 @@ struct FakeRuntimeService {
     signal_journal: Mutex<HashMap<String, SignalProcessRequest>>,
     wait_process_requests: Mutex<Vec<WaitProcessRequest>>,
     kill_signals: Mutex<Vec<i32>>,
+    kill_requests: Mutex<Vec<KillRequest>>,
+    kill_effects: Mutex<Vec<KillRequest>>,
     delete_modes: Mutex<Vec<DeleteMode>>,
+    delete_requests: Mutex<Vec<DeleteRequest>>,
+    delete_effects: Mutex<Vec<DeleteRequest>>,
     create_digest_override: Mutex<Option<String>>,
     create_attachments_digest_override: Mutex<Option<String>>,
     fail_create_after_effect: AtomicBool,
@@ -112,6 +116,8 @@ struct FakeRuntimeService {
     fail_stdin_after_effect: AtomicBool,
     fail_close_stdin_after_effect: AtomicBool,
     fail_signal_after_effect: AtomicBool,
+    fail_kill_after_effect: AtomicBool,
+    fail_delete_after_effect: AtomicBool,
     fail_file_after_effect: AtomicBool,
     fail_filesystem_after_effect: AtomicBool,
     hold_next_process: AtomicBool,
@@ -189,7 +195,11 @@ impl FakeRuntimeService {
             signal_journal: Mutex::new(HashMap::new()),
             wait_process_requests: Mutex::new(Vec::new()),
             kill_signals: Mutex::new(Vec::new()),
+            kill_requests: Mutex::new(Vec::new()),
+            kill_effects: Mutex::new(Vec::new()),
             delete_modes: Mutex::new(Vec::new()),
+            delete_requests: Mutex::new(Vec::new()),
+            delete_effects: Mutex::new(Vec::new()),
             create_digest_override: Mutex::new(None),
             create_attachments_digest_override: Mutex::new(None),
             fail_create_after_effect: AtomicBool::new(false),
@@ -202,6 +212,8 @@ impl FakeRuntimeService {
             fail_stdin_after_effect: AtomicBool::new(false),
             fail_close_stdin_after_effect: AtomicBool::new(false),
             fail_signal_after_effect: AtomicBool::new(false),
+            fail_kill_after_effect: AtomicBool::new(false),
+            fail_delete_after_effect: AtomicBool::new(false),
             fail_file_after_effect: AtomicBool::new(false),
             fail_filesystem_after_effect: AtomicBool::new(false),
             hold_next_process: AtomicBool::new(false),
@@ -431,8 +443,33 @@ impl FakeRuntimeService {
         self.kill_signals.lock().expect("kill lock").clone()
     }
 
+    fn kill_requests(&self) -> Vec<KillRequest> {
+        self.kill_requests
+            .lock()
+            .expect("kill request lock")
+            .clone()
+    }
+
+    fn kill_effects(&self) -> Vec<KillRequest> {
+        self.kill_effects.lock().expect("kill effect lock").clone()
+    }
+
     fn delete_modes(&self) -> Vec<DeleteMode> {
         self.delete_modes.lock().expect("delete lock").clone()
+    }
+
+    fn delete_requests(&self) -> Vec<DeleteRequest> {
+        self.delete_requests
+            .lock()
+            .expect("delete request lock")
+            .clone()
+    }
+
+    fn delete_effects(&self) -> Vec<DeleteRequest> {
+        self.delete_effects
+            .lock()
+            .expect("delete effect lock")
+            .clone()
     }
 
     fn container_count(&self) -> usize {
@@ -1017,6 +1054,10 @@ impl OciRuntimeService for FakeRuntimeService {
             .lock()
             .map_err(|error| lock_error("kill", error))?
             .push(request.signal.get());
+        self.kill_requests
+            .lock()
+            .map_err(|error| lock_error("kill", error))?
+            .push(request.clone());
         let mut containers = self
             .containers
             .lock()
@@ -1025,10 +1066,11 @@ impl OciRuntimeService for FakeRuntimeService {
             .get_mut(request.target.id.as_str())
             .ok_or_else(|| oci_error(ErrorCode::NotFound, "kill", "fake runtime is absent"))?;
         validate_target(&request.target, &container.record, "kill")?;
-        if *container.record.state.status() != ContainerState::Stopped
+        let already_stopped = *container.record.state.status() == ContainerState::Stopped;
+        let apply_stop = !already_stopped
             && !(self.ignore_graceful_signal.load(Ordering::SeqCst)
-                && request.signal.get() != DEFAULT_KILL_SIGNAL)
-        {
+                && request.signal.get() != DEFAULT_KILL_SIGNAL);
+        if apply_stop {
             container.record = runtime_record(
                 &request.target.id,
                 container.record.generation,
@@ -1039,8 +1081,21 @@ impl OciRuntimeService for FakeRuntimeService {
                 container.record.attachments_digest.as_deref(),
             )?;
             container.exit_status = Some(ExitStatus::signaled(request.signal.get(), false)?);
+            self.kill_effects
+                .lock()
+                .map_err(|error| lock_error("kill", error))?
+                .push(request.clone());
         }
-        Ok(container.record.clone())
+        let record = container.record.clone();
+        drop(containers);
+        if apply_stop && self.fail_kill_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake kill response was lost")
+                    .for_operation("kill")
+                    .retryable(true),
+            );
+        }
+        Ok(record)
     }
 
     async fn delete(&self, request: DeleteRequest) -> OciResult<()> {
@@ -1048,13 +1103,24 @@ impl OciRuntimeService for FakeRuntimeService {
             .lock()
             .map_err(|error| lock_error("delete", error))?
             .push(request.mode);
+        self.delete_requests
+            .lock()
+            .map_err(|error| lock_error("delete", error))?
+            .push(request.clone());
         let mut containers = self
             .containers
             .lock()
             .map_err(|error| lock_error("delete", error))?;
-        let container = containers
-            .get(request.target.id.as_str())
-            .ok_or_else(|| oci_error(ErrorCode::NotFound, "delete", "fake runtime is absent"))?;
+        let container = match containers.get(request.target.id.as_str()) {
+            Some(container) => container,
+            None => {
+                return Err(oci_error(
+                    ErrorCode::NotFound,
+                    "delete",
+                    "fake runtime is absent",
+                ));
+            }
+        };
         validate_target(&request.target, &container.record, "delete")?;
         if request.mode == DeleteMode::StoppedOnly
             && *container.record.state.status() != ContainerState::Stopped
@@ -1066,6 +1132,18 @@ impl OciRuntimeService for FakeRuntimeService {
             ));
         }
         containers.remove(request.target.id.as_str());
+        drop(containers);
+        self.delete_effects
+            .lock()
+            .map_err(|error| lock_error("delete", error))?
+            .push(request);
+        if self.fail_delete_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake delete response was lost")
+                    .for_operation("delete")
+                    .retryable(true),
+            );
+        }
         Ok(())
     }
 
@@ -4493,6 +4571,96 @@ async fn reopened_backend_kills_with_persisted_signal_and_preserves_exact_exit()
         .as_ref()
         .and_then(|metadata| metadata.oci_runtime.as_ref())
         .is_none());
+}
+
+#[tokio::test]
+async fn lost_kill_response_recovers_within_one_kill() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service.fail_kill_after_effect.store(true, Ordering::SeqCst);
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("lost-kill", ExecutionIsolation::Microvm),
+            &box_operation("lost-kill-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    let outcome = manager
+        .kill_with_options(
+            &lease.execution_id,
+            lease.generation,
+            KillExecutionOptions {
+                signal: Some(15),
+                timeout_secs: None,
+            },
+        )
+        .await
+        .expect("inner Unavailable retry recovers kill");
+
+    assert_eq!(outcome, KillOutcome::Killed);
+    let kills = service.kill_requests();
+    assert_eq!(kills.len(), 2);
+    assert_eq!(kills[0].context.operation_id, kills[1].context.operation_id);
+    assert_eq!(kills[0].signal.get(), 15);
+    assert_eq!(service.kill_effects().len(), 1);
+    assert_eq!(service.delete_modes(), vec![DeleteMode::StoppedOnly]);
+    assert_eq!(service.container_count(), 0);
+}
+
+#[tokio::test]
+async fn lost_delete_response_recovers_within_one_delete() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    service
+        .fail_delete_after_effect
+        .store(true, Ordering::SeqCst);
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("lost-delete", ExecutionIsolation::Microvm),
+            &box_operation("lost-delete-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    let outcome = manager
+        .kill_with_options(
+            &lease.execution_id,
+            lease.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: None,
+            },
+        )
+        .await
+        .expect("inner Unavailable retry recovers delete");
+
+    assert_eq!(outcome, KillOutcome::Killed);
+    assert_eq!(service.kill_effects().len(), 1);
+    let deletes = service.delete_requests();
+    assert_eq!(deletes.len(), 2);
+    assert_eq!(
+        deletes[0].context.operation_id,
+        deletes[1].context.operation_id
+    );
+    assert_eq!(service.delete_effects().len(), 1);
+    assert_eq!(service.container_count(), 0);
+    assert_eq!(
+        persisted(&manager, &lease.execution_id).status,
+        ManagedExecutionState::Stopped.as_status()
+    );
 }
 
 #[tokio::test]
