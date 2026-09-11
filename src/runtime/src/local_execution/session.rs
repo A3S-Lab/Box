@@ -49,13 +49,25 @@ impl ExecutionSessionManager for LocalExecutionManager {
                 .await?;
             return self.backend.execute(&record, request).await;
         }
+        resolve_microvm_exec_request_id(&mut request)?;
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
-        client
-            .exec_command_on_stream(stream, &request)
-            .await
-            .map_err(|error| session_error(execution_id, "execute command", error))
+        match client.exec_command_on_stream(stream, &request).await {
+            Ok(output) => Ok(output),
+            Err(error) if crate::vm::should_retry_keyed_guest_exec(&request, &error) => {
+                // Same request_id: guest replay cache reconciles a lost response.
+                // Rebind: the first stream is not reusable after transport loss.
+                let (client, stream) = self
+                    .bind_exec_record(&record, execution_id, generation)
+                    .await?;
+                client
+                    .exec_command_on_stream(stream, &request)
+                    .await
+                    .map_err(|error| session_error(execution_id, "execute command", error))
+            }
+            Err(error) => Err(session_error(execution_id, "execute command", error)),
+        }
     }
 
     async fn start_process(
@@ -318,6 +330,29 @@ impl ExecutionProcessStream for PtyStream {
     }
 }
 
+const MAX_REQUEST_ID_BYTES: usize = 512;
+
+/// Mint a durable guest one-shot identity when the caller omitted `request_id`
+/// (parity with OCI `managed-exec-*`). Reject empty / oversized / NUL ids.
+fn resolve_microvm_exec_request_id(request: &mut ExecRequest) -> ExecutionManagerResult<()> {
+    match request.request_id.as_deref() {
+        Some(request_id)
+            if request_id.is_empty()
+                || request_id.len() > MAX_REQUEST_ID_BYTES
+                || request_id.contains('\0') =>
+        {
+            Err(ExecutionManagerError::InvalidRequest(
+                "A3S MicroVM exec request ID is invalid".to_string(),
+            ))
+        }
+        Some(_) => Ok(()),
+        None => {
+            request.request_id = Some(format!("managed-exec-{}", uuid::Uuid::new_v4().simple()));
+            Ok(())
+        }
+    }
+}
+
 fn session_error(
     execution_id: &ExecutionId,
     operation: &str,
@@ -326,4 +361,52 @@ fn session_error(
     ExecutionManagerError::Unavailable(format!(
         "failed to {operation} for execution {execution_id}: {error}"
     ))
+}
+
+#[cfg(test)]
+mod microvm_exec_request_id_tests {
+    use super::*;
+
+    fn base_request(request_id: Option<String>) -> ExecRequest {
+        ExecRequest {
+            request_id,
+            cmd: vec!["true".to_string()],
+            timeout_ns: 1,
+            env: vec![],
+            working_dir: None,
+            rootfs: None,
+            stdin: None,
+            stdin_streaming: false,
+            user: None,
+            streaming: false,
+        }
+    }
+
+    #[test]
+    fn omit_path_mints_managed_exec_prefix() {
+        let mut request = base_request(None);
+        resolve_microvm_exec_request_id(&mut request).expect("mint");
+        let id = request.request_id.expect("minted");
+        assert!(id.starts_with("managed-exec-"));
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn caller_id_is_preserved() {
+        let mut request = base_request(Some("cli-exec-abc".to_string()));
+        resolve_microvm_exec_request_id(&mut request).expect("ok");
+        assert_eq!(request.request_id.as_deref(), Some("cli-exec-abc"));
+    }
+
+    #[test]
+    fn empty_and_nul_ids_are_rejected() {
+        assert!(matches!(
+            resolve_microvm_exec_request_id(&mut base_request(Some(String::new()))),
+            Err(ExecutionManagerError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            resolve_microvm_exec_request_id(&mut base_request(Some("bad\0id".to_string()))),
+            Err(ExecutionManagerError::InvalidRequest(_))
+        ));
+    }
 }
