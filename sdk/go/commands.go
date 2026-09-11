@@ -156,9 +156,13 @@ func (commands *Commands) Run(
 		StderrBase64 string `json:"stderr_base64"`
 		ExitCode     int    `json:"exit_code"`
 		Truncated    bool   `json:"truncated"`
+		RequestID    string `json:"request_id"`
 	}
 	if err := commands.sandbox.readRequest(ctx, op, fields, &wire, true); err != nil {
 		return CommandResult{}, err
+	}
+	if strings.TrimSpace(wire.RequestID) == "" {
+		return CommandResult{}, sdkError(op, CodeProtocol, "command result is missing request_id", nil)
 	}
 	stdout, err := base64.StdEncoding.DecodeString(wire.StdoutBase64)
 	if err != nil {
@@ -173,6 +177,7 @@ func (commands *Commands) Run(
 		Stderr:    stderr,
 		ExitCode:  wire.ExitCode,
 		Truncated: wire.Truncated,
+		RequestID: wire.RequestID,
 	}, nil
 }
 

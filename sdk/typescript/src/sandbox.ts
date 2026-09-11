@@ -121,6 +121,8 @@ export interface CommandResult {
   stderr: string
   exitCode: number
   truncated: boolean
+  /** Process-journal identity used for this one-shot exec. */
+  requestId: string
 }
 
 export interface WriteInfo {
@@ -972,6 +974,7 @@ export class Commands {
       stderr: decodeBase64(result, 'stderr_base64').toString('utf8'),
       exitCode: requiredNumber(result, 'exit_code'),
       truncated: requiredBoolean(result, 'truncated'),
+      requestId: requiredString(result, 'request_id'),
     }
   }
 

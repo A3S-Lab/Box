@@ -45,10 +45,11 @@ var (
 // Cause is retained so errors.Is continues to recognize context cancellation
 // and process errors.
 type Error struct {
-	Op      string
-	Code    ErrorCode
-	Message string
-	Cause   error
+	Op        string
+	Code      ErrorCode
+	Message   string
+	RequestID string
+	Cause     error
 }
 
 func (e *Error) Error() string {
@@ -82,6 +83,10 @@ func (e *Error) Is(target error) bool {
 
 func sdkError(op string, code ErrorCode, message string, cause error) error {
 	return &Error{Op: op, Code: code, Message: message, Cause: cause}
+}
+
+func sdkErrorWithRequestID(op string, code ErrorCode, message, requestID string, cause error) error {
+	return &Error{Op: op, Code: code, Message: message, RequestID: requestID, Cause: cause}
 }
 
 func invalid(op, message string) error {

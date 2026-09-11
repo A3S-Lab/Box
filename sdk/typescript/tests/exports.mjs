@@ -274,6 +274,7 @@ class FakeRuntime {
           stderr_base64: '',
           exit_code: 0,
           truncated: false,
+          request_id: request.request_id ?? 'sdk-command-test',
         }
       case 'file_write':
         return { path: request.path, size: 5 }
@@ -787,6 +788,7 @@ const result = await sandbox.commands.run("python -c 'print(6 * 7)'", {
 assert.equal(result.stdout, '42\n')
 assert.equal(result.stderr, '')
 assert.equal(result.exitCode, 0)
+assert.equal(result.requestId, 'caller-stable-exec-1')
 
 const write = await sandbox.files.write('/workspace/notes.txt', 'hello')
 assert.equal(write.size, 5)

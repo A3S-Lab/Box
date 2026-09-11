@@ -387,6 +387,7 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
             "stderr_base64": "",
             "exit_code": 0,
             "truncated": False,
+            "request_id": request.get("request_id") or "sdk-command-test",
         }
     if operation == "file_write":
         return {"path": request["path"], "size": 5}
@@ -794,6 +795,7 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(command["argv"], ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"])
         self.assertEqual(command["generation"], 1)
         self.assertEqual(command["request_id"], "caller-stable-exec-1")
+        self.assertEqual(result.request_id, "caller-stable-exec-1")
         self.assertEqual(write["data_base64"], base64.b64encode(b"hello").decode())
         self.assertEqual(read["path"], "/workspace/notes.txt")
         self.assertEqual(stat["operation"], "filesystem_stat")

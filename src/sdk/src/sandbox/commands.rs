@@ -116,6 +116,9 @@ pub struct CommandResult {
     pub stderr: String,
     pub exit_code: i32,
     pub truncated: bool,
+    /// Process-journal identity used for this one-shot exec (caller-provided or
+    /// SDK-minted). Reuse on retryable `Unavailable` retries.
+    pub request_id: String,
     pub(crate) stdout_bytes: Vec<u8>,
     pub(crate) stderr_bytes: Vec<u8>,
 }
@@ -164,7 +167,7 @@ impl Commands {
         };
         let (_, generation) = self.inner.active_execution()?;
         let request = ExecRequest {
-            request_id: Some(request_id),
+            request_id: Some(request_id.clone()),
             cmd: command.into().into_argv()?,
             timeout_ns,
             env: options
@@ -180,17 +183,30 @@ impl Commands {
             streaming: false,
         };
 
-        let output = self
+        let output = match self
             .inner
             .client
             .execute_execution(&self.inner.execution_id, generation, request)
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(
+                message,
+            ))) => {
+                return Err(ClientError::CommandUnavailable {
+                    request_id,
+                    message,
+                });
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(CommandResult {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             exit_code: output.exit_code,
             truncated: output.truncated,
+            request_id,
             stdout_bytes: output.stdout,
             stderr_bytes: output.stderr,
         })

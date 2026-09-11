@@ -297,7 +297,13 @@ function decodeResponse(
       isRecord(error) && typeof error.message === 'string'
         ? error.message
         : 'Local A3S Box request failed'
-    throw new A3SBoxError(message, code)
+    const requestId =
+      isRecord(error) &&
+      typeof error.request_id === 'string' &&
+      error.request_id.length > 0
+        ? error.request_id
+        : undefined
+    throw new A3SBoxError(message, code, { requestId })
   }
   if (!isRecord(envelope.result)) {
     throw new A3SBoxError(
