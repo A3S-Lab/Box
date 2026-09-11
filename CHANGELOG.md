@@ -76,6 +76,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Native live-session v4 CI on OCI `05a3b2b…` (#300): restore matched-cred
+  harness, `100755` scripts, Verify cleanup, same-request_id keyed-exec
+  retries (orphan `{id}.retry-N` journals blocked generation delete), and
+  Exit-time timeout-watchdog disarm. **Both-arch greened** on Box
+  `d07648d0…` / CI run `34542747784`: report SHA-256
+  `36f91361c3851ea995ac7530bcfe05f0c9216d6e9a5b7e130b48f151cd4b9a75`
+  (linux-x86_64) and
+  `8454044deabe77a08d7f193cd970e8f3117566a8651b3f9d4023cb2223321423`
+  (linux-arm64); verifier keeps B2/fixture/KVM/utility-VM claims false.
+
 - Restore Native live-session CI harness to matched-cred `run-linux-sandbox-ci`
   (probe-cgroup migrate + staged sandbox-oci-launcher + `$ORIGIN/lib`), instead
   of elevating the whole example. Elevating the example left `geteuid()==0`,
