@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Warm-pool **lease** exec accepts optional `request_id` and mints a
+  `cli-pool-*` guest one-shot identity when omitted, so retries on the **same
+  lease VM** can reuse the guest replay cache. Ambiguous transport errors
+  annotate `reuse request_id <id> on the same lease`. One-shot `pool run`
+  deliberately keeps `request_id: None` (VM is destroyed after the response, so
+  keyed replay cannot span client retries). Does **not** flip B2 harness close,
+  fixture continuity, or hosted-KVM claims.
+
 - CLI `container-update` accepts optional `--request-id` and mints a
   `cli-update-*` identity when omitted. Managed OCI live Tier-2 updates use it
   as the durable `operation_id` when minting a new update; legacy MicroVM live

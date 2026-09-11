@@ -111,6 +111,12 @@ pub struct PoolLeaseExecRequest {
     pub stdin: Option<Vec<u8>>,
     #[serde(default)]
     pub user: Option<String>,
+    /// Stable guest one-shot exec identity for retries on the same lease VM.
+    /// Omit to let the daemon mint a `cli-pool-*` id. One-shot `pool run` does
+    /// **not** use this field: that path destroys the VM after the response, so
+    /// keyed replay cannot span retries.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -209,6 +215,7 @@ impl PoolLeaseClient {
                 rootfs: req.rootfs,
                 stdin: req.stdin,
                 user: req.user,
+                request_id: req.request_id,
             },
         )
         .await
@@ -248,6 +255,7 @@ pub struct PoolLeaseExec {
     pub rootfs: Option<String>,
     pub stdin: Option<Vec<u8>>,
     pub user: Option<String>,
+    pub request_id: Option<String>,
 }
 
 #[cfg(not(windows))]

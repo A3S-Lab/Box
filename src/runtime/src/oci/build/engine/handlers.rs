@@ -608,6 +608,7 @@ pub(super) async fn handle_run_with_pool(
             rootfs: Some(session.guest_rootfs.clone()),
             stdin: None,
             user: user.map(str::to_string),
+            request_id: None,
         })
         .await;
 
