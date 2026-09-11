@@ -267,10 +267,8 @@ mod qualification {
         let inputs = load_inputs(&mut report);
         let outcome = match inputs {
             Ok(inputs) => {
-                let operation_id = OperationId::new(format!(
-                    "linux-kvm-live-session-{}",
-                    uuid::Uuid::new_v4()
-                ));
+                let operation_id =
+                    OperationId::new(format!("linux-kvm-live-session-{}", uuid::Uuid::new_v4()));
                 match operation_id {
                     Ok(operation_id) => {
                         report.operation_id = Some(operation_id.to_string());
@@ -465,12 +463,8 @@ mod qualification {
         .await?;
         report.keyed_captured_exec_before_owner_kill = true;
 
-        prove_file_upload_before_kill(
-            &manager,
-            &reservation.execution_id,
-            reservation.generation,
-        )
-        .await?;
+        prove_file_upload_before_kill(&manager, &reservation.execution_id, reservation.generation)
+            .await?;
         report.file_upload_before_kill = true;
 
         let host_service = host_service_identity(inputs.service.pid)?;
@@ -540,13 +534,21 @@ mod qualification {
                     "streaming stdin write before Host Service SIGKILL failed: {error}"
                 ))
             })?;
-        expect_stream_echo(process.as_mut(), STREAM_ECHO_BEFORE, "before Host Service SIGKILL")
-            .await?;
+        expect_stream_echo(
+            process.as_mut(),
+            STREAM_ECHO_BEFORE,
+            "before Host Service SIGKILL",
+        )
+        .await?;
 
         // Keep the Box manager: retained-handle continuity is the v1 gate.
         sigkill_host_service(inputs.service.pid)?;
         report.owner_sigkilled = true;
-        wait_host_service_gone(inputs.service.pid, &inputs.endpoint, Duration::from_secs(30))?;
+        wait_host_service_gone(
+            inputs.service.pid,
+            &inputs.endpoint,
+            Duration::from_secs(30),
+        )?;
         report.owner_gone = true;
 
         require_live_identity(
@@ -633,8 +635,12 @@ mod qualification {
                     "retained streaming stdin after Host Service reopen failed: {error}"
                 ))
             })?;
-        expect_stream_echo(process.as_mut(), STREAM_ECHO_AFTER, "after Host Service reopen")
-            .await?;
+        expect_stream_echo(
+            process.as_mut(),
+            STREAM_ECHO_AFTER,
+            "after Host Service reopen",
+        )
+        .await?;
         input.close_stdin().await.map_err(|error| {
             failure(format!(
                 "retained streaming close_stdin after Host Service reopen failed: {error}"
@@ -842,7 +848,6 @@ mod qualification {
         )?;
         Ok(())
     }
-
 
     async fn prove_file_upload_before_kill(
         manager: &LocalExecutionManager,
@@ -1072,10 +1077,7 @@ mod qualification {
                 persistent: false,
                 ..Default::default()
             },
-            labels: BTreeMap::from([(
-                "purpose".to_string(),
-                "linux-kvm-live-session".to_string(),
-            )]),
+            labels: BTreeMap::from([("purpose".to_string(), "linux-kvm-live-session".to_string())]),
             policy: Default::default(),
             rootfs_snapshot_id: None,
         }
@@ -1178,10 +1180,13 @@ mod qualification {
         Ok(())
     }
 
-    fn identity_from_binding(value: &Value, field: &str) -> Result<ProcessIdentityReport, AnyError> {
-        let identity = value.get(field).ok_or_else(|| {
-            failure(format!("KVM Live binding lacks {field} identity"))
-        })?;
+    fn identity_from_binding(
+        value: &Value,
+        field: &str,
+    ) -> Result<ProcessIdentityReport, AnyError> {
+        let identity = value
+            .get(field)
+            .ok_or_else(|| failure(format!("KVM Live binding lacks {field} identity")))?;
         let pid = identity
             .get("pid")
             .and_then(Value::as_i64)
@@ -1226,10 +1231,15 @@ mod qualification {
         })
     }
 
-    fn read_replacement_host_service_pid(service_root: &Path) -> Result<ProcessIdentityReport, AnyError> {
+    fn read_replacement_host_service_pid(
+        service_root: &Path,
+    ) -> Result<ProcessIdentityReport, AnyError> {
         let pid_path = service_root.join("qualification-service.pid");
-        let raw = std::fs::read_to_string(&pid_path)
-            .map_err(|error| failure(format!("replacement Host Service pid file missing: {error}")))?;
+        let raw = std::fs::read_to_string(&pid_path).map_err(|error| {
+            failure(format!(
+                "replacement Host Service pid file missing: {error}"
+            ))
+        })?;
         let pid: u32 = raw
             .trim()
             .parse()

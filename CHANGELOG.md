@@ -76,6 +76,25 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Restore Native live-session CI harness to matched-cred `run-linux-sandbox-ci`
+  (probe-cgroup migrate + staged sandbox-oci-launcher + `$ORIGIN/lib`), instead
+  of elevating the whole example. Elevating the example left `geteuid()==0`,
+  skipped owner SETPRIV_WRAPPER, and failed closed on cgroup v2 delegation /
+  Unix peer auth after the filesystem v4 merge.
+- Restore `100755` on live-session / elevate / KVM qualification shell scripts
+  after main regressions left them `100644` (`missing executable
+  …/elevate-linux-sandbox-owner.sh` before the v4 gate could run).
+- Sandbox CI Verify cleanup tears down the live-session host-root owner and
+  reaps elevate/launcher leftovers whose argv still reference the live-session
+  home, so leftover pgrep does not fail after a greened live-session gate.
+- Keyed captured exec after Host reopen retries OCI retryable `Unavailable`
+  (short `printf` can reap before recovery identity capture) with the **same**
+  request_id so prepare-exec reconciles a partial journal. Distinct
+  `{id}.retry-N` keys orphaned `active_operation` claims and blocked
+  generation delete (`A3S OCI delete rejected … owned by an active mutation`).
+- Disarm the detached OCI exec timeout watchdog when `Exit` is observed so it
+  cannot later claim a signal mutation against a finished process.
+
 - Live-session v3 streaming command survives `close_stdin` EOF (`sleep` after
   `while read`) so Kill after Host reopen still targets a live retained handle
   instead of failing as not-live under start-time identity.

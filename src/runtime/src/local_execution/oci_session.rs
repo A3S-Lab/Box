@@ -903,6 +903,9 @@ impl OciProcessStream {
         let event = self.pending.pop_front()?;
         if matches!(event, ExecEvent::Exit(_)) {
             self.done = true;
+            // Disarm the detached timeout watchdog once Exit is observed so it
+            // cannot later claim a signal mutation against a finished process.
+            self.watchdog.store(WATCHDOG_FINISHED, Ordering::SeqCst);
         }
         Some(event)
     }
