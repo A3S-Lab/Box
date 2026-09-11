@@ -817,8 +817,22 @@ impl VmManager {
         let commands = update.build_microvm_cgroup_commands();
         for cmd_str in &commands {
             let shell_cmd = vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()];
+            let request = a3s_box_core::exec::ExecRequest {
+                // Same live guest: key the journal so a lost response can replay
+                // instead of double-applying the cgroup write.
+                request_id: Some(format!("vm-cgroup-{}", uuid::Uuid::new_v4().simple())),
+                cmd: shell_cmd,
+                timeout_ns: 5_000_000_000,
+                env: vec![],
+                working_dir: None,
+                rootfs: None,
+                stdin: None,
+                stdin_streaming: false,
+                user: None,
+                streaming: false,
+            };
 
-            match self.exec_command(shell_cmd, 5_000_000_000).await {
+            match self.exec_request(&request).await {
                 Ok(output) if output.exit_code == 0 => {
                     result.applied.push(cmd_str.clone());
                 }

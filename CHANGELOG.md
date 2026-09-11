@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- MicroVM guest one-shot `exec_request` retries once on ambiguous transport
+  loss when a non-empty `request_id` is present (guest replay cache). Convenience
+  `exec_command` mints `vm-exec-*`; live MicroVM cgroup resource updates mint
+  `vm-cgroup-*` per command. Does **not** add pause/resume Runtime journals or
+  naive freezer replay (inspect/reconcile remains the recovery path), flip B2
+  harness close, fixture continuity, or hosted-KVM claims.
+
 ### Added
 
 - CRI `ExecSync` and non-interactive streaming oneshot mint a `cri-exec-*`
