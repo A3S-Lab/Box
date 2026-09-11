@@ -790,6 +790,43 @@ assert.equal(result.stderr, '')
 assert.equal(result.exitCode, 0)
 assert.equal(result.requestId, 'caller-stable-exec-1')
 
+class UnavailableOnceRuntime extends FakeRuntime {
+  #failNextCommand = true
+
+  async request(request) {
+    if (request.operation === 'command_run' && this.#failNextCommand) {
+      this.requests.push(request)
+      this.#failNextCommand = false
+      throw new A3SBoxError('prepare-exec response was lost', 'unavailable', {
+        requestId: 'sdk-command-minted-1',
+      })
+    }
+    return super.request(request)
+  }
+}
+
+const unavailableRuntime = new UnavailableOnceRuntime()
+const unavailableSandbox = await Sandbox.create(undefined, {
+  runtime: unavailableRuntime,
+})
+await assert.rejects(
+  unavailableSandbox.commands.run('true'),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.requestId === 'sdk-command-minted-1'
+)
+const recovered = await unavailableSandbox.commands.run('true', {
+  requestId: 'sdk-command-minted-1',
+})
+assert.equal(recovered.requestId, 'sdk-command-minted-1')
+const unavailableCommands = unavailableRuntime.requests.filter(
+  (request) => request.operation === 'command_run'
+)
+assert.equal(unavailableCommands.length, 2)
+assert.equal(unavailableCommands[0].request_id, undefined)
+assert.equal(unavailableCommands[1].request_id, 'sdk-command-minted-1')
+
 const write = await sandbox.files.write('/workspace/notes.txt', 'hello')
 assert.equal(write.size, 5)
 assert.equal(await sandbox.files.read('/workspace/notes.txt'), 'hello')
