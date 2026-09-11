@@ -1168,8 +1168,11 @@ impl OciLifecycleAdapter {
             BoxFileOp::Download => OciFileOp::Download,
         };
         let context = if request.op == BoxFileOp::Upload {
+            // Content-addressed by execution + generation + request payload.
+            // Do not mint a fresh session UUID: outer Unavailable retries must
+            // reuse the same durable op identity (same as kill/delete seeds).
             Some(operation_context(
-                &format!("session-{}", uuid::Uuid::new_v4().simple()),
+                execution_id.as_str(),
                 execution_generation,
                 "file",
                 (&binding.target, &request),
@@ -1223,8 +1226,11 @@ impl OciLifecycleAdapter {
             BoxFilesystemOp::Remove => OciFilesystemOp::Remove,
         };
         let context = if operation.is_mutating() {
+            // Content-addressed by execution + generation + request payload.
+            // Do not mint a fresh session UUID: outer Unavailable retries must
+            // reuse the same durable op identity (same as kill/delete seeds).
             Some(operation_context(
-                &format!("session-{}", uuid::Uuid::new_v4().simple()),
+                execution_id.as_str(),
                 execution_generation,
                 "filesystem",
                 (&binding.target, &request),

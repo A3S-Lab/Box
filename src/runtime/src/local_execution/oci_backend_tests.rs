@@ -2614,6 +2614,81 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
 }
 
 #[tokio::test]
+async fn mutating_file_and_filesystem_ops_reuse_content_addressed_identity_across_outer_calls() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("durable-mutations", ExecutionIsolation::Microvm),
+            &box_operation("durable-mutations-create"),
+        )
+        .await
+        .expect("initial launch");
+
+    let upload = BoxFileRequest {
+        op: BoxFileOp::Upload,
+        guest_path: "/work/same.txt".to_string(),
+        data: Some(STANDARD.encode(b"same bytes")),
+        user: None,
+        max_bytes: None,
+    };
+    manager
+        .transfer_file(&lease.execution_id, lease.generation, upload.clone())
+        .await
+        .expect("first upload");
+    manager
+        .transfer_file(&lease.execution_id, lease.generation, upload)
+        .await
+        .expect("outer retry upload");
+
+    let file_calls = service.file_requests();
+    assert_eq!(file_calls.len(), 2);
+    assert_eq!(
+        file_calls[0].context, file_calls[1].context,
+        "outer upload retries must reuse the durable op identity, not mint session-*"
+    );
+    assert_eq!(
+        service.file_effects().len(),
+        1,
+        "identical outer upload must replay, not apply twice"
+    );
+
+    let mkdir = BoxFilesystemRequest {
+        op: BoxFilesystemOp::MakeDir,
+        path: "/work/dir".to_string(),
+        destination: None,
+        depth: 0,
+        user: None,
+    };
+    manager
+        .filesystem(&lease.execution_id, lease.generation, mkdir.clone())
+        .await
+        .expect("first mkdir");
+    manager
+        .filesystem(&lease.execution_id, lease.generation, mkdir)
+        .await
+        .expect("outer retry mkdir");
+
+    let filesystem_calls = service.filesystem_requests();
+    assert_eq!(filesystem_calls.len(), 2);
+    assert_eq!(
+        filesystem_calls[0].context, filesystem_calls[1].context,
+        "outer mutating filesystem retries must reuse the durable op identity"
+    );
+    assert_eq!(
+        service.filesystem_effects().len(),
+        1,
+        "identical outer mkdir must replay, not apply twice"
+    );
+}
+
+#[tokio::test]
 async fn file_sessions_reject_invalid_download_limits_before_dispatch() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
