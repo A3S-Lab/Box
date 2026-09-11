@@ -91,8 +91,12 @@ struct FakeRuntimeService {
     stdin_effects: Mutex<Vec<WriteStdinRequest>>,
     stdin_journal: Mutex<HashMap<String, WriteStdinRequest>>,
     close_stdin_requests: Mutex<Vec<CloseStdinRequest>>,
+    close_stdin_effects: Mutex<Vec<CloseStdinRequest>>,
+    close_stdin_journal: Mutex<HashMap<String, CloseStdinRequest>>,
     resize_requests: Mutex<Vec<ResizeRequest>>,
     signal_process_requests: Mutex<Vec<SignalProcessRequest>>,
+    signal_effects: Mutex<Vec<SignalProcessRequest>>,
+    signal_journal: Mutex<HashMap<String, SignalProcessRequest>>,
     wait_process_requests: Mutex<Vec<WaitProcessRequest>>,
     kill_signals: Mutex<Vec<i32>>,
     delete_modes: Mutex<Vec<DeleteMode>>,
@@ -106,6 +110,8 @@ struct FakeRuntimeService {
     fail_update_after_effect: AtomicBool,
     fail_exec_after_effect: AtomicBool,
     fail_stdin_after_effect: AtomicBool,
+    fail_close_stdin_after_effect: AtomicBool,
+    fail_signal_after_effect: AtomicBool,
     fail_file_after_effect: AtomicBool,
     fail_filesystem_after_effect: AtomicBool,
     hold_next_process: AtomicBool,
@@ -175,8 +181,12 @@ impl FakeRuntimeService {
             stdin_effects: Mutex::new(Vec::new()),
             stdin_journal: Mutex::new(HashMap::new()),
             close_stdin_requests: Mutex::new(Vec::new()),
+            close_stdin_effects: Mutex::new(Vec::new()),
+            close_stdin_journal: Mutex::new(HashMap::new()),
             resize_requests: Mutex::new(Vec::new()),
             signal_process_requests: Mutex::new(Vec::new()),
+            signal_effects: Mutex::new(Vec::new()),
+            signal_journal: Mutex::new(HashMap::new()),
             wait_process_requests: Mutex::new(Vec::new()),
             kill_signals: Mutex::new(Vec::new()),
             delete_modes: Mutex::new(Vec::new()),
@@ -190,6 +200,8 @@ impl FakeRuntimeService {
             fail_update_after_effect: AtomicBool::new(false),
             fail_exec_after_effect: AtomicBool::new(false),
             fail_stdin_after_effect: AtomicBool::new(false),
+            fail_close_stdin_after_effect: AtomicBool::new(false),
+            fail_signal_after_effect: AtomicBool::new(false),
             fail_file_after_effect: AtomicBool::new(false),
             fail_filesystem_after_effect: AtomicBool::new(false),
             hold_next_process: AtomicBool::new(false),
@@ -349,6 +361,13 @@ impl FakeRuntimeService {
             .clone()
     }
 
+    fn close_stdin_effects(&self) -> Vec<CloseStdinRequest> {
+        self.close_stdin_effects
+            .lock()
+            .expect("close stdin effect lock")
+            .clone()
+    }
+
     fn resize_requests(&self) -> Vec<ResizeRequest> {
         self.resize_requests.lock().expect("resize lock").clone()
     }
@@ -357,6 +376,13 @@ impl FakeRuntimeService {
         self.signal_process_requests
             .lock()
             .expect("signal process lock")
+            .clone()
+    }
+
+    fn signal_effects(&self) -> Vec<SignalProcessRequest> {
+        self.signal_effects
+            .lock()
+            .expect("signal effect lock")
             .clone()
     }
 
@@ -1187,7 +1213,38 @@ impl OciRuntimeService for FakeRuntimeService {
         self.close_stdin_requests
             .lock()
             .map_err(|error| lock_error("close-stdin", error))?
+            .push(request.clone());
+        let operation_id = request.context.operation_id.to_string();
+        let mut journal = self
+            .close_stdin_journal
+            .lock()
+            .map_err(|error| lock_error("close-stdin", error))?;
+        if let Some(previous) = journal.get(&operation_id) {
+            if previous != &request {
+                return Err(oci_error(
+                    ErrorCode::Conflict,
+                    "close-stdin",
+                    "operation identity was reused with different content",
+                ));
+            }
+            return Ok(());
+        }
+        journal.insert(operation_id, request.clone());
+        self.close_stdin_effects
+            .lock()
+            .map_err(|error| lock_error("close-stdin", error))?
             .push(request);
+        drop(journal);
+        if self
+            .fail_close_stdin_after_effect
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake close-stdin response was lost")
+                    .for_operation("close-stdin")
+                    .retryable(true),
+            );
+        }
         Ok(())
     }
 
@@ -1205,6 +1262,23 @@ impl OciRuntimeService for FakeRuntimeService {
             .lock()
             .map_err(|error| lock_error("signal-process", error))?
             .push(request.clone());
+        let operation_id = request.context.operation_id.to_string();
+        {
+            let journal = self
+                .signal_journal
+                .lock()
+                .map_err(|error| lock_error("signal-process", error))?;
+            if let Some(previous) = journal.get(&operation_id) {
+                if previous != &request {
+                    return Err(oci_error(
+                        ErrorCode::Conflict,
+                        "signal-process",
+                        "operation identity was reused with different content",
+                    ));
+                }
+                return Ok(());
+            }
+        }
         let mut processes = self
             .processes
             .lock()
@@ -1217,6 +1291,22 @@ impl OciRuntimeService for FakeRuntimeService {
         append_missing_eof(&mut process.output, OutputStream::Stdout);
         if !process.record.terminal {
             append_missing_eof(&mut process.output, OutputStream::Stderr);
+        }
+        drop(processes);
+        self.signal_journal
+            .lock()
+            .map_err(|error| lock_error("signal-process", error))?
+            .insert(operation_id, request.clone());
+        self.signal_effects
+            .lock()
+            .map_err(|error| lock_error("signal-process", error))?
+            .push(request);
+        if self.fail_signal_after_effect.swap(false, Ordering::SeqCst) {
+            return Err(
+                Error::new(ErrorCode::Unavailable, "fake signal response was lost")
+                    .for_operation("signal-process")
+                    .retryable(true),
+            );
         }
         Ok(())
     }
@@ -3309,6 +3399,111 @@ async fn streaming_exec_retries_lost_stdin_and_preserves_exact_process_control()
         Some(RUNTIME_GENERATION)
     );
     assert!(!service.wait_process_requests().is_empty());
+}
+
+#[tokio::test]
+async fn streaming_close_stdin_inner_retry_reuses_mutation_sequence() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("close-stdin-retry", ExecutionIsolation::Sandbox),
+            &box_operation("close-stdin-retry-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut request = box_exec_request(None);
+    request.streaming = true;
+    request.stdin_streaming = true;
+    let mut process = manager
+        .start_process(&lease.execution_id, lease.generation, request)
+        .await
+        .expect("start streaming exec");
+    let input = process.input();
+    input
+        .write_stdin(b"before close")
+        .await
+        .expect("stdin before close");
+    service
+        .fail_close_stdin_after_effect
+        .store(true, Ordering::SeqCst);
+
+    input
+        .close_stdin()
+        .await
+        .expect("inner Unavailable retry recovers close-stdin");
+    input
+        .send_signal(ExecutionProcessSignal::Kill)
+        .await
+        .expect("signal after recovered close");
+
+    let mut terminal = None;
+    while let Some(event) = process.next_event().await.expect("stream event") {
+        if let ExecEvent::Exit(exit) = event {
+            terminal = Some(exit);
+        }
+    }
+
+    assert_eq!(terminal.expect("terminal status").exit_code, 137);
+    let close_calls = service.close_stdin_requests();
+    assert_eq!(close_calls.len(), 2);
+    assert_eq!(close_calls[0], close_calls[1]);
+    assert_eq!(service.close_stdin_effects().len(), 1);
+    assert_eq!(service.signal_process_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_signal_inner_retry_reuses_mutation_sequence() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("signal-retry", ExecutionIsolation::Sandbox),
+            &box_operation("signal-retry-create"),
+        )
+        .await
+        .expect("initial launch");
+    let mut request = box_exec_request(None);
+    request.streaming = true;
+    let mut process = manager
+        .start_process(&lease.execution_id, lease.generation, request)
+        .await
+        .expect("start streaming exec");
+    let input = process.input();
+    service
+        .fail_signal_after_effect
+        .store(true, Ordering::SeqCst);
+
+    input
+        .send_signal(ExecutionProcessSignal::Kill)
+        .await
+        .expect("inner Unavailable retry recovers signal-process");
+
+    let mut terminal = None;
+    while let Some(event) = process.next_event().await.expect("stream event") {
+        if let ExecEvent::Exit(exit) = event {
+            terminal = Some(exit);
+        }
+    }
+
+    assert_eq!(terminal.expect("terminal status").exit_code, 137);
+    let signals = service.signal_process_requests();
+    assert_eq!(signals.len(), 2);
+    assert_eq!(signals[0], signals[1]);
+    assert_eq!(signals[0].signal.get(), 9);
+    assert_eq!(service.signal_effects().len(), 1);
 }
 
 #[tokio::test]
