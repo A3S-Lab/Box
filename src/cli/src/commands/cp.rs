@@ -21,6 +21,57 @@ mod session;
 
 /// Timeout for directory transfers (60 seconds).
 const DIR_TRANSFER_TIMEOUT_NS: u64 = 60_000_000_000;
+const MAX_CP_REQUEST_ID_BYTES: usize = 512;
+
+fn mint_cli_cp_request_id() -> String {
+    format!("cli-cp-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn annotate_cp_unavailable(
+    error: Box<dyn std::error::Error>,
+    request_id: &str,
+) -> Box<dyn std::error::Error> {
+    use a3s_box_core::ExecutionManagerError;
+
+    let unavailable = error
+        .downcast_ref::<ExecutionManagerError>()
+        .is_some_and(|error| matches!(error, ExecutionManagerError::Unavailable(_)))
+        || error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("unavailable");
+    if unavailable {
+        format!("{error} (reuse request_id {request_id} on retry)").into()
+    } else {
+        error
+    }
+}
+
+async fn execute_copy_command(
+    session: &CopySession,
+    mut request: ExecRequest,
+) -> Result<a3s_box_core::exec::ExecOutput, Box<dyn std::error::Error>> {
+    let request_id = match request.request_id.take() {
+        Some(request_id) => {
+            if request_id.is_empty()
+                || request_id.len() > MAX_CP_REQUEST_ID_BYTES
+                || request_id.contains('\0')
+            {
+                return Err(
+                    "copy exec request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
+                        .into(),
+                );
+            }
+            request_id
+        }
+        None => mint_cli_cp_request_id(),
+    };
+    request.request_id = Some(request_id.clone());
+    match session.execute(request).await {
+        Ok(output) => Ok(output),
+        Err(error) => Err(annotate_cp_unavailable(error, &request_id)),
+    }
+}
 
 #[derive(Args)]
 pub struct CpArgs {
@@ -164,7 +215,7 @@ async fn restore_file_mode_in_box(
         streaming: false,
     };
 
-    let output = session.execute(request).await?;
+    let output = execute_copy_command(session, request).await?;
     if output.exit_code != 0 {
         return Err(format!(
             "Failed to set permissions on {box_path} in box: {}",
@@ -317,7 +368,7 @@ async fn copy_dir_from_box(
         streaming: false,
     };
 
-    let output = session.execute(request).await?;
+    let output = execute_copy_command(session, request).await?;
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -382,7 +433,7 @@ async fn copy_dir_to_box(
         streaming: false,
     };
 
-    let output = session.execute(request).await?;
+    let output = execute_copy_command(session, request).await?;
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -473,6 +524,7 @@ mod tests {
             execution_id: String,
             generation: ExecutionGeneration,
             command: Vec<String>,
+            request_id: Option<String>,
         },
         TransferFile {
             execution_id: String,
@@ -505,6 +557,7 @@ mod tests {
                 execution_id: execution_id.as_str().to_string(),
                 generation,
                 command: request.cmd,
+                request_id: request.request_id,
             });
             Ok(ExecOutput {
                 stdout: Vec::new(),
@@ -707,6 +760,7 @@ mod tests {
                         "-c".to_string(),
                         "tar -cf - .".to_string(),
                     ],
+                    request_id: None,
                 },
                 SessionCall::TransferFile {
                     execution_id: execution_id.as_str().to_string(),
@@ -750,26 +804,58 @@ mod tests {
         .await
         .unwrap();
 
+        let calls = manager.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
         assert_eq!(
-            *manager.calls.lock().unwrap(),
-            vec![
-                SessionCall::TransferFile {
-                    execution_id: execution_id.as_str().to_string(),
-                    generation,
-                    operation: FileOp::Upload,
-                    path: "/work/mode.txt".to_string(),
-                },
-                SessionCall::Execute {
-                    execution_id: execution_id.as_str().to_string(),
-                    generation,
-                    command: vec![
+            calls[0],
+            SessionCall::TransferFile {
+                execution_id: execution_id.as_str().to_string(),
+                generation,
+                operation: FileOp::Upload,
+                path: "/work/mode.txt".to_string(),
+            }
+        );
+        match &calls[1] {
+            SessionCall::Execute {
+                execution_id: observed_id,
+                generation: observed_generation,
+                command,
+                request_id,
+            } => {
+                assert_eq!(observed_id, execution_id.as_str());
+                assert_eq!(*observed_generation, generation);
+                assert_eq!(
+                    command,
+                    &vec![
                         "chmod".to_string(),
                         "750".to_string(),
                         "/work/mode.txt".to_string(),
-                    ],
-                },
-            ]
-        );
+                    ]
+                );
+                let request_id = request_id.as_deref().expect("minted request_id");
+                assert!(
+                    request_id.starts_with("cli-cp-"),
+                    "unexpected request_id: {request_id}"
+                );
+            }
+            other => panic!("expected chmod execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mint_cli_cp_request_id_uses_stable_prefix() {
+        let minted = mint_cli_cp_request_id();
+        assert!(minted.starts_with("cli-cp-"), "{minted}");
+    }
+
+    #[test]
+    fn annotate_cp_unavailable_surfaces_request_id() {
+        let error: Box<dyn std::error::Error> =
+            a3s_box_core::ExecutionManagerError::Unavailable("response lost".to_string()).into();
+        let annotated = annotate_cp_unavailable(error, "cli-cp-abc");
+        let message = annotated.to_string();
+        assert!(message.contains("unavailable"), "{message}");
+        assert!(message.contains("reuse request_id cli-cp-abc"), "{message}");
     }
 
     // --- Endpoint parsing tests ---
