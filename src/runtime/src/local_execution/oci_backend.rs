@@ -1277,21 +1277,25 @@ impl OciLifecycleAdapter {
         signal: Signal,
     ) -> ExecutionManagerResult<ContainerRecord> {
         binding.validate_for(execution_id)?;
-        let killed = self
-            .client
-            .kill(KillRequest {
-                context: operation_context(
-                    execution_id.as_str(),
-                    execution_generation,
-                    "kill",
-                    signal.get(),
-                )?,
-                target: binding.target.clone(),
-                signal,
-                all: true,
-            })
-            .await
-            .map_err(|error| sdk_error("kill", error))?;
+        // Durable operation identity is assigned before the call. A lost
+        // retryable response must replay that same kill; Runtime kill against
+        // an already-stopped container is naturally idempotent.
+        let request = KillRequest {
+            context: operation_context(
+                execution_id.as_str(),
+                execution_generation,
+                "kill",
+                signal.get(),
+            )?,
+            target: binding.target.clone(),
+            signal,
+            all: true,
+        };
+        let killed = match self.client.kill(request.clone()).await {
+            Err(error) if error.retryable => self.client.kill(request).await,
+            result => result,
+        }
+        .map_err(|error| sdk_error("kill", error))?;
         binding.validate_record(&killed)?;
         Ok(killed)
     }
@@ -1304,6 +1308,9 @@ impl OciLifecycleAdapter {
         mode: DeleteMode,
     ) -> ExecutionManagerResult<()> {
         binding.validate_for(execution_id)?;
+        // Durable operation identity is assigned before the call. Replay the
+        // same delete after a lost retryable response; NotFound after the
+        // Runtime already removed the container remains success.
         let request = DeleteRequest {
             context: operation_context(
                 execution_id.as_str(),
@@ -1314,9 +1321,14 @@ impl OciLifecycleAdapter {
             target: binding.target.clone(),
             mode,
         };
-        match self.client.delete(request).await {
+        match self.client.delete(request.clone()).await {
             Ok(()) => Ok(()),
             Err(error) if error.code == ErrorCode::NotFound => Ok(()),
+            Err(error) if error.retryable => match self.client.delete(request).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.code == ErrorCode::NotFound => Ok(()),
+                Err(error) => Err(sdk_error("delete", error)),
+            },
             Err(error) => Err(sdk_error("delete", error)),
         }
     }
