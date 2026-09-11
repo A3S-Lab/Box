@@ -85,7 +85,9 @@ All notable changes to A3S Box will be documented in this file.
 - Disarm the detached OCI exec timeout watchdog as soon as `wait_process`
   observes a terminal status (not only when `Exit` is later popped), so a
   dropped stream cannot race a late timeout SIGKILL claim against a finished
-  process. Detached futures that still wait for timeout keep the watchdog.
+  process. Uses compare-exchange from `WAITING` only so a real timeout can
+  still publish the legacy `Process killed: timeout exceeded` notice.
+  Detached futures that still wait for timeout keep the watchdog.
 
 - Native live-session v4 CI on OCI `05a3b2b…` (#300): restore matched-cred
   harness, `100755` scripts, Verify cleanup, same-request_id keyed-exec

@@ -903,9 +903,14 @@ impl OciProcessStream {
         let event = self.pending.pop_front()?;
         if matches!(event, ExecEvent::Exit(_)) {
             self.done = true;
-            // Disarm the detached timeout watchdog once Exit is observed so it
-            // cannot later claim a signal mutation against a finished process.
-            self.watchdog.store(WATCHDOG_FINISHED, Ordering::SeqCst);
+            // Disarm only while still waiting so a timed-out kill keeps
+            // WATCHDOG_TIMED_OUT long enough for the legacy timeout notice.
+            let _ = self.watchdog.compare_exchange(
+                WATCHDOG_WAITING,
+                WATCHDOG_FINISHED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
         }
         Some(event)
     }
@@ -1050,9 +1055,15 @@ impl ExecutionProcessStream for OciProcessStream {
                 {
                     Ok(status) => {
                         self.status = Some(status);
-                        // Process is terminal: disarm before Exit is popped so a
-                        // dropped stream cannot race a late timeout SIGKILL claim.
-                        self.watchdog.store(WATCHDOG_FINISHED, Ordering::SeqCst);
+                        // Disarm only while still waiting. Do not clobber
+                        // WATCHDOG_TIMED_OUT before queue_terminal_events can
+                        // publish the legacy timeout notice.
+                        let _ = self.watchdog.compare_exchange(
+                            WATCHDOG_WAITING,
+                            WATCHDOG_FINISHED,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        );
                     }
                     Err(error) if error.code == ErrorCode::DeadlineExceeded => {}
                     Err(error) => return Err(sdk_error("wait process", error)),
