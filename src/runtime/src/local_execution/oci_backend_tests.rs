@@ -2225,7 +2225,7 @@ async fn launch_persists_exact_runtime_binding_for_both_product_isolations() {
 }
 
 #[tokio::test]
-async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
+async fn captured_exec_replays_after_lost_response_within_one_execute() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let service = Arc::new(FakeRuntimeService::launch_ready());
     let provider = Arc::new(FakeBundleProvider::default());
@@ -2235,13 +2235,13 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
         ("ALPHA".to_string(), "container".to_string()),
         ("BETA".to_string(), "container".to_string()),
     ];
-    let first = manager(
+    let manager = manager(
         &directory,
         endpoint.clone(),
         service.clone(),
         provider.clone(),
     );
-    let lease = first
+    let lease = manager
         .create_and_start(create, &box_operation("captured-exec-create"))
         .await
         .expect("initial launch");
@@ -2259,23 +2259,16 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
     };
     service.fail_exec_after_effect.store(true, Ordering::SeqCst);
 
-    first
-        .execute(&lease.execution_id, lease.generation, exec.clone())
-        .await
-        .expect_err("first exec response is intentionally lost");
-    drop(first);
-
-    let reopened = manager(&directory, endpoint, service.clone(), provider);
-    let output = reopened
+    let output = manager
         .execute(&lease.execution_id, lease.generation, exec)
         .await
-        .expect("replayed captured exec");
+        .expect("inner Unavailable retry recovers captured exec");
 
     assert_eq!(output.stdout, b"fake stdout\n");
     assert_eq!(output.stderr, b"fake stderr\n");
     assert_eq!(output.exit_code, 23);
     assert!(!output.truncated);
-    assert!(reopened
+    assert!(manager
         .read_logs(&lease.execution_id, lease.generation)
         .await
         .expect("structured Box logs remain readable")
@@ -2330,6 +2323,56 @@ async fn captured_exec_replays_after_lost_response_and_backend_reopen() {
     assert_eq!(stdin[0].data, b"probe input");
     assert_eq!(stdin[0].process.container, calls[0].container);
     assert_eq!(service.close_stdin_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn omit_path_captured_exec_inner_retry_reuses_minted_process_identity() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = Arc::new(FakeRuntimeService::launch_ready());
+    let manager = manager(
+        &directory,
+        test_endpoint(),
+        service.clone(),
+        Arc::new(FakeBundleProvider::default()),
+    );
+    let lease = manager
+        .create_and_start(
+            request("omit-path-exec-retry", ExecutionIsolation::Sandbox),
+            &box_operation("omit-path-exec-retry-create"),
+        )
+        .await
+        .expect("initial launch");
+    service.fail_exec_after_effect.store(true, Ordering::SeqCst);
+
+    let output = manager
+        .execute(
+            &lease.execution_id,
+            lease.generation,
+            BoxExecRequest {
+                request_id: None,
+                cmd: vec!["/bin/true".to_string()],
+                timeout_ns: 1_000_000_000,
+                env: Vec::new(),
+                working_dir: None,
+                rootfs: None,
+                stdin: None,
+                stdin_streaming: false,
+                user: None,
+                streaming: false,
+            },
+        )
+        .await
+        .expect("omit-path inner Unavailable retry recovers without a caller request_id");
+
+    assert_eq!(output.exit_code, 23);
+    let calls = service.exec_requests();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0], calls[1]);
+    assert!(calls[0]
+        .process_id
+        .as_str()
+        .starts_with("a3s-box-exec-process-"));
+    assert_eq!(service.processes.lock().expect("process lock").len(), 1);
 }
 
 #[tokio::test]

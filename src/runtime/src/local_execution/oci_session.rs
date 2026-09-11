@@ -313,10 +313,13 @@ async fn launch_process(
             watchdog.clone(),
         );
     }
-    let process_record = client
-        .exec(exec_request)
-        .await
-        .map_err(|error| sdk_error("exec", error))?;
+    // Same durable process identity as file/FS: one retryable Unavailable after
+    // the Runtime has journaled the process must replay, not mint a second key.
+    let process_record = match client.exec(exec_request.clone()).await {
+        Err(error) if error.retryable => client.exec(exec_request).await,
+        result => result,
+    }
+    .map_err(|error| sdk_error("exec", error))?;
     validate_process_record(&process_record, &expected_target, terminal)?;
 
     let input = Arc::new(OciProcessInput {
