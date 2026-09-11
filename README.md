@@ -384,9 +384,12 @@ reports still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). It does not alone claim KVM MicroVM Live continuity.
 Pin OCI Runtime at `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip;
 prior greening on `61f77712…` / Native Live filesystem #290). Existing-host
-WSL2 evidence report SHA-256
-`9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd`
-(`retained_filesystem_proven=true`). Does not flip default create Host-bound
+WSL2 evidence on Box `d07648d0…` / CI run `34542747784`: report SHA-256
+`36f91361c3851ea995ac7530bcfe05f0c9216d6e9a5b7e130b48f151cd4b9a75`
+(linux-x86_64) and
+`8454044deabe77a08d7f193cd970e8f3117566a8651b3f9d4023cb2223321423`
+(linux-arm64) (`retained_filesystem_proven=true`,
+`retained_stream_handle_proven=true`). Does not flip default create Host-bound
 policy or cutover.
 
 ### Exercise the qualification-only WHPX handoff on Windows
