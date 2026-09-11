@@ -497,12 +497,19 @@ retain process or filesystem sessions after its owner dies.
     MicroVM Live siblings); harness reports keep
     `b2_process_session_recovery_closed=false`.
   - [x] Retained filesystem continuity on a real Native Linux owner restart
-    (v4 harness path above). **Existing-host WSL2 evidence** on OCI
-    `05a3b2bddff0668703caafc48f38514a139ee81a`: report SHA-256
-    `9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd`
-    (`status=passed`, `retained_filesystem_proven=true`,
-    `retained_stream_handle_proven=true`; B2 / fixture / KVM / utility-VM
-    claims stay false). Prior pin `61f77712…` evidence SHA-256
+    (v4 harness path above). **Existing-host WSL2 evidence** on Box
+    `d07648d0a7ed0d0801ba190cba3efc361dd9d0f0` (#300: matched-cred harness +
+    same-request_id keyed-exec retries) + OCI
+    `05a3b2bddff0668703caafc48f38514a139ee81a`: CI run `34542747784` report
+    SHA-256 `36f91361c3851ea995ac7530bcfe05f0c9216d6e9a5b7e130b48f151cd4b9a75`
+    (linux-x86_64) and
+    `8454044deabe77a08d7f193cd970e8f3117566a8651b3f9d4023cb2223321423`
+    (linux-arm64) (`status=passed`, `retained_filesystem_proven=true`,
+    `retained_stream_handle_proven=true`, `live_kill_after_reopen=true`,
+    `removed=true`; B2 / fixture / KVM / utility-VM claims stay false). Prior
+    pin `05a3b2b…` single-arch digest
+    `9d4f9703b2735f45b34ec98561b443b8076b97d818c57a39d4b4019d7f28bbfd`; prior
+    pin `61f77712…` evidence SHA-256
     `3d158d6755afcd187f883234768f54aaa1dbd330e56a2ef763d11164fd6b5818`.
   - [x] KVM MicroVM Live process-session continuity via observation harness
     `a3s.box.linux-kvm-live-session.v1` (`linux-kvm-live-session-qualification`)
