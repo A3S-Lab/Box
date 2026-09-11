@@ -898,11 +898,15 @@ impl PoolRegistry {
             };
             (leased.vm.clone(), LeaseExecGuard::new(leased))
         };
+        let request_id = match resolve_pool_lease_request_id(req.request_id) {
+            Ok(request_id) => request_id,
+            Err(error) => return err_resp(error),
+        };
         let output = vm
             .lock()
             .await
             .exec_request(&a3s_box_core::exec::ExecRequest {
-                request_id: None,
+                request_id: Some(request_id.clone()),
                 cmd: req.cmd,
                 timeout_ns: req.timeout_ns.unwrap_or(60_000_000_000),
                 env: req.env,
@@ -921,7 +925,7 @@ impl PoolRegistry {
                 exit_code: o.exit_code,
                 error: None,
             },
-            Err(e) => err_resp(e.to_string()),
+            Err(e) => err_resp(annotate_pool_lease_unavailable(e.to_string(), &request_id)),
         }
     }
 
@@ -1398,6 +1402,48 @@ fn err_resp(msg: impl Into<String>) -> PoolRunResponse {
 }
 
 #[cfg(not(windows))]
+const MAX_POOL_REQUEST_ID_BYTES: usize = 512;
+
+#[cfg(not(windows))]
+fn mint_cli_pool_request_id() -> String {
+    format!("cli-pool-{}", uuid::Uuid::new_v4().simple())
+}
+
+#[cfg(not(windows))]
+fn resolve_pool_lease_request_id(request_id: Option<String>) -> Result<String, String> {
+    match request_id {
+        Some(request_id) => {
+            if request_id.is_empty()
+                || request_id.len() > MAX_POOL_REQUEST_ID_BYTES
+                || request_id.contains('\0')
+            {
+                return Err(
+                    "pool lease exec request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
+                        .to_string(),
+                );
+            }
+            Ok(request_id)
+        }
+        None => Ok(mint_cli_pool_request_id()),
+    }
+}
+
+#[cfg(not(windows))]
+fn annotate_pool_lease_unavailable(message: String, request_id: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let retryable = lower.contains("unavailable")
+        || lower.contains("closed without response")
+        || lower.contains("response timed out")
+        || lower.contains("response read failed")
+        || lower.contains("connection failed");
+    if retryable {
+        format!("{message} (reuse request_id {request_id} on the same lease)")
+    } else {
+        message
+    }
+}
+
+#[cfg(not(windows))]
 fn timeout_duration(timeout_ns: Option<u64>, default_ns: u64) -> std::time::Duration {
     std::time::Duration::from_nanos(timeout_ns.unwrap_or(default_ns))
 }
@@ -1501,6 +1547,10 @@ async fn handle_conn(
                             )
                             .await
                         } else {
+                            // One-shot pool run destroys the VM after the
+                            // response, so a keyed request_id cannot span
+                            // client retries (new VM, empty replay cache).
+                            // Lease exec mints/reuses `cli-pool-*` instead.
                             vm.exec_request(&a3s_box_core::exec::ExecRequest {
                                 request_id: None,
                                 cmd: run.cmd,
@@ -1724,6 +1774,41 @@ mod tests {
         assert!(json.contains(r#""total_released":3"#));
         assert!(json.contains(r#""total_evicted":1"#));
         assert!(json.contains("hit_rate"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_pool_lease_request_id_mints_cli_prefix_when_omitted() {
+        let minted = resolve_pool_lease_request_id(None).expect("mint");
+        assert!(
+            minted.starts_with("cli-pool-"),
+            "unexpected request_id: {minted}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_pool_lease_request_id_rejects_invalid_ids() {
+        assert!(resolve_pool_lease_request_id(Some(String::new())).is_err());
+        assert!(resolve_pool_lease_request_id(Some("bad\0id".to_string())).is_err());
+        assert!(resolve_pool_lease_request_id(Some("x".repeat(513))).is_err());
+        assert_eq!(
+            resolve_pool_lease_request_id(Some("caller-stable-pool-1".to_string())).as_deref(),
+            Ok("caller-stable-pool-1")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn annotate_pool_lease_unavailable_surfaces_request_id() {
+        let annotated = annotate_pool_lease_unavailable(
+            "Exec server closed without response".to_string(),
+            "cli-pool-abc",
+        );
+        assert!(
+            annotated.contains("reuse request_id cli-pool-abc on the same lease"),
+            "{annotated}"
+        );
     }
 
     #[test]
@@ -2487,11 +2572,17 @@ mod tests {
             rootfs: Some("/run/a3s/build-rootfs".into()),
             stdin: None,
             user: None,
+            request_id: Some("cli-pool-stable-1".into()),
         }))
         .unwrap();
         assert!(exec.contains(r#""op":"exec""#));
         assert!(exec.contains(r#""lease_id":"lease-1""#));
         assert!(exec.contains(r#""rootfs":"/run/a3s/build-rootfs""#));
+        assert!(exec.contains(r#""request_id":"cli-pool-stable-1""#));
+
+        let exec_omit: PoolLeaseExecRequest =
+            serde_json::from_str(r#"{"lease_id":"lease-1","cmd":["true"]}"#).unwrap();
+        assert!(exec_omit.request_id.is_none());
 
         // PoolStatusResponse round-trips.
         let sr = PoolStatusResponse {
