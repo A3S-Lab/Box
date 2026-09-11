@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- One-shot OCI `exec` retries once on retryable `Unavailable` with the **same**
+  process-journal identity (parity with file upload / mutating filesystem),
+  including omit-path minted `managed-exec-*` seeds. Lost responses after the
+  Runtime journals the process no longer require a second outer `execute()` or
+  a caller-provided `request_id` to avoid orphan journals. Does **not** flip
+  B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - Mutating OCI file upload and filesystem ops derive durable operation
   identity from `execution_id` + generation + request payload (same pattern as
   kill/delete), instead of minting a fresh `session-{uuid}` seed per call.
