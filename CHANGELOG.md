@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `ExecClient::shutdown_rootfs_maintenance` shares the control-ACK ambiguous
+  transport path with `signal_main`: connect failures stay `Ok(false)` with no
+  retry; write/ACK timeout/closed retries once on a fresh stream. Guest already
+  ACKs repeat shutdown while `SHUTTING_DOWN`, so this avoids false-negative
+  shim force-teardown without request ids. Does **not** retry `spawn_main`,
+  flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - `ExecClient::signal_main` retries once on a fresh stream when the guest may
   already have applied the signal but the ACK was lost (write/ACK timeout /
   closed / bad frame). Connect failures stay `Ok(false)` with no retry (guest
