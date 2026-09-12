@@ -51,7 +51,7 @@ const EXEC_HOST_SLACK_SECS: u64 = 10;
 /// force-kill fallback.
 const SIGNAL_MAIN_ACK_TIMEOUT_SECS: u64 = 10;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ControlAckAttempt {
     /// Guest sent the expected control ACK.
     Acked,
@@ -59,6 +59,20 @@ enum ControlAckAttempt {
     NotReached,
     /// Write may have reached the guest, or the ACK was lost/timed out.
     Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpawnMainAttempt {
+    /// Guest sent `spawn-main-ack`.
+    Acked,
+    /// Connect failed; the control frame never left the host.
+    NotReached,
+    /// Write may have reached the guest, or the ACK was lost/timed out.
+    Ambiguous,
+    /// Guest reported the main is already present (idempotent success).
+    AlreadySpawned,
+    /// Guest rejected the spawn with a non-idempotent reason.
+    Rejected(String),
 }
 
 type ExecFrameReader = a3s_transport::FrameReader<tokio::io::ReadHalf<ExecStream>>;
@@ -603,10 +617,34 @@ impl ExecClient {
     /// command — already known to the guest via BOX_EXEC_* — as the MAIN process.
     /// The spawned main inherits the console (so its output reaches the json-file
     /// logs) and drives the VM lifecycle. Returns `Ok(true)` if acknowledged.
+    ///
+    /// Connect failures stay `Ok(false)` with no retry. After a write may have
+    /// reached the guest, a lost ACK is ambiguous: the guest publishes at most
+    /// one main and ACKs repeat spawn-main once the pid is published, so one
+    /// fresh-stream retry is safe. An `already spawned` NACK is treated as
+    /// success (observe-after-ambiguity).
     pub async fn spawn_main(&self, spec_json: Option<&[u8]>) -> Result<bool> {
+        match self.spawn_main_once(spec_json).await? {
+            SpawnMainAttempt::Acked => Ok(true),
+            SpawnMainAttempt::NotReached => Ok(false),
+            SpawnMainAttempt::AlreadySpawned => Ok(true),
+            SpawnMainAttempt::Rejected(reason) => Err(BoxError::ExecError(format!(
+                "spawn-main rejected by guest: {reason}"
+            ))),
+            SpawnMainAttempt::Ambiguous => match self.spawn_main_once(spec_json).await? {
+                SpawnMainAttempt::Acked | SpawnMainAttempt::AlreadySpawned => Ok(true),
+                SpawnMainAttempt::NotReached | SpawnMainAttempt::Ambiguous => Ok(false),
+                SpawnMainAttempt::Rejected(reason) => Err(BoxError::ExecError(format!(
+                    "spawn-main rejected by guest: {reason}"
+                ))),
+            },
+        }
+    }
+
+    async fn spawn_main_once(&self, spec_json: Option<&[u8]>) -> Result<SpawnMainAttempt> {
         let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(SpawnMainAttempt::NotReached),
         };
 
         let mut payload = b"spawn-main:".to_vec();
@@ -619,28 +657,35 @@ impl ExecClient {
             .map_err(|e| BoxError::ExecError(format!("spawn-main frame encode failed: {}", e)))?;
 
         if stream.write_all(&encoded).await.is_err() {
-            return Ok(false);
+            return Ok(SpawnMainAttempt::Ambiguous);
         }
 
         let (r, _w) = tokio::io::split(stream);
         let mut reader = a3s_transport::FrameReader::new(r);
-        match reader.read_frame().await {
-            Ok(Some(f))
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(SIGNAL_MAIN_ACK_TIMEOUT_SECS),
+            reader.read_frame(),
+        )
+        .await;
+        match read {
+            Ok(Ok(Some(f)))
                 if f.frame_type == a3s_transport::FrameType::Control
                     && f.payload == EXEC_SPAWN_MAIN_ACK =>
             {
-                Ok(true)
+                Ok(SpawnMainAttempt::Acked)
             }
-            Ok(Some(f))
+            Ok(Ok(Some(f)))
                 if f.frame_type == a3s_transport::FrameType::Control
                     && f.payload.starts_with(EXEC_SPAWN_MAIN_NACK) =>
             {
                 let reason = String::from_utf8_lossy(&f.payload[EXEC_SPAWN_MAIN_NACK.len()..]);
-                Err(BoxError::ExecError(format!(
-                    "spawn-main rejected by guest: {reason}"
-                )))
+                if reason.contains("already spawned") {
+                    Ok(SpawnMainAttempt::AlreadySpawned)
+                } else {
+                    Ok(SpawnMainAttempt::Rejected(reason.into_owned()))
+                }
             }
-            _ => Ok(false),
+            _ => Ok(SpawnMainAttempt::Ambiguous),
         }
     }
 }
@@ -1330,6 +1375,80 @@ mod tests {
             frames.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "guest must see shutdown twice (natural idempotency)"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_main_retries_once_after_lost_ack() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("spawn_main_retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            // First spawn-main: guest applies then drops both halves (lost ACK).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.frame_type, a3s_transport::FrameType::Control);
+            assert!(frame.payload.starts_with(b"spawn-main:"));
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            // Second spawn-main: ACK (guest published-pid idempotency).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert!(frame.payload.starts_with(b"spawn-main:"));
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            writer.write_control(EXEC_SPAWN_MAIN_ACK).await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        assert!(
+            client.spawn_main(None).await.unwrap(),
+            "lost ACK must recover via one fresh-stream retry"
+        );
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn spawn_main_treats_already_spawned_nack_as_success() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("spawn_main_already.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            let mut nack = EXEC_SPAWN_MAIN_NACK.to_vec();
+            nack.extend_from_slice(b"container main already spawned");
+            writer.write_control(&nack).await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        assert!(
+            client.spawn_main(None).await.unwrap(),
+            "already-spawned NACK is observe-after-ambiguity success"
         );
     }
 

@@ -6,19 +6,26 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `ExecClient::spawn_main` retries once on ambiguous ACK loss; guest now ACKs
+  repeat spawn-main once the container pid is published (bare and JSON frames)
+  and waits through the pending sentinel instead of NACKing. Host treats
+  `already spawned` NACK as success. Connect failures stay `Ok(false)` with no
+  retry. Does **not** flip B2 harness close, fixture continuity, or hosted-KVM
+  claims.
+
 - `ExecClient::shutdown_rootfs_maintenance` shares the control-ACK ambiguous
   transport path with `signal_main`: connect failures stay `Ok(false)` with no
   retry; write/ACK timeout/closed retries once on a fresh stream. Guest already
   ACKs repeat shutdown while `SHUTTING_DOWN`, so this avoids false-negative
-  shim force-teardown without request ids. Does **not** retry `spawn_main`,
-  flip B2 harness close, fixture continuity, or hosted-KVM claims.
+  shim force-teardown without request ids. Does **not** flip B2 harness close,
+  fixture continuity, or hosted-KVM claims.
 
 - `ExecClient::signal_main` retries once on a fresh stream when the guest may
   already have applied the signal but the ACK was lost (write/ACK timeout /
   closed / bad frame). Connect failures stay `Ok(false)` with no retry (guest
   never reached). Signal delivery is naturally idempotent, so this avoids
-  false-negative force-kills without inventing request ids. Does **not** retry
-  `spawn_main`, flip B2 harness close, fixture continuity, or hosted-KVM claims.
+  false-negative force-kills without inventing request ids. Does **not** flip
+  B2 harness close, fixture continuity, or hosted-KVM claims.
 
 - `ExecClient::exec_command` retries once on ambiguous guest transport loss when
   a non-empty `request_id` is present (fresh stream + guest replay cache). This

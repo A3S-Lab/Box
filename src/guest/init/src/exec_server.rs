@@ -226,11 +226,14 @@ pub fn set_deferred_main_spec(
 /// code could deadlock from this multi-threaded PID 1. The pid is published WHILE
 /// still registered MANAGED (the reaper can't reap it as an orphan before the
 /// hand-off), then released to the supervision loop, which reaps it for the real
-/// exit code. A CAS makes only the first spawn-main win.
+/// exit code. The first spawn claims the sentinel; concurrent/retried
+/// spawn-main frames wait for the published pid and ACK (no duplicate main).
 #[cfg(target_os = "linux")]
 fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
-    let uses_stashed_spec = frame.is_none();
-    if let Some(pid) = idempotent_stashed_main_pid(uses_stashed_spec, container_pid()) {
+    // One main per VM: if the pid is already published, ACK without re-spawning.
+    // Covers bare (stashed) and JSON (pool) frames alike — a lost ACK must not
+    // force a duplicate main or a false NACK.
+    if let Some(pid) = published_main_pid(container_pid()) {
         return Ok(pid);
     }
 
@@ -296,14 +299,19 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
         command.stdin(std::process::Stdio::null());
     }
 
-    // Idempotency: claim the sentinel (-1 → -2 pending); a second spawn-main loses.
-    // Concurrent triggers still race on the sentinel CAS. Once the real PID is
-    // published, a repeated bare trigger returns it above and is acknowledged
-    // without spawning a duplicate main.
+    // Idempotency: claim the sentinel (-1 → -2 pending). Concurrent / retried
+    // triggers wait for the published pid and ACK instead of NACKing — a lost ACK
+    // after the first spawn must not look like failure to the host.
     if CONTAINER_PID
         .compare_exchange(-1, -2, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        if let Some(pid) = published_main_pid(container_pid()) {
+            return Ok(pid);
+        }
+        if let Some(pid) = wait_for_published_container_pid(Duration::from_secs(2)) {
+            return Ok(pid);
+        }
         return Err("container main already spawned".to_string());
     }
 
@@ -324,8 +332,27 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     }
 }
 
-fn idempotent_stashed_main_pid(uses_stashed_spec: bool, current_pid: i32) -> Option<i32> {
-    (uses_stashed_spec && current_pid > 0).then_some(current_pid)
+#[cfg(target_os = "linux")]
+fn published_main_pid(current_pid: i32) -> Option<i32> {
+    (current_pid > 0).then_some(current_pid)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_published_container_pid(timeout: Duration) -> Option<i32> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(pid) = published_main_pid(container_pid()) {
+            return Some(pid);
+        }
+        // Spawn failed and reset the sentinel — caller may reclaim.
+        if container_pid() == -1 {
+            return None;
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Maximum payload bytes per streamed exec chunk.
@@ -3135,11 +3162,10 @@ mod tests {
     }
 
     #[test]
-    fn only_a_repeated_stashed_main_trigger_is_idempotent() {
-        assert_eq!(idempotent_stashed_main_pid(true, 42), Some(42));
-        assert_eq!(idempotent_stashed_main_pid(false, 42), None);
-        assert_eq!(idempotent_stashed_main_pid(true, -1), None);
-        assert_eq!(idempotent_stashed_main_pid(true, -2), None);
+    fn published_main_pid_acks_any_repeated_spawn_main() {
+        assert_eq!(published_main_pid(42), Some(42));
+        assert_eq!(published_main_pid(-1), None);
+        assert_eq!(published_main_pid(-2), None);
     }
 
     #[cfg(target_os = "linux")]
