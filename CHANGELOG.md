@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `ExecClient::signal_main` retries once on a fresh stream when the guest may
+  already have applied the signal but the ACK was lost (write/ACK timeout /
+  closed / bad frame). Connect failures stay `Ok(false)` with no retry (guest
+  never reached). Signal delivery is naturally idempotent, so this avoids
+  false-negative force-kills without inventing request ids. Does **not** retry
+  `spawn_main`, flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - `ExecClient::exec_command` retries once on ambiguous guest transport loss when
   a non-empty `request_id` is present (fresh stream + guest replay cache). This
   covers legacy MicroVM CLI/SDK socket callers that mint identity but previously
