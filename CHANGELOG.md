@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Remove stale Sandbox “opt-in / no setting means legacy” wording from ROADMAP
+  and README (EN/zh-CN) so docs match the merged Sandbox GA default
+  (`SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent).
 - Productize Linux Sandbox host preparation: add operator
   `scripts/prepare-linux-sandbox-host.sh` (setuid libexec launcher + delegated
   cgroup), keep `prepare-linux-sandbox-ci-host.sh` as a `--ci` wrapper, document
