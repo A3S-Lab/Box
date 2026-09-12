@@ -376,14 +376,18 @@ policy or cutover.
 
 ### Exercise Native Linux live-session Host reopen (observation)
 
-Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
-delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
-run the root-owned runner. It mirrors Sandbox CI: the runner starts as root,
-then `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`,
-sandbox `ruid`) and the same wrapper is exported as
-`A3S_BOX_CI_SETPRIV_WRAPPER` so the Native Linux owner can elevate for
-device-policy bootstrap. SDK Local Sandbox CI runs this gate and fail-closes
-on a missing or dishonest report; it still does not close B2.
+Live Host-reopen continuity is Native-Linux-driver-only today. For **product**
+Sandbox hosts, use `scripts/prepare-linux-sandbox-host.sh` (setuid libexec +
+delegated cgroup) as documented in
+[Installation](docs/installation.md#linux-sandbox-host-preparation). For this
+**observation gate**, prepare a delegated cgroup with the CI wrapper
+(`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then run the root-owned
+runner. It mirrors Sandbox CI: the runner starts as root, then
+`elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`, sandbox
+`ruid`) and the same wrapper is exported as `A3S_BOX_CI_SETPRIV_WRAPPER` so the
+Native Linux owner can elevate for device-policy bootstrap. SDK Local Sandbox
+CI runs this gate and fail-closes on a missing or dishonest report; it still
+does not close B2. See [Sandbox GA evidence](docs/sandbox-ga-evidence.md).
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release
