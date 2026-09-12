@@ -51,6 +51,16 @@ const EXEC_HOST_SLACK_SECS: u64 = 10;
 /// force-kill fallback.
 const SIGNAL_MAIN_ACK_TIMEOUT_SECS: u64 = 10;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalMainAttempt {
+    /// Guest sent `signal-main-ack`.
+    Acked,
+    /// Connect failed; the control frame never left the host.
+    NotReached,
+    /// Write may have reached the guest, or the ACK was lost/timed out.
+    Ambiguous,
+}
+
 type ExecFrameReader = a3s_transport::FrameReader<tokio::io::ReadHalf<ExecStream>>;
 type ExecFrameWriter = a3s_transport::FrameWriter<tokio::io::WriteHalf<ExecStream>>;
 
@@ -495,10 +505,26 @@ impl ExecClient {
     /// container's own stop handler; when it exits, guest init exits and the VM
     /// stops cleanly. Returns `Ok(true)` if the guest acknowledged, `Ok(false)`
     /// if it did not respond (caller should fall back to a hard stop).
+    ///
+    /// Connect failures mean the guest was never reached (`Ok(false)`, no retry).
+    /// After a write may have reached the guest, a lost ACK is ambiguous: the
+    /// signal is naturally idempotent, so one fresh-stream retry is safe and
+    /// avoids false-negative force-kills (parity with OCI kill/delete).
     pub async fn signal_main(&self, signal: i32) -> Result<bool> {
+        match self.signal_main_once(signal).await? {
+            SignalMainAttempt::Acked => Ok(true),
+            SignalMainAttempt::NotReached => Ok(false),
+            SignalMainAttempt::Ambiguous => match self.signal_main_once(signal).await? {
+                SignalMainAttempt::Acked => Ok(true),
+                SignalMainAttempt::NotReached | SignalMainAttempt::Ambiguous => Ok(false),
+            },
+        }
+    }
+
+    async fn signal_main_once(&self, signal: i32) -> Result<SignalMainAttempt> {
         let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(SignalMainAttempt::NotReached),
         };
 
         let payload = format!("signal-main:{}", signal).into_bytes();
@@ -508,14 +534,14 @@ impl ExecClient {
             .map_err(|e| BoxError::ExecError(format!("signal-main frame encode failed: {}", e)))?;
 
         if stream.write_all(&encoded).await.is_err() {
-            return Ok(false);
+            // Write may have partially reached the guest; treat as ambiguous.
+            return Ok(SignalMainAttempt::Ambiguous);
         }
 
         // Host-side deadline: a wedged guest can complete the connect handshake
         // (listen backlog) but never write the ACK, which would hang this read
         // forever — and stop/restart deliver the signal through here BEFORE their
-        // force-kill fallback, so the fallback would never run. On timeout report
-        // not-acknowledged so the caller force-kills.
+        // force-kill fallback, so the fallback would never run.
         let (r, _w) = tokio::io::split(stream);
         let mut reader = a3s_transport::FrameReader::new(r);
         let read = tokio::time::timeout(
@@ -528,9 +554,9 @@ impl ExecClient {
                 if f.frame_type == a3s_transport::FrameType::Control
                     && f.payload == EXEC_SIGNAL_MAIN_ACK =>
             {
-                Ok(true)
+                Ok(SignalMainAttempt::Acked)
             }
-            _ => Ok(false),
+            _ => Ok(SignalMainAttempt::Ambiguous),
         }
     }
 
@@ -1168,6 +1194,55 @@ mod tests {
         // SIGINT = 2 (image STOPSIGNAL example)
         let acked = client.signal_main(2).await.unwrap();
         assert!(acked);
+    }
+
+    #[tokio::test]
+    async fn signal_main_retries_once_after_lost_ack() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("signal_main_retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            // Accept connect verification
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            // First signal-main: apply (read frame) then drop the whole stream
+            // so the host sees closed-without-ACK (not the 10s ACK timeout).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(frame.payload, b"signal-main:15");
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            // Second signal-main: ACK.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.payload, b"signal-main:15");
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            writer.write_control(EXEC_SIGNAL_MAIN_ACK).await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let acked = client.signal_main(15).await.unwrap();
+        assert!(acked, "lost ACK must recover via one fresh-stream retry");
+        assert_eq!(
+            frames.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "guest must see the same signal twice (natural idempotency)"
+        );
     }
 
     #[tokio::test]
