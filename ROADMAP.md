@@ -214,12 +214,12 @@ The Linux owner composition validates an absolute private root, serializes
 startup across processes, records the exact PID start identity and pinned
 runtime/agent paths plus SHA-256 digests, refuses an unowned socket or live
 artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
-bridge and async Rust SDK constructor honor the explicit
-`A3S_BOX_OCI_MIGRATION=sandbox` Sandbox opt-in and the qualification-only
-`A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path that requires an explicit
-`A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`. No setting means
-no owner probe or startup and preserves the legacy route. Core lifecycle,
-run/exec/PTY, wait,
+bridge and async Rust SDK constructor default Linux Sandbox records to
+`SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent (explicit `off` keeps the
+legacy route; explicit `sandbox` hard-fails if the owner is not launch-ready).
+The qualification-only `A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path still
+requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`.
+Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
 lanes now pass the Rust, Python, TypeScript, and Go Sandbox suites through this
