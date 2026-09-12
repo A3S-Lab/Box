@@ -452,10 +452,11 @@ pub(crate) fn inspect_rootfs_identity_requirements_with_preference(
 
 /// Prepare one per-box rootfs for the exact user-namespace mapping.
 ///
-/// A root-run service can translate OCI container ownership to subordinate
-/// host IDs directly. A non-root service leaves ownership replay to PID 1 from
-/// inside the user namespace. Read-only rootfs is rejected for the latter until
-/// an idmapped-mount path can guarantee replay before the read-only transition.
+/// A process with effective root (including setpriv euid 0 / non-root ruid) can
+/// translate OCI container ownership to the planned subordinate host IDs.
+/// A fully non-root service leaves ownership replay to PID 1 inside the user
+/// namespace. Read-only rootfs is rejected for the latter until an idmapped-mount
+/// path can guarantee replay before the read-only transition.
 #[cfg(target_os = "linux")]
 pub fn prepare_rootfs_ownership(
     root: &Path,
@@ -474,7 +475,12 @@ pub(crate) fn prepare_rootfs_ownership_with_preference(
     read_only: bool,
     prefer_image_manifest: bool,
 ) -> Result<()> {
-    if effective_uid != 0 {
+    // Prepare when either:
+    // - euid is 0 (setpriv CI: durable non-root ruid, but CAP_CHOWN is available), or
+    // - durable identity is root / tests pass effective_uid == 0 to request prepare.
+    // Fully non-root services (euid != 0 and durable uid != 0) still defer to PID 1.
+    let should_prepare = unsafe { libc::geteuid() } == 0 || effective_uid == 0;
+    if !should_prepare {
         if read_only {
             return Err(BoxError::ConfigError(
                 "Sandbox read-only rootfs requires a root-run service until idmapped rootfs preparation is available"

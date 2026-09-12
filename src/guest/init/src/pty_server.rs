@@ -228,6 +228,10 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
         let mut seen = std::collections::HashSet::new();
         sec_supplemental_groups.retain(|gid| seen.insert(*gid));
     }
+    #[cfg(target_os = "linux")]
+    let may_setgroups = crate::namespace::setgroups_permitted();
+    #[cfg(not(target_os = "linux"))]
+    let may_setgroups = true;
     let sec_cap_drop: Vec<String> = request
         .env
         .iter()
@@ -405,7 +409,7 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
             // supplemental groups need CAP_SETGID and capset needs CAP_SETPCAP,
             // both cleared once user.apply() drops to a non-root uid. The default
             // keep-set retains CAP_SETUID/CAP_SETGID so user.apply still works.
-            if !sec_supplemental_groups.is_empty() {
+            if may_setgroups && !sec_supplemental_groups.is_empty() {
                 let ret = unsafe {
                     libc::setgroups(
                         sec_supplemental_groups.len() as _,

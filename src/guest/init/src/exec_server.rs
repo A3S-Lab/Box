@@ -2754,6 +2754,10 @@ fn configure_child_process(
         let _ = no_new_privs;
         let _ = cgroup_procs;
     }
+    #[cfg(target_os = "linux")]
+    let may_setgroups = crate::namespace::setgroups_permitted();
+    #[cfg(not(target_os = "linux"))]
+    let may_setgroups = true;
 
     unsafe {
         command.pre_exec(move || {
@@ -2780,7 +2784,8 @@ fn configure_child_process(
             }
             // Apply supplemental groups while still privileged — setgroups
             // needs CAP_SETGID, which user.apply() drops via setuid below.
-            if !supplemental_groups.is_empty() {
+            // HostSandbox userns often has /proc/self/setgroups=deny; skip then.
+            if may_setgroups && !supplemental_groups.is_empty() {
                 let ret = libc::setgroups(
                     supplemental_groups.len() as _,
                     supplemental_groups.as_ptr() as *const libc::gid_t,
