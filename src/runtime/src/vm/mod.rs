@@ -15,7 +15,7 @@ mod spec;
 mod windows_stop;
 
 #[cfg(unix)]
-pub(crate) use execution::should_retry_keyed_guest_exec;
+pub(crate) use crate::grpc::should_retry_keyed_guest_exec;
 pub(crate) use layout::{
     legacy_sandbox_runtime_root, persistent_rootfs_generation_exists, runtime_socket_dir,
     sandbox_runtime_root,

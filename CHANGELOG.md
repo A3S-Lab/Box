@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `ExecClient::exec_command` retries once on ambiguous guest transport loss when
+  a non-empty `request_id` is present (fresh stream + guest replay cache). This
+  covers legacy MicroVM CLI/SDK socket callers that mint identity but previously
+  had no in-call replay. `VmManager::exec_request` relies on the client (no
+  double retry). Managed session `exec_command_on_stream` still rebinds itself.
+  Omit-path stays unkeyed. Does **not** flip B2 harness close, fixture
+  continuity, or hosted-KVM claims.
+
 - Managed MicroVM `ExecutionSessionManager::execute` retries once on ambiguous
   guest transport loss when a non-empty `request_id` is already present, after
   rebinding the exec stream (parity with `VmManager::exec_request`). Omit-path

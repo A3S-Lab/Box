@@ -15,6 +15,7 @@ pub use attestation::{
     AttestationClient, RaTlsAttestationClient, SealClient, SealResult, SecretEntry,
     SecretInjectionResult, SecretInjector, UnsealResult,
 };
+pub(crate) use exec::should_retry_keyed_guest_exec;
 pub use exec::{ExecClient, StreamingExec, StreamingExecInput};
 #[cfg(unix)]
 pub use pty::{PtyClient, StreamingPty, StreamingPtyInput};
