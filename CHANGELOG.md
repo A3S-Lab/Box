@@ -4,32 +4,24 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.6] — 2026-09-12
+
 ### Changed
 
-- Remove stale Sandbox “opt-in / no setting means legacy” wording from ROADMAP
-  and README (EN/zh-CN) so docs match the merged Sandbox GA default
-  (`SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent).
-- Productize Linux Sandbox host preparation: add operator
-  `scripts/prepare-linux-sandbox-host.sh` (setuid libexec launcher + delegated
-  cgroup), keep `prepare-linux-sandbox-ci-host.sh` as a `--ci` wrapper, document
-  the path in `docs/installation.md`, and publish `docs/sandbox-ga-evidence.md`.
-  Narrow README/website Sandbox networking claims (bridge/publish rejected;
-  loopback + R17 service relays only). Website Linux Sandbox status moves from
-  Preview to Production with the same non-claims. Does **not** flip MicroVM
-  cutover, B2 close, fixture Live, or `BX0.3`.
-- Linux Sandbox GA default activation: an absent `A3S_BOX_OCI_MIGRATION`
+- **Linux Sandbox GA production release:** an absent `A3S_BOX_OCI_MIGRATION`
   selects `SandboxViaOci` for new Sandbox records (omit-isolation remains
   MicroVM). Explicit `off` keeps the VM-only backend; explicit `sandbox`
   hard-fails when the OCI owner is not launch-ready. When the default cannot
   start the owner, MicroVM continue on legacy and Sandbox preflight fails
   closed. Hosted `sdk-local-sandbox` proves the composition with the env
-  unset. Does **not** flip omit→MicroVM cutover,
+  unset. Productized host prep (`scripts/prepare-linux-sandbox-host.sh`),
+  evidence binder (`docs/sandbox-ga-evidence.md`), and frozen networking
+  non-claims (bridge/publish rejected). Website Linux Sandbox status is
+  Production. Does **not** flip omit→MicroVM cutover,
   `b2_process_session_recovery_closed`, WHPX/KVM MicroVM production claims,
   fixture Live, or Cloud `BX0.3`.
-- Document the Linux Sandbox **production claim surface**: the OCI owner route
-  is CI-proven (SDK Local Sandbox + Native Live v4), not a “preview”.
-  Stopped-only owner crash recovery stays distinct from Live retained
-  stream/filesystem reattach.
+- Remove stale Sandbox “opt-in / no setting means legacy” wording from ROADMAP
+  and README (EN/zh-CN) so docs match the Sandbox GA default.
 
 ### Fixed
 
