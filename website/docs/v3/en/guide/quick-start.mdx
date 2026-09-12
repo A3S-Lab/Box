@@ -76,7 +76,9 @@ commits, exports, and filesystem snapshots.
 
 ## Select the shared-kernel Sandbox
 
-On a certified Linux host, request the Sandbox explicitly:
+On a certified Linux host prepared for Sandbox GA (`v3.2.6`+), request the
+Sandbox explicitly. Leave `A3S_BOX_OCI_MIGRATION` unset so the production
+`SandboxViaOci` owner route is selected:
 
 ```bash
 a3s-box run --rm \
@@ -87,8 +89,9 @@ a3s-box run --rm \
   sh -lc 'id; cat /proc/self/status'
 ```
 
-An explicit `--isolation microvm` value is rejected. Omission is the public way
-to select the default, which prevents scripts from treating backend names as
+Host preparation is documented in [Installation](./installation/). An explicit
+`--isolation microvm` value is rejected. Omission is the public way to select
+the default MicroVM, which prevents scripts from treating backend names as
 interchangeable compatibility modes.
 
 ## Use a native SDK
