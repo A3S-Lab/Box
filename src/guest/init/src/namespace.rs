@@ -613,11 +613,17 @@ fn apply_security_before_exec(
             if let Some(cap_keep) = &cap_keep {
                 if let Some(user) = process_user {
                     restrict_capabilities_to_keep_for_user(cap_keep, user).map_err(|error| {
-                        std::io::Error::new(error.kind(), format!("pre_exec restrict_caps_for_user: {error}"))
+                        std::io::Error::new(
+                            error.kind(),
+                            format!("pre_exec restrict_caps_for_user: {error}"),
+                        )
                     })?;
                 } else {
                     restrict_capabilities_to_keep(cap_keep).map_err(|error| {
-                        std::io::Error::new(error.kind(), format!("pre_exec restrict_caps: {error}"))
+                        std::io::Error::new(
+                            error.kind(),
+                            format!("pre_exec restrict_caps: {error}"),
+                        )
                     })?;
                 }
             } else if should_drop_caps(&cap_drop) {
@@ -633,7 +639,10 @@ fn apply_security_before_exec(
                 })?;
                 if let Some(cap_keep) = &cap_keep {
                     finalize_capabilities_to_keep(cap_keep).map_err(|error| {
-                        std::io::Error::new(error.kind(), format!("pre_exec finalize_caps: {error}"))
+                        std::io::Error::new(
+                            error.kind(),
+                            format!("pre_exec finalize_caps: {error}"),
+                        )
                     })?;
                 }
             }
