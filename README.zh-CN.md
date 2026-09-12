@@ -51,16 +51,16 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 
 ## 当前发布线
 
-`3.2.5` 发布线在保持公共 SDK 契约稳定的同时，打包来自 `main` 的最新运行时与集成修复：
+`3.2.6` 发布线在保持公共 SDK 契约稳定的同时，打包 Linux Sandbox GA 默认激活与来自 `main` 的最新运行时修复：
 
 | 领域 | 最新行为 |
 | --- | --- |
+| Linux Sandbox GA | 未设置 `A3S_BOX_OCI_MIGRATION` 时，新的 Sandbox 记录默认走 `SandboxViaOci`；托管 x86_64/aarch64 CI 在未设置该变量时证明该路由（生命周期 + Native Live v4）。主机准备：`scripts/prepare-linux-sandbox-host.sh`。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md)。不是 MicroVM/`BX0.3` 宣称。 |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` 以有界并发排空空闲 VM 与租约；销毁失败尽力回收孤儿（空闲、租约释放/过期、一次性 `pool run`、补充中途与模板拆除）；即使构建为 Failing/Unavailable，也会移除快照模板目录（`~/.a3s/pool/tpl-*`）。 |
-| Linux Sandbox | Setuid OCI launcher 发现覆盖环境变量、打包路径与 `/usr/local/libexec/...`；在有委托用户 cgroup 时，前台 `run --rm --isolation sandbox` 在合格主机上干净完成。 |
-| MicroVM lifecycle | 工作负载已退出时跳过 guest stop；Unix 冷启动在无 exec 心跳时失败即关闭；崩溃检测宽限为 80ms。 |
+| MicroVM lifecycle | 工作负载已退出时跳过 guest stop；Unix 冷启动在无 exec 心跳时失败即关闭；崩溃检测宽限为 80ms。传输层对带 key 的 exec 与只读文件系统操作覆盖歧义 ACK/流丢失重试。 |
 | CRI | PodSandbox 创建将 agent 工作负载推迟到 `StartContainer`；取消与销毁路径在 VM 拆除失败时尽力回收孤儿。 |
 | Runtime builds | 仅 OCI 的构建在无 hypervisor 依赖的情况下保留持久清理与 socket 处理。 |
-| Evidence | Soak 运行记录每能力结果与版本化主机资源采样；历史性能矩阵保留数字，同时记录哪些 Linux 清理阻塞被后续 tip 关闭。 |
+| Evidence | Soak 运行记录每能力结果与版本化主机资源采样；Sandbox GA binder 冻结网络非宣称（bridge/publish 拒绝）。 |
 
 安装程序、原生二进制以及 Rust、Python、TypeScript 与 Go SDK 产物从同一版本化发布标签发布。完整补丁历史见
 [Changelog](CHANGELOG.md)。

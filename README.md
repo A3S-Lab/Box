@@ -76,17 +76,17 @@ is not yet a production claim.
 
 ## Current release line
 
-The `3.2.5` release line keeps the public SDK contract stable while packaging
-the latest runtime and integration fixes from `main`:
+The `3.2.6` release line keeps the public SDK contract stable while packaging
+Linux Sandbox GA activation and the latest runtime fixes from `main`:
 
 | Area | Latest behavior |
 | --- | --- |
+| Linux Sandbox GA | Absent `A3S_BOX_OCI_MIGRATION` defaults new Sandbox records to `SandboxViaOci`; hosted x86_64/aarch64 CI proves the route with the env unset (lifecycle + Native Live v4). Operator host prep: `scripts/prepare-linux-sandbox-host.sh`. Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md). Not a MicroVM/`BX0.3` claim. |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` drain idle VMs and leases with bounded concurrency; destroy failures best-effort reap orphans (idle, lease release/expiry, oneshot `pool run`, mid-replenish, and template teardown); snapshot template dirs (`~/.a3s/pool/tpl-*`) are removed even after a Failing/Unavailable build. |
-| Linux Sandbox | Setuid OCI launcher discovery covers env, packaged paths, and `/usr/local/libexec/...`; with a delegated user cgroup, foreground `run --rm --isolation sandbox` completes cleanly on qualified hosts. |
-| MicroVM lifecycle | Guest stop is skipped when the workload already exited; Unix cold boot fail-closes without an exec heartbeat; crash-detection grace is 80ms. |
+| MicroVM lifecycle | Guest stop is skipped when the workload already exited; Unix cold boot fail-closes without an exec heartbeat; crash-detection grace is 80ms. Transport retries cover ambiguous ACK/stream loss on keyed exec and read-only filesystem ops. |
 | CRI | PodSandbox creation defers the agent workload until `StartContainer`; cancel and destroy paths best-effort reap orphans when VM teardown fails. |
 | Runtime builds | OCI-only builds retain durable cleanup and socket handling without hypervisor dependencies. |
-| Evidence | Soak runs record per-capability results and versioned host-resource samples; the historical performance matrix retains numbers while documenting which Linux cleanup blockers later tips closed. |
+| Evidence | Soak runs record per-capability results and versioned host-resource samples; Sandbox GA binder freezes networking non-claims (bridge/publish rejected). |
 
 Installers, native binaries, and the Rust, Python, TypeScript, and Go SDK
 artifacts are published from the same versioned release tag. See the

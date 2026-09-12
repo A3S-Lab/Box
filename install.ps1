@@ -48,7 +48,7 @@ function Get-NormalizedTag {
         $number -notmatch '^[0-9A-Za-z.+-]+$' -or
         $number -notmatch '^[^.]+\.[^.]+\.[^.]+'
     ) {
-        throw "Invalid version '$Candidate'; expected a release such as v3.2.5."
+        throw "Invalid version '$Candidate'; expected a release such as v3.2.6."
     }
     return $tag
 }
