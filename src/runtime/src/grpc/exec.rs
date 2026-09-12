@@ -85,6 +85,29 @@ async fn connect_exec_stream(path: &Path) -> std::io::Result<ExecStream> {
     }
 }
 
+/// True when the failure may have occurred after the guest already claimed or
+/// completed a keyed one-shot exec (lost response / broken connection).
+pub(crate) fn is_ambiguous_guest_exec_transport(error: &BoxError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("unavailable")
+        || message.contains("closed without response")
+        || message.contains("response timed out")
+        || message.contains("response read failed")
+        || message.contains("connection failed")
+}
+
+/// Keyed one-shot exec can replay the guest journal with the same `request_id`.
+pub(crate) fn should_retry_keyed_guest_exec(
+    request: &a3s_box_core::exec::ExecRequest,
+    error: &BoxError,
+) -> bool {
+    request
+        .request_id
+        .as_ref()
+        .is_some_and(|request_id| !request_id.is_empty())
+        && is_ambiguous_guest_exec_transport(error)
+}
+
 /// Client for executing commands through the platform-local guest channel.
 ///
 /// Uses the Frame wire protocol: sends a Data frame with JSON ExecRequest,
@@ -128,12 +151,21 @@ impl ExecClient {
     /// Execute a command in the guest.
     ///
     /// Sends a Data frame with JSON ExecRequest, reads a Data frame with JSON ExecOutput.
+    /// When `request_id` is non-empty, retries once on ambiguous transport loss
+    /// with a fresh stream so the guest replay cache can reconcile a lost reply.
     pub async fn exec_command(
         &self,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
         let stream = self.open_stream().await?;
-        self.exec_command_on_stream(stream, request).await
+        match self.exec_command_on_stream(stream, request).await {
+            Ok(output) => Ok(output),
+            Err(error) if should_retry_keyed_guest_exec(request, &error) => {
+                let stream = self.open_stream().await?;
+                self.exec_command_on_stream(stream, request).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn exec_command_on_stream(
@@ -1651,5 +1683,58 @@ mod windows_tests {
         assert_eq!(output.stdout, b"windows\n");
         assert_eq!(output.exit_code, 0);
         server.await.expect("server task joins");
+    }
+}
+
+#[cfg(test)]
+mod keyed_exec_tests {
+    use super::*;
+
+    #[test]
+    fn ambiguous_transport_detects_lost_response_paths() {
+        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
+            "Exec server closed without response".to_string()
+        )));
+        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
+            "Exec response timed out after 15s".to_string()
+        )));
+        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
+            "Exec connection failed to /tmp/x".to_string()
+        )));
+        assert!(!is_ambiguous_guest_exec_transport(&BoxError::ExecError(
+            "command rejected by guest policy".to_string()
+        )));
+    }
+
+    #[test]
+    fn keyed_retry_requires_non_empty_request_id() {
+        let keyed = a3s_box_core::exec::ExecRequest {
+            request_id: Some("cli-exec-abc".to_string()),
+            cmd: vec!["true".to_string()],
+            timeout_ns: 1,
+            env: vec![],
+            working_dir: None,
+            rootfs: None,
+            stdin: None,
+            stdin_streaming: false,
+            user: None,
+            streaming: false,
+        };
+        let unkeyed = a3s_box_core::exec::ExecRequest {
+            request_id: None,
+            ..keyed.clone()
+        };
+        let empty = a3s_box_core::exec::ExecRequest {
+            request_id: Some(String::new()),
+            ..keyed.clone()
+        };
+        let lost = BoxError::ExecError("Exec server closed without response".to_string());
+        assert!(should_retry_keyed_guest_exec(&keyed, &lost));
+        assert!(!should_retry_keyed_guest_exec(&unkeyed, &lost));
+        assert!(!should_retry_keyed_guest_exec(&empty, &lost));
+        assert!(!should_retry_keyed_guest_exec(
+            &keyed,
+            &BoxError::ExecError("policy denied".to_string())
+        ));
     }
 }

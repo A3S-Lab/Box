@@ -2,31 +2,6 @@
 
 use super::*;
 
-#[cfg(unix)]
-/// True when the failure may have occurred after the guest already claimed or
-/// completed a keyed one-shot exec (lost response / broken connection).
-pub(crate) fn is_ambiguous_guest_exec_transport(error: &BoxError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("unavailable")
-        || message.contains("closed without response")
-        || message.contains("response timed out")
-        || message.contains("response read failed")
-        || message.contains("connection failed")
-}
-
-#[cfg(unix)]
-/// Keyed one-shot exec can replay the guest journal with the same `request_id`.
-pub(crate) fn should_retry_keyed_guest_exec(
-    request: &a3s_box_core::exec::ExecRequest,
-    error: &BoxError,
-) -> bool {
-    request
-        .request_id
-        .as_ref()
-        .is_some_and(|request_id| !request_id.is_empty())
-        && is_ambiguous_guest_exec_transport(error)
-}
-
 impl VmManager {
     /// Get the exec client, if connected.
     #[cfg(unix)]
@@ -534,13 +509,8 @@ impl VmManager {
         };
 
         let exec_start = std::time::Instant::now();
-        let mut result = client.exec_command(request).await;
-        if let Err(ref error) = result {
-            if should_retry_keyed_guest_exec(request, error) {
-                // Same request_id: guest replay cache reconciles a lost response.
-                result = client.exec_command(request).await;
-            }
-        }
+        // ExecClient::exec_command owns keyed in-call replay on ambiguous transport.
+        let result = client.exec_command(request).await;
 
         // Record Prometheus metrics
         if let Some(ref prom) = self.prom {
@@ -582,58 +552,5 @@ impl VmManager {
         };
 
         self.exec_request(&request).await
-    }
-}
-
-#[cfg(all(test, unix))]
-mod keyed_exec_tests {
-    use super::*;
-
-    #[test]
-    fn ambiguous_transport_detects_lost_response_paths() {
-        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
-            "Exec server closed without response".to_string()
-        )));
-        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
-            "Exec response timed out after 15s".to_string()
-        )));
-        assert!(is_ambiguous_guest_exec_transport(&BoxError::ExecError(
-            "Exec connection failed to /tmp/x".to_string()
-        )));
-        assert!(!is_ambiguous_guest_exec_transport(&BoxError::ExecError(
-            "command rejected by guest policy".to_string()
-        )));
-    }
-
-    #[test]
-    fn keyed_retry_requires_non_empty_request_id() {
-        let keyed = a3s_box_core::exec::ExecRequest {
-            request_id: Some("vm-exec-abc".to_string()),
-            cmd: vec!["true".to_string()],
-            timeout_ns: 1,
-            env: vec![],
-            working_dir: None,
-            rootfs: None,
-            stdin: None,
-            stdin_streaming: false,
-            user: None,
-            streaming: false,
-        };
-        let unkeyed = a3s_box_core::exec::ExecRequest {
-            request_id: None,
-            ..keyed.clone()
-        };
-        let empty = a3s_box_core::exec::ExecRequest {
-            request_id: Some(String::new()),
-            ..keyed.clone()
-        };
-        let lost = BoxError::ExecError("Exec server closed without response".to_string());
-        assert!(should_retry_keyed_guest_exec(&keyed, &lost));
-        assert!(!should_retry_keyed_guest_exec(&unkeyed, &lost));
-        assert!(!should_retry_keyed_guest_exec(&empty, &lost));
-        assert!(!should_retry_keyed_guest_exec(
-            &keyed,
-            &BoxError::ExecError("policy denied".to_string())
-        ));
     }
 }
