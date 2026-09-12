@@ -313,7 +313,12 @@ fn child_process(
     // apparently successful but unbounded workload violates the resource
     // contract.
     if let Some(descriptor) = cgroup_procs {
-        crate::cgroup::join_current_process(descriptor).map_err(NamespaceError::ExecFailed)?;
+        crate::cgroup::join_current_process(descriptor).map_err(|error| {
+            NamespaceError::ExecFailed(std::io::Error::new(
+                error.kind(),
+                format!("cgroup join via inherited descriptor: {error}"),
+            ))
+        })?;
     }
 
     // Resolve bare OCI entrypoints through the container PATH. Rust's
@@ -380,8 +385,11 @@ fn child_process(
     // Replace current process with the command
     let err = cmd.exec();
 
-    // If exec returns, it failed
-    Err(NamespaceError::ExecFailed(err))
+    // If exec returns, it failed (including pre_exec failures).
+    Err(NamespaceError::ExecFailed(std::io::Error::new(
+        err.kind(),
+        format!("command exec for {command}: {err}"),
+    )))
 }
 
 fn resolve_command_path(command: &str, env: &[(&str, &str)]) -> Option<PathBuf> {
@@ -477,6 +485,23 @@ fn resolve_user_and_groups(
     Ok((Some(process_user), groups))
 }
 
+/// Whether this process may call `setgroups(2)`.
+///
+/// Unprivileged user namespaces commonly write `deny` to `/proc/self/setgroups`
+/// before installing `gid_map`. After that, `setgroups` always returns `EPERM`
+/// even for the namespace's root. HostSandbox inherits that policy from the OCI
+/// owner, so image supplemental groups must be skipped rather than treated as a
+/// hard launch failure. Primary `uid`/`gid` via `setuid`/`setgid` still apply.
+#[cfg(target_os = "linux")]
+pub(crate) fn setgroups_permitted() -> bool {
+    match std::fs::read_to_string("/proc/self/setgroups") {
+        Ok(value) => value.trim() == "allow",
+        // Outside a user namespace the file is typically absent; setgroups is
+        // then governed only by capabilities.
+        Err(_) => true,
+    }
+}
+
 /// Apply security restrictions (seccomp, no-new-privileges, capabilities) and
 /// the container user before exec using the pre_exec hook.
 ///
@@ -537,6 +562,13 @@ fn apply_security_before_exec(
     } else {
         None
     };
+    let may_setgroups = setgroups_permitted();
+    if !may_setgroups && process_user.is_some() && !supplemental_groups.is_empty() {
+        tracing::debug!(
+            groups = ?supplemental_groups,
+            "Skipping image supplemental groups because /proc/self/setgroups is deny"
+        );
+    }
 
     // Use pre_exec to apply security in the child process right before exec
     // SAFETY: pre_exec runs after fork, before exec. We only call
@@ -548,7 +580,11 @@ fn apply_security_before_exec(
             if no_new_privs {
                 let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                 if ret != 0 {
-                    return Err(std::io::Error::last_os_error());
+                    let error = std::io::Error::last_os_error();
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("pre_exec no_new_privs: {error}"),
+                    ));
                 }
             }
 
@@ -556,13 +592,17 @@ fn apply_security_before_exec(
             //    server: supplemental groups -> capabilities -> setgid+setuid.
             //    Each step needs root/CAP_SET*; setuid is LAST because it clears
             //    the privileges needed by the earlier ones.
-            if process_user.is_some() && !supplemental_groups.is_empty() {
+            if may_setgroups && process_user.is_some() && !supplemental_groups.is_empty() {
                 let ret = libc::setgroups(
                     supplemental_groups.len() as _,
                     supplemental_groups.as_ptr() as *const libc::gid_t,
                 );
                 if ret != 0 {
-                    return Err(std::io::Error::last_os_error());
+                    let error = std::io::Error::last_os_error();
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("pre_exec setgroups: {error}"),
+                    ));
                 }
             }
 
@@ -572,19 +612,29 @@ fn apply_security_before_exec(
             // bits only until the identity switch, then finalize below.
             if let Some(cap_keep) = &cap_keep {
                 if let Some(user) = process_user {
-                    restrict_capabilities_to_keep_for_user(cap_keep, user)?;
+                    restrict_capabilities_to_keep_for_user(cap_keep, user).map_err(|error| {
+                        std::io::Error::new(error.kind(), format!("pre_exec restrict_caps_for_user: {error}"))
+                    })?;
                 } else {
-                    restrict_capabilities_to_keep(cap_keep)?;
+                    restrict_capabilities_to_keep(cap_keep).map_err(|error| {
+                        std::io::Error::new(error.kind(), format!("pre_exec restrict_caps: {error}"))
+                    })?;
                 }
             } else if should_drop_caps(&cap_drop) {
-                drop_capabilities(&cap_drop)?;
+                drop_capabilities(&cap_drop).map_err(|error| {
+                    std::io::Error::new(error.kind(), format!("pre_exec drop_caps: {error}"))
+                })?;
             }
 
             // 4. Drop to the target uid/gid (image USER / --user).
             if let Some(user) = process_user {
-                user.apply()?;
+                user.apply().map_err(|error| {
+                    std::io::Error::new(error.kind(), format!("pre_exec setuid/setgid: {error}"))
+                })?;
                 if let Some(cap_keep) = &cap_keep {
-                    finalize_capabilities_to_keep(cap_keep)?;
+                    finalize_capabilities_to_keep(cap_keep).map_err(|error| {
+                        std::io::Error::new(error.kind(), format!("pre_exec finalize_caps: {error}"))
+                    })?;
                 }
             }
 
@@ -592,7 +642,9 @@ fn apply_security_before_exec(
             match &seccomp_mode {
                 SeccompMode::Default => {
                     if let Some(filter) = &seccomp_filter {
-                        install_seccomp_filter(filter)?;
+                        install_seccomp_filter(filter).map_err(|error| {
+                            std::io::Error::new(error.kind(), format!("pre_exec seccomp: {error}"))
+                        })?;
                     }
                 }
                 SeccompMode::Unconfined => {
@@ -1710,6 +1762,19 @@ mod tests {
     }
 
     // --- Namespace error tests ---
+
+    #[test]
+    fn setgroups_permitted_matches_proc_file_when_present() {
+        // On hosts without userns denial the helper must not invent a deny.
+        // When the file exists, trust its trimmed value.
+        let path = std::path::Path::new("/proc/self/setgroups");
+        if !path.exists() {
+            assert!(setgroups_permitted());
+            return;
+        }
+        let value = std::fs::read_to_string(path).unwrap();
+        assert_eq!(setgroups_permitted(), value.trim() == "allow");
+    }
 
     #[test]
     fn test_namespace_error_display() {

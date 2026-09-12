@@ -594,7 +594,10 @@ fn mount_tmpfs(target: &Path, bytes: u64) -> Result<()> {
     let target_c = CString::new(target_string.as_ref())
         .map_err(|error| BoxError::BuildError(format!("Invalid tmpfs target path: {error}")))?;
     let fstype = CString::new("tmpfs").unwrap();
-    let data = CString::new(format!("size={bytes},mode=0700,nosuid,nodev"))
+    // nosuid/nodev belong in mount flags, not tmpfs superblock options.
+    // Kernels that reject unknown tmpfs parameters (for example some WSL builds)
+    // return EINVAL when those tokens are duplicated in the data string.
+    let data = CString::new(format!("size={bytes},mode=0700"))
         .map_err(|error| BoxError::BuildError(format!("Invalid tmpfs mount options: {error}")))?;
     let flags = libc::MS_NOSUID | libc::MS_NODEV;
     let ret = unsafe {
