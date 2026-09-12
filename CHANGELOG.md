@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Productize Linux Sandbox host preparation: add operator
+  `scripts/prepare-linux-sandbox-host.sh` (setuid libexec launcher + delegated
+  cgroup), keep `prepare-linux-sandbox-ci-host.sh` as a `--ci` wrapper, document
+  the path in `docs/installation.md`, and publish `docs/sandbox-ga-evidence.md`.
+  Narrow README/website Sandbox networking claims (bridge/publish rejected;
+  loopback + R17 service relays only). Website Linux Sandbox status moves from
+  Preview to Production with the same non-claims. Does **not** flip MicroVM
+  cutover, B2 close, fixture Live, or `BX0.3`.
 - Linux Sandbox GA default activation: an absent `A3S_BOX_OCI_MIGRATION`
   selects `SandboxViaOci` for new Sandbox records (omit-isolation remains
   MicroVM). Explicit `off` keeps the VM-only backend; explicit `sandbox`

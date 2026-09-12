@@ -20,9 +20,11 @@ then replace a previous installer-managed copy as one staged operation.
 
 Intel macOS and Windows on ARM are rejected rather than receiving an
 incompatible archive. The installer installs the runtime distribution; it does
-not enable KVM, HVF, WHPX, or Linux Sandbox host capabilities. Review
+not enable KVM, HVF, WHPX, or Linux Sandbox host capabilities by itself. Review
 [Platform boundaries](../README.md#platform-boundaries) and the
-[Windows WHPX guide](windows-whpx.md) before running real workloads.
+[Windows WHPX guide](windows-whpx.md) before running real workloads. For
+Sandbox, complete [Linux Sandbox host preparation](#linux-sandbox-host-preparation)
+after install.
 
 ## One-line installation
 
@@ -98,6 +100,33 @@ supports `A3S_BOX_PROFILE` or `--profile` to select the shell startup file.
 Set `A3S_BOX_NO_MODIFY_PATH=true` to suppress PATH changes in a piped
 invocation. Set `GITHUB_TOKEN` when authenticated GitHub API access is needed
 because of rate limits.
+
+## Linux Sandbox host preparation
+
+The installer does not enable Sandbox host capabilities. On a certified Linux
+host, after installing Box and locating the pinned `a3s-oci` binary:
+
+```bash
+sudo bash /path/to/box/scripts/prepare-linux-sandbox-host.sh \
+  --install-launcher /absolute/path/to/a3s-oci
+export A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT=...  # printed by the script
+a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
+```
+
+The script:
+
+- prepares a delegated cgroup v2 tree owned by the invoking non-root identity;
+- ensures subordinate UID/GID ranges and userns-related sysctls when needed; and
+- installs the setuid launcher at `/usr/local/libexec/a3s-box-sandbox-oci-launcher`
+  when `--install-launcher` is supplied (required on production hosts; discovery
+  also checks env and packaged paths).
+
+Do **not** set `A3S_BOX_OCI_MIGRATION` for the Sandbox GA default. Use
+`A3S_BOX_OCI_MIGRATION=off` only for MicroVM-only hosts without OCI prep.
+
+CI qualification uses `prepare-linux-sandbox-ci-host.sh` (setpriv on nosuid
+runners) and is not a substitute for the operator setuid install. Evidence:
+[Sandbox GA evidence](sandbox-ga-evidence.md).
 
 ## Offline installation
 

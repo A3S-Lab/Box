@@ -376,14 +376,18 @@ policy or cutover.
 
 ### Exercise Native Linux live-session Host reopen (observation)
 
-Live Host-reopen continuity is Native-Linux-driver-only today. Prepare a
-delegated cgroup (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then
-run the root-owned runner. It mirrors Sandbox CI: the runner starts as root,
-then `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`,
-sandbox `ruid`) and the same wrapper is exported as
-`A3S_BOX_CI_SETPRIV_WRAPPER` so the Native Linux owner can elevate for
-device-policy bootstrap. SDK Local Sandbox CI runs this gate and fail-closes
-on a missing or dishonest report; it still does not close B2.
+Live Host-reopen continuity is Native-Linux-driver-only today. For **product**
+Sandbox hosts, use `scripts/prepare-linux-sandbox-host.sh` (setuid libexec +
+delegated cgroup) as documented in
+[Installation](docs/installation.md#linux-sandbox-host-preparation). For this
+**observation gate**, prepare a delegated cgroup with the CI wrapper
+(`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then run the root-owned
+runner. It mirrors Sandbox CI: the runner starts as root, then
+`elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`, sandbox
+`ruid`) and the same wrapper is exported as `A3S_BOX_CI_SETPRIV_WRAPPER` so the
+Native Linux owner can elevate for device-policy bootstrap. SDK Local Sandbox
+CI runs this gate and fail-closes on a missing or dishonest report; it still
+does not close B2. See [Sandbox GA evidence](docs/sandbox-ga-evidence.md).
 
 ```bash
 cargo build -p a3s-box-runtime --example linux-native-live-session-qualification --release
@@ -538,7 +542,7 @@ runtime mutation instead of being stored and silently weakened.
 | Workloads | create, start, stop, restart, kill, pause, wait, inspect, exec, attach, PTY, live process inventory, health, and restart policy |
 | Images and builds | pull, push, tag, save/load, verified layers, selected Dockerfile/Containerfile builds, content-addressed cache, and signed-image policy |
 | Storage | bind mounts, named volumes, tmpfs, copy, diff, export, commit, filesystem snapshots, and copy-on-write restore |
-| Networking and Compose | TSI, named bridges, peer discovery, TCP publication, generation-fenced Runtime Service forwarding on Sandbox and MicroVM, and a bounded ACL/YAML Compose subset with bounded concurrent image prefetch |
+| Networking and Compose | **MicroVM:** TSI, named bridges, peer discovery, TCP publication, and a bounded ACL/YAML Compose subset. **Sandbox:** private netns with loopback-only networking plus generation-fenced Runtime Service host-loopback relays; named bridges and static published ports are rejected. See [Sandbox GA evidence](docs/sandbox-ga-evidence.md). |
 | Operations | structured logs, normalized runtime stats, ordered events, audit evidence, metrics, monitoring, replay-safe resource updates, and cleanup |
 | Acceleration and security | rootfs/layer caches, warm pools, opt-in Linux/KVM snapshot-fork, and host-gated SEV-SNP-oriented workflows |
 
@@ -741,7 +745,7 @@ operation returns a typed availability error before dispatch.
 | Linux MicroVM | Primary local path through KVM/libkrun; Runtime 0.5 readiness/liveness and bounded graceful-stop cases are wired into the advertised provider profiles alongside self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | The current revision still requires an enrolled KVM run of all capability-triggered lifecycle cases plus the longer `G2`/`R24` profiles |
 | macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical persistent/crash recovery, mount-free filesystem snapshot, legacy migration, maintenance, and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and Native Live v4 use the production owner route with `A3S_BOX_OCI_MIGRATION` unset (Sandbox GA default) | **Production** shared-kernel path for `--isolation sandbox` (not default omit-isolation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
+| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and Native Live v4 use the production owner route with `A3S_BOX_OCI_MIGRATION` unset (Sandbox GA default). Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **Production** shared-kernel path for `--isolation sandbox` (not default omit-isolation). Host prep: [Installation](docs/installation.md#linux-sandbox-host-preparation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
 | TEE | Runtime-bound RA-TLS artifacts, exact identity-attachment binding, attestation-before-execution for confidential Tasks and Services, and an opt-in simulated KVM conformance profile; a separately armed SEV-SNP hardware gate pins the launch measurement | Identity attachment is advertised only by an explicitly configured confidential provider; simulation and an unexecuted hardware job are not hardware security evidence |
 

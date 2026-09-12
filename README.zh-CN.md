@@ -235,7 +235,7 @@ Box 类似 Docker，但不与 Docker 完全相同。不支持的控制在运行�
 | 工作负载 | create、start、stop、restart、kill、pause、wait、inspect、exec、attach、PTY、实时进程清单、健康与重启策略 |
 | 镜像与构建 | pull、push、tag、save/load、经验证层、选定的 Dockerfile/Containerfile 构建、内容寻址缓存与签名镜像策略 |
 | 存储 | bind mount、命名卷、tmpfs、copy、diff、export、commit、文件系统快照与写时复制恢复 |
-| 网络与 Compose | TSI、命名桥、对等发现、TCP 发布、Sandbox 与 MicroVM 上代际围栏的 Runtime Service 转发，以及有界 ACL/YAML Compose 子集与有界并发镜像预取 |
+| 网络与 Compose | **MicroVM：** TSI、命名桥、对等发现、TCP 发布与有界 ACL/YAML Compose 子集。**Sandbox：** 私有 netns、仅 loopback，以及代际围栏的 Runtime Service 主机 loopback 中继；命名桥与静态发布端口被拒绝。见 [Sandbox GA evidence](docs/sandbox-ga-evidence.md)。 |
 | 运维 | 结构化日志、规范化运行时统计、有序事件、审计证据、指标、监控、可重放安全资源更新与清理 |
 | 加速与安全 | rootfs/层缓存、warm pool、可选 Linux/KVM snapshot-fork，以及主机门控的 SEV-SNP 导向工作流 |
 
@@ -352,7 +352,7 @@ Python、TypeScript 与 Go 与 `a3s-box sdk-bridge` 交换结构化 protocol-v3 
 | Linux MicroVM | 经 KVM/libkrun 的主要本地路径；Runtime 0.5 就绪/存活与有界优雅停止用例已接线到已宣告的提供方配置文件，与自托管生命周期、SDK、CRI、竞态、泄漏、snapshot-fork 与 soak 门并列 | 当前修订仍要求一次已登记的 KVM 运行覆盖所有能力触发的生命周期用例，加上更长的 `G2`/`R24` 配置文件 |
 | macOS MicroVM | Apple Silicon/HVF 构建与打包路径，加上物理持久/崩溃恢复、无挂载文件系统快照、遗留迁移、维护与已发布端口回归门 | [`integration-hvf` 门](docs/ci-hvf-runner.md) 需要已登记的物理 Apple Silicon runner；Intel macOS 不受支持 |
 | Windows MicroVM | 覆盖生命周期、exec、copy、stats、端口、bind/命名卷、commit、快照与清理的真实 x86_64 WHPX soak | 一个 vCPU；无交互 PTY、桥接网络、TEE、snapshot-fork 或 CRI |
-| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期与 Native Live v4 在未设置 `A3S_BOX_OCI_MIGRATION` 时使用生产所有者路由（Sandbox GA 默认） | **生产** 共享内核路径（`--isolation sandbox`；非默认省略 isolation）。仅 VM 控制被拒绝。主机报告保持 `b2_process_session_recovery_closed=false`。不是 MicroVM/TEE/`BX0.3` 宣称。 |
+| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期与 Native Live v4 在未设置 `A3S_BOX_OCI_MIGRATION` 时使用生产所有者路由（Sandbox GA 默认）。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **生产** 共享内核路径（`--isolation sandbox`；非默认省略 isolation）。主机准备：[Installation](docs/installation.md#linux-sandbox-host-preparation)。仅 VM 控制被拒绝。主机报告保持 `b2_process_session_recovery_closed=false`。不是 MicroVM/TEE/`BX0.3` 宣称。 |
 | Kubernetes | CRI v1 服务器与 containerd runtime-v2 shim 预览 | 不声明完整 CRI 符合性 |
 | TEE | 运行时绑定的 RA-TLS 产物、确切身份附件绑定、机密 Tasks 与 Services 的执行前证明，以及可选的模拟 KVM 符合性配置文件；单独武装的 SEV-SNP 硬件门固定启动测量 | 身份附件仅由显式配置的机密提供方宣告；模拟与未执行的硬件作业不是硬件安全证据 |
 
