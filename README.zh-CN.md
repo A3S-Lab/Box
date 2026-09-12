@@ -75,7 +75,8 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 > - 将分离的 init stdout/stderr 投影到 Box 日志，以及只读与 PTY CLI attach，且无遗留 runtime-socket 回退。
 >
 > 调用经能力检查并绑定到确切运行时目标。文件与文件系统变更对显式可重试的丢失响应复用同一操作身份，并验证仅生效一次；读响应有大小边界，若目标或形状漂移则拒绝。资源意图在变更前持久化，并以同一操作身份恢复。快照 freezer 声明也持久化其运行时变更是否已应用，因此崩溃恢复从不重放已完成的 thaw，同时原始创建身份保持不可变。保留的本地 SDK 客户端现在暴露首个断开流结果，然后在后续显式对账时重连并重新协商。通用 Box/OCI 契约还在两个不同的 runtime-owner 测试进程间恢复一个 manager，恰好一次 create、start 与 exec；原始实时进程流与输入句柄通过替换所有者继续清单、stdin、输出、signal、wait 与清理。原始运行时输出与结构化 Box 日志保持分离。固定运行时资格验证现在在 Box SDK 套件运行前，对其真实原生与 utility-VM 驱动执行二进制文件传输与描述符受限的 mkdir/stat/list/move/remove。固定运行时现在提供长期多容器 Native Linux 主机所有者，Box 现在提供其生产直连进程 bundle 编译器、受保护的身份围栏所有者启动，以及显式 CLI/SDK 组合。在 bundle 构造前，资源守卫校验托管 home、持久附加产品卷与网络，并安装经验证的快照 lower，失败即关闭回滚。直连 SDK argv 命令在 OCI 调度前使用有效容器 `PATH`，对照已准备的 rootfs 解析 `argv[0]`，在不削弱运行时规范化绝对路径契约的前提下保留无 shell 的 `Argv("printf", ...)` 行为。阻塞式 Native Linux x86_64 与 aarch64 真实主机通道现在通过 Rust、Python、TypeScript 与 Go SDK 的生命周期、exec、文件系统、路由感知统计、pause/resume、快照恢复、重启与清理表面传递此生产所有者组合。两条通道在运行中的 Sandbox 下杀死确切已认证的 OCI 所有者，证明其 launcher 与 init 身份终止，并用新的 Box SDK-bridge 进程重新绑定所有者端点，将对账代际视为已停止且不捏造退出状态，删除其确切运行时墓碑，并重启下一 Box 与 OCI 代际。代际围栏的 Box worker 在 OCI init 启动前就绪，消费运行时的有序输出游标，写入常规拆分控制台文件，喂给配置的保留/脱敏驱动，在 runtime-service 所有者替换后重连，并在删除运行时代际前发布排空证据。
-> WHPX 生产组合、跨真实驱动所有者死亡的透明进程/文件系统会话恢复，以及更广的切换门仍开放；上方的默认拆分仍具权威性。
+> **Sandbox（Native Linux）宣称面：** 在 `A3S_BOX_OCI_MIGRATION=sandbox` 下，生产所有者路由已在 x86_64/aarch64 CI（SDK Local Sandbox）证明：生命周期、exec、文件系统、pause/resume、快照、重启、清理，以及 Native Live v4 在所有者 SIGKILL 后保留流句柄与文件系统连续性。主机 harness 报告仍保持 `b2_process_session_recovery_closed=false`（报告永不自证关闭 B2）。fixture `process_restart` 不是 driver Live 证据。
+> **仍开放（不在 Sandbox GA 范围）：** 默认 MicroVM → OCI cutover、WHPX/KVM MicroVM *生产* 组合（资格验证-only 仍有效）、HostRuntimeService 作为默认 create 路径，以及更广的 Cloud `BX0.3` 硬件 TEE 宣称。在单独的默认激活变更落地前，省略 `--isolation` → MicroVM 的默认拆分仍具权威性。
 > 遵循[迁移路线图](ROADMAP.md)中已检查的门。
 
 ## 从一个工作负载开始
@@ -135,7 +136,9 @@ a3s-box rm web
 
 显式 `--isolation microvm` 写法被拒绝。省略是选择默认的唯一公开方式，这可防止脚本将后端名称当作可互换的兼容模式。
 
-在经认证的 Linux 主机上，显式请求共享内核预览：
+在经认证的 Linux 主机上，显式请求共享内核 **Sandbox**（设置
+`A3S_BOX_OCI_MIGRATION=sandbox` 时走生产所有者路由 — 见下节）。这不是预览 API，
+而是对 CI 已证明路径的选择加入激活：
 
 ```bash
 a3s-box run --rm \
@@ -145,9 +148,10 @@ a3s-box run --rm \
   alpine:3.20 -- sh -lc 'id; cat /proc/self/status'
 ```
 
-### 在 Linux 上选择加入长期 OCI 所有者
+### 在 Linux 上选择加入长期 OCI 所有者（Sandbox 生产路径）
 
-生产迁移路径刻意尚未成为默认。安装固定的 `a3s-oci` 与 `a3s-oci-agent` 对，并在管理已迁移记录的每个进程中保持相同配置：
+Sandbox 生产激活刻意 **选择加入**（不是省略 `--isolation` 的默认路径）。安装固定的
+`a3s-oci` 与 `a3s-oci-agent` 对，并在管理已迁移记录的每个进程中保持相同配置：
 
 ```bash
 export A3S_BOX_OCI_MIGRATION=sandbox
@@ -161,7 +165,14 @@ a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
 
 覆盖产物发现时，两个产物变量必须一起提供；每个可执行文件在所有者启动前以及 bundle 变更前都会做能力探测与 SHA-256 围栏。所有者根以模式 `0700` 创建；已有根必须是绝对规范化、真实、同 UID 且具有该确切模式的目录。仅当 PID 启动身份、端点、路径与摘要匹配时才会复用实时所有者。未知 socket 与漂移产物失败即关闭。
 
-若此所有者被不干净地终止，其父绑定的 Native Linux 进程树一并终止。下一次显式 Box 操作启动不同的身份围栏所有者，将已认证的旧代际视为已停止，拒绝合成不可用的退出状态，仅移除该确切代际，并允许显式重启创建下一 Box 与 OCI 代际。此仅停止的崩溃恢复已在真实 x86_64 与 aarch64 Linux 主机上资格验证；它不是实时 exec 或文件系统会话的透明续跑。
+若此所有者被不干净地终止，其父绑定的 Native Linux 进程树一并终止。下一次*普通*
+Box 操作启动不同的身份围栏所有者，将已认证的旧代际视为已停止，拒绝合成不可用的退出状态，仅移除该确切代际，并允许显式重启创建下一 Box 与 OCI 代际。此 **仅停止**
+的崩溃恢复已在真实 x86_64 与 aarch64 Linux 主机上资格验证。
+
+另外，Native Live v4 观察门（SDK Local Sandbox CI）在保留 Box manager 时证明
+Host 所有者 SIGKILL 后的 **保留** 流式 exec 句柄与文件系统连续性 — 见英文 README
+Native Live 小节。勿将仅停止对账与 Live 重附着混淆；二者皆真，且都不翻转
+`b2_process_session_recovery_closed`。
 
 Rust 应用通过 `A3sBoxClient::with_configured_paths(...).await` 选择同一路径，或显式构造 `NativeLinuxOciMigrationConfig`。同步的 `new`、`from_home` 与 `with_paths` 构造器为 API 兼容保留遗留行为。
 
@@ -340,7 +351,7 @@ Python、TypeScript 与 Go 与 `a3s-box sdk-bridge` 交换结构化 protocol-v3 
 | Linux MicroVM | 经 KVM/libkrun 的主要本地路径；Runtime 0.5 就绪/存活与有界优雅停止用例已接线到已宣告的提供方配置文件，与自托管生命周期、SDK、CRI、竞态、泄漏、snapshot-fork 与 soak 门并列 | 当前修订仍要求一次已登记的 KVM 运行覆盖所有能力触发的生命周期用例，加上更长的 `G2`/`R24` 配置文件 |
 | macOS MicroVM | Apple Silicon/HVF 构建与打包路径，加上物理持久/崩溃恢复、无挂载文件系统快照、遗留迁移、维护与已发布端口回归门 | [`integration-hvf` 门](docs/ci-hvf-runner.md) 需要已登记的物理 Apple Silicon runner；Intel macOS 不受支持 |
 | Windows MicroVM | 覆盖生命周期、exec、copy、stats、端口、bind/命名卷、commit、快照与清理的真实 x86_64 WHPX soak | 一个 vCPU；无交互 PTY、桥接网络、TEE、snapshot-fork 或 CRI |
-| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期用例使用生产所有者路由 | 共享内核预览；需要保留的 main 分支生命周期证据，且仅 VM 控制被拒绝 |
+| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期与 Native Live v4 在 `A3S_BOX_OCI_MIGRATION=sandbox` 下使用生产所有者路由 | **生产选择加入** 共享内核路径（非默认省略 isolation）。仅 VM 控制被拒绝。主机报告保持 `b2_process_session_recovery_closed=false`。不是 MicroVM/TEE/`BX0.3` 宣称。 |
 | Kubernetes | CRI v1 服务器与 containerd runtime-v2 shim 预览 | 不声明完整 CRI 符合性 |
 | TEE | 运行时绑定的 RA-TLS 产物、确切身份附件绑定、机密 Tasks 与 Services 的执行前证明，以及可选的模拟 KVM 符合性配置文件；单独武装的 SEV-SNP 硬件门固定启动测量 | 身份附件仅由显式配置的机密提供方宣告；模拟与未执行的硬件作业不是硬件安全证据 |
 

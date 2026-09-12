@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Document the Linux Sandbox **production claim surface**: with
+  `A3S_BOX_OCI_MIGRATION=sandbox`, the OCI owner route is CI-proven (SDK Local
+  Sandbox + Native Live v4), not a “preview”. Stopped-only owner crash recovery
+  stays distinct from Live retained stream/filesystem reattach. Does **not**
+  flip default omit-isolation → MicroVM, `b2_process_session_recovery_closed`,
+  WHPX/KVM MicroVM production claims, fixture Live, or Cloud `BX0.3`.
+
 ### Fixed
 
 - `ExecClient::filesystem` retries once on a fresh stream for read-only ops
