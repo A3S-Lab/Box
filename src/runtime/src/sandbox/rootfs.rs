@@ -452,10 +452,11 @@ pub(crate) fn inspect_rootfs_identity_requirements_with_preference(
 
 /// Prepare one per-box rootfs for the exact user-namespace mapping.
 ///
-/// A root-run service can translate OCI container ownership to subordinate
-/// host IDs directly. A non-root service leaves ownership replay to PID 1 from
-/// inside the user namespace. Read-only rootfs is rejected for the latter until
-/// an idmapped-mount path can guarantee replay before the read-only transition.
+/// A process with effective root (including setpriv euid 0 / non-root ruid) can
+/// translate OCI container ownership to the planned subordinate host IDs.
+/// A fully non-root service leaves ownership replay to PID 1 inside the user
+/// namespace. Read-only rootfs is rejected for the latter until an idmapped-mount
+/// path can guarantee replay before the read-only transition.
 #[cfg(target_os = "linux")]
 pub fn prepare_rootfs_ownership(
     root: &Path,
@@ -474,13 +475,19 @@ pub(crate) fn prepare_rootfs_ownership_with_preference(
     read_only: bool,
     prefer_image_manifest: bool,
 ) -> Result<()> {
-    if effective_uid != 0 {
+    // Durable Sandbox identity may be non-root (setpriv ruid) while the process
+    // still has euid 0 and can translate OCI ownership to the planned host IDs.
+    // Gate preparation on CAP_CHOWN capability (euid), not on the durable uid
+    // used to select subordinate ranges / OCI mappings.
+    let host_can_chown = unsafe { libc::geteuid() } == 0;
+    if !host_can_chown {
         if read_only {
             return Err(BoxError::ConfigError(
                 "Sandbox read-only rootfs requires a root-run service until idmapped rootfs preparation is available"
                     .to_string(),
             ));
         }
+        let _ = effective_uid;
         return Ok(());
     }
 
