@@ -120,6 +120,25 @@ pub(crate) fn is_ambiguous_guest_exec_transport(error: &BoxError) -> bool {
         || message.contains("connection failed")
 }
 
+/// True when a filesystem call may have completed in the guest but the host
+/// lost the reply (or the write may have partially reached the guest).
+fn is_ambiguous_filesystem_transport(error: &BoxError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("unavailable")
+        || message.contains("closed without")
+        || message.contains("response timed out")
+        || message.contains("response read failed")
+        || message.contains("request write failed")
+        || message.contains("connection failed")
+}
+
+fn is_idempotent_filesystem_op(op: &a3s_box_core::FilesystemOp) -> bool {
+    matches!(
+        op,
+        a3s_box_core::FilesystemOp::Stat | a3s_box_core::FilesystemOp::ListDir
+    )
+}
+
 /// Keyed one-shot exec can replay the guest journal with the same `request_id`.
 pub(crate) fn should_retry_keyed_guest_exec(
     request: &a3s_box_core::exec::ExecRequest,
@@ -432,7 +451,27 @@ impl ExecClient {
     }
 
     /// Perform a filesystem metadata or mutation operation inside the guest.
+    ///
+    /// Read-only ops (`Stat`, `ListDir`) retry once on a fresh stream when the
+    /// transport is ambiguous — they are naturally idempotent. Mutating ops
+    /// (`MakeDir`, `Move`, `Remove`) stay single-shot until guest journals exist.
     pub async fn filesystem(
+        &self,
+        request: &a3s_box_core::FilesystemRequest,
+    ) -> Result<a3s_box_core::FilesystemResponse> {
+        match self.filesystem_once(request).await {
+            Ok(response) => Ok(response),
+            Err(error)
+                if is_idempotent_filesystem_op(&request.op)
+                    && is_ambiguous_filesystem_transport(&error) =>
+            {
+                self.filesystem_once(request).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn filesystem_once(
         &self,
         request: &a3s_box_core::FilesystemRequest,
     ) -> Result<a3s_box_core::FilesystemResponse> {
@@ -1175,6 +1214,109 @@ mod tests {
             .unwrap();
         assert!(response.success);
         assert!(response.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filesystem_stat_retries_once_after_lost_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("filesystem-stat-retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            // First Stat: read request then drop both halves (lost response).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            // Second Stat: respond.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            writer
+                .write_data(
+                    &serde_json::to_vec(&a3s_box_core::FilesystemResponse {
+                        success: true,
+                        entry: None,
+                        entries: Vec::new(),
+                        error: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .filesystem(&a3s_box_core::FilesystemRequest {
+                op: a3s_box_core::FilesystemOp::Stat,
+                path: "/tmp".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn filesystem_mkdir_does_not_retry_after_lost_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("filesystem-mkdir-no-retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+            // No second accept — mutating ops must not retry without journals.
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let err = client
+            .filesystem(&a3s_box_core::FilesystemRequest {
+                op: a3s_box_core::FilesystemOp::MakeDir,
+                path: "/tmp/new-dir".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            is_ambiguous_filesystem_transport(&err),
+            "expected ambiguous transport error, got {err}"
+        );
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

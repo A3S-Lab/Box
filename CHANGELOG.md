@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `ExecClient::filesystem` retries once on a fresh stream for read-only ops
+  (`Stat`, `ListDir`) when the guest transport is ambiguous. Mutating ops
+  (`MakeDir`, `Move`, `Remove`) stay single-shot until guest journals exist —
+  guest `MakeDir` is not idempotent (`directory already exists`). Does **not**
+  flip B2 harness close, fixture continuity, or hosted-KVM claims.
+
 - `ExecClient::spawn_main` retries once on ambiguous ACK loss; guest now ACKs
   repeat spawn-main once the container pid is published (bare and JSON frames)
   and waits through the pending sentinel instead of NACKing. Host treats
