@@ -816,8 +816,9 @@ mod tests {
         let home = absolute("a3s-oci-config-home");
         #[cfg(target_os = "linux")]
         {
-            let (selection, config) =
-                parse_environment(None, None, None, None, &home).unwrap().unwrap();
+            let (selection, config) = parse_environment(None, None, None, None, &home)
+                .unwrap()
+                .unwrap();
             assert_eq!(selection, NativeLinuxMigrationSelection::DefaultSandbox);
             assert!(config.runtime_path().is_none());
         }
