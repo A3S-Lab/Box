@@ -49,7 +49,7 @@ impl ExecutionSessionManager for LocalExecutionManager {
                 .await?;
             return self.backend.execute(&record, request).await;
         }
-        resolve_microvm_exec_request_id(&mut request)?;
+        validate_microvm_exec_request_id(&request)?;
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
@@ -58,6 +58,7 @@ impl ExecutionSessionManager for LocalExecutionManager {
             Err(error) if crate::vm::should_retry_keyed_guest_exec(&request, &error) => {
                 // Same request_id: guest replay cache reconciles a lost response.
                 // Rebind: the first stream is not reusable after transport loss.
+                // Omit-path stays unkeyed (health probes / observational exec).
                 let (client, stream) = self
                     .bind_exec_record(&record, execution_id, generation)
                     .await?;
@@ -332,9 +333,10 @@ impl ExecutionProcessStream for PtyStream {
 
 const MAX_REQUEST_ID_BYTES: usize = 512;
 
-/// Mint a durable guest one-shot identity when the caller omitted `request_id`
-/// (parity with OCI `managed-exec-*`). Reject empty / oversized / NUL ids.
-fn resolve_microvm_exec_request_id(request: &mut ExecRequest) -> ExecutionManagerResult<()> {
+/// Reject empty / oversized / NUL ids. Do **not** mint on omit-path: health
+/// probes and other observational MicroVM execs intentionally stay unkeyed.
+/// Callers that need guest-journal replay (CLI/CRI/SDK) mint before calling.
+fn validate_microvm_exec_request_id(request: &ExecRequest) -> ExecutionManagerResult<()> {
     match request.request_id.as_deref() {
         Some(request_id)
             if request_id.is_empty()
@@ -345,11 +347,7 @@ fn resolve_microvm_exec_request_id(request: &mut ExecRequest) -> ExecutionManage
                 "A3S MicroVM exec request ID is invalid".to_string(),
             ))
         }
-        Some(_) => Ok(()),
-        None => {
-            request.request_id = Some(format!("managed-exec-{}", uuid::Uuid::new_v4().simple()));
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
@@ -383,29 +381,27 @@ mod microvm_exec_request_id_tests {
     }
 
     #[test]
-    fn omit_path_mints_managed_exec_prefix() {
-        let mut request = base_request(None);
-        resolve_microvm_exec_request_id(&mut request).expect("mint");
-        let id = request.request_id.expect("minted");
-        assert!(id.starts_with("managed-exec-"));
-        assert!(!id.is_empty());
+    fn omit_path_stays_unkeyed() {
+        let request = base_request(None);
+        validate_microvm_exec_request_id(&request).expect("omit ok");
+        assert!(request.request_id.is_none());
     }
 
     #[test]
-    fn caller_id_is_preserved() {
-        let mut request = base_request(Some("cli-exec-abc".to_string()));
-        resolve_microvm_exec_request_id(&mut request).expect("ok");
+    fn caller_id_is_accepted() {
+        let request = base_request(Some("cli-exec-abc".to_string()));
+        validate_microvm_exec_request_id(&request).expect("ok");
         assert_eq!(request.request_id.as_deref(), Some("cli-exec-abc"));
     }
 
     #[test]
     fn empty_and_nul_ids_are_rejected() {
         assert!(matches!(
-            resolve_microvm_exec_request_id(&mut base_request(Some(String::new()))),
+            validate_microvm_exec_request_id(&base_request(Some(String::new()))),
             Err(ExecutionManagerError::InvalidRequest(_))
         ));
         assert!(matches!(
-            resolve_microvm_exec_request_id(&mut base_request(Some("bad\0id".to_string()))),
+            validate_microvm_exec_request_id(&base_request(Some("bad\0id".to_string()))),
             Err(ExecutionManagerError::InvalidRequest(_))
         ));
     }
