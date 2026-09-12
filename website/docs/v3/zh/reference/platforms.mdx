@@ -15,7 +15,7 @@ API 已实现不等于它在每种主机上都有生产保证。准入取决于�
 | Linux MicroVM   | 主要本地运行时               | 需要 KVM 和 libkrun，能力最完整                              |
 | macOS MicroVM   | 已实现并通过构建检查         | 仅 Apple Silicon 和 Hypervisor.framework，不支持 Intel macOS |
 | Windows MicroVM | 已实现并通过真实主机浸泡测试 | x86_64 WHPX，固定一个 vCPU，并受下列限制                     |
-| Linux Sandbox   | 预览，已通过真实运行时 CI    | 仅经过认证的 Linux 主机，共享主机内核                        |
+| Linux Sandbox   | 生产（显式 isolation）           | 经认证的 Linux x86_64/aarch64；共享主机内核；见 Box 仓库 Sandbox GA evidence |
 | Kubernetes      | 预览                         | Linux CRI v1 与 containerd runtime-v2 shim，不声明完整一致性 |
 | TEE             | 取决于主机                   | 面向 SEV-SNP 的流程；模拟不构成硬件安全证据                  |
 

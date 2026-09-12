@@ -296,9 +296,10 @@ crate.
 
 The dependency check resolves only `a3s-oci-sdk` and its public core types from
 the OCI Runtime repository. The typed opt-in composition and durable selection
-now satisfy this boundary gate. Linux Sandbox production activation remains
-explicitly opt-in; default activation and the unified MicroVM cutover remain
-later gates.
+now satisfy this boundary gate. Linux Sandbox production activation for
+`--isolation sandbox` defaults to `SandboxViaOci` when
+`A3S_BOX_OCI_MIGRATION` is absent; the unified MicroVM cutover remains a later
+gate. See [Sandbox GA evidence](docs/sandbox-ga-evidence.md).
 
 **Sandbox GA claim surface (2026-09-12):** Linux defaults new Sandbox records
 to `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent. Hosted
@@ -306,9 +307,10 @@ to `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent. Hosted
 including Native Live v4 retained stream and filesystem continuity with the
 env unset. Explicit `off` preserves the VM-only backend; explicit `sandbox`
 hard-fails when the owner is not launch-ready. Public docs must not call this
-path a “preview” while CI proves it. Sandbox GA does **not** require MicroVM
-cutover, WHPX/KVM MicroVM production composition, flipping
-`b2_process_session_recovery_closed`, fixture-as-driver Live, or Cloud
+path a “preview” while CI proves it. Operator host prep is documented in
+[Installation](docs/installation.md#linux-sandbox-host-preparation). Sandbox GA
+does **not** require MicroVM cutover, WHPX/KVM MicroVM production composition,
+flipping `b2_process_session_recovery_closed`, fixture-as-driver Live, or Cloud
 `BX0.3` hardware-TEE exit. Default omit-isolation → MicroVM remains until a
 separate MicroVM cutover. Full B3/B4 exit gates remain open; Sandbox
 GA must advertise only the surfaces already proven (not Compose/CRI/bridge as
