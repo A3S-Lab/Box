@@ -16,5 +16,6 @@ pub use attestation::{
     SecretInjectionResult, SecretInjector, UnsealResult,
 };
 pub use exec::{ExecClient, StreamingExec, StreamingExecInput};
+pub(crate) use exec::should_retry_keyed_guest_exec;
 #[cfg(unix)]
 pub use pty::{PtyClient, StreamingPty, StreamingPtyInput};
