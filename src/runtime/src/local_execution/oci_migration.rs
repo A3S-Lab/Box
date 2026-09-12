@@ -8,14 +8,21 @@ use std::sync::Arc;
 use a3s_box_core::ExecutionBackend;
 use a3s_box_core::{ExecutionManagerError, ExecutionManagerResult};
 #[cfg(target_os = "linux")]
+use a3s_box_core::{ExecutionIsolation, ExecutionState, KillOutcome};
+#[cfg(target_os = "linux")]
+use async_trait::async_trait;
+#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
 use super::LocalExecutionManager;
 #[cfg(target_os = "linux")]
 use super::{
-    LinuxKvmOciBundleProvider, NativeLinuxOciBundleProvider, OciLocalExecutionBackend,
+    LinuxKvmOciBundleProvider, LocalExecutionBackend, LocalExecutionHandle,
+    LocalExecutionObservation, NativeLinuxOciBundleProvider, OciLocalExecutionBackend,
     OciMigrationPolicy,
 };
+#[cfg(target_os = "linux")]
+use crate::{BoxRecord, ManagedRuntimeRoute};
 
 pub const OCI_MIGRATION_ENV: &str = "A3S_BOX_OCI_MIGRATION";
 pub const OCI_HOST_ROOT_ENV: &str = "A3S_BOX_OCI_HOST_ROOT";
@@ -170,16 +177,21 @@ impl NativeLinuxOciMigrationConfig {
         self.agent_path.as_deref()
     }
 
-    /// Parse the process-wide opt-in. An absent/off value preserves the
-    /// existing VM backend without probing or starting an OCI owner.
+    /// Parse the process-wide migration selection.
+    ///
+    /// On Linux, an absent value selects the Sandbox GA default (`SandboxViaOci`).
+    /// Explicit `off`/`legacy` preserves the VM-only backend. Explicit
+    /// `sandbox`/`on` selects the same composition but hard-fails construction
+    /// when the OCI owner is not launch-ready.
     pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
-        parse_environment(
+        Ok(parse_environment(
             std::env::var_os(OCI_MIGRATION_ENV),
             std::env::var_os(OCI_HOST_ROOT_ENV),
             std::env::var_os(OCI_RUNTIME_PATH_ENV),
             std::env::var_os(OCI_AGENT_PATH_ENV),
             home_dir,
-        )
+        )?
+        .map(|(_, config)| config))
     }
 
     fn validate(&self) -> ExecutionManagerResult<()> {
@@ -391,8 +403,13 @@ impl LocalExecutionManager {
         }
     }
 
-    /// Select the production migration composition only when explicitly opted
-    /// in through `A3S_BOX_OCI_MIGRATION`.
+    /// Select the production Sandbox migration composition.
+    ///
+    /// On Linux, an absent `A3S_BOX_OCI_MIGRATION` defaults to `SandboxViaOci`.
+    /// Explicit `off` keeps the legacy VM backend. Explicit `sandbox` hard-fails
+    /// when the OCI owner is not launch-ready; the Linux default soft-composes a
+    /// fail-closed unavailable OCI backend so MicroVM continue to work without
+    /// OCI host prep.
     pub async fn with_configured_backend(
         state_path: impl Into<PathBuf>,
         home_dir: impl Into<PathBuf>,
@@ -437,15 +454,39 @@ impl LocalExecutionManager {
                 )
                 .await;
             }
-            match NativeLinuxOciMigrationConfig::from_environment(&home_dir)? {
-                Some(config) => {
-                    Self::with_native_linux_oci_migration_and_pull_progress(
-                        state_path,
-                        home_dir,
+            match parse_environment(
+                std::env::var_os(OCI_MIGRATION_ENV),
+                std::env::var_os(OCI_HOST_ROOT_ENV),
+                std::env::var_os(OCI_RUNTIME_PATH_ENV),
+                std::env::var_os(OCI_AGENT_PATH_ENV),
+                &home_dir,
+            )? {
+                Some((selection, config)) => {
+                    match Self::with_native_linux_oci_migration_and_pull_progress(
+                        state_path.clone(),
+                        home_dir.clone(),
                         config,
-                        pull_progress_fn,
+                        pull_progress_fn.clone(),
                     )
                     .await
+                    {
+                        Ok(manager) => Ok(manager),
+                        Err(error)
+                            if matches!(
+                                selection,
+                                NativeLinuxMigrationSelection::DefaultSandbox
+                            ) =>
+                        {
+                            Ok(Self::with_oci_migration_backend_and_pull_progress(
+                                state_path,
+                                home_dir,
+                                Arc::new(UnavailableOciMigrationBackend::new(error)),
+                                OciMigrationPolicy::SandboxViaOci,
+                                pull_progress_fn,
+                            ))
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 None => legacy_backend(state_path, home_dir, pull_progress_fn),
             }
@@ -488,35 +529,135 @@ fn legacy_backend(
     ))
 }
 
+/// How Linux selected the native Sandbox OCI composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeLinuxMigrationSelection {
+    /// Env absent on Linux: default SandboxViaOci; soft if owner not ready.
+    DefaultSandbox,
+    /// Explicit sandbox/on: hard-fail when the owner is not launch-ready.
+    ExplicitSandbox,
+}
+
+/// Fail-closed OCI side of `SandboxViaOci` when default activation cannot start
+/// the owner. MicroVM continues on the legacy backend; Sandbox preflight fails.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct UnavailableOciMigrationBackend {
+    message: String,
+}
+
+#[cfg(target_os = "linux")]
+impl UnavailableOciMigrationBackend {
+    fn new(error: ExecutionManagerError) -> Self {
+        Self {
+            message: format!(
+                "Linux Sandbox OCI owner is not launch-ready ({error}); install the A3S OCI Runtime package or set {OCI_MIGRATION_ENV}=off for MicroVM-only hosts"
+            ),
+        }
+    }
+
+    fn unavailable(&self) -> ExecutionManagerError {
+        ExecutionManagerError::Unavailable(self.message.clone())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl LocalExecutionBackend for UnavailableOciMigrationBackend {
+    async fn preflight_isolation(
+        &self,
+        isolation: ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        if isolation.is_sandbox() {
+            Err(self.unavailable())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn route_for_create(&self, _record: &BoxRecord) -> ExecutionManagerResult<ManagedRuntimeRoute> {
+        Ok(ManagedRuntimeRoute::OciSdk)
+    }
+
+    async fn preflight(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        Err(self.unavailable())
+    }
+
+    async fn start(&self, _record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        Err(self.unavailable())
+    }
+
+    async fn inspect(
+        &self,
+        _record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        Ok(LocalExecutionObservation {
+            state: ExecutionState::Created,
+            handle: None,
+            exit_code: None,
+        })
+    }
+
+    async fn pause(
+        &self,
+        _record: &BoxRecord,
+        _keep_memory: bool,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        Err(self.unavailable())
+    }
+
+    async fn resume(&self, _record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        Err(self.unavailable())
+    }
+
+    async fn kill(&self, _record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
+        Err(self.unavailable())
+    }
+}
+
 fn parse_environment(
     mode: Option<OsString>,
     service_root: Option<OsString>,
     runtime_path: Option<OsString>,
     agent_path: Option<OsString>,
     home_dir: &Path,
-) -> ExecutionManagerResult<Option<NativeLinuxOciMigrationConfig>> {
-    let Some(mode) = mode.filter(|value| !value.is_empty()) else {
-        return Ok(None);
+) -> ExecutionManagerResult<Option<(NativeLinuxMigrationSelection, NativeLinuxOciMigrationConfig)>>
+{
+    let selection = match mode.filter(|value| !value.is_empty()) {
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                NativeLinuxMigrationSelection::DefaultSandbox
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Ok(None);
+            }
+        }
+        Some(mode) => {
+            let mode = mode.to_str().ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_MIGRATION_ENV} must contain UTF-8 text"
+                ))
+            })?;
+            match mode.trim().to_ascii_lowercase().as_str() {
+                "" | "0" | "false" | "off" | "disabled" | "legacy" => return Ok(None),
+                "1" | "true" | "on" | "sandbox" | "sandbox-via-oci" => {
+                    NativeLinuxMigrationSelection::ExplicitSandbox
+                }
+                "all" | "all-via-oci" | "microvm" | "microvm-via-oci" | "kvm" => {
+                    return Err(ExecutionManagerError::InvalidRequest(format!(
+                        "MicroVM OCI qualification uses {OCI_KVM_ENDPOINT_ENV} with LinuxKvmOciMigrationConfig; NativeLinuxOciMigrationConfig accepts only sandbox"
+                    )))
+                }
+                value => {
+                    return Err(ExecutionManagerError::InvalidRequest(format!(
+                        "unsupported {OCI_MIGRATION_ENV} value {value:?}; expected off or sandbox"
+                    )))
+                }
+            }
+        }
     };
-    let mode = mode.to_str().ok_or_else(|| {
-        ExecutionManagerError::InvalidRequest(format!(
-            "{OCI_MIGRATION_ENV} must contain UTF-8 text"
-        ))
-    })?;
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "off" | "disabled" | "legacy" => return Ok(None),
-        "1" | "true" | "on" | "sandbox" | "sandbox-via-oci" => {}
-        "all" | "all-via-oci" | "microvm" | "microvm-via-oci" | "kvm" => {
-            return Err(ExecutionManagerError::InvalidRequest(format!(
-                "MicroVM OCI qualification uses {OCI_KVM_ENDPOINT_ENV} with LinuxKvmOciMigrationConfig; NativeLinuxOciMigrationConfig accepts only sandbox"
-            )))
-        }
-        value => {
-            return Err(ExecutionManagerError::InvalidRequest(format!(
-                "unsupported {OCI_MIGRATION_ENV} value {value:?}; expected off or sandbox"
-            )))
-        }
-    }
 
     let root = service_root
         .filter(|value| !value.is_empty())
@@ -537,7 +678,7 @@ fn parse_environment(
             )))
         }
     }
-    Ok(Some(config))
+    Ok(Some((selection, config)))
 }
 
 fn parse_windows_environment(
@@ -671,12 +812,22 @@ mod tests {
     }
 
     #[test]
-    fn environment_is_opt_in_and_rejects_unqualified_all_policy() {
+    fn environment_defaults_on_linux_and_rejects_unqualified_all_policy() {
         let home = absolute("a3s-oci-config-home");
-        assert_eq!(
-            parse_environment(None, None, None, None, &home).unwrap(),
-            None
-        );
+        #[cfg(target_os = "linux")]
+        {
+            let (selection, config) =
+                parse_environment(None, None, None, None, &home).unwrap().unwrap();
+            assert_eq!(selection, NativeLinuxMigrationSelection::DefaultSandbox);
+            assert!(config.runtime_path().is_none());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(
+                parse_environment(None, None, None, None, &home).unwrap(),
+                None
+            );
+        }
         assert_eq!(
             parse_environment(Some(OsString::from("off")), None, None, None, &home).unwrap(),
             None
@@ -697,7 +848,7 @@ mod tests {
             &home
         )
         .is_err());
-        let config = parse_environment(
+        let (selection, config) = parse_environment(
             Some(OsString::from("sandbox")),
             Some(absolute("a3s-oci-root").into_os_string()),
             Some(runtime.clone().into_os_string()),
@@ -706,6 +857,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        assert_eq!(selection, NativeLinuxMigrationSelection::ExplicitSandbox);
         assert_eq!(config.runtime_path(), Some(runtime.as_path()));
         assert_eq!(config.agent_path(), Some(agent.as_path()));
     }

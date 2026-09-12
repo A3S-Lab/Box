@@ -55,10 +55,13 @@ with `box_vm` or `oci_sdk` before capability preflight and persist that choice
 with the reservation before launch side effects. Later policy changes cannot
 reroute their lifecycle, recovery, or cleanup, and a selected OCI failure is
 never retried on the Box backend. On Linux, the CLI, machine bridge, and the
-async Rust SDK constructor can now opt new Sandbox records into the production
-bundle provider and long-lived pinned runtime owner with
-`A3S_BOX_OCI_MIGRATION=sandbox`. With the setting absent, current behavior is
-unchanged. Linux also has an explicit qualification-only `microvm`/`all`
+async Rust SDK constructor default new Sandbox records to the production
+bundle provider and long-lived pinned runtime owner (`SandboxViaOci`) without
+requiring `A3S_BOX_OCI_MIGRATION`. Explicit `A3S_BOX_OCI_MIGRATION=off` keeps
+the VM-only backend; explicit `sandbox`/`on` selects the same composition but
+hard-fails when the OCI owner is not launch-ready. When the default cannot
+start the owner, MicroVM continue on the legacy backend and Sandbox
+preflight fails closed. Linux also has an explicit qualification-only `microvm`/`all`
 composition for the externally launched OCI Runtime
 `box-kvm-qualification-service`; it requires `A3S_BOX_OCI_KVM_ENDPOINT`, is not
 enabled by default, and is not yet a production claim. Windows x86_64 likewise
@@ -144,18 +147,21 @@ artifacts are published from the same versioned release tag. See the
 > console files, feeds the configured retention/redaction driver, reconnects
 > after runtime-service owner replacement, and publishes drain evidence before
 > the runtime generation is deleted.
-> **Sandbox (Native Linux) claim surface:** with `A3S_BOX_OCI_MIGRATION=sandbox`,
-> the production owner route is CI-proven on x86_64 and aarch64 (SDK Local
-> Sandbox): lifecycle, exec, filesystem, pause/resume, snapshot, restart,
-> cleanup, and Native Live v4 retained stream + filesystem continuity across
-> owner SIGKILL. Host harness reports still keep
+> **Sandbox (Native Linux) claim surface:** Linux defaults new Sandbox records
+> to the production OCI owner route (`SandboxViaOci`) without requiring
+> `A3S_BOX_OCI_MIGRATION`. Hosted CI on x86_64/aarch64 (SDK Local Sandbox)
+> proves that path with the env unset: lifecycle, exec, filesystem,
+> pause/resume, snapshot, restart, cleanup, and Native Live v4 retained stream
+> + filesystem continuity across owner SIGKILL. Explicit `off` keeps the
+> VM-only backend; explicit `sandbox` hard-fails when the owner is not ready.
+> Host harness reports still keep
 > `b2_process_session_recovery_closed=false` (reports never self-certify B2
 > close). Fixture `process_restart` is not driver Live evidence.
 > **Still open (out of Sandbox GA):** default MicroVM → OCI cutover, WHPX/KVM
 > MicroVM *production* composition (qualification-only remains), HostRuntime
 > Service registration as the default create path, and broader Cloud `BX0.3`
 > hardware-TEE claims. The default omit-isolation → MicroVM split above is
-> still authoritative until a separate default-activation change ships.
+> still authoritative until a separate MicroVM cutover ships.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
@@ -222,10 +228,9 @@ An explicit `--isolation microvm` spelling is rejected. Omission is the only
 public way to select the default, which prevents scripts from treating backend
 names as interchangeable compatibility modes.
 
-On a certified Linux host, request the shared-kernel **Sandbox** explicitly
-(production owner route when `A3S_BOX_OCI_MIGRATION=sandbox` is set — see
-below). This is not a preview API; it is opt-in activation of the path CI
-already proves:
+On a certified Linux host, request the shared-kernel **Sandbox** explicitly.
+`--isolation sandbox` uses the production OCI owner route by default (see
+below). This is not a preview API:
 
 ```bash
 a3s-box run --rm \
@@ -235,19 +240,21 @@ a3s-box run --rm \
   alpine:3.20 -- sh -lc 'id; cat /proc/self/status'
 ```
 
-### Opt into the long-lived OCI owner on Linux (Sandbox production path)
+### Long-lived OCI owner on Linux (Sandbox production path)
 
-Sandbox production activation is deliberately **opt-in** (not the default
-omit-isolation path). Install the pinned `a3s-oci` and `a3s-oci-agent` pair,
-then keep the same configuration in every process that manages the migrated
-records:
+Sandbox production activation is the Linux default for `--isolation sandbox`
+(not the default omit-isolation / MicroVM path). Install the pinned `a3s-oci`
+and `a3s-oci-agent` pair. Artifact overrides are optional when the packaged
+binaries are on the discovery path:
 
 ```bash
-export A3S_BOX_OCI_MIGRATION=sandbox
+# Optional overrides; omit A3S_BOX_OCI_MIGRATION to use the Sandbox GA default.
 export A3S_BOX_OCI_RUNTIME_PATH=/absolute/path/to/a3s-oci
 export A3S_BOX_OCI_AGENT_PATH=/absolute/path/to/a3s-oci-agent
 # Optional; the default is a short, per-UID/per-A3S-home directory under /tmp.
 export A3S_BOX_OCI_HOST_ROOT=/absolute/private/runtime-root
+# Escape hatch for MicroVM-only hosts without OCI host prep:
+# export A3S_BOX_OCI_MIGRATION=off
 
 a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
 ```
@@ -734,7 +741,7 @@ operation returns a typed availability error before dispatch.
 | Linux MicroVM | Primary local path through KVM/libkrun; Runtime 0.5 readiness/liveness and bounded graceful-stop cases are wired into the advertised provider profiles alongside self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | The current revision still requires an enrolled KVM run of all capability-triggered lifecycle cases plus the longer `G2`/`R24` profiles |
 | macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical persistent/crash recovery, mount-free filesystem snapshot, legacy migration, maintenance, and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and Native Live v4 use the production owner route under `A3S_BOX_OCI_MIGRATION=sandbox` | **Production opt-in** shared-kernel path (not default omit-isolation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
+| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and Native Live v4 use the production owner route with `A3S_BOX_OCI_MIGRATION` unset (Sandbox GA default) | **Production** shared-kernel path for `--isolation sandbox` (not default omit-isolation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
 | TEE | Runtime-bound RA-TLS artifacts, exact identity-attachment binding, attestation-before-execution for confidential Tasks and Services, and an opt-in simulated KVM conformance profile; a separately armed SEV-SNP hardware gate pins the launch measurement | Identity attachment is advertised only by an explicitly configured confidential provider; simulation and an unexecuted hardware job are not hardware security evidence |
 

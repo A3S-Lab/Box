@@ -650,9 +650,11 @@ jobs:
           # euid 0). Elevate only the owner child via the setpriv wrapper.
           export A3S_BOX_CI_SETPRIV_MATCHED_CREDS=1
           export A3S_BOX_CI_SETPRIV_WRAPPER="$GITHUB_WORKSPACE/scripts/run-linux-sandbox-ci.sh"
+          # Sandbox GA default: absent A3S_BOX_OCI_MIGRATION selects SandboxViaOci.
+          # Do not export the env; prove production composition without the opt-in.
+          unset A3S_BOX_OCI_MIGRATION || true
           export A3S_DEPS_STUB=1
           export A3S_HOME
-          export A3S_BOX_OCI_MIGRATION=sandbox
           export A3S_BOX_OCI_HOST_ROOT A3S_BOX_OCI_RUNTIME_PATH A3S_BOX_OCI_AGENT_PATH
           export A3S_BOX_SANDBOX_OCI_LAUNCHER A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT
           export A3S_BOX_SDK_LOCAL_SMOKE=1

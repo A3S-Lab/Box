@@ -214,8 +214,9 @@ pub(crate) fn images_dir() -> PathBuf {
     a3s_box_core::dirs_home().join("images")
 }
 
-/// Construct the canonical local lifecycle facade. OCI migration remains a
-/// process-wide explicit opt-in; an absent setting preserves the VM backend.
+/// Construct the canonical local lifecycle facade. On Linux, an absent
+/// `A3S_BOX_OCI_MIGRATION` defaults to SandboxViaOci; explicit `off` keeps the
+/// VM-only backend.
 pub(crate) async fn configured_local_execution_manager(
     home: &Path,
 ) -> Result<a3s_box_runtime::LocalExecutionManager, Box<dyn std::error::Error>> {

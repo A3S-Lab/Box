@@ -300,15 +300,17 @@ now satisfy this boundary gate. Linux Sandbox production activation remains
 explicitly opt-in; default activation and the unified MicroVM cutover remain
 later gates.
 
-**Sandbox GA claim surface (2026-09-12):** Linux
-`A3S_BOX_OCI_MIGRATION=sandbox` is the production owner route proven by hosted
-`sdk-local-sandbox` (x86_64/aarch64) including Native Live v4 retained stream
-and filesystem continuity. Public docs must not call this path a “preview”
-while CI proves it. Sandbox GA does **not** require MicroVM cutover, WHPX/KVM
-MicroVM production composition, flipping
+**Sandbox GA claim surface (2026-09-12):** Linux defaults new Sandbox records
+to `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent. Hosted
+`sdk-local-sandbox` (x86_64/aarch64) proves the production owner route
+including Native Live v4 retained stream and filesystem continuity with the
+env unset. Explicit `off` preserves the VM-only backend; explicit `sandbox`
+hard-fails when the owner is not launch-ready. Public docs must not call this
+path a “preview” while CI proves it. Sandbox GA does **not** require MicroVM
+cutover, WHPX/KVM MicroVM production composition, flipping
 `b2_process_session_recovery_closed`, fixture-as-driver Live, or Cloud
 `BX0.3` hardware-TEE exit. Default omit-isolation → MicroVM remains until a
-separate default-activation change. Full B3/B4 exit gates remain open; Sandbox
+separate MicroVM cutover. Full B3/B4 exit gates remain open; Sandbox
 GA must advertise only the surfaces already proven (not Compose/CRI/bridge as
 closed).
 
