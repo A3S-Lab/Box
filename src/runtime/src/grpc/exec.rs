@@ -1211,15 +1211,17 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             drop(stream);
 
-            // First signal-main: apply (read frame) but drop without ACK.
+            // First signal-main: apply (read frame) then drop the whole stream
+            // so the host sees closed-without-ACK (not the 10s ACK timeout).
             let (stream, _) = listener.accept().await.unwrap();
-            let (r, _w) = tokio::io::split(stream);
+            let (r, w) = tokio::io::split(stream);
             let mut reader = a3s_transport::FrameReader::new(r);
             let frame = reader.read_frame().await.unwrap().unwrap();
             assert_eq!(frame.frame_type, a3s_transport::FrameType::Control);
             assert_eq!(frame.payload, b"signal-main:15");
             frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             drop(reader);
+            drop(w);
 
             // Second signal-main: ACK.
             let (stream, _) = listener.accept().await.unwrap();
