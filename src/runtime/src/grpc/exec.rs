@@ -52,8 +52,8 @@ const EXEC_HOST_SLACK_SECS: u64 = 10;
 const SIGNAL_MAIN_ACK_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignalMainAttempt {
-    /// Guest sent `signal-main-ack`.
+enum ControlAckAttempt {
+    /// Guest sent the expected control ACK.
     Acked,
     /// Connect failed; the control frame never left the host.
     NotReached,
@@ -511,37 +511,76 @@ impl ExecClient {
     /// signal is naturally idempotent, so one fresh-stream retry is safe and
     /// avoids false-negative force-kills (parity with OCI kill/delete).
     pub async fn signal_main(&self, signal: i32) -> Result<bool> {
-        match self.signal_main_once(signal).await? {
-            SignalMainAttempt::Acked => Ok(true),
-            SignalMainAttempt::NotReached => Ok(false),
-            SignalMainAttempt::Ambiguous => match self.signal_main_once(signal).await? {
-                SignalMainAttempt::Acked => Ok(true),
-                SignalMainAttempt::NotReached | SignalMainAttempt::Ambiguous => Ok(false),
-            },
+        let payload = format!("signal-main:{}", signal).into_bytes();
+        self.control_ack_with_ambiguous_retry(&payload, EXEC_SIGNAL_MAIN_ACK, "signal-main")
+            .await
+    }
+
+    /// Ask the restricted rootfs maintenance guest to unmount its read-only
+    /// auxiliary disk and let PID 1 return. Returns false on any transport or
+    /// protocol failure so teardown can use its bounded shim fallback.
+    ///
+    /// Guest shutdown is naturally idempotent (`IDLE→SHUTTING_DOWN` or already
+    /// `SHUTTING_DOWN` both ACK). Connect failures stay `Ok(false)` with no
+    /// retry; ambiguous write/ACK loss retries once on a fresh stream.
+    pub async fn shutdown_rootfs_maintenance(&self) -> Result<bool> {
+        self.control_ack_with_ambiguous_retry(
+            EXEC_CONTROL_SHUTDOWN_MAINTENANCE,
+            EXEC_SHUTDOWN_MAINTENANCE_ACK,
+            "maintenance shutdown",
+        )
+        .await
+    }
+
+    async fn control_ack_with_ambiguous_retry(
+        &self,
+        control_payload: &[u8],
+        ack_payload: &[u8],
+        label: &str,
+    ) -> Result<bool> {
+        match self
+            .control_ack_once(control_payload, ack_payload, label)
+            .await?
+        {
+            ControlAckAttempt::Acked => Ok(true),
+            ControlAckAttempt::NotReached => Ok(false),
+            ControlAckAttempt::Ambiguous => {
+                match self
+                    .control_ack_once(control_payload, ack_payload, label)
+                    .await?
+                {
+                    ControlAckAttempt::Acked => Ok(true),
+                    ControlAckAttempt::NotReached | ControlAckAttempt::Ambiguous => Ok(false),
+                }
+            }
         }
     }
 
-    async fn signal_main_once(&self, signal: i32) -> Result<SignalMainAttempt> {
+    async fn control_ack_once(
+        &self,
+        control_payload: &[u8],
+        ack_payload: &[u8],
+        label: &str,
+    ) -> Result<ControlAckAttempt> {
         let mut stream = match connect_exec_stream(&self.socket_path).await {
             Ok(s) => s,
-            Err(_) => return Ok(SignalMainAttempt::NotReached),
+            Err(_) => return Ok(ControlAckAttempt::NotReached),
         };
 
-        let payload = format!("signal-main:{}", signal).into_bytes();
-        let frame = a3s_transport::Frame::control(payload);
+        let frame = a3s_transport::Frame::control(control_payload.to_vec());
         let encoded = frame
             .encode()
-            .map_err(|e| BoxError::ExecError(format!("signal-main frame encode failed: {}", e)))?;
+            .map_err(|e| BoxError::ExecError(format!("{label} frame encode failed: {e}")))?;
 
         if stream.write_all(&encoded).await.is_err() {
             // Write may have partially reached the guest; treat as ambiguous.
-            return Ok(SignalMainAttempt::Ambiguous);
+            return Ok(ControlAckAttempt::Ambiguous);
         }
 
         // Host-side deadline: a wedged guest can complete the connect handshake
         // (listen backlog) but never write the ACK, which would hang this read
-        // forever — and stop/restart deliver the signal through here BEFORE their
-        // force-kill fallback, so the fallback would never run.
+        // forever — and stop/restart deliver these controls BEFORE their
+        // force-kill / shim fallback, so the fallback would never run.
         let (r, _w) = tokio::io::split(stream);
         let mut reader = a3s_transport::FrameReader::new(r);
         let read = tokio::time::timeout(
@@ -552,43 +591,12 @@ impl ExecClient {
         match read {
             Ok(Ok(Some(f)))
                 if f.frame_type == a3s_transport::FrameType::Control
-                    && f.payload == EXEC_SIGNAL_MAIN_ACK =>
+                    && f.payload == ack_payload =>
             {
-                Ok(SignalMainAttempt::Acked)
+                Ok(ControlAckAttempt::Acked)
             }
-            _ => Ok(SignalMainAttempt::Ambiguous),
+            _ => Ok(ControlAckAttempt::Ambiguous),
         }
-    }
-
-    /// Ask the restricted rootfs maintenance guest to unmount its read-only
-    /// auxiliary disk and let PID 1 return. Returns false on any transport or
-    /// protocol failure so teardown can use its bounded shim fallback.
-    pub async fn shutdown_rootfs_maintenance(&self) -> Result<bool> {
-        let mut stream = match connect_exec_stream(&self.socket_path).await {
-            Ok(stream) => stream,
-            Err(_) => return Ok(false),
-        };
-        let frame = a3s_transport::Frame::control(EXEC_CONTROL_SHUTDOWN_MAINTENANCE.to_vec());
-        let encoded = frame.encode().map_err(|error| {
-            BoxError::ExecError(format!("maintenance shutdown frame encode failed: {error}"))
-        })?;
-        if stream.write_all(&encoded).await.is_err() {
-            return Ok(false);
-        }
-
-        let (read, _write) = tokio::io::split(stream);
-        let mut reader = a3s_transport::FrameReader::new(read);
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(SIGNAL_MAIN_ACK_TIMEOUT_SECS),
-            reader.read_frame(),
-        )
-        .await;
-        Ok(matches!(
-            response,
-            Ok(Ok(Some(frame)))
-                if frame.frame_type == a3s_transport::FrameType::Control
-                    && frame.payload == EXEC_SHUTDOWN_MAINTENANCE_ACK
-        ))
     }
 
     /// Ask a guest that booted IDLE (`BOX_DEFERRED_MAIN=1`) to spawn its container
@@ -1271,6 +1279,58 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         assert!(client.shutdown_rootfs_maintenance().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn shutdown_rootfs_maintenance_retries_once_after_lost_ack() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("maintenance-shutdown-retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            // First shutdown: guest applies (read frame) then drop both halves.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(frame.payload, EXEC_CONTROL_SHUTDOWN_MAINTENANCE);
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            // Second shutdown: ACK (guest already SHUTTING_DOWN is idempotent).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(frame.payload, EXEC_CONTROL_SHUTDOWN_MAINTENANCE);
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            writer
+                .write_control(EXEC_SHUTDOWN_MAINTENANCE_ACK)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        assert!(
+            client.shutdown_rootfs_maintenance().await.unwrap(),
+            "lost ACK must recover via one fresh-stream retry"
+        );
+        assert_eq!(
+            frames.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "guest must see shutdown twice (natural idempotency)"
+        );
     }
 
     #[tokio::test]
