@@ -491,8 +491,9 @@ support or any unqualified option fails before image preparation. In addition,
 endpoint must be supplied explicitly so this experimental service can never
 activate by accident.
 
-Current Linux opt-in covers new Sandbox reservations through the long-lived
-Native Linux owner, plus an explicit qualification-only MicroVM path through
+Current Linux Sandbox GA defaults new Sandbox reservations through the long-lived
+Native Linux owner when `A3S_BOX_OCI_MIGRATION` is absent, plus an explicit
+qualification-only MicroVM path through
 `box-kvm-qualification-service` when `A3S_BOX_OCI_KVM_ENDPOINT` is set. On that
 Linux/macOS same-uid virtio-fs path, Box does not request guest portable
 rootfs-metadata ownership replay: the share retains Host UIDs and guest
