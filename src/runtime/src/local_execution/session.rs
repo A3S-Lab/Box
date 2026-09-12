@@ -49,13 +49,26 @@ impl ExecutionSessionManager for LocalExecutionManager {
                 .await?;
             return self.backend.execute(&record, request).await;
         }
+        validate_microvm_exec_request_id(&request)?;
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
-        client
-            .exec_command_on_stream(stream, &request)
-            .await
-            .map_err(|error| session_error(execution_id, "execute command", error))
+        match client.exec_command_on_stream(stream, &request).await {
+            Ok(output) => Ok(output),
+            Err(error) if crate::vm::should_retry_keyed_guest_exec(&request, &error) => {
+                // Same request_id: guest replay cache reconciles a lost response.
+                // Rebind: the first stream is not reusable after transport loss.
+                // Omit-path stays unkeyed (health probes / observational exec).
+                let (client, stream) = self
+                    .bind_exec_record(&record, execution_id, generation)
+                    .await?;
+                client
+                    .exec_command_on_stream(stream, &request)
+                    .await
+                    .map_err(|error| session_error(execution_id, "execute command", error))
+            }
+            Err(error) => Err(session_error(execution_id, "execute command", error)),
+        }
     }
 
     async fn start_process(
@@ -318,6 +331,26 @@ impl ExecutionProcessStream for PtyStream {
     }
 }
 
+const MAX_REQUEST_ID_BYTES: usize = 512;
+
+/// Reject empty / oversized / NUL ids. Do **not** mint on omit-path: health
+/// probes and other observational MicroVM execs intentionally stay unkeyed.
+/// Callers that need guest-journal replay (CLI/CRI/SDK) mint before calling.
+fn validate_microvm_exec_request_id(request: &ExecRequest) -> ExecutionManagerResult<()> {
+    match request.request_id.as_deref() {
+        Some(request_id)
+            if request_id.is_empty()
+                || request_id.len() > MAX_REQUEST_ID_BYTES
+                || request_id.contains('\0') =>
+        {
+            Err(ExecutionManagerError::InvalidRequest(
+                "A3S MicroVM exec request ID is invalid".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn session_error(
     execution_id: &ExecutionId,
     operation: &str,
@@ -326,4 +359,50 @@ fn session_error(
     ExecutionManagerError::Unavailable(format!(
         "failed to {operation} for execution {execution_id}: {error}"
     ))
+}
+
+#[cfg(test)]
+mod microvm_exec_request_id_tests {
+    use super::*;
+
+    fn base_request(request_id: Option<String>) -> ExecRequest {
+        ExecRequest {
+            request_id,
+            cmd: vec!["true".to_string()],
+            timeout_ns: 1,
+            env: vec![],
+            working_dir: None,
+            rootfs: None,
+            stdin: None,
+            stdin_streaming: false,
+            user: None,
+            streaming: false,
+        }
+    }
+
+    #[test]
+    fn omit_path_stays_unkeyed() {
+        let request = base_request(None);
+        validate_microvm_exec_request_id(&request).expect("omit ok");
+        assert!(request.request_id.is_none());
+    }
+
+    #[test]
+    fn caller_id_is_accepted() {
+        let request = base_request(Some("cli-exec-abc".to_string()));
+        validate_microvm_exec_request_id(&request).expect("ok");
+        assert_eq!(request.request_id.as_deref(), Some("cli-exec-abc"));
+    }
+
+    #[test]
+    fn empty_and_nul_ids_are_rejected() {
+        assert!(matches!(
+            validate_microvm_exec_request_id(&base_request(Some(String::new()))),
+            Err(ExecutionManagerError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_microvm_exec_request_id(&base_request(Some("bad\0id".to_string()))),
+            Err(ExecutionManagerError::InvalidRequest(_))
+        ));
+    }
 }

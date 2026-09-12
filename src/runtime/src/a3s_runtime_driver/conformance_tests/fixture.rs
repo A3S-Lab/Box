@@ -466,25 +466,34 @@ impl BoxRuntimeConformanceFixture {
     ) -> Result<()> {
         if spec.class == a3s_runtime::contract::RuntimeUnitClass::Service {
             let stop = self.cases.action(&format!("{label}-stop"), spec);
-            let inspection = client.stop(&stop).await?;
-            if let RuntimeInspection::Found { observation, .. } = inspection {
-                require(
-                    matches!(
-                        observation.state,
-                        RuntimeUnitState::Stopped
-                            | RuntimeUnitState::Failed
-                            | RuntimeUnitState::Unknown
-                    ),
-                    format!("{label} stop returned an active state"),
-                )?;
+            match client.stop(&stop).await {
+                Ok(inspection) => {
+                    if let RuntimeInspection::Found { observation, .. } = inspection {
+                        require(
+                            matches!(
+                                observation.state,
+                                RuntimeUnitState::Stopped
+                                    | RuntimeUnitState::Failed
+                                    | RuntimeUnitState::Unknown
+                            ),
+                            format!("{label} stop returned an active state"),
+                        )?;
+                    }
+                }
+                // Service may already be absent after a fast exit races cleanup.
+                Err(RuntimeError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
             }
         }
         let remove = self.cases.action(&format!("{label}-remove"), spec);
-        let removal = client.remove(&remove).await?;
-        require(
-            removal.unit_id == spec.unit_id && removal.generation == spec.generation,
-            format!("{label} removal changed immutable identity"),
-        )
+        match client.remove(&remove).await {
+            Ok(removal) => require(
+                removal.unit_id == spec.unit_id && removal.generation == spec.generation,
+                format!("{label} removal changed immutable identity"),
+            ),
+            Err(RuntimeError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn evidence(

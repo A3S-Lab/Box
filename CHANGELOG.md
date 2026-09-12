@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Managed MicroVM `ExecutionSessionManager::execute` retries once on ambiguous
+  guest transport loss when a non-empty `request_id` is already present, after
+  rebinding the exec stream (parity with `VmManager::exec_request`). Omit-path
+  stays unkeyed so health probes remain observational. Streaming `start_process`
+  stays unkeyed. R17 conformance cleanup treats stop/remove `NotFound` as
+  already-absent after a fast service exit. Does **not** flip B2 harness close,
+  fixture continuity, or hosted-KVM claims.
+
 - MicroVM guest one-shot `exec_request` retries once on ambiguous transport
   loss when a non-empty `request_id` is present (guest replay cache). Convenience
   `exec_command` mints `vm-exec-*`; live MicroVM cgroup resource updates mint
