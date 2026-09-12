@@ -73,7 +73,8 @@ a3s-box volume inspect app-data
 
 ## 显式选择共享内核 Sandbox
 
-在经过认证的 Linux 主机上：
+在已完成 Sandbox GA 主机准备的认证 Linux 上（`v3.2.6`+），显式请求 Sandbox。
+保持 `A3S_BOX_OCI_MIGRATION` 未设置，以使用生产 `SandboxViaOci` 所有者路由：
 
 ```bash
 a3s-box run --rm \
@@ -84,8 +85,8 @@ a3s-box run --rm \
   sh -lc 'id; cat /proc/self/status'
 ```
 
-显式的 `--isolation microvm` 会被拒绝；省略参数才是默认 MicroVM 的公开选择方式。
-这样脚本不会误把后端名称当作可互换的兼容模式。
+主机准备见[安装](./installation/)。显式的 `--isolation microvm` 会被拒绝；
+省略参数才是默认 MicroVM 的公开选择方式，这样脚本不会误把后端名称当作可互换的兼容模式。
 
 ## 使用原生 SDK
 

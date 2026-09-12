@@ -116,6 +116,22 @@ sh ./install.sh \
 `# >>> a3s-box installer >>>` 与 `# <<< a3s-box installer <<<` 之间的块；
 Windows 需从用户 `PATH` 移除该目录。卸载二进制不会自动删除运行时数据。
 
+## Linux Sandbox 主机准备（3.2.6 GA）
+
+安装器不会启用 Sandbox 主机能力。在经认证的 Linux 主机上安装 `v3.2.6` 或更新版本后，
+准备委托 cgroup 与 setuid launcher，然后**不要**设置 `A3S_BOX_OCI_MIGRATION`：
+
+```bash
+sudo bash /path/to/box/scripts/prepare-linux-sandbox-host.sh \
+  --install-launcher /absolute/path/to/a3s-oci
+export A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT=...  # 脚本会打印
+a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
+```
+
+证据与非宣称见 Box 仓库
+[Sandbox GA evidence](https://github.com/A3S-Lab/Box/blob/main/docs/sandbox-ga-evidence.md)。
+这不是 MicroVM 或 `BX0.3` 宣称。
+
 ## 下一步
 
 安装后继续阅读[快速开始](./quick-start/)；生产部署前请检查

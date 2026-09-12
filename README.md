@@ -76,8 +76,10 @@ is not yet a production claim.
 
 ## Current release line
 
-The `3.2.6` release line keeps the public SDK contract stable while packaging
-Linux Sandbox GA activation and the latest runtime fixes from `main`:
+The `3.2.6` release line (published as
+[v3.2.6](https://github.com/A3S-Lab/Box/releases/tag/v3.2.6)) keeps the public
+SDK contract stable while packaging Linux Sandbox GA activation and the latest
+runtime fixes from `main`:
 
 | Area | Latest behavior |
 | --- | --- |

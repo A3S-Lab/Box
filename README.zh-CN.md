@@ -51,7 +51,9 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 
 ## 当前发布线
 
-`3.2.6` 发布线在保持公共 SDK 契约稳定的同时，打包 Linux Sandbox GA 默认激活与来自 `main` 的最新运行时修复：
+`3.2.6` 发布线（已发布为
+[v3.2.6](https://github.com/A3S-Lab/Box/releases/tag/v3.2.6)）在保持公共 SDK
+契约稳定的同时，打包 Linux Sandbox GA 默认激活与来自 `main` 的最新运行时修复：
 
 | 领域 | 最新行为 |
 | --- | --- |

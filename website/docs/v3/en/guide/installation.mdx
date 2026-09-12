@@ -108,6 +108,23 @@ remove that installation directory from the per-user `PATH`.
 Uninstalling binaries intentionally does not delete runtime state stored
 elsewhere.
 
+## Linux Sandbox host preparation (3.2.6 GA)
+
+The installer does not enable Sandbox host capabilities. After installing
+`v3.2.6` or newer on a certified Linux host, prepare the delegated cgroup and
+setuid launcher, then run without setting `A3S_BOX_OCI_MIGRATION`:
+
+```bash
+sudo bash /path/to/box/scripts/prepare-linux-sandbox-host.sh \
+  --install-launcher /absolute/path/to/a3s-oci
+export A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT=...  # printed by the script
+a3s-box run --rm --isolation sandbox alpine:3.20 -- sleep 5
+```
+
+Evidence and non-claims:
+[Sandbox GA evidence](https://github.com/A3S-Lab/Box/blob/main/docs/sandbox-ga-evidence.md)
+in the Box repository. This is not a MicroVM or `BX0.3` claim.
+
 ## Next step
 
 Continue with the [quick start](./quick-start/) or review the

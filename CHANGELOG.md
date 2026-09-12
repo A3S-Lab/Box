@@ -4,6 +4,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Website installation and quick-start document Linux Sandbox GA host prep for
+  the published `v3.2.6` line (leave `A3S_BOX_OCI_MIGRATION` unset; link the
+  evidence binder). README points at the GitHub Release URL.
+
 ## [3.2.6] — 2026-09-12
 
 ### Changed
