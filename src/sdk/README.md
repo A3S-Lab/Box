@@ -311,8 +311,9 @@ let client = A3sBoxClient::with_configured_paths(paths).await?;
 # Ok(()) }
 ```
 
-It honors `A3S_BOX_OCI_MIGRATION=sandbox` and the paired
-`A3S_BOX_OCI_RUNTIME_PATH`/`A3S_BOX_OCI_AGENT_PATH` overrides. For an
+On Linux it defaults new Sandbox records to `SandboxViaOci` when
+`A3S_BOX_OCI_MIGRATION` is absent, and honors explicit `sandbox`/`off` plus the
+paired `A3S_BOX_OCI_RUNTIME_PATH`/`A3S_BOX_OCI_AGENT_PATH` overrides. For an
 environment-independent embedding, construct `NativeLinuxOciMigrationConfig`
 and pass it to `A3sBoxClient::with_native_linux_oci_migration`. Synchronous
 constructors intentionally retain the legacy backend.

@@ -4,6 +4,22 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Linux Sandbox GA default activation: an absent `A3S_BOX_OCI_MIGRATION`
+  selects `SandboxViaOci` for new Sandbox records (omit-isolation remains
+  MicroVM). Explicit `off` keeps the VM-only backend; explicit `sandbox`
+  hard-fails when the OCI owner is not launch-ready. When the default cannot
+  start the owner, MicroVM continue on legacy and Sandbox preflight fails
+  closed. Hosted `sdk-local-sandbox` proves the composition with the env
+  unset. Does **not** flip omit→MicroVM cutover,
+  `b2_process_session_recovery_closed`, WHPX/KVM MicroVM production claims,
+  fixture Live, or Cloud `BX0.3`.
+- Document the Linux Sandbox **production claim surface**: the OCI owner route
+  is CI-proven (SDK Local Sandbox + Native Live v4), not a “preview”.
+  Stopped-only owner crash recovery stays distinct from Live retained
+  stream/filesystem reattach.
+
 ### Fixed
 
 - `ExecClient::filesystem` retries once on a fresh stream for read-only ops

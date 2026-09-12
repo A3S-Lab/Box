@@ -28,9 +28,9 @@ async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
     let isolation = requested_isolation()?;
     let base_image =
         std::env::var("A3S_BOX_SDK_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
-    // This async constructor is deliberately exercised even without migration:
-    // it must preserve the legacy backend when the opt-in is absent and select
-    // the production OCI composition when CI supplies it.
+    // This async constructor is deliberately exercised with the Sandbox GA
+    // default: an absent A3S_BOX_OCI_MIGRATION selects SandboxViaOci on Linux.
+    // CI proves the production OCI composition without exporting the env.
     let client = A3sBoxClient::with_configured_paths(A3sBoxPaths::from_home(&home)).await?;
     let diagnostics = client.runtime_diagnostics();
     require(
