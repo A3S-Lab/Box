@@ -3162,7 +3162,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_repeated_stashed_main_trigger_is_idempotent() {
+    fn published_main_pid_acks_any_repeated_spawn_main() {
         assert_eq!(published_main_pid(42), Some(42));
         assert_eq!(published_main_pid(-1), None);
         assert_eq!(published_main_pid(-2), None);
