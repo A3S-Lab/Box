@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v2 reports.
+"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v3 reports.
 
-Retained-stream proof, retained-filesystem proof, and kvm_microvm_live_claimed
-are required together. B2, fixture continuity, and utility-VM claims must stay
-false.
+Retained-stream proof, retained-filesystem proof (with stable keyed file-upload
+request_id), and kvm_microvm_live_claimed are required together. B2, fixture
+continuity, and utility-VM claims must stay false.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-kvm-live-session.v2"
+SCHEMA = "a3s.box.linux-kvm-live-session.v3"
+KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"
 REQUIRED_TRUE = (
     "retained_stream_handle_proven",
     "kvm_microvm_live_claimed",
@@ -39,6 +40,12 @@ def evaluate(report: dict) -> list[str]:
             failures.append(f"{required} is not true")
     if report.get("kvm_microvm_live_claimed") != report.get("retained_stream_handle_proven"):
         failures.append("kvm_microvm_live_claimed must match retained_stream_handle_proven")
+    upload_id = report.get("file_upload_request_id")
+    if upload_id != KEYED_FILE_UPLOAD_BEFORE:
+        failures.append(
+            f"file_upload_request_id={upload_id!r} "
+            f"(expected {KEYED_FILE_UPLOAD_BEFORE!r})"
+        )
     for forbidden in FORBIDDEN:
         if report.get(forbidden):
             failures.append(f"{forbidden} must stay false")
@@ -49,6 +56,7 @@ def passing_report() -> dict:
     report = {
         "schema_version": SCHEMA,
         "status": "passed",
+        "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
     }
     for required in REQUIRED_TRUE:
         report[required] = True
@@ -63,13 +71,14 @@ def self_test() -> int:
         return 1
     bad_cases = [
         {
-            "schema_version": "a3s.box.linux-kvm-live-session.v1",
+            "schema_version": "a3s.box.linux-kvm-live-session.v2",
             "status": "passed",
             "retained_stream_handle_proven": True,
             "kvm_microvm_live_claimed": True,
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         },
         {
             "schema_version": SCHEMA,
@@ -79,6 +88,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         },
         {
             "schema_version": SCHEMA,
@@ -88,6 +98,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         },
         {
             "schema_version": SCHEMA,
@@ -97,6 +108,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         },
         {
             "schema_version": SCHEMA,
@@ -106,6 +118,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": False,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         },
         {
             "schema_version": SCHEMA,
@@ -115,6 +128,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
             "b2_process_session_recovery_closed": True,
         },
         {
@@ -125,6 +139,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
             "fixture_stream_continuity_claimed": True,
         },
         {
@@ -135,7 +150,28 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
             "utility_vm_claimed": True,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+            "file_upload_request_id": None,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "kvm_microvm_live_claimed": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+            "file_upload_request_id": "unkeyed-or-wrong-id",
         },
     ]
     for case in bad_cases:
@@ -177,7 +213,7 @@ def main(argv: list[str]) -> int:
             print(f"  {item}", file=sys.stderr)
         return 1
     print(
-        "kvm live-session v2 retained-stream+filesystem and kvm_microvm_live proven; "
+        "kvm live-session v3 retained-stream+keyed-filesystem and kvm_microvm_live proven; "
         "B2/fixture/utility-VM claims remain false"
     )
     return 0

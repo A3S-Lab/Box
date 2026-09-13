@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v4 reports.
+"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v5 reports.
 
-Retained-stream and retained-filesystem proofs are required. B2, fixture
-continuity, KVM MicroVM Live, and utility-VM claims must stay false — this gate
-does not close those.
+Retained-stream and retained-filesystem proofs are required, including a stable
+keyed file-upload request_id. B2, fixture continuity, KVM MicroVM Live, and
+utility-VM claims must stay false — this gate does not close those.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-native-live-session.v4"
+SCHEMA = "a3s.box.linux-native-live-session.v5"
+KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"
 REQUIRED_TRUE = (
     "retained_stream_handle_proven",
     "file_upload_before_kill",
@@ -37,6 +38,12 @@ def evaluate(report: dict) -> list[str]:
     for required in REQUIRED_TRUE:
         if report.get(required) is not True:
             failures.append(f"{required} is not true")
+    upload_id = report.get("file_upload_request_id")
+    if upload_id != KEYED_FILE_UPLOAD_BEFORE:
+        failures.append(
+            f"file_upload_request_id={upload_id!r} "
+            f"(expected {KEYED_FILE_UPLOAD_BEFORE!r})"
+        )
     for forbidden in FORBIDDEN:
         if report.get(forbidden):
             failures.append(f"{forbidden} must stay false")
@@ -47,6 +54,7 @@ def passing_report() -> dict:
     report = {
         "schema_version": SCHEMA,
         "status": "passed",
+        "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
     }
     for required in REQUIRED_TRUE:
         report[required] = True
@@ -60,7 +68,7 @@ def self_test() -> int:
         print("self-test: passing report was rejected", file=sys.stderr)
         return 1
     bad_cases = [
-        {"schema_version": "v3", "status": "passed", "retained_stream_handle_proven": True},
+        {"schema_version": "v4", "status": "passed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "failed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "passed", "retained_stream_handle_proven": False},
         {
@@ -70,6 +78,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
             "b2_process_session_recovery_closed": True,
         },
         {
@@ -79,6 +88,7 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": True,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
             "fixture_stream_continuity_claimed": True,
         },
         {
@@ -88,6 +98,25 @@ def self_test() -> int:
             "file_upload_before_kill": True,
             "file_download_after_reattach": False,
             "retained_filesystem_proven": True,
+            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+            "file_upload_request_id": None,
+        },
+        {
+            "schema_version": SCHEMA,
+            "status": "passed",
+            "retained_stream_handle_proven": True,
+            "file_upload_before_kill": True,
+            "file_download_after_reattach": True,
+            "retained_filesystem_proven": True,
+            "file_upload_request_id": "unkeyed-or-wrong-id",
         },
     ]
     for case in bad_cases:
@@ -129,7 +158,7 @@ def main(argv: list[str]) -> int:
             print(f"  {item}", file=sys.stderr)
         return 1
     print(
-        "live-session v4 retained-stream+filesystem proven; "
+        "live-session v5 retained-stream+keyed-filesystem proven; "
         "B2/fixture/KVM/utility-VM claims remain false"
     )
     return 0

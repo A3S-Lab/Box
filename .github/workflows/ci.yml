@@ -32,8 +32,10 @@ jobs:
       - name: Verify OCI SDK and artifact pins agree
         shell: bash
         run: bash scripts/check-oci-pins.sh
-      - name: Verify live-session report honesty checker
-        run: python3 scripts/verify-linux-native-live-session-report.py --self-test
+      - name: Verify live-session report honesty checkers
+        run: |
+          python3 scripts/verify-linux-native-live-session-report.py --self-test
+          python3 scripts/verify-linux-kvm-live-session-report.py --self-test
       - name: Verify setuid-launcher proof honesty checker
         run: python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py --self-test
       - name: Verify MicroVM transport-retry honesty checker

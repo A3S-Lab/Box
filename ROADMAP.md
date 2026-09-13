@@ -529,6 +529,13 @@ retain process or filesystem sessions after its owner dies.
     `61f77712…`). Does **not** close B2
     (`b2_process_session_recovery_closed` stays false) and does not claim
     fixture `process_restart` continuity.
+  - [x] Observation harness `a3s.box.linux-native-live-session.v5` extends v4
+    with a harness-stable keyed file-upload identity
+    (`file_upload_request_id` =
+    `a3s.box.live-session.keyed-file.before-owner-kill`) and shared
+    Unavailable retry for upload/download (parity with keyed exec). Fail-closed
+    verifier requires the keyed id. Does **not** close B2 or claim MicroVM
+    guest `file_replay` on the Sandbox OCI Live path.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -578,7 +585,11 @@ retain process or filesystem sessions after its owner dies.
     (`retained_filesystem_proven=true`; B2 stays false). Prior pin
     `61f77712…` evidence SHA-256
     `1f8cede9c5906b915a067d8347ede99ceb647b3eb93408610daca7c0ea5f758f`.
-- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
+  - [x] Observation harness `a3s.box.linux-kvm-live-session.v3` extends v2 with
+    a harness-stable keyed file-upload identity (`file_upload_request_id` =
+    `a3s.box.live-session.keyed-file.before-owner-kill`) and shared Unavailable
+    retry for upload/download. Fail-closed verifier requires the keyed id.
+    Does **not** close B2 or claim MicroVM cutover.- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
   terminal or Failed-on-vanish instead of stuck transitional states; snapshot

@@ -6,6 +6,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Live-session observation honesty bumps: Native
+  `a3s.box.linux-native-live-session.v5` and KVM
+  `a3s.box.linux-kvm-live-session.v3` require a harness-stable keyed file-upload
+  identity (`file_upload_request_id` =
+  `a3s.box.live-session.keyed-file.before-owner-kill`) and share the same
+  Unavailable retry helper for upload/download as keyed exec. Report verifiers
+  fail-closed without that id. Does **not** flip B2, claim MicroVM cutover, or
+  claim guest `file_replay` journals on the Sandbox OCI Live path.
+
 - File upload and mutating filesystem `Unavailable` errors now preserve the
   durable `request_id` (SDK-minted `file-*` / `fs-*` or caller-supplied) the same
   way one-shot command Unavailable does, so callers can retry Host reopen /

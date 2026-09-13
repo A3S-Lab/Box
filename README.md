@@ -376,16 +376,17 @@ cargo build -p a3s-box-runtime --example linux-kvm-live-session-qualification --
   --home /tmp/a3s-box-kvm-live-session-home
 ```
 
-Schema `a3s.box.linux-kvm-live-session.v2` keeps the Box manager across Host
+Schema `a3s.box.linux-kvm-live-session.v3` keeps the Box manager across Host
 Service SIGKILL, proves retained streaming `start_process` handle continuity
 (`retained_stream_handle_proven` / `kvm_microvm_live_claimed`), and proves
-filesystem continuity via public `transfer_file` (upload before kill,
-download after reattach on the same generation;
-`retained_filesystem_proven`). Add `--box-owned` to skip external Host start
-and recover through Box ensure (`box_owned_ensure_proven`);
+filesystem continuity via public `transfer_file` with a harness-stable keyed
+upload identity (`file_upload_request_id` /
+`a3s.box.live-session.keyed-file.before-owner-kill`; download after reattach on
+the same generation; `retained_filesystem_proven`). Add `--box-owned` to skip
+external Host start and recover through Box ensure (`box_owned_ensure_proven`);
 `b2_process_session_recovery_closed` stays false. Fixture continuity stays
 unclaimed (`fixture_stream_continuity_claimed` stays false). Together with
-Native Live v4, this closes the ROADMAP process-session recovery parent;
+Native Live v5, this closes the ROADMAP process-session recovery parent;
 harness reports
 still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). Pin OCI Runtime at
@@ -426,16 +427,17 @@ sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBO
   --home /tmp/a3s-box-native-live-session-home
 ```
 
-Schema `a3s.box.linux-native-live-session.v4` keeps the Box manager across a
+Schema `a3s.box.linux-native-live-session.v5` keeps the Box manager across a
 Native Linux Host owner SIGKILL, proves retained streaming `start_process`
 handle continuity when the path passes (`retained_stream_handle_proven`), and
-proves filesystem continuity via public `transfer_file` (upload before kill,
-download after reattach on the same generation;
-`retained_filesystem_proven`). It continues authentic Live keyed captured exec
-plus state/inventory/stats/kill without inventing an exit status. Fixture
-`process_restart` is never claimed as driver evidence
+proves filesystem continuity via public `transfer_file` with a harness-stable
+keyed upload identity (`file_upload_request_id` /
+`a3s.box.live-session.keyed-file.before-owner-kill`; download after reattach on
+the same generation; `retained_filesystem_proven`). It continues authentic Live
+keyed captured exec plus state/inventory/stats/kill without inventing an exit
+status. Fixture `process_restart` is never claimed as driver evidence
 (`fixture_stream_continuity_claimed` stays false). Together with KVM MicroVM
-Live v2, this closes the ROADMAP process-session recovery parent; harness
+Live v3, this closes the ROADMAP process-session recovery parent; harness
 reports still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). It does not alone claim KVM MicroVM Live continuity.
 Pin OCI Runtime at `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip;

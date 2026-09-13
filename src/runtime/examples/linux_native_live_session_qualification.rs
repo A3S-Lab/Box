@@ -7,14 +7,15 @@
 //! kill, download after reattach on the same generation), plus keyed captured
 //! exec / state / inventory / stats / kill, without inventing an exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v4`.
+//! Schema `a3s.box.linux-native-live-session.v5`.
 //!
 //! Honest scope (anti-overfit):
 //! - Live Host-reopen is Native-Linux-driver-only today.
 //! - `retained_stream_handle_proven` is set only when the same
 //!   `start_process` handle continues stdin/output/signal after owner reopen.
-//! - `retained_filesystem_proven` is set only when upload-before-kill bytes
-//!   match download-after-reattach on the same Box generation.
+//! - `retained_filesystem_proven` is set only when keyed upload-before-kill
+//!   bytes match download-after-reattach on the same Box generation (stable
+//!   `file_upload_request_id`, same Unavailable retry policy as keyed exec).
 //! - Fixture `process_restart` continuity is never claimed
 //!   (`fixture_stream_continuity_claimed` stays false).
 //! - Does **not** claim KVM MicroVM Live continuity. Harness reports keep
@@ -55,7 +56,7 @@ mod qualification {
         BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionBackend,
         ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
         ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
-        ExecutionSessionManager, ExecutionState, FileOp, FileRequest,
+        ExecutionSessionManager, ExecutionState, FileOp, FileRequest, FileResponse,
         IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
         ResourceConfig, StreamType,
     };
@@ -79,16 +80,17 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v4";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v5";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
+    const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";
     const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
     const FS_GUEST_PATH: &str = "/tmp/.a3s-box-native-live-fs.bin";
-    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv4\n";
+    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv5\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -130,10 +132,12 @@ mod qualification {
         retained_stream_handle_proven: bool,
         /// Upload before owner SIGKILL via public Box `transfer_file`.
         file_upload_before_kill: bool,
+        /// Durable upload identity used before owner SIGKILL (harness-stable).
+        file_upload_request_id: Option<String>,
         /// Download after Live reopen matches the pre-kill upload payload.
         file_download_after_reattach: bool,
-        /// Aggregate: upload before kill + exact download match after reattach
-        /// on the same Running generation (no invented stop).
+        /// Aggregate: keyed upload before kill + exact download match after
+        /// reattach on the same Running generation (no invented stop).
         retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
@@ -192,6 +196,7 @@ mod qualification {
                 utility_vm_claimed: false,
                 retained_stream_handle_proven: false,
                 file_upload_before_kill: false,
+                file_upload_request_id: None,
                 file_download_after_reattach: false,
                 retained_filesystem_proven: false,
                 fixture_stream_continuity_claimed: false,
@@ -419,9 +424,15 @@ mod qualification {
         .await?;
         report.keyed_captured_exec_before_owner_kill = true;
 
-        prove_file_upload_before_kill(&manager, &reservation.execution_id, reservation.generation)
-            .await?;
+        prove_file_upload_before_kill(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_FILE_UPLOAD_BEFORE,
+        )
+        .await?;
         report.file_upload_before_kill = true;
+        report.file_upload_request_id = Some(KEYED_FILE_UPLOAD_BEFORE.to_string());
 
         let owner = load_owner_record(&inputs.host_root)?;
         report.owner_before_kill = Some(owner.clone());
@@ -653,6 +664,7 @@ mod qualification {
         report.file_download_after_reattach = true;
         report.retained_filesystem_proven = report.file_upload_before_kill
             && report.file_download_after_reattach
+            && report.file_upload_request_id.as_deref() == Some(KEYED_FILE_UPLOAD_BEFORE)
             && report.reconciled_ready_after_reopen
             && report.observed_running_after_reopen
             && report.exit_code_absent_after_reopen;
@@ -813,41 +825,69 @@ mod qualification {
         Ok(())
     }
 
+    async fn transfer_file_until_ready(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FileRequest,
+        phase: &str,
+    ) -> Result<FileResponse, AnyError> {
+        // Host reopen / backend-not-ready can surface retryable Unavailable.
+        // Keep the same request (including durable request_id when present).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match manager
+                .transfer_file(execution_id, generation, request.clone())
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(ExecutionManagerError::Unavailable(message)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure(format!(
+                            "{phase}: execution backend unavailable: {message}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    return Err(failure(format!("{phase}: {error}")));
+                }
+            }
+        }
+    }
+
     async fn prove_file_upload_before_kill(
         manager: &LocalExecutionManager,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
+        request_id: &str,
     ) -> Result<(), AnyError> {
-        let response = manager
-            .transfer_file(
-                execution_id,
-                generation,
-                FileRequest {
-                    op: FileOp::Upload,
-                    guest_path: FS_GUEST_PATH.to_string(),
-                    data: Some(STANDARD.encode(FS_PAYLOAD)),
-                    user: None,
-                    max_bytes: None,
-                    request_id: None,
-                },
-            )
-            .await
-            .map_err(|error| {
-                failure(format!(
-                    "Live retained file upload before owner SIGKILL failed: {error}"
-                ))
-            })?;
+        let response = transfer_file_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FileRequest {
+                op: FileOp::Upload,
+                guest_path: FS_GUEST_PATH.to_string(),
+                data: Some(STANDARD.encode(FS_PAYLOAD)),
+                user: None,
+                max_bytes: None,
+                request_id: Some(request_id.to_string()),
+            },
+            &format!("Live retained keyed file upload `{request_id}` before owner SIGKILL"),
+        )
+        .await?;
         require(
             response.success && response.error.is_none(),
             format!(
-                "Live retained file upload before owner SIGKILL reported failure: {:?}",
+                "Live retained keyed file upload `{request_id}` before owner SIGKILL reported failure: {:?}",
                 response.error
             ),
         )?;
         require(
             response.size == FS_PAYLOAD.len() as u64,
             format!(
-                "Live retained file upload size mismatch: got {} expected {}",
+                "Live retained keyed file upload `{request_id}` size mismatch: got {} expected {}",
                 response.size,
                 FS_PAYLOAD.len()
             ),
@@ -860,37 +900,21 @@ mod qualification {
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> Result<(), AnyError> {
-        // Downloads can hit retryable Unavailable briefly after Host reopen.
-        let request = FileRequest {
-            op: FileOp::Download,
-            guest_path: FS_GUEST_PATH.to_string(),
-            data: None,
-            user: None,
-            max_bytes: Some(FS_PAYLOAD.len() as u64),
-            request_id: None,
-        };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        let response = loop {
-            match manager
-                .transfer_file(execution_id, generation, request.clone())
-                .await
-            {
-                Ok(response) => break response,
-                Err(ExecutionManagerError::Unavailable(message)) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(failure(format!(
-                            "Live retained file download after reopen failed: execution backend unavailable: {message}"
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => {
-                    return Err(failure(format!(
-                        "Live retained file download after reopen failed: {error}"
-                    )));
-                }
-            }
-        };
+        let response = transfer_file_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FileRequest {
+                op: FileOp::Download,
+                guest_path: FS_GUEST_PATH.to_string(),
+                data: None,
+                user: None,
+                max_bytes: Some(FS_PAYLOAD.len() as u64),
+                request_id: None,
+            },
+            "Live retained file download after reopen",
+        )
+        .await?;
         require(
             response.success && response.error.is_none(),
             format!(

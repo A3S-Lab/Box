@@ -31,7 +31,7 @@ Authoritative hosted gate. Steps that matter for GA:
    `A3S_BOX_OCI_MIGRATION` **unset**.
 5. Packaged SDK smoke with `/dev/kvm` absent and inaccessible
    (`scripts/no-kvm-packaged-sdk-smoke.sh`).
-6. Native Live v4 retained stream + filesystem continuity, verified by
+6. Native Live v5 retained stream + keyed filesystem continuity, verified by
    `scripts/verify-linux-native-live-session-report.py`.
 
 ## Operator setuid launcher evidence (self-hosted)
@@ -66,7 +66,7 @@ not required to flip B2 or MicroVM cutover.
 | Named volumes, bind/tmpfs (R17 mounts) | R17 profile gate |
 | Network: private netns, loopback-only; R17 Service host-loopback relays | R17 networking profile + design |
 | Pause/resume, filesystem snapshots | SDK Local Sandbox |
-| Native Live v4 retained stream + FS across owner SIGKILL | Live-session gate + verifier |
+| Native Live v5 retained stream + keyed FS across owner SIGKILL | Live-session gate + verifier |
 | Stopped-only owner crash recovery | no-KVM recovery report |
 | Fresh ensure reaps supervised orphans after Host SIGKILL | SDK sandbox smoke + #339 |
 | Operator setuid launcher (self-hosted suid FS) | proof script + honesty verifier |

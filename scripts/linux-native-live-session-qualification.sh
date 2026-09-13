@@ -228,7 +228,7 @@ if [[ -n "${probe}" ]]; then
   printf 0 >"${probe}/cgroup.procs"
 fi
 
-echo "running Native Linux live-session qualification v4"
+echo "running Native Linux live-session qualification v5"
 echo "  home=${A3S_HOME}"
 echo "  host-root=${HOST_ROOT}"
 echo "  image=${IMAGE}"
