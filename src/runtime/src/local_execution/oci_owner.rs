@@ -84,21 +84,13 @@ impl NativeLinuxOwnerRecord {
 }
 
 /// Options for [`ensure_native_linux_oci_owner`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EnsureNativeLinuxOwnerOptions {
     /// When reclaiming a dead Host, tear down orphaned supervised sessions
     /// (session supervisor / launcher / init) so stopped-only reconcile sees a
     /// tombstone. Must be **false** for retained-manager Live reopen, which
     /// needs those processes to survive Host SIGKILL.
     pub reap_orphaned_supervised_sessions: bool,
-}
-
-impl Default for EnsureNativeLinuxOwnerOptions {
-    fn default() -> Self {
-        Self {
-            reap_orphaned_supervised_sessions: false,
-        }
-    }
 }
 
 pub(crate) async fn ensure_native_linux_oci_owner(
