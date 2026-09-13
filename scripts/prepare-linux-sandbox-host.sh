@@ -174,7 +174,15 @@ if [[ -n "${LAUNCHER_SOURCE}" ]]; then
   # Setuid is required so non-root callers can enter the Sandbox namespaces.
   chmod 4755 "${SYSTEM_LAUNCHER}"
   chown root:root "${SYSTEM_LAUNCHER}"
-  printf 'Installed setuid Sandbox OCI launcher at %s\n' "${SYSTEM_LAUNCHER}"
+  # Fail closed on nosuid mounts where chmod 4755 is silently ignored.
+  mode="$(stat -c '%a' "${SYSTEM_LAUNCHER}" 2>/dev/null || stat -f '%OLp' "${SYSTEM_LAUNCHER}")"
+  owner_uid="$(stat -c '%u' "${SYSTEM_LAUNCHER}" 2>/dev/null || stat -f '%u' "${SYSTEM_LAUNCHER}")"
+  if [[ "${mode}" != 4755 || "${owner_uid}" != 0 ]]; then
+    echo "refusing incomplete setuid launcher install at ${SYSTEM_LAUNCHER} (mode=${mode} uid=${owner_uid}); filesystem may be nosuid" >&2
+    echo "CI setpriv on nosuid runners is lab evidence only; use a suid-capable root filesystem for operator proof." >&2
+    exit 1
+  fi
+  printf 'Installed setuid Sandbox OCI launcher at %s (mode 4755 root:root)\n' "${SYSTEM_LAUNCHER}"
 else
   printf 'Skipped setuid launcher install (pass --install-launcher ABS_PATH).\n'
   printf 'Discovery still checks %s when present.\n' "${SYSTEM_LAUNCHER}"

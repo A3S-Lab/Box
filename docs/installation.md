@@ -126,7 +126,10 @@ Do **not** set `A3S_BOX_OCI_MIGRATION` for the Sandbox GA default. Use
 
 CI qualification uses `prepare-linux-sandbox-ci-host.sh` (setpriv on nosuid
 runners) and is not a substitute for the operator setuid install. Evidence:
-[Sandbox GA evidence](sandbox-ga-evidence.md).
+[Sandbox GA evidence](sandbox-ga-evidence.md). On a suid-capable host, prove the
+operator path with `scripts/proof-linux-sandbox-setuid-launcher.sh` (non-root
+run, setpriv unset). Non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER`
+now fail-closes unless the resolved launcher is root-owned mode `4755`.
 
 ## Offline installation
 

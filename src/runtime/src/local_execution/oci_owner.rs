@@ -353,9 +353,15 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
     // When CI supplies the setpriv wrapper, spawn the owner with euid 0 / non-root
     // ruid so native-linux-host-service can install the parent-bound helper, then
     // drop to the real identity for Unix peer auth with the matched harness.
+    // Without that lab wrapper, non-root operators must use the setuid libexec
+    // launcher — CI setpriv is not proof of that install.
     let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
         .filter(|value| !value.is_empty())
         .filter(|_| unsafe { libc::geteuid() } != 0);
+    if elevate_wrapper.is_none() && unsafe { libc::geteuid() } != 0 {
+        crate::sandbox::require_operator_setuid_launcher(&launcher)
+            .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))?;
+    }
     let mut command = if let Some(wrapper) = elevate_wrapper {
         let mut command = Command::new("bash");
         command.arg(wrapper);

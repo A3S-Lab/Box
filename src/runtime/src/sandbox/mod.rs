@@ -66,6 +66,14 @@ pub(crate) fn resolve_sandbox_oci_launcher(
     capability::resolve_sandbox_oci_launcher(explicit)
 }
 
+/// Fail closed unless `path` is a root-owned setuid Sandbox OCI launcher.
+#[cfg(target_os = "linux")]
+pub(crate) fn require_operator_setuid_launcher(
+    path: &std::path::Path,
+) -> a3s_box_core::error::Result<()> {
+    capability::require_operator_setuid_launcher(path)
+}
+
 /// Apply a complete resource contract to the exact recorded Sandbox generation.
 ///
 /// The A3S OCI SDK is the only live-update path for a host Sandbox. MicroVM

@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Non-root native Linux Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` now
+  fail-closes unless the resolved Sandbox OCI launcher is root-owned setuid
+  (mode `4755`). `prepare-linux-sandbox-host.sh --install-launcher` refuses
+  nosuid installs where `chmod 4755` does not stick. Self-hosted proof script
+  `scripts/proof-linux-sandbox-setuid-launcher.sh` emits
+  `a3s.box.linux-sandbox-setuid-launcher-proof.v1` without claiming CI setpriv
+  as setuid evidence, B2 close, or MicroVM cutover.
+
 - Qualification-only Linux KVM Box-owned Host spawn forces
   `A3S_OCI_KVM_SESSION_OWNER=1`. Fresh `with_linux_kvm_oci_qualification`
   construction reaps orphaned session-owner / shim children from

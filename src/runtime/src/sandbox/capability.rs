@@ -288,6 +288,64 @@ pub(crate) fn resolve_sandbox_oci_launcher(explicit: Option<&Path>) -> Result<Pa
     }
 }
 
+/// Require a root-owned setuid launcher for non-root operator Host spawn.
+///
+/// Lab CI may elevate through `A3S_BOX_CI_SETPRIV_WRAPPER` instead; that path
+/// skips this check. Does not claim that CI setpriv proves operator setuid.
+#[cfg(target_os = "linux")]
+pub(crate) fn require_operator_setuid_launcher(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "failed to inspect Sandbox OCI launcher {}: {error}",
+            path.display()
+        ),
+        hint: Some(
+            "Install the setuid launcher with scripts/prepare-linux-sandbox-host.sh --install-launcher"
+                .to_string(),
+        ),
+    })?;
+    if !metadata.is_file() {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Sandbox OCI launcher {} is not a regular file",
+                path.display()
+            ),
+            hint: Some(
+                "Install the setuid launcher with scripts/prepare-linux-sandbox-host.sh --install-launcher"
+                    .to_string(),
+            ),
+        });
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o4000 == 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Sandbox OCI launcher {} is not setuid (mode {mode:04o}); non-root Host spawn requires the operator setuid install",
+                path.display()
+            ),
+            hint: Some(format!(
+                "Run: sudo bash scripts/prepare-linux-sandbox-host.sh --install-launcher <a3s-oci>; expected {SANDBOX_OCI_LAUNCHER_SYSTEM_PATH} mode 4755 root:root. CI setpriv is not a substitute."
+            )),
+        });
+    }
+    if metadata.uid() != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Sandbox OCI launcher {} must be owned by root for setuid elevation (uid {})",
+                path.display(),
+                metadata.uid()
+            ),
+            hint: Some(
+                "Re-run prepare-linux-sandbox-host.sh --install-launcher as root so the launcher is root:root mode 4755"
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn resolve_a3s_oci_artifacts(
     runtime_path: Option<&Path>,
@@ -914,6 +972,50 @@ mod tests {
 
         let resolved = resolve_sandbox_oci_launcher(Some(&launcher)).unwrap();
         assert_eq!(resolved, launcher.canonicalize().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn require_operator_setuid_launcher_rejects_missing_setuid_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let launcher = temporary.path().join("a3s-box-sandbox-oci-launcher");
+        std::fs::write(&launcher, b"launcher").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = require_operator_setuid_launcher(&launcher).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("not setuid"),
+            "expected setuid refusal, got {message}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn require_operator_setuid_launcher_accepts_root_owned_setuid_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let launcher = temporary.path().join("a3s-box-sandbox-oci-launcher");
+        std::fs::write(&launcher, b"launcher").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let metadata = std::fs::metadata(&launcher).unwrap();
+        if metadata.mode() & 0o4000 == 0 {
+            // nosuid temp filesystems may strip the bit; skip acceptance proof.
+            return;
+        }
+        if metadata.uid() != 0 {
+            let error = require_operator_setuid_launcher(&launcher).unwrap_err();
+            assert!(
+                error.to_string().contains("owned by root"),
+                "non-root setuid fixture must fail closed: {}",
+                error
+            );
+            return;
+        }
+        require_operator_setuid_launcher(&launcher).unwrap();
     }
 
     #[cfg(target_os = "linux")]
