@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pin `a3s-runtime` to the relative-only Exec control-plane slack fix so short
+  R17 `timeout_ms` budgets (guest command time) are not consumed by lease /
+  capability waits as `request expired before provider dispatch`. Does **not**
+  widen conformance timeouts or flip B2 / MicroVM cutover.
+
 ### Added
 
 - Non-root native Linux Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` now
