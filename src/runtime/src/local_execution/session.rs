@@ -192,10 +192,22 @@ impl ExecutionSessionManager for LocalExecutionManager {
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
-        client
-            .filesystem_on_stream(stream, &request)
-            .await
-            .map_err(|error| session_error(execution_id, "access filesystem", error))
+        match client.filesystem_on_stream(stream, &request).await {
+            Ok(response) => Ok(response),
+            Err(error) if crate::vm::should_retry_guest_filesystem(&request, &error) => {
+                // Same request_id: guest filesystem journal reconciles a lost
+                // mutating response. Read-only ops retry as naturally idempotent.
+                // Rebind: the first stream is not reusable after transport loss.
+                let (client, stream) = self
+                    .bind_exec_record(&record, execution_id, generation)
+                    .await?;
+                client
+                    .filesystem_on_stream(stream, &request)
+                    .await
+                    .map_err(|error| session_error(execution_id, "access filesystem", error))
+            }
+            Err(error) => Err(session_error(execution_id, "access filesystem", error)),
+        }
     }
 }
 
