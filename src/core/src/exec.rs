@@ -207,6 +207,13 @@ pub struct FileRequest {
     /// or below [`MAX_BOUNDED_FILE_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
+    /// Optional durable identity for [`FileOp::Upload`].
+    ///
+    /// When set, the guest journals the exact result so an ambiguous transport
+    /// loss can replay one effect instead of double-writing. Downloads ignore
+    /// this field. Absent IDs keep the historical single-shot upload behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Largest decoded file that can be returned in one framed JSON response.
@@ -675,6 +682,7 @@ mod tests {
             data: Some("aGVsbG8=".to_string()),
             user: Some("1000:1000".to_string()),
             max_bytes: None,
+            request_id: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("max_bytes"));
@@ -698,6 +706,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: Some(4096),
+            request_id: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
@@ -743,6 +752,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: None,
+            request_id: None,
         });
 
         let value = serde_json::to_value(&request).unwrap();

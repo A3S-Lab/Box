@@ -27,6 +27,10 @@ fn mint_cli_cp_request_id() -> String {
     format!("cli-cp-{}", uuid::Uuid::new_v4().simple())
 }
 
+fn mint_cli_file_request_id() -> String {
+    format!("cli-file-{}", uuid::Uuid::new_v4().simple())
+}
+
 fn annotate_cp_unavailable(
     error: Box<dyn std::error::Error>,
     request_id: &str,
@@ -246,6 +250,7 @@ async fn copy_file_from_box(
             data: None,
             user: None,
             max_bytes: None,
+            request_id: None,
         })
         .await?;
     if !response.success {
@@ -299,6 +304,7 @@ async fn copy_file_to_box(
             data: Some(base64::engine::general_purpose::STANDARD.encode(&content)),
             user: None,
             max_bytes: None,
+            request_id: Some(mint_cli_file_request_id()),
         })
         .await?;
     if !response.success {
@@ -736,6 +742,7 @@ mod tests {
                 data: None,
                 user: None,
                 max_bytes: None,
+                request_id: None,
             })
             .await
             .unwrap();

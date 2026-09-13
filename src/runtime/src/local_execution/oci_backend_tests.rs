@@ -2644,6 +2644,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 data: Some(upload_data.clone()),
                 user: Some("1000:1001".to_string()),
                 max_bytes: None,
+                request_id: None,
             },
         )
         .await
@@ -2663,6 +2664,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 data: None,
                 user: None,
                 max_bytes: None,
+                request_id: None,
             },
         )
         .await
@@ -2686,6 +2688,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 data: None,
                 user: None,
                 max_bytes: Some(9),
+                request_id: None,
             },
         )
         .await
@@ -2858,6 +2861,7 @@ async fn mutating_file_and_filesystem_ops_reuse_content_addressed_identity_acros
         data: Some(STANDARD.encode(b"same bytes")),
         user: None,
         max_bytes: None,
+        request_id: None,
     };
     manager
         .transfer_file(&lease.execution_id, lease.generation, upload.clone())
@@ -2935,6 +2939,7 @@ async fn file_sessions_reject_invalid_download_limits_before_dispatch() {
             data: Some(STANDARD.encode(b"value")),
             user: None,
             max_bytes: Some(5),
+            request_id: None,
         },
         BoxFileRequest {
             op: BoxFileOp::Download,
@@ -2942,6 +2947,7 @@ async fn file_sessions_reject_invalid_download_limits_before_dispatch() {
             data: None,
             user: None,
             max_bytes: Some(0),
+            request_id: None,
         },
         BoxFileRequest {
             op: BoxFileOp::Download,
@@ -2949,6 +2955,7 @@ async fn file_sessions_reject_invalid_download_limits_before_dispatch() {
             data: None,
             user: None,
             max_bytes: Some(a3s_box_core::MAX_BOUNDED_FILE_BYTES + 1),
+            request_id: None,
         },
     ] {
         let error = manager
@@ -2987,6 +2994,7 @@ async fn file_and_filesystem_capabilities_and_box_generation_fail_before_dispatc
         data: None,
         user: None,
         max_bytes: None,
+        request_id: None,
     };
     let stale_error = file_manager
         .transfer_file(&file_lease.execution_id, stale, file_request.clone())
@@ -3094,6 +3102,7 @@ async fn file_and_filesystem_sessions_reject_runtime_target_drift() {
                 data: None,
                 user: None,
                 max_bytes: None,
+                request_id: None,
             },
         )
         .await

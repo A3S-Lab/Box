@@ -6,11 +6,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM guest file downloads retry once on ambiguous transport loss (fresh
+  stream / session rebind), matching read-only filesystem ops. No guest journal
+  and no `request_id` — downloads are side-effect-free. Does **not** flip B2 or
+  claim Sandbox Live FS recovery closed.
+
 - MicroVM `LocalExecutionManager::filesystem` now shares the guest filesystem
   retry policy with `ExecClient::filesystem` (rebind + one retry on ambiguous
   transport for read-only ops and keyed mutating ops). SDK-minted `fs-*` IDs
-  from #344 reach the production session path. Does **not** add file-upload
-  journals, flip B2, or claim Sandbox Live FS recovery closed.
+  from #344 reach the production session path. Does **not** flip B2 or claim
+  Sandbox Live FS recovery closed.
 
 - Pin `a3s-runtime` to the relative-only Exec control-plane slack fix so short
   R17 `timeout_ms` budgets (guest command time) are not consumed by lease /
@@ -18,6 +23,15 @@ All notable changes to A3S Box will be documented in this file.
   widen conformance timeouts or flip B2 / MicroVM cutover.
 
 ### Added
+
+- Guest file uploads accept an optional durable `request_id`. When set, guest
+  init journals the exact response and the MicroVM guest channel retries once
+  on ambiguous transport loss (same at-most-once pattern as keyed exec /
+  mutating filesystem). Unkeyed uploads stay single-shot. Downloads retry as
+  naturally idempotent reads (no journal). The Rust SDK mints `file-<uuid>` on
+  `write`, and `a3s-box cp` uploads mint `cli-file-*`. Session `transfer_file`
+  rebinds through the shared file-transfer retry policy. Does **not** flip B2,
+  MicroVM cutover, or claim Sandbox Live FS recovery closed.
 
 - Guest mutating filesystem ops (`MakeDir` / `Move` / `Remove`) accept an
   optional durable `request_id`. When set, guest init journals the exact
