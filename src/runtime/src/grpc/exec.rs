@@ -139,6 +139,22 @@ fn is_idempotent_filesystem_op(op: &a3s_box_core::FilesystemOp) -> bool {
     )
 }
 
+fn is_mutating_filesystem_op(op: &a3s_box_core::FilesystemOp) -> bool {
+    matches!(
+        op,
+        a3s_box_core::FilesystemOp::MakeDir
+            | a3s_box_core::FilesystemOp::Move
+            | a3s_box_core::FilesystemOp::Remove
+    )
+}
+
+fn has_filesystem_request_id(request: &a3s_box_core::FilesystemRequest) -> bool {
+    request
+        .request_id
+        .as_ref()
+        .is_some_and(|request_id| !request_id.is_empty())
+}
+
 /// Keyed one-shot exec can replay the guest journal with the same `request_id`.
 pub(crate) fn should_retry_keyed_guest_exec(
     request: &a3s_box_core::exec::ExecRequest,
@@ -454,15 +470,19 @@ impl ExecClient {
     ///
     /// Read-only ops (`Stat`, `ListDir`) retry once on a fresh stream when the
     /// transport is ambiguous — they are naturally idempotent. Mutating ops
-    /// (`MakeDir`, `Move`, `Remove`) stay single-shot until guest journals exist.
+    /// (`MakeDir`, `Move`, `Remove`) retry once only when a durable
+    /// `request_id` is present so the guest journal can replay one effect.
+    /// Unkeyed mutating ops stay single-shot.
     pub async fn filesystem(
         &self,
         request: &a3s_box_core::FilesystemRequest,
     ) -> Result<a3s_box_core::FilesystemResponse> {
+        let keyed_mutation =
+            is_mutating_filesystem_op(&request.op) && has_filesystem_request_id(request);
         match self.filesystem_once(request).await {
             Ok(response) => Ok(response),
             Err(error)
-                if is_idempotent_filesystem_op(&request.op)
+                if (is_idempotent_filesystem_op(&request.op) || keyed_mutation)
                     && is_ambiguous_filesystem_transport(&error) =>
             {
                 self.filesystem_once(request).await
@@ -1209,6 +1229,7 @@ mod tests {
                 destination: None,
                 depth: 2,
                 user: Some("user".to_string()),
+                request_id: None,
             })
             .await
             .unwrap();
@@ -1269,6 +1290,7 @@ mod tests {
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             })
             .await
             .unwrap();
@@ -1297,7 +1319,7 @@ mod tests {
             frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             drop(reader);
             drop(w);
-            // No second accept — mutating ops must not retry without journals.
+            // No second accept — unkeyed mutating ops must not retry without a journal ID.
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1309,6 +1331,7 @@ mod tests {
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             })
             .await
             .unwrap_err();
@@ -1317,6 +1340,65 @@ mod tests {
             "expected ambiguous transport error, got {err}"
         );
         assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn filesystem_keyed_mkdir_retries_after_lost_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("filesystem-mkdir-keyed-retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            // First attempt: accept then drop after reading (ambiguous loss).
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            // Retry: return a successful MakeDir response.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let payload = serde_json::to_vec(&a3s_box_core::FilesystemResponse {
+                success: true,
+                entry: None,
+                entries: Vec::new(),
+                error: None,
+            })
+            .unwrap();
+            let frame = a3s_transport::Frame::data(payload);
+            tokio::io::AsyncWriteExt::write_all(&mut w, &frame.encode().unwrap())
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .filesystem(&a3s_box_core::FilesystemRequest {
+                op: a3s_box_core::FilesystemOp::MakeDir,
+                path: "/tmp/new-dir".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some("fs-mkdir-1".into()),
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -2709,6 +2709,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 destination: None,
                 depth: 0,
                 user: Some("1000".to_string()),
+                request_id: None,
             },
         )
         .await
@@ -2728,6 +2729,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             },
         )
         .await
@@ -2750,6 +2752,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 destination: None,
                 depth: 2,
                 user: None,
+                request_id: None,
             },
         )
         .await
@@ -2768,6 +2771,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 destination: Some("/work/tree/moved.txt".to_string()),
                 depth: 0,
                 user: None,
+                request_id: None,
             },
         )
         .await
@@ -2786,6 +2790,7 @@ async fn file_and_filesystem_sessions_preserve_exact_targets_and_replay_mutation
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             },
         )
         .await
@@ -2881,6 +2886,7 @@ async fn mutating_file_and_filesystem_ops_reuse_content_addressed_identity_acros
         destination: None,
         depth: 0,
         user: None,
+        request_id: None,
     };
     manager
         .filesystem(&lease.execution_id, lease.generation, mkdir.clone())
@@ -3028,6 +3034,7 @@ async fn file_and_filesystem_capabilities_and_box_generation_fail_before_dispatc
         destination: None,
         depth: 0,
         user: None,
+        request_id: None,
     };
     let stale_error = filesystem_manager
         .filesystem(
@@ -3111,6 +3118,7 @@ async fn file_and_filesystem_sessions_reject_runtime_target_drift() {
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             },
         )
         .await

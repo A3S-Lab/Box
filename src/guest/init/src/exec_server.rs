@@ -869,7 +869,8 @@ pub(crate) fn handle_connection(
             return Ok(());
         }
         Ok(GuestSessionRequest::Filesystem(request)) => {
-            let response_payload = serde_json::to_vec(&handle_filesystem_request(request))?;
+            let response = dispatch_filesystem_request(request);
+            let response_payload = serde_json::to_vec(&response)?;
             write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
             return Ok(());
         }
@@ -1100,6 +1101,54 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
 const MAX_FILESYSTEM_DEPTH: u32 = 64;
 const MAX_FILESYSTEM_ENTRIES: usize = 4096;
 const MAX_FILESYSTEM_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+fn dispatch_filesystem_request(request: FilesystemRequest) -> FilesystemResponse {
+    use crate::filesystem_replay::{
+        filesystem_replay_cache, filesystem_request_digest, is_mutating_filesystem_op,
+        FilesystemReplayAcquire,
+    };
+
+    let request_id = request
+        .request_id
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    if !is_mutating_filesystem_op(request.op) || request_id.is_none() {
+        return handle_filesystem_request(request);
+    }
+    let request_id = request_id.expect("filtered above");
+    let digest = match filesystem_request_digest(&request) {
+        Ok(digest) => digest,
+        Err(error) => {
+            return FilesystemResponse {
+                success: false,
+                entry: None,
+                entries: Vec::new(),
+                error: Some(error),
+            };
+        }
+    };
+    match filesystem_replay_cache().acquire(request_id, digest) {
+        Ok(FilesystemReplayAcquire::Replay(response)) => (*response).clone(),
+        Ok(FilesystemReplayAcquire::Execute(claim)) => {
+            let response = handle_filesystem_request(request);
+            match claim.complete(response.clone()) {
+                Ok(shared) => (*shared).clone(),
+                Err(error) => FilesystemResponse {
+                    success: false,
+                    entry: None,
+                    entries: Vec::new(),
+                    error: Some(error),
+                },
+            }
+        }
+        Err(error) => FilesystemResponse {
+            success: false,
+            entry: None,
+            entries: Vec::new(),
+            error: Some(error),
+        },
+    }
+}
 
 fn handle_filesystem_request(request: FilesystemRequest) -> FilesystemResponse {
     let result = (|| {
@@ -3808,6 +3857,7 @@ mod tests {
             destination: destination.map(|path| path.to_string_lossy().into_owned()),
             depth,
             user: None,
+            request_id: None,
         };
 
         let created = handle_filesystem_request(request(
@@ -3896,6 +3946,7 @@ mod tests {
             destination: None,
             depth: 0,
             user: None,
+            request_id: None,
         });
         assert!(response.success, "{:?}", response.error);
         let entry = response.entry.unwrap();
@@ -3913,6 +3964,7 @@ mod tests {
             destination: None,
             depth: 0,
             user: None,
+            request_id: None,
         }))
         .unwrap();
         assert!(declares_guest_session_request(&envelope));

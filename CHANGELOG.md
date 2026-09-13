@@ -13,6 +13,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Guest mutating filesystem ops (`MakeDir` / `Move` / `Remove`) accept an
+  optional durable `request_id`. When set, guest init journals the exact
+  response and the MicroVM guest channel retries once on ambiguous transport
+  loss (same at-most-once pattern as keyed exec). Unkeyed mutating ops stay
+  single-shot. The Rust SDK mints `fs-<uuid>` IDs for mutate helpers. Does
+  **not** flip B2, MicroVM cutover, or claim Sandbox Live FS recovery closed.
+
 - Fail-closed honesty verifier
   `scripts/verify-linux-sandbox-setuid-launcher-proof.py` for
   `a3s.box.linux-sandbox-setuid-launcher-proof.v1` (mode `4755`, root uid,

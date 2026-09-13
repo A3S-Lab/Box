@@ -18,6 +18,7 @@ mod container_devices;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod diff_baseline;
 pub mod exec_server;
+pub mod filesystem_replay;
 pub mod host_config;
 mod listener;
 pub mod namespace;
