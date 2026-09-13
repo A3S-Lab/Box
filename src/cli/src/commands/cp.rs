@@ -169,6 +169,7 @@ async fn is_directory_in_box(
             destination: None,
             depth: 0,
             user: None,
+            request_id: None,
         })
         .await?;
     if !response.success {
@@ -745,6 +746,7 @@ mod tests {
                 destination: None,
                 depth: 0,
                 user: None,
+                request_id: None,
             })
             .await
             .unwrap();

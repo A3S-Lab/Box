@@ -271,6 +271,13 @@ pub struct FilesystemRequest {
     /// Guest user used for home expansion and ownership.
     #[serde(default)]
     pub user: Option<String>,
+    /// Optional durable identity for mutating ops (`MakeDir` / `Move` / `Remove`).
+    ///
+    /// When set, the guest journals the exact result so an ambiguous transport
+    /// loss can replay one effect instead of double-applying. Read-only ops
+    /// ignore this field. Absent IDs keep the historical single-shot behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Entry type returned by a workload filesystem operation.
@@ -753,6 +760,7 @@ mod tests {
             destination: Some("~/after".to_string()),
             depth: 0,
             user: Some("user".to_string()),
+            request_id: None,
         });
 
         let value = serde_json::to_value(&request).unwrap();

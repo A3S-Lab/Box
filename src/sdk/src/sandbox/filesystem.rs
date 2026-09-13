@@ -298,6 +298,7 @@ impl Filesystem {
                 destination: None,
                 depth: 0,
                 user: options.user,
+                request_id: None,
             })
             .await?;
         let mut response = require_filesystem_success(response)?;
@@ -336,6 +337,7 @@ impl Filesystem {
                 destination: None,
                 depth,
                 user: options.user,
+                request_id: None,
             })
             .await?;
         Ok(require_filesystem_success(response)?.entries)
@@ -357,6 +359,7 @@ impl Filesystem {
             destination: None,
             depth: 0,
             user: options.user,
+            request_id: None,
         })
         .await
     }
@@ -382,6 +385,7 @@ impl Filesystem {
             destination: Some(destination.into()),
             depth: 0,
             user: options.user,
+            request_id: None,
         })
         .await
     }
@@ -402,11 +406,19 @@ impl Filesystem {
             destination: None,
             depth: 0,
             user: options.user,
+            request_id: None,
         })
         .await
     }
 
-    async fn mutate(&self, request: FilesystemRequest) -> Result<()> {
+    async fn mutate(&self, mut request: FilesystemRequest) -> Result<()> {
+        if request
+            .request_id
+            .as_ref()
+            .is_none_or(|request_id| request_id.is_empty())
+        {
+            request.request_id = Some(format!("fs-{}", uuid::Uuid::new_v4()));
+        }
         require_filesystem_success(self.filesystem(request).await?).map(|_| ())
     }
 
