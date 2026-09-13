@@ -227,6 +227,10 @@ launched `box-whpx-qualification-service` pipe, or
 `A3S_BOX_WHPX_OCI_BOX_OWNED=1` plus service root/bin/shim/vm-rootfs so Box
 identity-fences and (re)spawns that Host under a deterministic named pipe.
 Box-owned WHPX ensure does not claim WHPX MicroVM production cutover.
+Box-owned native Linux Host spawn forces
+`A3S_OCI_NATIVE_SESSION_SUPERVISOR=1` so production SandboxViaOci create uses
+Host → Supervisor → Launcher; external Hosts that omit the env remain
+Host-bound. This does not flip B2 harness close or MicroVM cutover.
 Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI

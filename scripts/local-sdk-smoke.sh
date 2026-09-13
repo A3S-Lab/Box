@@ -282,7 +282,15 @@ def load_recovery_record(host_root: Path, owner: dict, container_id: str) -> tup
     assert recovery["target"]["id"] == container_id
     assert int(recovery["owner"]["pid"]) == int(owner["pid"])
     assert int(recovery["owner"]["startTimeTicks"]) == int(owner["pid_start_time"])
-    if os.environ.get("A3S_OCI_NATIVE_SESSION_SUPERVISOR") == "1":
+    # Box-owned native Host spawn forces supervised create for Sandbox GA.
+    # Require the durable supervisor identity whenever this smoke exercises
+    # Sandbox isolation (not MicroVM / external Host paths).
+    if isolation == "sandbox":
+        assert "sessionSupervisor" in recovery, (
+            "Box-owned Sandbox create must persist sessionSupervisor in recovery.v6"
+        )
+        require_live_identity("OCI session supervisor", recovery["sessionSupervisor"])
+    elif os.environ.get("A3S_OCI_NATIVE_SESSION_SUPERVISOR") == "1":
         assert "sessionSupervisor" in recovery, (
             "supervised create must persist sessionSupervisor in recovery.v6"
         )

@@ -17,6 +17,7 @@ const OWNER_RECORD_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
 const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-owner";
 const OWNER_SOCKET_NAME: &str = "runtime.sock";
+const NATIVE_SESSION_SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -350,6 +351,11 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    // Production SandboxViaOci is Box-owned: force supervised create so GA
+    // create and Live reopen share Host → Supervisor → Launcher. External
+    // operator-launched Hosts that omit the env stay Host-bound. Does not
+    // flip B2 harness close or MicroVM cutover.
+    command.env(NATIVE_SESSION_SUPERVISOR_ENV, "1");
     // SAFETY: the closure only performs async-signal-safe session and
     // cgroup.procs migration syscalls between fork and exec and does not
     // access shared Rust state.
@@ -781,5 +787,15 @@ mod tests {
         );
         assert!(!record.is_alive(), "a zombie owner must be reclaimed");
         child.wait().expect("reap completed owner fixture");
+    }
+
+    #[test]
+    fn box_owned_spawn_forces_supervised_create_env() {
+        assert_eq!(
+            NATIVE_SESSION_SUPERVISOR_ENV,
+            "A3S_OCI_NATIVE_SESSION_SUPERVISOR"
+        );
+        // spawn_owner always exports this as "1" so Box-owned Sandbox create
+        // and Live reopen share the supervised Host path.
     }
 }
