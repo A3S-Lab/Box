@@ -21,6 +21,8 @@ const OWNER_RECORD_SCHEMA: &str = "a3s.box.linux-kvm-oci-owner.v1";
 const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-kvm-owner";
 const OWNER_SOCKET_NAME: &str = "runtime.sock";
+const KVM_SESSION_OWNER_ENV: &str = "A3S_OCI_KVM_SESSION_OWNER";
+const KVM_LIVE_BINDING_FILE: &str = ".a3s-oci-kvm-live-session-binding.json";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -137,10 +139,35 @@ impl LinuxKvmOwnerRecord {
     }
 }
 
+/// Options for [`ensure_linux_kvm_oci_owner`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EnsureLinuxKvmOwnerOptions {
+    /// When reclaiming a dead Host, tear down Live-survivable session-owner /
+    /// shim children recorded under `{runtime_root}/shares`. Must be **false**
+    /// for retained-manager Live reopen.
+    pub reap_orphaned_session_children: bool,
+    /// Required when [`Self::reap_orphaned_session_children`] is true.
+    pub runtime_root: Option<PathBuf>,
+}
+
 /// Ensure a Box-owned Linux KVM qualification Host is identity-fenced and ready.
 pub(crate) async fn ensure_linux_kvm_oci_owner(
     service_root: &Path,
     artifacts: &LinuxKvmOwnerArtifacts,
+) -> ExecutionManagerResult<OciRuntimeEndpoint> {
+    ensure_linux_kvm_oci_owner_with_options(
+        service_root,
+        artifacts,
+        EnsureLinuxKvmOwnerOptions::default(),
+    )
+    .await
+}
+
+/// Ensure with explicit stopped-only vs Live reopen options.
+pub(crate) async fn ensure_linux_kvm_oci_owner_with_options(
+    service_root: &Path,
+    artifacts: &LinuxKvmOwnerArtifacts,
+    options: EnsureLinuxKvmOwnerOptions,
 ) -> ExecutionManagerResult<OciRuntimeEndpoint> {
     validate_service_root(service_root)?;
     let root = service_root.to_path_buf();
@@ -180,6 +207,14 @@ pub(crate) async fn ensure_linux_kvm_oci_owner(
             let result = wait_until_ready(&endpoint, None).await;
             drop(lock);
             return result.map(|()| endpoint);
+        }
+        if options.reap_orphaned_session_children {
+            let runtime_root = options.runtime_root.as_deref().ok_or_else(|| {
+                ExecutionManagerError::Internal(
+                    "Linux KVM OCI owner orphan reap requires runtime_root".to_string(),
+                )
+            })?;
+            reap_orphaned_kvm_session_children(runtime_root)?;
         }
         reclaim_dead_owner_socket(&socket_path)?;
     } else if path_exists_no_follow(&socket_path)? {
@@ -381,11 +416,10 @@ fn spawn_owner(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    // Live qualification exports A3S_OCI_KVM_SESSION_OWNER=1; preserve it so
-    // ensure-spawned Hosts retain session-owner create behavior.
-    if let Some(value) = std::env::var_os("A3S_OCI_KVM_SESSION_OWNER") {
-        command.env("A3S_OCI_KVM_SESSION_OWNER", value);
-    }
+    // Box-owned Hosts always use session-owner create so Live reopen and
+    // stopped-only fresh construction share Host → session-owner → shim.
+    // External operator-launched Hosts that omit the env remain Host-bound.
+    command.env(KVM_SESSION_OWNER_ENV, "1");
     // SAFETY: setsid only; no shared Rust state between fork and exec.
     unsafe {
         command.pre_exec(|| {
@@ -599,6 +633,138 @@ fn remove_record_if_same(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct KvmLiveProcessIdentity {
+    pid: u32,
+    #[serde(rename = "startTimeTicks")]
+    start_time_ticks: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct KvmLiveBindingFields {
+    #[serde(rename = "sessionOwner")]
+    session_owner: Option<KvmLiveProcessIdentity>,
+    shim: Option<KvmLiveProcessIdentity>,
+}
+
+/// Tear down Live-survivable session-owner / shim children left by a dead Host.
+///
+/// Used only on fresh KVM qualification construction (stopped-only). Retained-
+/// manager Live reopen must leave these processes alone.
+fn reap_orphaned_kvm_session_children(runtime_root: &Path) -> ExecutionManagerResult<()> {
+    let shares_root = runtime_root.join("shares");
+    if !shares_root.is_dir() {
+        return Ok(());
+    }
+    let mut bindings = Vec::new();
+    collect_kvm_live_bindings(&shares_root, &mut bindings)?;
+    for path in bindings {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "failed to read orphaned KVM Live binding {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let binding: KvmLiveBindingFields = match serde_json::from_slice(&bytes) {
+            Ok(binding) => binding,
+            Err(_) => continue,
+        };
+        if let Some(session_owner) = binding.session_owner.as_ref() {
+            signal_identity_gone("orphaned KVM session-owner", session_owner)?;
+        }
+        if let Some(shim) = binding.shim.as_ref() {
+            signal_identity_gone("orphaned KVM shim", shim)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_kvm_live_bindings(root: &Path, found: &mut Vec<PathBuf>) -> ExecutionManagerResult<()> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "failed to scan KVM shares root {}: {error}",
+                root.display()
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to read KVM shares entry under {}: {error}",
+                root.display()
+            ))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to inspect KVM shares entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if file_type.is_dir() {
+            collect_kvm_live_bindings(&path, found)?;
+        } else if entry.file_name() == KVM_LIVE_BINDING_FILE {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn signal_identity_gone(
+    label: &str,
+    identity: &KvmLiveProcessIdentity,
+) -> ExecutionManagerResult<()> {
+    if identity.pid == 0 || identity.start_time_ticks == 0 {
+        return Ok(());
+    }
+    if crate::process::is_process_running_with_identity(
+        identity.pid,
+        Some(identity.start_time_ticks),
+    ) {
+        // SAFETY: qualification reclaim of an exact recorded identity.
+        let rc = unsafe { libc::kill(identity.pid as i32, libc::SIGKILL) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            let gone = err.raw_os_error() == Some(libc::ESRCH)
+                || err.kind() == std::io::ErrorKind::NotFound;
+            if !gone {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "failed to SIGKILL {label} pid {}: {err}",
+                    identity.pid
+                )));
+            }
+        }
+    }
+    wait_identity_gone(label, identity)
+}
+
+fn wait_identity_gone(
+    label: &str,
+    identity: &KvmLiveProcessIdentity,
+) -> ExecutionManagerResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !crate::process::is_process_running_with_identity(
+            identity.pid,
+            Some(identity.start_time_ticks),
+        ) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(ExecutionManagerError::Unavailable(format!(
+        "{label} pid {} remained alive after stopped-only Host reclaim",
+        identity.pid
+    )))
+}
+
 fn reclaim_dead_owner_socket(path: &Path) -> ExecutionManagerResult<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -760,5 +926,43 @@ mod tests {
         );
         assert!(!record.is_alive(), "a zombie owner must be reclaimed");
         child.wait().expect("reap completed owner fixture");
+    }
+
+    #[test]
+    fn box_owned_spawn_forces_session_owner_env() {
+        assert_eq!(KVM_SESSION_OWNER_ENV, "A3S_OCI_KVM_SESSION_OWNER");
+    }
+
+    #[test]
+    fn kvm_live_binding_fields_parse_optional_identities() {
+        let with_children = br#"{
+            "schemaVersion": "a3s.oci.kvm-live-session-binding.v1",
+            "sessionOwner": {"pid": 11, "startTimeTicks": 22},
+            "shim": {"pid": 33, "startTimeTicks": 44}
+        }"#;
+        let parsed: KvmLiveBindingFields =
+            serde_json::from_slice(with_children).expect("parse KVM Live binding");
+        assert_eq!(parsed.session_owner.as_ref().unwrap().pid, 11);
+        assert_eq!(parsed.shim.as_ref().unwrap().start_time_ticks, 44);
+
+        let empty = br#"{}"#;
+        let parsed: KvmLiveBindingFields =
+            serde_json::from_slice(empty).expect("parse empty binding");
+        assert!(parsed.session_owner.is_none());
+        assert!(parsed.shim.is_none());
+    }
+
+    #[test]
+    fn collect_kvm_live_bindings_walks_nested_shares() {
+        let root =
+            std::env::temp_dir().join(format!("a3s-kvm-live-binding-walk-{}", std::process::id()));
+        let nested = root.join("shares").join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested shares");
+        let binding = nested.join(KVM_LIVE_BINDING_FILE);
+        std::fs::write(&binding, b"{}").expect("write binding");
+        let mut found = Vec::new();
+        collect_kvm_live_bindings(root.join("shares").as_path(), &mut found).expect("walk shares");
+        assert_eq!(found, vec![binding]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
