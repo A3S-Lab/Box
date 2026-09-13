@@ -589,9 +589,16 @@ impl LocalExecutionManager {
                     owner.shim_path.clone(),
                     owner.system_image_manifest.clone(),
                 )?;
-                let endpoint = super::oci_kvm_owner::ensure_linux_kvm_oci_owner(
+                // Fresh KVM qualification construction: reclaiming a dead Host
+                // must tear down Live-survivable session-owner/shim orphans.
+                // Retained-manager Live reopen keeps the default (no reap).
+                let endpoint = super::oci_kvm_owner::ensure_linux_kvm_oci_owner_with_options(
                     &owner.service_root,
                     &artifacts,
+                    super::oci_kvm_owner::EnsureLinuxKvmOwnerOptions {
+                        reap_orphaned_session_children: true,
+                        runtime_root: Some(config.runtime_root().to_path_buf()),
+                    },
                 )
                 .await?;
                 if &endpoint != config.endpoint() {

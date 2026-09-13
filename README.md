@@ -325,8 +325,10 @@ For Box-owned Host ensure/recovery (identity-fenced `box-owner.json`, refuse
 unowned sockets, reclaim dead owners, retained-manager respawn), set
 `A3S_BOX_KVM_OCI_BOX_OWNED=1` together with the service root/bin/shim/manifest
 env vars and do **not** pre-bind the endpoint. The qualification script
-`--box-owned` mode uses this path, including Host SIGKILL → ensure respawn.
-External operator-launched Hosts remain supported when `BOX_OWNED` is unset.
+`--box-owned` mode uses this path, including Host SIGKILL → ensure respawn
+(with session-owner create forced and orphan session-owner/shim reap on fresh
+construction; Live retained-manager reopen does not reap). External
+operator-launched Hosts remain supported when `BOX_OWNED` is unset.
 This is still qualification-only; it does not promote KVM MicroVM to production
 or change default omit→MicroVM routing.
 
@@ -356,7 +358,8 @@ MicroVM routing.
 
 ### Exercise KVM MicroVM live-session Host reopen (observation)
 
-Opt-in Live path only (`A3S_OCI_KVM_SESSION_OWNER=1`). Distinct from the
+Opt-in Live path only (`A3S_OCI_KVM_SESSION_OWNER=1`; Box-owned Host spawn
+forces this as well). Distinct from the
 stopped-only `linux-kvm-oci-qualification` gate. Build and run:
 
 ```bash

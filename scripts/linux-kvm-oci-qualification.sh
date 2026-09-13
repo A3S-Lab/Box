@@ -6,8 +6,10 @@
 #   2) Host Service SIGKILL/restart while a generation is running → stopped-only
 #      reconcile without invented exit status → delete
 #
-# With --box-owned: Box identity-fences and (re)spawns the Host; phase 2 SIGKILL
-# reads box-owner.json and relies on ensure for replacement (no external respawn).
+# With --box-owned: Box identity-fences and (re)spawns the Host with session-
+# owner create; phase 2 SIGKILL reads box-owner.json and relies on ensure for
+# replacement (including orphan session-owner/shim reap on fresh construction).
+# Live retained-manager reopen keeps those children alive (separate harness).
 #
 # Observation-only. Does not claim fresh-host, AArch64 promotion, or MicroVM
 # production cutover.

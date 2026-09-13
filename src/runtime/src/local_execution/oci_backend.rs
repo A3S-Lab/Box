@@ -1523,6 +1523,8 @@ impl OciLocalExecutionBackend {
         let Some(recovery) = self.linux_kvm_owner.as_ref() else {
             return Ok(());
         };
+        // Retained-manager Live reopen: do not reap session-owner/shim orphans.
+        // Fresh construction uses ensure_linux_kvm_oci_owner_with_options(..., reap: true).
         let endpoint = super::oci_kvm_owner::ensure_linux_kvm_oci_owner(
             &recovery.service_root,
             &recovery.artifacts,

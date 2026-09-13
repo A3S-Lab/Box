@@ -6,6 +6,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Qualification-only Linux KVM Box-owned Host spawn forces
+  `A3S_OCI_KVM_SESSION_OWNER=1`. Fresh `with_linux_kvm_oci_qualification`
+  construction reaps orphaned session-owner / shim children from
+  `{runtime_root}/shares/**/.a3s-oci-kvm-live-session-binding.json` when
+  reclaiming a dead Host; retained-manager Live reopen keeps the default (no
+  reap). Stopped-only box-owned qualification asserts those orphans survive
+  Host SIGKILL until fresh ensure tears them down. Does **not** claim KVM
+  MicroVM production cutover, B2 close, or default omit→OCI routing.
+
 - Fresh `SandboxViaOci` construction reaps orphaned supervised sessions
   (session supervisor / launcher / init) when reclaiming a dead native Linux
   Host, so stopped-only owner-death reconcile sees a tombstone without a

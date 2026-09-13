@@ -221,7 +221,10 @@ The qualification-only `A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path still
 requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for an externally launched
 `box-kvm-qualification-service`, or `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service
 root/bin/shim/manifest so Box identity-fences and (re)spawns that Host under
-`{service_root}/runtime.sock`. Box-owned KVM ensure does not claim production
+`{service_root}/runtime.sock`. Box-owned KVM Host spawn forces
+`A3S_OCI_KVM_SESSION_OWNER=1`; fresh qualification construction reaps
+session-owner/shim orphans on dead-Host reclaim, while retained-manager Live
+reopen does not. Box-owned KVM ensure does not claim production
 MicroVM cutover. Windows WHPX qualification likewise accepts an externally
 launched `box-whpx-qualification-service` pipe, or
 `A3S_BOX_WHPX_OCI_BOX_OWNED=1` plus service root/bin/shim/vm-rootfs so Box

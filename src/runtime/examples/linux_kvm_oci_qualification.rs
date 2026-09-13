@@ -9,7 +9,9 @@
 //! 1. create replay + Box-manager reopen + start + exact exit `23` + delete
 //! 2. when service restart inputs are present: a second generation that is
 //!    observed running, interrupted by Host Service SIGKILL/restart, and
-//!    reconciled to stopped without an invented exit status before delete
+//!    reconciled to stopped without an invented exit status before delete.
+//!    Box-owned Hosts force session-owner create; fresh reconnect must reap
+//!    Live-survivable session-owner/shim orphans during ensure.
 
 #[cfg(not(all(
     target_os = "linux",
@@ -138,6 +140,10 @@ mod qualification {
         restart_reconciled_stopped: bool,
         restart_exit_code_absent: bool,
         restart_removed: bool,
+        /// Box-owned only: Live binding identities observed before Host SIGKILL.
+        restart_session_orphans_observed: bool,
+        /// Box-owned only: those identities are gone after fresh ensure reconnect.
+        restart_session_orphans_reaped: bool,
     }
 
     impl QualificationReport {
@@ -177,6 +183,8 @@ mod qualification {
                 restart_reconciled_stopped: false,
                 restart_exit_code_absent: false,
                 restart_removed: false,
+                restart_session_orphans_observed: false,
+                restart_session_orphans_reaped: false,
             }
         }
     }
@@ -612,6 +620,22 @@ mod qualification {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
+        let mut orphan_identities = Vec::new();
+        if service.box_owned {
+            orphan_identities = load_live_session_identities(&inputs.runtime_root)?;
+            require(
+                !orphan_identities.is_empty(),
+                "Box-owned Host with session-owner create must publish KVM Live binding identities before Host SIGKILL",
+            )?;
+            for (label, pid, start) in &orphan_identities {
+                require(
+                    process_start_time(*pid)? == Some(*start),
+                    format!("{label} is not alive with its recorded identity before Host SIGKILL"),
+                )?;
+            }
+            report.restart_session_orphans_observed = true;
+        }
+
         drop(manager);
         restart_host_service(service, &inputs.endpoint)?;
         report.runtime_service_restarted = true;
@@ -678,6 +702,22 @@ mod qualification {
                 status.state
             ),
         )?;
+        if service.box_owned {
+            for (label, pid, start) in &orphan_identities {
+                let gone_deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while std::time::Instant::now() < gone_deadline {
+                    if process_start_time(*pid)? != Some(*start) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                require(
+                    process_start_time(*pid)? != Some(*start),
+                    format!("{label} remained alive after fresh Box-owned ensure reclaim"),
+                )?;
+            }
+            report.restart_session_orphans_reaped = true;
+        }
         report.restart_reconciled_stopped = true;
 
         let store = ManagedExecutionStore::new(&inputs.state_path);
@@ -937,6 +977,90 @@ mod qualification {
             && left.memory_mb == right.memory_mb
             && left.disk_mb == right.disk_mb
             && left.timeout == right.timeout
+    }
+
+    const KVM_LIVE_BINDING_FILE: &str = ".a3s-oci-kvm-live-session-binding.json";
+
+    fn load_live_session_identities(
+        runtime_root: &Path,
+    ) -> Result<Vec<(String, u32, u64)>, AnyError> {
+        let shares = runtime_root.join("shares");
+        let mut bindings = Vec::new();
+        collect_live_bindings(&shares, &mut bindings)?;
+        let mut identities = Vec::new();
+        for path in bindings {
+            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            for field in ["sessionOwner", "shim"] {
+                let Some(identity) = value.get(field) else {
+                    continue;
+                };
+                if identity.is_null() {
+                    continue;
+                }
+                let pid = identity
+                    .get("pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| failure(format!("KVM Live binding.{field} lacks pid")))?
+                    as u32;
+                let start = identity
+                    .get("startTimeTicks")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        failure(format!("KVM Live binding.{field} lacks startTimeTicks"))
+                    })?;
+                if pid > 0 && start > 0 {
+                    identities.push((format!("KVM {field}"), pid, start));
+                }
+            }
+        }
+        Ok(identities)
+    }
+
+    fn collect_live_bindings(root: &Path, found: &mut Vec<PathBuf>) -> Result<(), AnyError> {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(failure(format!(
+                    "failed to enumerate {}: {error}",
+                    root.display()
+                )))
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect_live_bindings(&path, found)?;
+            } else if entry.file_name() == KVM_LIVE_BINDING_FILE {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn process_start_time(pid: u32) -> Result<Option<u64>, AnyError> {
+        let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let closing = raw
+            .rfind(") ")
+            .ok_or_else(|| failure(format!("process {pid} has malformed stat evidence")))?;
+        let fields: Vec<&str> = raw[closing + 2..].split_whitespace().collect();
+        require(
+            fields.len() > 19,
+            format!("process {pid} has incomplete stat evidence"),
+        )?;
+        if matches!(fields[0], "Z" | "X" | "x") {
+            return Ok(None);
+        }
+        let start = fields[19]
+            .parse::<u64>()
+            .map_err(|_| failure(format!("process {pid} has invalid starttime")))?;
+        Ok(Some(start))
     }
 
     fn directory_absent_or_empty(path: &Path) -> Result<bool, AnyError> {
