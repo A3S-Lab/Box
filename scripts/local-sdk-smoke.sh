@@ -328,10 +328,22 @@ def exercise_owner_death_recovery(sandbox: Sandbox) -> None:
     assert int(recovery["target"]["generation"]) == old_runtime_generation
     old_launcher = require_live_identity("old OCI launcher", recovery["launcher"])
     old_init = require_live_identity("old OCI init", recovery["init"])
+    old_supervisor = None
+    if "sessionSupervisor" in recovery:
+        old_supervisor = require_live_identity(
+            "old OCI session supervisor", recovery["sessionSupervisor"]
+        )
     assert recovery_path.is_file()
 
     os.kill(old_owner_identity[0], signal.SIGKILL)
     wait_identity_gone("old OCI owner", old_owner_identity)
+    # Supervised create keeps launcher/init under the session supervisor after
+    # Host death (Live reopen). This stopped-only owner-death gate tears the
+    # supervisor down so Box reconciles a tombstone rather than a live session.
+    if old_supervisor is not None:
+        if process_start_time(old_supervisor[0]) == old_supervisor[1]:
+            os.kill(old_supervisor[0], signal.SIGKILL)
+        wait_identity_gone("old OCI session supervisor", old_supervisor)
     wait_identity_gone("old OCI launcher", old_launcher)
     wait_identity_gone("old OCI init", old_init)
 
