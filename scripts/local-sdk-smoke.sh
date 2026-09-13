@@ -338,21 +338,22 @@ def exercise_owner_death_recovery(sandbox: Sandbox) -> None:
     os.kill(old_owner_identity[0], signal.SIGKILL)
     wait_identity_gone("old OCI owner", old_owner_identity)
     # Supervised create keeps launcher/init under the session supervisor after
-    # Host death (Live reopen). This stopped-only owner-death gate tears the
-    # supervisor down so Box reconciles a tombstone rather than a live session.
+    # Host death (Live reopen). Stopped-only smoke must NOT tear those down
+    # here — a fresh Box process must reap orphans during owner ensure.
     if old_supervisor is not None:
-        if process_start_time(old_supervisor[0]) == old_supervisor[1]:
-            os.kill(old_supervisor[0], signal.SIGKILL)
-        wait_identity_gone("old OCI session supervisor", old_supervisor)
-    wait_identity_gone("old OCI launcher", old_launcher)
-    wait_identity_gone("old OCI init", old_init)
+        require_live_identity("orphaned OCI session supervisor", recovery["sessionSupervisor"])
 
     # Every synchronous SDK request launches a distinct `a3s-box sdk-bridge`
     # process. This inspection therefore forces a fresh Box process to reclaim
-    # the stale endpoint and reconcile the stopped OCI tombstone.
+    # the stale endpoint (reaping supervised orphans) and reconcile the
+    # stopped OCI tombstone.
     assert not sandbox.is_running(), "owner-death reconciliation still reports the Sandbox running"
     assert sandbox.state == "stopped", "owner-death reconciliation did not persist stopped"
     assert sandbox.generation == old_box_generation, "owner-death changed the Box generation"
+    if old_supervisor is not None:
+        wait_identity_gone("old OCI session supervisor", old_supervisor)
+    wait_identity_gone("old OCI launcher", old_launcher)
+    wait_identity_gone("old OCI init", old_init)
 
     new_owner = load_owner_record(host_root)
     new_owner_identity = (int(new_owner["pid"]), int(new_owner["pid_start_time"]))

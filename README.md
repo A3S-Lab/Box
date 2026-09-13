@@ -164,8 +164,10 @@ artifacts are published from the same versioned release tag. See the
 > Cloud `BX0.3` hardware-TEE claims. Box-owned native Host spawn now forces
 > supervised create (`A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`) for production
 > `SandboxViaOci`; external Hosts that omit the env remain Host-bound.
-> The default omit-isolation → MicroVM split above is still authoritative
-> until a separate MicroVM cutover ships.
+> Fresh construction reaps supervised orphans when reclaiming a dead Host
+> (stopped-only); retained-manager Live reopen does not. The default
+> omit-isolation → MicroVM split above is still authoritative until a
+> separate MicroVM cutover ships.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

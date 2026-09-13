@@ -1410,11 +1410,10 @@ impl OciLocalExecutionBackend {
 
     /// Enable identity-fenced owner respawn for retained-manager Live reopen.
     ///
-    /// Construction already calls [`super::oci_owner::ensure_native_linux_oci_owner`].
-    /// Without this recovery handle, `reconcile`/`inspect` only reconnect the SDK
-    /// transport to a dead socket and never spawn a replacement Host — so v3
-    /// retained-stream reopen stays Unavailable while the session supervisor's
-    /// 30s reattach window expires.
+    /// Construction already calls
+    /// [`super::oci_owner::ensure_native_linux_oci_owner_with_options`] with
+    /// orphan reap enabled. Retained-manager Live reopen calls the default
+    /// ensure (no reap) so supervised children survive Host SIGKILL.
     #[cfg(all(feature = "vm", target_os = "linux"))]
     pub fn with_native_linux_owner_recovery(
         mut self,
@@ -1497,6 +1496,9 @@ impl OciLocalExecutionBackend {
         let Some(recovery) = self.native_linux_owner.as_ref() else {
             return Ok(());
         };
+        // Retained-manager Live reopen: do not reap supervised orphans.
+        // Fresh SandboxViaOci construction uses
+        // `ensure_native_linux_oci_owner_with_options(..., reap: true)`.
         let endpoint = super::oci_owner::ensure_native_linux_oci_owner(
             &recovery.service_root,
             &recovery.artifacts,

@@ -83,9 +83,32 @@ impl NativeLinuxOwnerRecord {
     }
 }
 
+/// Options for [`ensure_native_linux_oci_owner`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EnsureNativeLinuxOwnerOptions {
+    /// When reclaiming a dead Host, tear down orphaned supervised sessions
+    /// (session supervisor / launcher / init) so stopped-only reconcile sees a
+    /// tombstone. Must be **false** for retained-manager Live reopen, which
+    /// needs those processes to survive Host SIGKILL.
+    pub reap_orphaned_supervised_sessions: bool,
+}
+
 pub(crate) async fn ensure_native_linux_oci_owner(
     service_root: &Path,
     artifacts: &CertifiedA3sOci,
+) -> ExecutionManagerResult<OciRuntimeEndpoint> {
+    ensure_native_linux_oci_owner_with_options(
+        service_root,
+        artifacts,
+        EnsureNativeLinuxOwnerOptions::default(),
+    )
+    .await
+}
+
+pub(crate) async fn ensure_native_linux_oci_owner_with_options(
+    service_root: &Path,
+    artifacts: &CertifiedA3sOci,
+    options: EnsureNativeLinuxOwnerOptions,
 ) -> ExecutionManagerResult<OciRuntimeEndpoint> {
     validate_service_root(service_root)?;
     let root = service_root.to_path_buf();
@@ -125,6 +148,9 @@ pub(crate) async fn ensure_native_linux_oci_owner(
             let result = wait_until_ready(&endpoint, None).await;
             drop(lock);
             return result.map(|()| endpoint);
+        }
+        if options.reap_orphaned_supervised_sessions {
+            reap_orphaned_supervised_sessions(service_root, &record)?;
         }
         reclaim_dead_owner_socket(&socket_path)?;
     } else if path_exists_no_follow(&socket_path)? {
@@ -686,6 +712,139 @@ fn remove_record_if_same(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct RecoveryProcessIdentity {
+    pid: u32,
+    #[serde(rename = "startTimeTicks")]
+    start_time_ticks: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecoverySupervisedFields {
+    #[serde(rename = "sessionSupervisor")]
+    session_supervisor: Option<RecoveryProcessIdentity>,
+    launcher: Option<RecoveryProcessIdentity>,
+    init: Option<RecoveryProcessIdentity>,
+}
+
+/// Tear down Live-survivable children left behind by a dead Host.
+///
+/// Used only on fresh SandboxViaOci construction (stopped-only). Retained-
+/// manager Live reopen must leave these processes alone.
+fn reap_orphaned_supervised_sessions(
+    service_root: &Path,
+    dead_owner: &NativeLinuxOwnerRecord,
+) -> ExecutionManagerResult<()> {
+    let executor_root = service_root.join("executor").join(format!(
+        "a3s-oci-agent-{}-{:016x}",
+        dead_owner.pid, dead_owner.pid_start_time
+    ));
+    if !executor_root.is_dir() {
+        return Ok(());
+    }
+    let mut recovery_paths = Vec::new();
+    let entries = std::fs::read_dir(&executor_root).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to scan orphaned executor root {}: {error}",
+            executor_root.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to read orphaned executor entry under {}: {error}",
+                executor_root.display()
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("c-") {
+            continue;
+        }
+        let recovery = entry.path().join("recovery.json");
+        if recovery.is_file() {
+            recovery_paths.push(recovery);
+        }
+    }
+    for path in recovery_paths {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "failed to read orphaned recovery {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let recovery: RecoverySupervisedFields = match serde_json::from_slice(&bytes) {
+            Ok(recovery) => recovery,
+            Err(_) => continue,
+        };
+        // Supervisor first: Host-bound children often exit with it. Always
+        // signal remaining identities so unsupervised leftovers are not left
+        // for a false wait timeout.
+        if let Some(supervisor) = recovery.session_supervisor.as_ref() {
+            signal_identity_gone("orphaned OCI session supervisor", supervisor)?;
+        }
+        if let Some(launcher) = recovery.launcher.as_ref() {
+            signal_identity_gone("orphaned OCI launcher", launcher)?;
+        }
+        if let Some(init) = recovery.init.as_ref() {
+            signal_identity_gone("orphaned OCI init", init)?;
+        }
+    }
+    Ok(())
+}
+
+fn signal_identity_gone(
+    label: &str,
+    identity: &RecoveryProcessIdentity,
+) -> ExecutionManagerResult<()> {
+    if identity.pid == 0 || identity.start_time_ticks == 0 {
+        return Ok(());
+    }
+    if crate::process::is_process_running_with_identity(
+        identity.pid,
+        Some(identity.start_time_ticks),
+    ) {
+        // SAFETY: qualification/product reclaim of an exact recorded identity.
+        let rc = unsafe { libc::kill(identity.pid as i32, libc::SIGKILL) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            let gone = err.raw_os_error() == Some(libc::ESRCH)
+                || err.kind() == std::io::ErrorKind::NotFound;
+            if !gone {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "failed to SIGKILL {label} pid {}: {err}",
+                    identity.pid
+                )));
+            }
+        }
+    }
+    wait_identity_gone(label, identity)
+}
+
+fn wait_identity_gone(
+    label: &str,
+    identity: &RecoveryProcessIdentity,
+) -> ExecutionManagerResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !crate::process::is_process_running_with_identity(
+            identity.pid,
+            Some(identity.start_time_ticks),
+        ) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(ExecutionManagerError::Unavailable(format!(
+        "{label} pid {} remained alive after stopped-only Host reclaim",
+        identity.pid
+    )))
+}
+
 fn reclaim_dead_owner_socket(path: &Path) -> ExecutionManagerResult<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -797,5 +956,29 @@ mod tests {
         );
         // spawn_owner always exports this as "1" so Box-owned Sandbox create
         // and Live reopen share the supervised Host path.
+    }
+
+    #[test]
+    fn recovery_supervised_fields_parse_optional_supervisor() {
+        let with_supervisor = br#"{
+            "sessionSupervisor": {"pid": 11, "startTimeTicks": 22},
+            "launcher": {"pid": 33, "startTimeTicks": 44},
+            "init": {"pid": 55, "startTimeTicks": 66},
+            "schemaVersion": "a3s.oci.native-linux-recovery.v6"
+        }"#;
+        let parsed: RecoverySupervisedFields =
+            serde_json::from_slice(with_supervisor).expect("parse supervised recovery");
+        assert_eq!(parsed.session_supervisor.as_ref().unwrap().pid, 11);
+        assert_eq!(parsed.launcher.as_ref().unwrap().start_time_ticks, 44);
+        assert_eq!(parsed.init.as_ref().unwrap().pid, 55);
+
+        let without_supervisor = br#"{
+            "launcher": {"pid": 1, "startTimeTicks": 2},
+            "init": {"pid": 3, "startTimeTicks": 4}
+        }"#;
+        let parsed: RecoverySupervisedFields =
+            serde_json::from_slice(without_supervisor).expect("parse host-bound recovery");
+        assert!(parsed.session_supervisor.is_none());
+        assert_eq!(parsed.launcher.as_ref().unwrap().pid, 1);
     }
 }
