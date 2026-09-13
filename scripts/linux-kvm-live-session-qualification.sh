@@ -191,7 +191,7 @@ export A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG="${SERVICE_LOG}"
 if [[ "${BOX_OWNED}" -eq 1 ]]; then
   export A3S_BOX_KVM_OCI_BOX_OWNED=1
   : >"${SERVICE_LOG}"
-  echo "running Linux KVM live-session qualification v2 (Box-owned Host ensure)"
+  echo "running Linux KVM live-session qualification v3 (Box-owned Host ensure)"
   echo "  home=${A3S_HOME}"
   echo "  service-root=${SERVICE_ROOT}"
   echo "  image=${IMAGE}"
@@ -229,7 +229,7 @@ fi
 
 export A3S_BOX_KVM_LIVE_SESSION_SERVICE_PID="${SERVICE_PID}"
 
-echo "running Linux KVM live-session qualification v2"
+echo "running Linux KVM live-session qualification v3"
 echo "  home=${A3S_HOME}"
 echo "  service-root=${SERVICE_ROOT}"
 echo "  service-pid=${SERVICE_PID}"
