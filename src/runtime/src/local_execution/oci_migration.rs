@@ -428,9 +428,18 @@ impl LocalExecutionManager {
                         .to_string(),
                 )
             })?;
-            let endpoint =
-                super::oci_owner::ensure_native_linux_oci_owner(config.service_root(), artifacts)
-                    .await?;
+            // Fresh SandboxViaOci construction: reclaiming a dead Host must
+            // tear down Live-survivable supervised orphans so stopped-only
+            // reconcile sees a tombstone. Retained-manager Live reopen keeps
+            // the default (no reap) via `ensure_native_linux_owner`.
+            let endpoint = super::oci_owner::ensure_native_linux_oci_owner_with_options(
+                config.service_root(),
+                artifacts,
+                super::oci_owner::EnsureNativeLinuxOwnerOptions {
+                    reap_orphaned_supervised_sessions: true,
+                },
+            )
+            .await?;
             let mut provider = NativeLinuxOciBundleProvider::new(
                 home_dir.clone(),
                 artifacts.runtime_path.clone(),
