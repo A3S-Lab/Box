@@ -359,9 +359,8 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .filter(|value| !value.is_empty())
         .filter(|_| unsafe { libc::geteuid() } != 0);
     if elevate_wrapper.is_none() && unsafe { libc::geteuid() } != 0 {
-        crate::sandbox::require_operator_setuid_launcher(&launcher).map_err(|error| {
-            ExecutionManagerError::Unavailable(error.to_string())
-        })?;
+        crate::sandbox::require_operator_setuid_launcher(&launcher)
+            .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))?;
     }
     let mut command = if let Some(wrapper) = elevate_wrapper {
         let mut command = Command::new("bash");
