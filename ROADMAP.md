@@ -642,8 +642,9 @@ owner replacement, and must publish final drain evidence before deletion.
 The standalone CRI adapter now reconciles persisted sandboxes to `NotReady`
 after a service restart, marks containers without a live VM exited, reclaims
 their bridge-network endpoints, and removes leaked CRI rootfs trees. This is
-resource-safe restart reconciliation, not process-session reattachment; the
-real native-driver recovery gate below remains open.
+resource-safe restart reconciliation, not process-session reattachment (that
+Live observation matrix is checklist-closed above; harness reports still keep
+`b2_process_session_recovery_closed=false`).
 
 ### B3 - Storage And Networking Attachments
 
