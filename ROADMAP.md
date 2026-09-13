@@ -289,7 +289,11 @@ non-Unix hosts. The pinned real-driver prerequisite now also proves binary
 upload/download, changed-request conflict fencing, stat/list/move, exact
 mutation replay, recursive removal, and post-cleanup `NotFound` through native
 Linux and utility-VM lifecycle harnesses. Cross-process filesystem-session
-recovery remains a release gate rather than claimed evidence.
+recovery against the durable owner fixture is covered by
+`retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`
+(mkdir + keyed upload survive owner SIGKILL; list/download after reconnect).
+That fixture is **not** real-driver B2 evidence —
+`b2_process_session_recovery_closed` stays false.
 
 ## Delivery Milestones
 
@@ -589,7 +593,8 @@ retain process or filesystem sessions after its owner dies.
     a harness-stable keyed file-upload identity (`file_upload_request_id` =
     `a3s.box.live-session.keyed-file.before-owner-kill`) and shared Unavailable
     retry for upload/download. Fail-closed verifier requires the keyed id.
-    Does **not** close B2 or claim MicroVM cutover.- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
+    Does **not** close B2 or claim MicroVM cutover.
+  - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
   terminal or Failed-on-vanish instead of stuck transitional states; snapshot
@@ -615,8 +620,10 @@ recreation, and terminal-exit races. The cross-platform deterministic owner
 contract now keeps the original Box process stream and input handle alive,
 exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
-one exec dispatch. Native Linux and KVM MicroVM Live reattachment on real
-hosts is checklist-closed under the process-session recovery parent above
+one exec dispatch. The same fixture owner also recovers keyed file upload and
+mutating filesystem state across owner replacement without flipping B2. Native
+Linux and KVM MicroVM Live reattachment on real hosts is checklist-closed under
+the process-session recovery parent above
 (existing-host WSL2 digests); harness reports still keep
 `b2_process_session_recovery_closed=false`. Box-owned native Host spawn forces
 supervised create for production SandboxViaOci; external Hosts without the env

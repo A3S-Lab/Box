@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Cross-process filesystem-session recovery fixture
+  `retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`:
+  durable owner journals mkdir + keyed upload across owner SIGKILL, then
+  list/download after reconnect. Extends the process-restart fixture with
+  `File` / `Filesystem` ops. Does **not** flip
+  `b2_process_session_recovery_closed` or claim real-driver Live FS recovery.
+
 - Live-session observation honesty bumps: Native
   `a3s.box.linux-native-live-session.v5` and KVM
   `a3s.box.linux-kvm-live-session.v3` require a harness-stable keyed file-upload

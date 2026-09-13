@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,6 +13,18 @@ pub(super) struct DurableFixtureState {
     pub(super) exit_status: Option<ExitStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) process: Option<DurableFixtureProcess>,
+    /// Guest directories that survive owner-process replacement.
+    #[serde(default)]
+    pub(super) directories: BTreeSet<String>,
+    /// Guest file payloads (base64) that survive owner-process replacement.
+    #[serde(default)]
+    pub(super) files: BTreeMap<String, String>,
+    /// Keyed upload journal for at-most-once mutating file effects.
+    #[serde(default)]
+    pub(super) file_operations: BTreeMap<String, OciFileRequest>,
+    /// Keyed mutation journal for at-most-once filesystem effects.
+    #[serde(default)]
+    pub(super) filesystem_operations: BTreeMap<String, OciFilesystemRequest>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
