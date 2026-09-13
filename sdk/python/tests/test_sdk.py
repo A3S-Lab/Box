@@ -390,7 +390,11 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
             "request_id": request.get("request_id") or "sdk-command-test",
         }
     if operation == "file_write":
-        return {"path": request["path"], "size": 5}
+        return {
+            "path": request["path"],
+            "size": 5,
+            "request_id": request.get("request_id") or "file-test",
+        }
     if operation == "file_read":
         return {
             "path": request["path"],
@@ -788,6 +792,47 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(len(commands), 2)
         self.assertNotIn("request_id", commands[0])
         self.assertEqual(commands[1]["request_id"], "sdk-command-minted-1")
+
+    def test_file_write_unavailable_preserves_request_id_for_retry(self) -> None:
+        class UnavailableOnceRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self._fail_next_write = True
+
+            def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+                payload = dict(request)
+                if payload["operation"] != "sdk_capabilities":
+                    self.requests.append(payload)
+                if payload["operation"] == "file_write" and self._fail_next_write:
+                    self._fail_next_write = False
+                    raise A3SBoxError(
+                        "prepare-file response was lost",
+                        code="unavailable",
+                        request_id="file-minted-1",
+                    )
+                return response_for(payload)
+
+        runtime = UnavailableOnceRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.write("/workspace/note.txt", b"hi")
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "file-minted-1")
+
+        result = sandbox.files.write(
+            "/workspace/note.txt",
+            b"hi",
+            request_id=raised.exception.request_id,
+        )
+        self.assertEqual(result.request_id, "file-minted-1")
+        writes = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "file_write"
+        ]
+        self.assertEqual(len(writes), 2)
+        self.assertNotIn("request_id", writes[0])
+        self.assertEqual(writes[1]["request_id"], "file-minted-1")
 
     def test_exports_native_local_clients(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)

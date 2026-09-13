@@ -216,7 +216,7 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "command_run":
 		return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false, "request_id": "sdk-command-test"}, nil
 	case "file_write":
-		return WriteInfo{Path: "/tmp/value", Size: 5}, nil
+		return WriteInfo{Path: "/tmp/value", Size: 5, RequestID: "file-test"}, nil
 	case "file_read":
 		return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString([]byte("value")), "size": 5}, nil
 	case "filesystem_stat":

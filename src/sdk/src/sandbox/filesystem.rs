@@ -22,6 +22,8 @@ pub const MAX_ARTIFACT_BYTES: u64 = MAX_BOUNDED_FILE_BYTES;
 pub struct WriteInfo {
     pub path: String,
     pub size: u64,
+    /// Durable upload identity used for this write (SDK-minted or caller-supplied).
+    pub request_id: String,
 }
 
 /// One verified guest file exported as a bounded build or test artifact.
@@ -69,15 +71,24 @@ impl ArtifactExportOptions {
     }
 }
 
-/// Optional guest identity for a filesystem operation.
+/// Optional guest identity and durable request identity for a filesystem operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesystemOptions {
     pub user: Option<String>,
+    /// Stable upload / mutate identity for replay-safe retries after retryable
+    /// `Unavailable`. When omitted, write and mutate helpers mint a fresh id.
+    /// Read-only ops ignore this field.
+    pub request_id: Option<String>,
 }
 
 impl FilesystemOptions {
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
+        self
+    }
+
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
         self
     }
 }
@@ -114,19 +125,33 @@ impl Filesystem {
         options: FilesystemOptions,
     ) -> Result<WriteInfo> {
         let path = path.into();
-        let response = self
+        let request_id = resolve_durable_request_id(options.request_id, "file")?;
+        let response = match self
             .transfer(FileRequest {
                 op: FileOp::Upload,
                 guest_path: path.clone(),
                 data: Some(STANDARD.encode(data.as_ref())),
                 user: options.user,
                 max_bytes: None,
-                request_id: Some(format!("file-{}", uuid::Uuid::new_v4())),
+                request_id: Some(request_id.clone()),
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(
+                message,
+            ))) => {
+                return Err(ClientError::CommandUnavailable {
+                    request_id,
+                    message,
+                });
+            }
+            Err(error) => return Err(error),
+        };
         require_file_success(response).map(|response| WriteInfo {
             path,
             size: response.size,
+            request_id,
         })
     }
 
@@ -234,6 +259,7 @@ impl Filesystem {
 
         let filesystem_options = FilesystemOptions {
             user: options.user.clone(),
+            request_id: None,
         };
         let entry = self
             .stat_with_options(path.clone(), filesystem_options.clone())
@@ -361,7 +387,7 @@ impl Filesystem {
             destination: None,
             depth: 0,
             user: options.user,
-            request_id: None,
+            request_id: options.request_id,
         })
         .await
     }
@@ -387,7 +413,7 @@ impl Filesystem {
             destination: Some(destination.into()),
             depth: 0,
             user: options.user,
-            request_id: None,
+            request_id: options.request_id,
         })
         .await
     }
@@ -408,20 +434,24 @@ impl Filesystem {
             destination: None,
             depth: 0,
             user: options.user,
-            request_id: None,
+            request_id: options.request_id,
         })
         .await
     }
 
     async fn mutate(&self, mut request: FilesystemRequest) -> Result<()> {
-        if request
-            .request_id
-            .as_ref()
-            .is_none_or(|request_id| request_id.is_empty())
-        {
-            request.request_id = Some(format!("fs-{}", uuid::Uuid::new_v4()));
+        let request_id = resolve_durable_request_id(request.request_id.take(), "fs")?;
+        request.request_id = Some(request_id.clone());
+        match self.filesystem(request).await {
+            Ok(response) => require_filesystem_success(response).map(|_| ()),
+            Err(ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(
+                message,
+            ))) => Err(ClientError::CommandUnavailable {
+                request_id,
+                message,
+            }),
+            Err(error) => Err(error),
         }
-        require_filesystem_success(self.filesystem(request).await?).map(|_| ())
     }
 
     async fn transfer(&self, request: FileRequest) -> Result<FileResponse> {
@@ -439,6 +469,31 @@ impl Filesystem {
             .filesystem_execution(&self.inner.execution_id, generation, request)
             .await
     }
+}
+
+const MAX_DURABLE_REQUEST_ID_BYTES: usize = 512;
+
+fn resolve_durable_request_id(request_id: Option<String>, mint_prefix: &str) -> Result<String> {
+    match request_id {
+        Some(request_id) => {
+            validate_durable_request_id(&request_id)?;
+            Ok(request_id)
+        }
+        None => Ok(format!("{mint_prefix}-{}", uuid::Uuid::new_v4())),
+    }
+}
+
+fn validate_durable_request_id(request_id: &str) -> Result<()> {
+    if request_id.is_empty()
+        || request_id.len() > MAX_DURABLE_REQUEST_ID_BYTES
+        || request_id.contains('\0')
+    {
+        return Err(ClientError::Validation(
+            "filesystem request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_artifact_limit(max_bytes: u64) -> Result<()> {

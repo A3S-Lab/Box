@@ -277,7 +277,11 @@ class FakeRuntime {
           request_id: request.request_id ?? 'sdk-command-test',
         }
       case 'file_write':
-        return { path: request.path, size: 5 }
+        return {
+          path: request.path,
+          size: 5,
+          request_id: request.request_id ?? 'file-test',
+        }
       case 'file_read':
         return {
           path: request.path,
@@ -827,8 +831,48 @@ assert.equal(unavailableCommands.length, 2)
 assert.equal(unavailableCommands[0].request_id, undefined)
 assert.equal(unavailableCommands[1].request_id, 'sdk-command-minted-1')
 
+class UnavailableOnceFileRuntime extends FakeRuntime {
+  #failNextWrite = true
+
+  async request(request) {
+    if (request.operation === 'file_write' && this.#failNextWrite) {
+      this.requests.push(request)
+      this.#failNextWrite = false
+      throw new A3SBoxError('prepare-file response was lost', 'unavailable', {
+        requestId: 'file-minted-1',
+      })
+    }
+    return super.request(request)
+  }
+}
+
+const unavailableFileRuntime = new UnavailableOnceFileRuntime()
+const unavailableFileSandbox = await Sandbox.create(undefined, {
+  runtime: unavailableFileRuntime,
+})
+await assert.rejects(
+  unavailableFileSandbox.files.write('/workspace/note.txt', 'hi'),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.requestId === 'file-minted-1'
+)
+const recoveredWrite = await unavailableFileSandbox.files.write(
+  '/workspace/note.txt',
+  'hi',
+  { requestId: 'file-minted-1' }
+)
+assert.equal(recoveredWrite.requestId, 'file-minted-1')
+const unavailableWrites = unavailableFileRuntime.requests.filter(
+  (request) => request.operation === 'file_write'
+)
+assert.equal(unavailableWrites.length, 2)
+assert.equal(unavailableWrites[0].request_id, undefined)
+assert.equal(unavailableWrites[1].request_id, 'file-minted-1')
+
 const write = await sandbox.files.write('/workspace/notes.txt', 'hello')
 assert.equal(write.size, 5)
+assert.equal(write.requestId, 'file-test')
 assert.equal(await sandbox.files.read('/workspace/notes.txt'), 'hello')
 assert.equal(await sandbox.files.exists('/workspace/notes.txt'), true)
 await sandbox.kill()

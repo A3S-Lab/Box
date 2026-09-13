@@ -452,6 +452,72 @@ func TestCommandUnavailablePreservesRequestIDForRetry(t *testing.T) {
 	}
 }
 
+func TestFileWriteUnavailablePreservesRequestIDForRetry(t *testing.T) {
+	failOnce := true
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "file_write" {
+			return map[string]any{}, nil
+		}
+		if failOnce {
+			failOnce = false
+			return nil, sdkErrorWithRequestID(
+				"file_write",
+				CodeUnavailable,
+				"prepare-file response was lost",
+				"file-minted-1",
+				nil,
+			)
+		}
+		requestID := stringValue(request["request_id"])
+		return WriteInfo{
+			Path:      stringValue(request["path"]),
+			Size:      2,
+			RequestID: requestID,
+		}, nil
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	_, err := sandbox.Files().Write(context.Background(), "/workspace/note.txt", []byte("hi"))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var first *Error
+	if !errors.As(err, &first) || first.RequestID != "file-minted-1" {
+		t.Fatalf("expected minted request_id on Unavailable, got %#v", err)
+	}
+	result, err := sandbox.Files().Write(
+		context.Background(),
+		"/workspace/note.txt",
+		[]byte("hi"),
+		FileRequestID(first.RequestID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestID != first.RequestID {
+		t.Fatalf("retry result request_id=%q, want %q", result.RequestID, first.RequestID)
+	}
+	writes := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "file_write" {
+			writes = append(writes, request)
+		}
+	}
+	if len(writes) != 2 {
+		t.Fatalf("expected two file_write calls, got %d", len(writes))
+	}
+	if writes[0]["request_id"] != nil {
+		t.Fatalf("omit-path first call should omit request_id, got %#v", writes[0]["request_id"])
+	}
+	if writes[1]["request_id"] != "file-minted-1" {
+		t.Fatalf("retry must reuse minted request_id, got %#v", writes[1]["request_id"])
+	}
+}
+
 func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 	binaryOutput := []byte{0xff, 0x00, 'A'}
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
@@ -469,7 +535,15 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(data, binaryOutput) {
 				t.Fatalf("unexpected file data: %v, %v", data, err)
 			}
-			return WriteInfo{Path: stringValue(request["path"]), Size: uint64(len(data))}, nil
+			requestID := stringValue(request["request_id"])
+			if requestID == "" {
+				requestID = "file-test"
+			}
+			return WriteInfo{
+				Path:      stringValue(request["path"]),
+				Size:      uint64(len(data)),
+				RequestID: requestID,
+			}, nil
 		case "file_read":
 			return map[string]any{"path": request["path"], "data_base64": base64.StdEncoding.EncodeToString(binaryOutput), "size": 3}, nil
 		case "filesystem_stat":

@@ -217,6 +217,17 @@ fn command_unavailable_surfaces_request_id_on_bridge_error() {
 }
 
 #[test]
+fn file_unavailable_surfaces_request_id_on_bridge_error() {
+    let failure = BridgeFailure::from(ClientError::CommandUnavailable {
+        request_id: "file-abc".to_string(),
+        message: "prepare-file interrupted".to_string(),
+    });
+    assert_eq!(failure.code, "unavailable");
+    assert_eq!(failure.request_id.as_deref(), Some("file-abc"));
+    assert!(failure.message.contains("prepare-file"));
+}
+
+#[test]
 fn command_run_request_accepts_optional_request_id() {
     let with_id: BridgeRequest = serde_json::from_str(
         r#"{
@@ -246,6 +257,58 @@ fn command_run_request_accepts_optional_request_id() {
         panic!("expected command_run");
     };
     assert_eq!(request_id, None);
+}
+
+#[test]
+fn file_write_request_accepts_optional_request_id() {
+    let with_id: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"file_write",
+            "sandbox_id":"box-1",
+            "generation":1,
+            "path":"/tmp/a",
+            "data_base64":"aGk=",
+            "request_id":"caller-stable-file-1"
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::FileWrite { request_id, .. } = with_id else {
+        panic!("expected file_write");
+    };
+    assert_eq!(request_id.as_deref(), Some("caller-stable-file-1"));
+
+    let omitted: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"file_write",
+            "sandbox_id":"box-1",
+            "generation":1,
+            "path":"/tmp/a",
+            "data_base64":"aGk="
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::FileWrite { request_id, .. } = omitted else {
+        panic!("expected file_write");
+    };
+    assert_eq!(request_id, None);
+}
+
+#[test]
+fn filesystem_make_dir_request_accepts_optional_request_id() {
+    let with_id: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"filesystem_make_dir",
+            "sandbox_id":"box-1",
+            "generation":1,
+            "path":"/tmp/out",
+            "request_id":"caller-stable-fs-1"
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::FilesystemMakeDir { request_id, .. } = with_id else {
+        panic!("expected filesystem_make_dir");
+    };
+    assert_eq!(request_id.as_deref(), Some("caller-stable-fs-1"));
 }
 
 #[tokio::test]

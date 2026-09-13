@@ -128,6 +128,8 @@ export interface CommandResult {
 export interface WriteInfo {
   path: string
   size: number
+  /** Durable upload identity used for this write (SDK-minted or caller-supplied). */
+  requestId: string
 }
 
 export interface Artifact {
@@ -1072,15 +1074,16 @@ export class Filesystem {
   async write(
     path: string,
     data: string | Uint8Array,
-    options: { user?: string } = {}
+    options: { user?: string; requestId?: string } = {}
   ): Promise<WriteInfo> {
     const result = await this.sandbox.bridgeRequest({
-      ...this.request('file_write', path, options.user),
+      ...this.request('file_write', path, options),
       data_base64: Buffer.from(data).toString('base64'),
     })
     return {
       path: requiredString(result, 'path'),
       size: requiredNumber(result, 'size'),
+      requestId: requiredString(result, 'request_id'),
     }
   }
 
@@ -1155,7 +1158,7 @@ export class Filesystem {
 
   async stat(path: string, options: { user?: string } = {}): Promise<EntryInfo> {
     const result = await this.sandbox.bridgeRequest(
-      this.request('filesystem_stat', path, options.user)
+      this.request('filesystem_stat', path, options)
     )
     return entryInfo(requiredRecord(result, 'entry'))
   }
@@ -1180,7 +1183,7 @@ export class Filesystem {
     options: { depth?: number; user?: string } = {}
   ): Promise<EntryInfo[]> {
     const result = await this.sandbox.bridgeRequest({
-      ...this.request('filesystem_list', path, options.user),
+      ...this.request('filesystem_list', path, options),
       depth: options.depth ?? 1,
     })
     if (!Array.isArray(result.entries)) {
@@ -1191,10 +1194,10 @@ export class Filesystem {
 
   async makeDir(
     path: string,
-    options: { user?: string } = {}
+    options: { user?: string; requestId?: string } = {}
   ): Promise<EntryInfo | undefined> {
     const result = await this.sandbox.bridgeRequest(
-      this.request('filesystem_make_dir', path, options.user)
+      this.request('filesystem_make_dir', path, options)
     )
     return result.entry === undefined ? undefined : entryInfo(asRecord(result.entry))
   }
@@ -1202,18 +1205,21 @@ export class Filesystem {
   async rename(
     oldPath: string,
     newPath: string,
-    options: { user?: string } = {}
+    options: { user?: string; requestId?: string } = {}
   ): Promise<EntryInfo | undefined> {
     const result = await this.sandbox.bridgeRequest({
-      ...this.request('filesystem_move', oldPath, options.user),
+      ...this.request('filesystem_move', oldPath, options),
       destination: newPath,
     })
     return result.entry === undefined ? undefined : entryInfo(asRecord(result.entry))
   }
 
-  async remove(path: string, options: { user?: string } = {}): Promise<void> {
+  async remove(
+    path: string,
+    options: { user?: string; requestId?: string } = {}
+  ): Promise<void> {
     await this.sandbox.bridgeRequest(
-      this.request('filesystem_remove', path, options.user)
+      this.request('filesystem_remove', path, options)
     )
   }
 
@@ -1222,7 +1228,7 @@ export class Filesystem {
     user: string | undefined,
     maxBytes?: number
   ): Promise<Buffer> {
-    const request = this.request('file_read', path, user)
+    const request = this.request('file_read', path, { user })
     const result = await this.sandbox.bridgeRequest(
       maxBytes === undefined ? request : { ...request, max_bytes: maxBytes }
     )
@@ -1251,14 +1257,29 @@ export class Filesystem {
   private request(
     operation: string,
     path: string,
-    user: string | undefined
+    options: { user?: string; requestId?: string } = {}
   ): Readonly<Record<string, unknown>> {
+    if (options.requestId !== undefined) {
+      if (
+        options.requestId.length === 0 ||
+        options.requestId.length > 512 ||
+        options.requestId.includes('\0')
+      ) {
+        throw new A3SBoxError(
+          'requestId must be a non-empty string of at most 512 bytes without NUL',
+          'invalid_request'
+        )
+      }
+    }
     return {
       operation,
       sandbox_id: this.sandbox.sandboxId,
       generation: this.sandbox.generation,
       path,
-      ...(user === undefined ? {} : { user }),
+      ...(options.user === undefined ? {} : { user: options.user }),
+      ...(options.requestId === undefined
+        ? {}
+        : { request_id: options.requestId }),
     }
   }
 }

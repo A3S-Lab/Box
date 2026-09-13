@@ -887,17 +887,19 @@ class Filesystem:
         data: str | bytes,
         *,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> WriteInfo:
         raw = data.encode() if isinstance(data, str) else data
         result = self._sandbox._runtime.request(
             {
-                **self._request("file_write", path, user=user),
+                **self._request("file_write", path, user=user, request_id=request_id),
                 "data_base64": base64.b64encode(raw).decode(),
             }
         )
         return WriteInfo(
             path=_string(result["path"]),
             size=_integer(result["size"]),
+            request_id=_string(result["request_id"]),
         )
 
     def read(
@@ -1004,9 +1006,17 @@ class Filesystem:
             for entry in _mapping_sequence(result["entries"])
         ]
 
-    def make_dir(self, path: str, *, user: str | None = None) -> EntryInfo | None:
+    def make_dir(
+        self,
+        path: str,
+        *,
+        user: str | None = None,
+        request_id: str | None = None,
+    ) -> EntryInfo | None:
         result = self._sandbox._runtime.request(
-            self._request("filesystem_make_dir", path, user=user)
+            self._request(
+                "filesystem_make_dir", path, user=user, request_id=request_id
+            )
         )
         entry = result.get("entry")
         return None if entry is None else _entry_info(_mapping(entry))
@@ -1017,19 +1027,33 @@ class Filesystem:
         new_path: str,
         *,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> EntryInfo | None:
         result = self._sandbox._runtime.request(
             {
-                **self._request("filesystem_move", old_path, user=user),
+                **self._request(
+                    "filesystem_move",
+                    old_path,
+                    user=user,
+                    request_id=request_id,
+                ),
                 "destination": new_path,
             }
         )
         entry = result.get("entry")
         return None if entry is None else _entry_info(_mapping(entry))
 
-    def remove(self, path: str, *, user: str | None = None) -> None:
+    def remove(
+        self,
+        path: str,
+        *,
+        user: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
         self._sandbox._runtime.request(
-            self._request("filesystem_remove", path, user=user)
+            self._request(
+                "filesystem_remove", path, user=user, request_id=request_id
+            )
         )
 
     def _request(
@@ -1038,6 +1062,7 @@ class Filesystem:
         path: str,
         *,
         user: str | None,
+        request_id: str | None = None,
     ) -> dict[str, object]:
         request: dict[str, object] = {
             "operation": operation,
@@ -1047,6 +1072,18 @@ class Filesystem:
         }
         if user is not None:
             request["user"] = user
+        if request_id is not None:
+            if (
+                not isinstance(request_id, str)
+                or not request_id
+                or len(request_id) > 512
+                or "\0" in request_id
+            ):
+                raise A3SBoxError(
+                    "request_id must be a non-empty string of at most 512 bytes without NUL",
+                    code="invalid_request",
+                )
+            request["request_id"] = request_id
         return request
 
 
@@ -1561,17 +1598,19 @@ class AsyncFilesystem:
         data: str | bytes,
         *,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> WriteInfo:
         raw = data.encode() if isinstance(data, str) else data
         result = await self._sandbox._runtime.request(
             {
-                **self._request("file_write", path, user=user),
+                **self._request("file_write", path, user=user, request_id=request_id),
                 "data_base64": base64.b64encode(raw).decode(),
             }
         )
         return WriteInfo(
             path=_string(result["path"]),
             size=_integer(result["size"]),
+            request_id=_string(result["request_id"]),
         )
 
     async def read(
@@ -1683,9 +1722,12 @@ class AsyncFilesystem:
         path: str,
         *,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> EntryInfo | None:
         result = await self._sandbox._runtime.request(
-            self._request("filesystem_make_dir", path, user=user)
+            self._request(
+                "filesystem_make_dir", path, user=user, request_id=request_id
+            )
         )
         entry = result.get("entry")
         return None if entry is None else _entry_info(_mapping(entry))
@@ -1696,19 +1738,33 @@ class AsyncFilesystem:
         new_path: str,
         *,
         user: str | None = None,
+        request_id: str | None = None,
     ) -> EntryInfo | None:
         result = await self._sandbox._runtime.request(
             {
-                **self._request("filesystem_move", old_path, user=user),
+                **self._request(
+                    "filesystem_move",
+                    old_path,
+                    user=user,
+                    request_id=request_id,
+                ),
                 "destination": new_path,
             }
         )
         entry = result.get("entry")
         return None if entry is None else _entry_info(_mapping(entry))
 
-    async def remove(self, path: str, *, user: str | None = None) -> None:
+    async def remove(
+        self,
+        path: str,
+        *,
+        user: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
         await self._sandbox._runtime.request(
-            self._request("filesystem_remove", path, user=user)
+            self._request(
+                "filesystem_remove", path, user=user, request_id=request_id
+            )
         )
 
     def _request(
@@ -1717,6 +1773,7 @@ class AsyncFilesystem:
         path: str,
         *,
         user: str | None,
+        request_id: str | None = None,
     ) -> dict[str, object]:
         request: dict[str, object] = {
             "operation": operation,
@@ -1726,4 +1783,16 @@ class AsyncFilesystem:
         }
         if user is not None:
             request["user"] = user
+        if request_id is not None:
+            if (
+                not isinstance(request_id, str)
+                or not request_id
+                or len(request_id) > 512
+                or "\0" in request_id
+            ):
+                raise A3SBoxError(
+                    "request_id must be a non-empty string of at most 512 bytes without NUL",
+                    code="invalid_request",
+                )
+            request["request_id"] = request_id
         return request

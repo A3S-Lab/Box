@@ -47,6 +47,8 @@ struct RecordingRuntime {
     event_requests: Mutex<VecDeque<(ExecutionGeneration, ExecutionEventsRequest)>>,
     runtime_events: Mutex<Vec<ExecutionRuntimeEvent>>,
     fail_next_execute: Mutex<bool>,
+    fail_next_transfer: Mutex<bool>,
+    fail_next_filesystem: Mutex<bool>,
 }
 
 impl RecordingRuntime {
@@ -122,11 +124,21 @@ impl RecordingRuntime {
                 },
             ]),
             fail_next_execute: Mutex::new(false),
+            fail_next_transfer: Mutex::new(false),
+            fail_next_filesystem: Mutex::new(false),
         }
     }
 
     fn fail_next_execute(&self) {
         *self.fail_next_execute.lock().unwrap() = true;
+    }
+
+    fn fail_next_transfer(&self) {
+        *self.fail_next_transfer.lock().unwrap() = true;
+    }
+
+    fn fail_next_filesystem(&self) {
+        *self.fail_next_filesystem.lock().unwrap() = true;
     }
 
     fn execution_id() -> ExecutionId {
@@ -441,6 +453,12 @@ impl ExecutionSessionManager for RecordingRuntime {
         _generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
+        self.file_requests.lock().unwrap().push(request.clone());
+        if std::mem::replace(&mut *self.fail_next_transfer.lock().unwrap(), false) {
+            return Err(ExecutionManagerError::Unavailable(
+                "prepare-file interrupted".to_string(),
+            ));
+        }
         let response = match request.op {
             FileOp::Upload => FileResponse {
                 success: true,
@@ -454,7 +472,6 @@ impl ExecutionSessionManager for RecordingRuntime {
             },
             FileOp::Download => self.download_response.lock().unwrap().clone(),
         };
-        self.file_requests.lock().unwrap().push(request);
         Ok(response)
     }
 
@@ -464,12 +481,20 @@ impl ExecutionSessionManager for RecordingRuntime {
         _generation: ExecutionGeneration,
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
+        self.filesystem_requests
+            .lock()
+            .unwrap()
+            .push(request.clone());
+        if std::mem::replace(&mut *self.fail_next_filesystem.lock().unwrap(), false) {
+            return Err(ExecutionManagerError::Unavailable(
+                "prepare-filesystem interrupted".to_string(),
+            ));
+        }
         let entry = (request.op == FilesystemOp::Stat).then(|| {
             let mut entry = self.stat_entry.lock().unwrap().clone();
             entry.path.clone_from(&request.path);
             entry
         });
-        self.filesystem_requests.lock().unwrap().push(request);
         Ok(FilesystemResponse {
             success: true,
             entry,
@@ -668,6 +693,107 @@ async fn command_run_unavailable_preserves_request_id_for_retry() {
         assert_eq!(exec[0].request_id.as_deref(), Some(request_id.as_str()));
         assert_eq!(exec[1].request_id.as_deref(), Some(request_id.as_str()));
     }
+}
+
+#[tokio::test]
+async fn file_write_unavailable_preserves_request_id_for_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    runtime.fail_next_transfer();
+    let first = sandbox
+        .files
+        .write("/workspace/note.txt", b"hi")
+        .await
+        .unwrap_err();
+    let ClientError::CommandUnavailable {
+        request_id,
+        message,
+    } = first
+    else {
+        panic!("expected CommandUnavailable, got {first:?}");
+    };
+    assert!(
+        request_id.starts_with("file-"),
+        "minted request_id missing: {request_id}"
+    );
+    assert!(message.contains("prepare-file"));
+
+    let recovered = sandbox
+        .files
+        .write_with_options(
+            "/workspace/note.txt",
+            b"hi",
+            FilesystemOptions::default().request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.request_id, request_id);
+    assert_eq!(recovered.size, 2);
+
+    let file_requests = runtime.file_requests.lock().unwrap();
+    assert_eq!(file_requests.len(), 2);
+    assert_eq!(
+        file_requests[0].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    assert_eq!(
+        file_requests[1].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn filesystem_make_dir_unavailable_preserves_request_id_for_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    runtime.fail_next_filesystem();
+    let first = sandbox.files.make_dir("/workspace/out").await.unwrap_err();
+    let ClientError::CommandUnavailable {
+        request_id,
+        message,
+    } = first
+    else {
+        panic!("expected CommandUnavailable, got {first:?}");
+    };
+    assert!(
+        request_id.starts_with("fs-"),
+        "minted request_id missing: {request_id}"
+    );
+    assert!(message.contains("prepare-filesystem"));
+
+    sandbox
+        .files
+        .make_dir_with_options(
+            "/workspace/out",
+            FilesystemOptions::default().request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+
+    let filesystem_requests = runtime.filesystem_requests.lock().unwrap();
+    assert_eq!(filesystem_requests.len(), 2);
+    assert_eq!(
+        filesystem_requests[0].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    assert_eq!(
+        filesystem_requests[1].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
 }
 
 #[tokio::test]

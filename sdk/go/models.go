@@ -280,8 +280,9 @@ type SandboxInfo struct {
 }
 
 type WriteInfo struct {
-	Path string `json:"path"`
-	Size uint64 `json:"size"`
+	Path      string `json:"path"`
+	Size      uint64 `json:"size"`
+	RequestID string `json:"request_id"`
 }
 
 // Artifact is one verified, bounded guest file and its SHA-256 digest.
