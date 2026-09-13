@@ -687,6 +687,7 @@ async fn execute_request(
             path,
             data_base64,
             user,
+            request_id,
         } => {
             let data = STANDARD
                 .decode(&data_base64)
@@ -694,11 +695,12 @@ async fn execute_request(
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let result = sandbox
                 .files
-                .write_with_options(&path, data, FilesystemOptions { user })
+                .write_with_options(&path, data, FilesystemOptions { user, request_id })
                 .await?;
             Ok(json!({
                 "path": result.path,
                 "size": result.size,
+                "request_id": result.request_id,
             }))
         }
         BridgeRequest::FileRead {
@@ -709,7 +711,10 @@ async fn execute_request(
             max_bytes,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            let options = FilesystemOptions { user };
+            let options = FilesystemOptions {
+                user,
+                request_id: None,
+            };
             let data = match max_bytes {
                 Some(max_bytes) => {
                     sandbox
@@ -734,7 +739,13 @@ async fn execute_request(
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let entry = sandbox
                 .files
-                .stat_with_options(path, FilesystemOptions { user })
+                .stat_with_options(
+                    path,
+                    FilesystemOptions {
+                        user,
+                        request_id: None,
+                    },
+                )
                 .await?;
             Ok(json!({ "entry": entry_value(&entry) }))
         }
@@ -748,7 +759,14 @@ async fn execute_request(
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let entries = sandbox
                 .files
-                .list_with_options(path, depth, FilesystemOptions { user })
+                .list_with_options(
+                    path,
+                    depth,
+                    FilesystemOptions {
+                        user,
+                        request_id: None,
+                    },
+                )
                 .await?;
             Ok(json!({
                 "entries": entries.iter().map(entry_value).collect::<Vec<_>>(),
@@ -759,11 +777,12 @@ async fn execute_request(
             generation,
             path,
             user,
+            request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
-                .make_dir_with_options(path, FilesystemOptions { user })
+                .make_dir_with_options(path, FilesystemOptions { user, request_id })
                 .await?;
             Ok(json!({ "ok": true }))
         }
@@ -773,11 +792,12 @@ async fn execute_request(
             path,
             destination,
             user,
+            request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
-                .move_path_with_options(path, destination, FilesystemOptions { user })
+                .move_path_with_options(path, destination, FilesystemOptions { user, request_id })
                 .await?;
             Ok(json!({ "ok": true }))
         }
@@ -786,11 +806,12 @@ async fn execute_request(
             generation,
             path,
             user,
+            request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
-                .remove_with_options(path, FilesystemOptions { user })
+                .remove_with_options(path, FilesystemOptions { user, request_id })
                 .await?;
             Ok(json!({ "ok": true }))
         }

@@ -20,11 +20,18 @@ type fileOptionFunc func(*fileConfig)
 func (option fileOptionFunc) applyFile(config *fileConfig) { option(config) }
 
 type fileConfig struct {
-	user string
+	user      string
+	requestID string
 }
 
 func FileAs(user string) FileOption {
 	return fileOptionFunc(func(config *fileConfig) { config.user = user })
+}
+
+// FileRequestID sets a stable upload / mutate identity for replay-safe retries
+// after retryable Unavailable. When omitted, the Rust bridge mints a fresh id.
+func FileRequestID(requestID string) FileOption {
+	return fileOptionFunc(func(config *fileConfig) { config.requestID = requestID })
 }
 
 // ArtifactExportOption configures one bounded guest-file export.
@@ -80,7 +87,13 @@ func (filesystem *Filesystem) Write(
 	fields["data_base64"] = base64.StdEncoding.EncodeToString(data)
 	var result WriteInfo
 	err = filesystem.sandbox.readRequest(ctx, op, fields, &result, true)
-	return result, err
+	if err != nil {
+		return WriteInfo{}, err
+	}
+	if result.RequestID == "" {
+		return WriteInfo{}, sdkError(op, CodeProtocol, "file write result is missing request_id", nil)
+	}
+	return result, nil
 }
 
 func (filesystem *Filesystem) WriteString(
@@ -322,6 +335,14 @@ func (filesystem *Filesystem) fields(
 	fields := map[string]any{"path": path}
 	if config.user != "" {
 		fields["user"] = config.user
+	}
+	if config.requestID != "" {
+		if strings.TrimSpace(config.requestID) == "" ||
+			len(config.requestID) > 512 ||
+			strings.ContainsRune(config.requestID, 0) {
+			return nil, invalid(operation, "filesystem request_id must be a non-empty string of at most 512 bytes without NUL")
+		}
+		fields["request_id"] = config.requestID
 	}
 	return fields, nil
 }

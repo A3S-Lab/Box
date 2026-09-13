@@ -273,6 +273,10 @@ pub enum BridgeRequest {
         data_base64: String,
         #[serde(default)]
         user: Option<String>,
+        /// Stable upload identity for replay-safe retries after retryable
+        /// `Unavailable`. When omitted, the Rust Sandbox facade mints a fresh id.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     FileRead {
         sandbox_id: String,
@@ -305,6 +309,8 @@ pub enum BridgeRequest {
         path: String,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     FilesystemMove {
         sandbox_id: String,
@@ -313,6 +319,8 @@ pub enum BridgeRequest {
         destination: String,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     FilesystemRemove {
         sandbox_id: String,
@@ -320,6 +328,8 @@ pub enum BridgeRequest {
         path: String,
         #[serde(default)]
         user: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
 }
 

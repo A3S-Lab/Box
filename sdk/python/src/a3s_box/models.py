@@ -19,6 +19,7 @@ class CommandResult:
 class WriteInfo:
     path: str
     size: int
+    request_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

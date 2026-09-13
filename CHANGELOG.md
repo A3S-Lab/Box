@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- File upload and mutating filesystem `Unavailable` errors now preserve the
+  durable `request_id` (SDK-minted `file-*` / `fs-*` or caller-supplied) the same
+  way one-shot command Unavailable does, so callers can retry Host reopen /
+  backend-not-ready failures against the existing guest journal. Bridge
+  `file_write` / `filesystem_make_dir` / `filesystem_move` /
+  `filesystem_remove` accept optional `request_id`; `file_write` success
+  returns `request_id`. Go / Python / TypeScript SDKs expose the same identity
+  surface. Does **not** key downloads, flip B2, or claim Sandbox Live FS
+  recovery closed.
+
 ### Fixed
 
 - MicroVM guest file downloads retry once on ambiguous transport loss (fresh

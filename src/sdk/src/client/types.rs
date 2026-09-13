@@ -10,8 +10,9 @@ pub enum ClientError {
     Runtime(#[from] a3s_box_core::error::BoxError),
     #[error("execution lifecycle error: {0}")]
     Execution(#[from] a3s_box_core::ExecutionManagerError),
-    /// Retryable command failure that already claimed process-journal
-    /// `request_id`. Callers must reuse that id on retry.
+    /// Retryable manager `Unavailable` after a durable guest `request_id` was
+    /// claimed (one-shot command, keyed file upload, or keyed filesystem
+    /// mutation). Callers must reuse that id on retry.
     #[error("{message}")]
     CommandUnavailable { request_id: String, message: String },
     #[error("validation error: {0}")]
