@@ -22,6 +22,7 @@ mod oci_kvm_owner {
     //! Stub types so KVM owner recovery builders compile off Linux.
     use std::path::PathBuf;
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct LinuxKvmOwnerArtifacts {
         pub runtime_path: PathBuf,
@@ -30,6 +31,47 @@ mod oci_kvm_owner {
         pub shim_sha256: String,
         pub system_image_manifest: PathBuf,
         pub system_image_manifest_sha256: String,
+    }
+}
+#[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+mod oci_whpx_owner;
+#[cfg(all(
+    feature = "vm",
+    not(all(target_os = "windows", target_arch = "x86_64"))
+))]
+mod oci_whpx_owner {
+    //! Stub types so WHPX owner recovery builders compile off Windows x86_64.
+    use std::path::{Component, Path, PathBuf};
+
+    use a3s_box_core::{ExecutionManagerError, ExecutionManagerResult};
+    use sha2::{Digest, Sha256};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct WindowsWhpxOwnerArtifacts {
+        pub runtime_path: PathBuf,
+        pub runtime_sha256: String,
+        pub shim_path: PathBuf,
+        pub shim_sha256: String,
+        pub vm_rootfs: PathBuf,
+        pub agent_sha256: String,
+    }
+
+    pub(crate) fn owned_pipe_name(service_root: &Path) -> ExecutionManagerResult<String> {
+        if !service_root.is_absolute()
+            || service_root.parent().is_none()
+            || service_root
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "Windows WHPX OCI service root must be an absolute normalized non-root path: {}",
+                service_root.display()
+            )));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(service_root.to_string_lossy().as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        Ok(format!(r"\\.\pipe\a3s-box-whpx-owner-{}", &digest[..32]))
     }
 }
 #[cfg(all(feature = "vm", target_os = "linux"))]
@@ -85,7 +127,7 @@ pub use oci_backend::{
 #[cfg(feature = "vm")]
 pub use oci_migration::{
     LinuxKvmBoxOwnedOwner, LinuxKvmOciMigrationConfig, NativeLinuxOciMigrationConfig,
-    WindowsWhpxOciMigrationConfig,
+    WindowsWhpxBoxOwnedOwner, WindowsWhpxOciMigrationConfig,
 };
 #[cfg(feature = "vm")]
 pub use oci_production::{

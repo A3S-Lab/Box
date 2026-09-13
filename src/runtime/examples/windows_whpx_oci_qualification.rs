@@ -47,6 +47,11 @@ mod qualification {
     const ENDPOINT_ENV: &str = "A3S_BOX_OCI_WHPX_ENDPOINT";
     const IMAGE_ENV: &str = "A3S_BOX_WHPX_OCI_IMAGE";
     const REPORT_ENV: &str = "A3S_BOX_WHPX_OCI_REPORT";
+    const BOX_OWNED_ENV: &str = "A3S_BOX_WHPX_OCI_BOX_OWNED";
+    const SERVICE_ROOT_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_ROOT";
+    const SERVICE_BIN_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_BIN";
+    const SERVICE_SHIM_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_SHIM";
+    const SERVICE_VM_ROOTFS_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS";
     const SCHEMA_VERSION: &str = "a3s.box.windows-whpx-oci-qualification.v1";
     const STDOUT_MARKER: &str = "a3s-box-whpx-oci-stdout";
     const STDERR_MARKER: &str = "a3s-box-whpx-oci-stderr";
@@ -61,6 +66,11 @@ mod qualification {
         runtime_root: PathBuf,
         endpoint: String,
         image: String,
+        box_owned: bool,
+        service_root: Option<PathBuf>,
+        service_bin: Option<PathBuf>,
+        service_shim: Option<PathBuf>,
+        service_vm_rootfs: Option<PathBuf>,
     }
 
     #[derive(Debug, Serialize)]
@@ -91,6 +101,8 @@ mod qualification {
         box_directory_absent: bool,
         runtime_shares_absent: bool,
         bundle_handoffs_absent: bool,
+        box_owned: bool,
+        box_owned_ensure_proven: bool,
     }
 
     impl QualificationReport {
@@ -122,6 +134,8 @@ mod qualification {
                 box_directory_absent: false,
                 runtime_shares_absent: false,
                 bundle_handoffs_absent: false,
+                box_owned: false,
+                box_owned_ensure_proven: false,
             }
         }
     }
@@ -204,18 +218,38 @@ mod qualification {
         let endpoint = required_environment_string(ENDPOINT_ENV)?;
         let image = required_environment_string(IMAGE_ENV)?;
         let state_path = home_dir.join("managed-executions.json");
+        let box_owned = matches!(
+            std::env::var(BOX_OWNED_ENV).ok().as_deref().map(str::trim),
+            Some("1" | "true" | "on" | "yes" | "box-owned")
+        );
+        let (service_root, service_bin, service_shim, service_vm_rootfs) = if box_owned {
+            (
+                Some(absolute_environment_path(SERVICE_ROOT_ENV)?),
+                Some(absolute_environment_path(SERVICE_BIN_ENV)?),
+                Some(absolute_environment_path(SERVICE_SHIM_ENV)?),
+                Some(absolute_environment_path(SERVICE_VM_ROOTFS_ENV)?),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         report.home_dir = Some(home_dir.clone());
         report.state_path = Some(state_path.clone());
         report.runtime_root = Some(runtime_root.clone());
         report.endpoint = Some(endpoint.clone());
         report.image = Some(image.clone());
+        report.box_owned = box_owned;
         Ok(Inputs {
             home_dir,
             state_path,
             runtime_root,
             endpoint,
             image,
+            box_owned,
+            service_root,
+            service_bin,
+            service_shim,
+            service_vm_rootfs,
         })
     }
 
@@ -280,6 +314,31 @@ mod qualification {
             "restarted Box manager recovered different reservation evidence",
         )?;
         report.manager_restart_reconciled = true;
+
+        let mut restarted = restarted;
+        if inputs.box_owned {
+            let service_root = inputs
+                .service_root
+                .as_ref()
+                .ok_or_else(|| failure("box-owned qualification lost service root"))?;
+            kill_box_owned_host(service_root)?;
+            drop(restarted);
+            restarted = connect(inputs).await?;
+            let recovered_after_ensure = match restarted.reconcile(operation_id).await? {
+                ReconcileOutcome::Created(reservation) => reservation,
+                _ => {
+                    return Err(failure(
+                        "Box-owned ensure reconnect did not recover created state",
+                    ))
+                }
+            };
+            require(
+                recovered_after_ensure.execution_id == reservation.execution_id
+                    && recovered_after_ensure.generation == reservation.generation,
+                "Box-owned ensure reconnect recovered a different reservation",
+            )?;
+            report.box_owned_ensure_proven = true;
+        }
 
         let lease = tokio::time::timeout(
             Duration::from_secs(30 * 60),
@@ -395,16 +454,78 @@ mod qualification {
     }
 
     async fn connect(inputs: &Inputs) -> Result<LocalExecutionManager, AnyError> {
-        let config = WindowsWhpxOciMigrationConfig::new(
+        let mut config = WindowsWhpxOciMigrationConfig::new(
             inputs.runtime_root.clone(),
             inputs.endpoint.clone(),
         )?;
+        if inputs.box_owned {
+            config = config.with_box_owned_owner(
+                inputs
+                    .service_root
+                    .clone()
+                    .ok_or_else(|| failure("box-owned connect requires service root"))?,
+                inputs
+                    .service_bin
+                    .clone()
+                    .ok_or_else(|| failure("box-owned connect requires service bin"))?,
+                inputs
+                    .service_shim
+                    .clone()
+                    .ok_or_else(|| failure("box-owned connect requires service shim"))?,
+                inputs
+                    .service_vm_rootfs
+                    .clone()
+                    .ok_or_else(|| failure("box-owned connect requires vm-rootfs"))?,
+            )?;
+        }
         Ok(LocalExecutionManager::with_windows_whpx_oci_qualification(
             &inputs.state_path,
             &inputs.home_dir,
             config,
         )
         .await?)
+    }
+
+    fn kill_box_owned_host(service_root: &Path) -> Result<(), AnyError> {
+        let record_path = service_root.join("box-owner.json");
+        let bytes = std::fs::read(&record_path).map_err(|error| {
+            failure(format!(
+                "failed to read Box-owned WHPX owner record {}: {error}",
+                record_path.display()
+            ))
+        })?;
+        let record: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| failure(format!("invalid Box-owned WHPX owner record: {error}")))?;
+        let pid = record
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| failure("Box-owned WHPX owner record lacks pid"))?
+            as u32;
+        require(pid != 0, "Box-owned WHPX owner pid must be non-zero")?;
+        let status = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status()
+            .map_err(|error| {
+                failure(format!("failed to launch taskkill for pid {pid}: {error}"))
+            })?;
+        if !status.success() {
+            // Already gone is acceptable for ensure reclaim.
+            let still_running = a3s_box_runtime::is_process_running_with_identity(pid, None);
+            require(
+                !still_running,
+                format!("taskkill failed and Host pid {pid} is still running"),
+            )?;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if !a3s_box_runtime::is_process_running_with_identity(pid, None) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Err(failure(format!(
+            "Host Service pid {pid} remained alive after taskkill"
+        )))
     }
 
     fn qualification_request(image: &str) -> CreateExecutionRequest {

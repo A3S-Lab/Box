@@ -35,6 +35,11 @@ pub const OCI_KVM_SERVICE_ROOT_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_ROOT";
 pub const OCI_KVM_SERVICE_BIN_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_BIN";
 pub const OCI_KVM_SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_SHIM";
 pub const OCI_KVM_SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_MANIFEST";
+pub const OCI_WHPX_BOX_OWNED_ENV: &str = "A3S_BOX_WHPX_OCI_BOX_OWNED";
+pub const OCI_WHPX_SERVICE_ROOT_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_ROOT";
+pub const OCI_WHPX_SERVICE_BIN_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_BIN";
+pub const OCI_WHPX_SERVICE_SHIM_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_SHIM";
+pub const OCI_WHPX_SERVICE_VM_ROOTFS_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS";
 #[cfg(test)]
 const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
 
@@ -51,6 +56,39 @@ pub struct NativeLinuxOciMigrationConfig {
 pub struct WindowsWhpxOciMigrationConfig {
     runtime_root: PathBuf,
     endpoint: super::OciRuntimeEndpoint,
+    box_owned_owner: Option<WindowsWhpxBoxOwnedOwner>,
+}
+
+/// Optional Box-owned Host ensure inputs for Windows WHPX qualification.
+///
+/// When set, construction identity-fences and (re)spawns
+/// `box-whpx-qualification-service` under `service_root`. External-only connect
+/// remains available when this is absent so existing operator-launched Hosts
+/// keep working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsWhpxBoxOwnedOwner {
+    service_root: PathBuf,
+    runtime_path: PathBuf,
+    shim_path: PathBuf,
+    vm_rootfs: PathBuf,
+}
+
+impl WindowsWhpxBoxOwnedOwner {
+    pub fn service_root(&self) -> &Path {
+        &self.service_root
+    }
+
+    pub fn runtime_path(&self) -> &Path {
+        &self.runtime_path
+    }
+
+    pub fn shim_path(&self) -> &Path {
+        &self.shim_path
+    }
+
+    pub fn vm_rootfs(&self) -> &Path {
+        &self.vm_rootfs
+    }
 }
 
 /// Optional Box-owned Host ensure inputs for Linux KVM qualification.
@@ -196,9 +234,31 @@ impl WindowsWhpxOciMigrationConfig {
         let config = Self {
             runtime_root: runtime_root.into(),
             endpoint: super::OciRuntimeEndpoint::windows_named_pipe(endpoint)?,
+            box_owned_owner: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Attach Box-owned Host ensure/recovery for the qualification service.
+    ///
+    /// The configured endpoint must be the deterministic pipe derived from
+    /// `service_root`. This does not select production MicroVM routing.
+    pub fn with_box_owned_owner(
+        mut self,
+        service_root: impl Into<PathBuf>,
+        runtime_path: impl Into<PathBuf>,
+        shim_path: impl Into<PathBuf>,
+        vm_rootfs: impl Into<PathBuf>,
+    ) -> ExecutionManagerResult<Self> {
+        self.box_owned_owner = Some(WindowsWhpxBoxOwnedOwner {
+            service_root: service_root.into(),
+            runtime_path: runtime_path.into(),
+            shim_path: shim_path.into(),
+            vm_rootfs: vm_rootfs.into(),
+        });
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn runtime_root(&self) -> &Path {
@@ -209,11 +269,22 @@ impl WindowsWhpxOciMigrationConfig {
         &self.endpoint
     }
 
+    pub fn box_owned_owner(&self) -> Option<&WindowsWhpxBoxOwnedOwner> {
+        self.box_owned_owner.as_ref()
+    }
+
     pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
         parse_windows_environment(
-            std::env::var_os(OCI_MIGRATION_ENV),
-            std::env::var_os(OCI_HOST_ROOT_ENV),
-            std::env::var_os(OCI_WHPX_ENDPOINT_ENV),
+            WindowsWhpxEnvironmentInputs {
+                mode: std::env::var_os(OCI_MIGRATION_ENV),
+                runtime_root: std::env::var_os(OCI_HOST_ROOT_ENV),
+                endpoint: std::env::var_os(OCI_WHPX_ENDPOINT_ENV),
+                box_owned: std::env::var_os(OCI_WHPX_BOX_OWNED_ENV),
+                service_root: std::env::var_os(OCI_WHPX_SERVICE_ROOT_ENV),
+                service_bin: std::env::var_os(OCI_WHPX_SERVICE_BIN_ENV),
+                service_shim: std::env::var_os(OCI_WHPX_SERVICE_SHIM_ENV),
+                service_vm_rootfs: std::env::var_os(OCI_WHPX_SERVICE_VM_ROOTFS_ENV),
+            },
             home_dir,
         )
     }
@@ -221,7 +292,21 @@ impl WindowsWhpxOciMigrationConfig {
     fn validate(&self) -> ExecutionManagerResult<()> {
         validate_absolute_normalized(&self.runtime_root, "WHPX OCI runtime root")?;
         match &self.endpoint {
-            super::OciRuntimeEndpoint::WindowsNamedPipe { .. } => Ok(()),
+            super::OciRuntimeEndpoint::WindowsNamedPipe { name } => {
+                if let Some(owner) = &self.box_owned_owner {
+                    validate_absolute_normalized(&owner.service_root, "WHPX OCI service root")?;
+                    validate_absolute_normalized(&owner.runtime_path, "WHPX OCI runtime binary")?;
+                    validate_absolute_normalized(&owner.shim_path, "WHPX OCI shim")?;
+                    validate_absolute_normalized(&owner.vm_rootfs, "WHPX OCI vm-rootfs")?;
+                    let expected = super::oci_whpx_owner::owned_pipe_name(&owner.service_root)?;
+                    if name != &expected {
+                        return Err(ExecutionManagerError::InvalidRequest(format!(
+                            "Box-owned WHPX OCI endpoint must be {expected} (got {name})"
+                        )));
+                    }
+                }
+                Ok(())
+            }
             super::OciRuntimeEndpoint::UnixSocket { .. } => {
                 Err(ExecutionManagerError::InvalidRequest(
                     "WHPX OCI qualification requires a Windows named-pipe endpoint".to_string(),
@@ -408,13 +493,35 @@ impl LocalExecutionManager {
             if let Some(progress) = pull_progress_fn.as_ref() {
                 provider = provider.with_pull_progress_fn(progress.clone());
             }
-            let oci = Arc::new(
-                super::OciLocalExecutionBackend::connect(
-                    config.endpoint().clone(),
-                    Arc::new(provider),
+            let provider = Arc::new(provider);
+            let oci = if let Some(owner) = config.box_owned_owner() {
+                let artifacts = super::oci_whpx_owner::WindowsWhpxOwnerArtifacts::certify(
+                    owner.runtime_path.clone(),
+                    owner.shim_path.clone(),
+                    owner.vm_rootfs.clone(),
+                )?;
+                let endpoint = super::oci_whpx_owner::ensure_windows_whpx_oci_owner(
+                    &owner.service_root,
+                    &artifacts,
                 )
-                .await?,
-            );
+                .await?;
+                if &endpoint != config.endpoint() {
+                    return Err(ExecutionManagerError::Internal(format!(
+                        "Windows WHPX OCI owner ensure returned a different endpoint ({endpoint:?}) than configured ({:?})",
+                        config.endpoint()
+                    )));
+                }
+                Arc::new(
+                    super::OciLocalExecutionBackend::connect(endpoint, provider)
+                        .await?
+                        .with_windows_whpx_owner_recovery(owner.service_root.clone(), artifacts),
+                )
+            } else {
+                Arc::new(
+                    super::OciLocalExecutionBackend::connect(config.endpoint().clone(), provider)
+                        .await?,
+                )
+            };
             Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
                 home_dir,
@@ -794,11 +901,19 @@ fn parse_environment(
 }
 
 fn parse_windows_environment(
-    mode: Option<OsString>,
-    runtime_root: Option<OsString>,
-    endpoint: Option<OsString>,
+    inputs: WindowsWhpxEnvironmentInputs,
     home_dir: &Path,
 ) -> ExecutionManagerResult<Option<WindowsWhpxOciMigrationConfig>> {
+    let WindowsWhpxEnvironmentInputs {
+        mode,
+        runtime_root,
+        endpoint,
+        box_owned,
+        service_root,
+        service_bin,
+        service_shim,
+        service_vm_rootfs,
+    } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -827,6 +942,62 @@ fn parse_windows_environment(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default_service_root(home_dir));
+    let box_owned = box_owned
+        .as_ref()
+        .and_then(|value| value.to_str())
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "off" | "no" => false,
+            "1" | "true" | "on" | "yes" | "box-owned" => true,
+            _ => false,
+        })
+        .unwrap_or(false);
+
+    if box_owned {
+        let service_root = service_root
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_ROOT_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_bin = service_bin
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_BIN_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_shim = service_shim
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_SHIM_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_vm_rootfs = service_vm_rootfs
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_VM_ROOTFS_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let endpoint = match endpoint.filter(|value| !value.is_empty()) {
+            Some(value) => value.into_string().map_err(|_| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_ENDPOINT_ENV} must contain UTF-8 text"
+                ))
+            })?,
+            None => super::oci_whpx_owner::owned_pipe_name(&service_root)?,
+        };
+        return WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint)?
+            .with_box_owned_owner(service_root, service_bin, service_shim, service_vm_rootfs)
+            .map(Some);
+    }
+
     let endpoint = endpoint
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -841,6 +1012,18 @@ fn parse_windows_environment(
             ))
         })?;
     WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
+}
+
+#[derive(Default)]
+struct WindowsWhpxEnvironmentInputs {
+    mode: Option<OsString>,
+    runtime_root: Option<OsString>,
+    endpoint: Option<OsString>,
+    box_owned: Option<OsString>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_vm_rootfs: Option<OsString>,
 }
 
 #[derive(Default)]
@@ -1050,14 +1233,22 @@ mod tests {
     #[test]
     fn windows_environment_requires_explicit_pipe_and_accepts_microvm() {
         let home = absolute("a3s-oci-config-home");
-        assert!(
-            parse_windows_environment(Some(OsString::from("all")), None, None, &home,).is_err()
-        );
+        assert!(parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("all")),
+                ..Default::default()
+            },
+            &home,
+        )
+        .is_err());
 
         let config = parse_windows_environment(
-            Some(OsString::from("microvm")),
-            Some(absolute("a3s-oci-whpx-root").into_os_string()),
-            Some(OsString::from(DEFAULT_OCI_WHPX_ENDPOINT)),
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                runtime_root: Some(absolute("a3s-oci-whpx-root").into_os_string()),
+                endpoint: Some(OsString::from(DEFAULT_OCI_WHPX_ENDPOINT)),
+                ..Default::default()
+            },
             &home,
         )
         .unwrap()
@@ -1069,6 +1260,36 @@ mod tests {
             )
             .unwrap()
         );
+        assert!(config.box_owned_owner().is_none());
+    }
+
+    #[test]
+    fn windows_box_owned_environment_derives_pipe_from_service_root() {
+        let home = absolute("a3s-oci-config-home");
+        let service_root = absolute("a3s-whpx-service");
+        let expected =
+            super::super::oci_whpx_owner::owned_pipe_name(&service_root).expect("derive pipe");
+        let config = parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                runtime_root: Some(absolute("a3s-oci-whpx-root").into_os_string()),
+                box_owned: Some(OsString::from("1")),
+                service_root: Some(service_root.clone().into_os_string()),
+                service_bin: Some(absolute("a3s-oci.exe").into_os_string()),
+                service_shim: Some(absolute("a3s-oci-krun-shim.exe").into_os_string()),
+                service_vm_rootfs: Some(absolute("system").into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::windows_named_pipe(expected).unwrap()
+        );
+        let owner = config.box_owned_owner().expect("box-owned owner");
+        assert_eq!(owner.service_root(), service_root.as_path());
     }
 
     #[test]

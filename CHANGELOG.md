@@ -6,6 +6,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Qualification-only Windows WHPX OCI **Box-owned Host ensure/recovery**
+  (`a3s.box.windows-whpx-oci-owner.v1`): identity-fenced spawn of
+  `box-whpx-qualification-service`, refuse unowned ready evidence, reclaim
+  dead owners, retained-manager respawn via `with_windows_whpx_owner_recovery`.
+  Opt in with `WindowsWhpxOciMigrationConfig::with_box_owned_owner` or
+  `A3S_BOX_WHPX_OCI_BOX_OWNED=1` plus service root/bin/shim/vm-rootfs.
+  Script `-BoxOwned` skips external Host start; the qualification executable
+  proves Host `taskkill` → ensure reconnect (`box_owned_ensure_proven`).
+  Does **not** claim WHPX MicroVM production cutover, B2 close, or default
+  omit→OCI routing.
+
 - Qualification-only Linux KVM OCI **Box-owned Host ensure/recovery**
   (`a3s.box.linux-kvm-oci-owner.v1`): identity-fenced spawn of
   `box-kvm-qualification-service`, refuse unowned sockets, reclaim dead

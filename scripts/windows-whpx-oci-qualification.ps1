@@ -8,7 +8,8 @@ param(
     [string]$OciGuestArtifactDirectory,
     [Parameter(Mandatory)]
     [string]$RootfsArchive,
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [switch]$BoxOwned
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,9 +61,15 @@ $importStdoutPath = Join-Path $outputRoot 'box-import.stdout.log'
 $importStderrPath = Join-Path $outputRoot 'box-import.stderr.log'
 $qualificationStdoutPath = Join-Path $outputRoot 'qualification.stdout.log'
 $qualificationStderrPath = Join-Path $outputRoot 'qualification.stderr.log'
-$pipeName = '\\.\pipe\a3s-oci-box-qualification-{0}-{1}' -f $PID, (
-    [Guid]::NewGuid().ToString('N')
-)
+$pipeName = if ($BoxOwned) {
+    # Placeholder overwritten after the service root exists; Box derives the
+    # deterministic pipe from A3S_BOX_WHPX_OCI_SERVICE_ROOT.
+    '\\.\pipe\a3s-box-whpx-owner-pending'
+} else {
+    '\\.\pipe\a3s-oci-box-qualification-{0}-{1}' -f $PID, (
+        [Guid]::NewGuid().ToString('N')
+    )
+}
 $image = 'a3s-box-whpx-oci-qualification:local'
 $startedAt = [DateTime]::UtcNow
 
@@ -338,7 +345,12 @@ foreach ($name in @(
     'A3S_BOX_OCI_HOST_ROOT',
     'A3S_BOX_OCI_WHPX_ENDPOINT',
     'A3S_BOX_WHPX_OCI_IMAGE',
-    'A3S_BOX_WHPX_OCI_REPORT'
+    'A3S_BOX_WHPX_OCI_REPORT',
+    'A3S_BOX_WHPX_OCI_BOX_OWNED',
+    'A3S_BOX_WHPX_OCI_SERVICE_ROOT',
+    'A3S_BOX_WHPX_OCI_SERVICE_BIN',
+    'A3S_BOX_WHPX_OCI_SERVICE_SHIM',
+    'A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS'
 )) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable(
         $name,
@@ -383,34 +395,36 @@ try {
         throw "Staged Box binary cannot preserve Windows OCI symlinks: $diagnostic; see $infoStdoutPath and $infoStderrPath"
     }
 
-    $service = Start-Process -FilePath $ociCli `
-        -ArgumentList (Join-QuotedNativeArguments -Arguments $serviceArguments) `
-        -WorkingDirectory $ociBin `
-        -RedirectStandardOutput $serviceStdoutPath `
-        -RedirectStandardError $serviceStderrPath `
-        -WindowStyle Hidden -PassThru
+    if (-not $BoxOwned) {
+        $service = Start-Process -FilePath $ociCli `
+            -ArgumentList (Join-QuotedNativeArguments -Arguments $serviceArguments) `
+            -WorkingDirectory $ociBin `
+            -RedirectStandardOutput $serviceStdoutPath `
+            -RedirectStandardError $serviceStderrPath `
+            -WindowStyle Hidden -PassThru
 
-    for ($attempt = 0; $attempt -lt 300; $attempt++) {
-        if ($service.HasExited) {
-            throw "OCI qualification service exited with code $($service.ExitCode) before readiness"
-        }
-        if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
-            $candidate = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
-            if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
-                $ready = $candidate
-                break
+        for ($attempt = 0; $attempt -lt 300; $attempt++) {
+            if ($service.HasExited) {
+                throw "OCI qualification service exited with code $($service.ExitCode) before readiness"
             }
+            if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+                $candidate = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
+                if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
+                    $ready = $candidate
+                    break
+                }
+            }
+            Start-Sleep -Milliseconds 100
         }
-        Start-Sleep -Milliseconds 100
-    }
-    if ($null -eq $ready) {
-        throw 'Timed out waiting for the OCI qualification service.'
-    }
-    if ($ready.owner_pid -ne $service.Id -or
-        $ready.endpoint -ne $pipeName -or
-        [IO.Path]::GetFullPath($ready.runtime_root) -ne $runtimeRoot -or
-        [IO.Path]::GetFullPath($ready.state_root) -ne $stateRoot) {
-        throw 'OCI qualification readiness evidence does not match the launched owner.'
+        if ($null -eq $ready) {
+            throw 'Timed out waiting for the OCI qualification service.'
+        }
+        if ($ready.owner_pid -ne $service.Id -or
+            $ready.endpoint -ne $pipeName -or
+            [IO.Path]::GetFullPath($ready.runtime_root) -ne $runtimeRoot -or
+            [IO.Path]::GetFullPath($ready.state_root) -ne $stateRoot) {
+            throw 'OCI qualification readiness evidence does not match the launched owner.'
+        }
     }
 
     $importProcess = Start-Process -FilePath $boxCli `
@@ -427,9 +441,24 @@ try {
 
     $env:A3S_BOX_WHPX_OCI_QUALIFICATION = '1'
     $env:A3S_BOX_OCI_HOST_ROOT = $runtimeRoot
-    $env:A3S_BOX_OCI_WHPX_ENDPOINT = $pipeName
     $env:A3S_BOX_WHPX_OCI_IMAGE = $image
     $env:A3S_BOX_WHPX_OCI_REPORT = $reportPath
+    if ($BoxOwned) {
+        $env:A3S_BOX_WHPX_OCI_BOX_OWNED = '1'
+        $env:A3S_BOX_WHPX_OCI_SERVICE_ROOT = $runtimeRoot
+        $env:A3S_BOX_WHPX_OCI_SERVICE_BIN = $ociCli
+        $env:A3S_BOX_WHPX_OCI_SERVICE_SHIM = $ociShim
+        $env:A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS = $systemRoot
+        # Derive the same pipe Box will use so the report endpoint matches.
+        $hasher = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [Text.Encoding]::UTF8.GetBytes($runtimeRoot)
+        $digest = ($hasher.ComputeHash($bytes) |
+            ForEach-Object { $_.ToString('x2') }) -join ''
+        $pipeName = '\\.\pipe\a3s-box-whpx-owner-{0}' -f $digest.Substring(0, 32)
+        $env:A3S_BOX_OCI_WHPX_ENDPOINT = $pipeName
+    } else {
+        $env:A3S_BOX_OCI_WHPX_ENDPOINT = $pipeName
+    }
     $qualificationProcess = Start-Process -FilePath $qualification `
         -WorkingDirectory $boxBin `
         -RedirectStandardOutput $qualificationStdoutPath `
@@ -460,6 +489,12 @@ try {
         -not $qualificationReport.bundle_handoffs_absent) {
         throw 'Box qualification report does not satisfy the complete lifecycle contract.'
     }
+    if ($BoxOwned -and (
+            -not $qualificationReport.box_owned -or
+            -not $qualificationReport.box_owned_ensure_proven
+        )) {
+        throw 'Box-owned WHPX qualification did not prove Host ensure recovery.'
+    }
     if (-not (Directory-IsAbsentOrEmpty (Join-Path $runtimeRoot 'shares')) -or
         -not (Directory-IsAbsentOrEmpty (Join-Path $runtimeRoot 'bundle-handoffs'))) {
         throw 'OCI runtime shares or Box bundle handoffs remain after qualification.'
@@ -480,6 +515,17 @@ finally {
     if ($null -ne $service -and -not $service.HasExited) {
         Stop-Process -Id $service.Id -Force -ErrorAction SilentlyContinue
         $service.WaitForExit(15000) | Out-Null
+    }
+    $ownerRecordPath = Join-Path $runtimeRoot 'box-owner.json'
+    if (Test-Path -LiteralPath $ownerRecordPath -PathType Leaf) {
+        try {
+            $ownerRecord = Get-Content -LiteralPath $ownerRecordPath -Raw | ConvertFrom-Json
+            if ($null -ne $ownerRecord.pid) {
+                Stop-Process -Id ([int]$ownerRecord.pid) -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            # Best-effort cleanup of a Box-owned Host.
+        }
     }
     $residual = @(Wait-ForNoA3sProcesses)
     if ($residual.Count -gt 0) {
