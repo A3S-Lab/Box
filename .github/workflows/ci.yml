@@ -42,6 +42,8 @@ jobs:
         run: python3 scripts/verify-microvm-transport-retry-honesty.py --self-test && python3 scripts/verify-microvm-transport-retry-honesty.py
       - name: Verify process-restart filesystem honesty checker
         run: python3 scripts/verify-process-restart-filesystem-honesty.py --self-test && python3 scripts/verify-process-restart-filesystem-honesty.py
+      - name: Verify live-session schema alignment honesty checker
+        run: python3 scripts/verify-live-session-schema-alignment.py --self-test && python3 scripts/verify-live-session-schema-alignment.py
       - name: Enforce live-session script +x and keyed-exec retry identity
         shell: bash
         run: |
