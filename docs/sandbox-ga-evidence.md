@@ -52,7 +52,9 @@ sudo bash scripts/proof-linux-sandbox-setuid-launcher.sh \
 The script installs via `prepare-linux-sandbox-host.sh --install-launcher`,
 refuses nosuid installs where `chmod 4755` does not stick, unsets the CI
 setpriv wrapper, and runs a non-root `a3s-box run --isolation sandbox` smoke.
-Report schema: `a3s.box.linux-sandbox-setuid-launcher-proof.v1`. This gate is
+Report schema: `a3s.box.linux-sandbox-setuid-launcher-proof.v1`. Verify with
+`python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py REPORT.json`
+(fail-closed honesty checker; CI runs `--self-test`). This gate is
 not required to flip B2 or MicroVM cutover.
 
 ## Proven Sandbox surfaces
@@ -66,6 +68,8 @@ not required to flip B2 or MicroVM cutover.
 | Pause/resume, filesystem snapshots | SDK Local Sandbox |
 | Native Live v4 retained stream + FS across owner SIGKILL | Live-session gate + verifier |
 | Stopped-only owner crash recovery | no-KVM recovery report |
+| Fresh ensure reaps supervised orphans after Host SIGKILL | SDK sandbox smoke + #339 |
+| Operator setuid launcher (self-hosted suid FS) | proof script + honesty verifier |
 
 ## Explicit non-claims
 

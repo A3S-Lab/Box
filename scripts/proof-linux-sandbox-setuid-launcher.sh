@@ -187,5 +187,12 @@ with open(report_path, "w", encoding="utf-8") as handle:
 raise SystemExit(0 if status == "passed" else 1)
 PY
 
+if [[ "${STATUS}" != "passed" ]]; then
+  echo "${ERROR}" >&2
+  exit 1
+fi
+
+python3 "${SCRIPT_DIR}/verify-linux-sandbox-setuid-launcher-proof.py" "${REPORT}"
+
 echo "setuid launcher proof passed: ${SYSTEM_LAUNCHER} mode ${mode} root:root"
 echo "  report=${REPORT}"

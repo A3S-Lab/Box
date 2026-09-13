@@ -13,6 +13,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Fail-closed honesty verifier
+  `scripts/verify-linux-sandbox-setuid-launcher-proof.py` for
+  `a3s.box.linux-sandbox-setuid-launcher-proof.v1` (mode `4755`, root uid,
+  non-root proof identity, setpriv-not-claimed, B2/cutover false). Wired into
+  Format CI `--self-test` and invoked by
+  `proof-linux-sandbox-setuid-launcher.sh` after a passing run. Does **not**
+  claim every distro has setuid, B2 close, or MicroVM cutover.
+
 - Non-root native Linux Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` now
   fail-closes unless the resolved Sandbox OCI launcher is root-owned setuid
   (mode `4755`). `prepare-linux-sandbox-host.sh --install-launcher` refuses
