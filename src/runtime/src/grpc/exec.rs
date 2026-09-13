@@ -185,8 +185,7 @@ pub(crate) fn should_retry_guest_file_download(
     request: &a3s_box_core::exec::FileRequest,
     error: &BoxError,
 ) -> bool {
-    matches!(request.op, a3s_box_core::FileOp::Download)
-        && is_ambiguous_filesystem_transport(error)
+    matches!(request.op, a3s_box_core::FileOp::Download) && is_ambiguous_filesystem_transport(error)
 }
 
 /// Combined guest file-transfer retry policy for ExecClient and MicroVM session.
@@ -194,7 +193,8 @@ pub(crate) fn should_retry_guest_file_transfer(
     request: &a3s_box_core::exec::FileRequest,
     error: &BoxError,
 ) -> bool {
-    should_retry_guest_file_upload(request, error) || should_retry_guest_file_download(request, error)
+    should_retry_guest_file_upload(request, error)
+        || should_retry_guest_file_download(request, error)
 }
 
 /// Keyed one-shot exec can replay the guest journal with the same `request_id`.

@@ -16,8 +16,7 @@ pub use attestation::{
     SecretInjectionResult, SecretInjector, UnsealResult,
 };
 pub(crate) use exec::{
-    should_retry_guest_file_transfer, should_retry_guest_file_upload,
-    should_retry_guest_filesystem, should_retry_keyed_guest_exec,
+    should_retry_guest_file_transfer, should_retry_guest_filesystem, should_retry_keyed_guest_exec,
 };
 pub use exec::{ExecClient, StreamingExec, StreamingExecInput};
 #[cfg(unix)]
