@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v5 reports.
+"""Fail-closed honesty checks for a3s.box.linux-native-live-session.v6 reports.
 
-Retained-stream and retained-filesystem proofs are required, including a stable
-keyed file-upload request_id. B2, fixture continuity, KVM MicroVM Live, and
-utility-VM claims must stay false — this gate does not close those.
+Retained-stream and retained-filesystem proofs are required, including stable
+keyed MakeDir and keyed file-upload request IDs plus ListDir after reattach.
+B2, fixture continuity, KVM MicroVM Live, and utility-VM claims must stay
+false — this gate does not close those.
 """
 
 from __future__ import annotations
@@ -13,10 +14,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-native-live-session.v5"
+SCHEMA = "a3s.box.linux-native-live-session.v6"
 KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"
+KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"
 REQUIRED_TRUE = (
     "retained_stream_handle_proven",
+    "mkdir_before_kill",
+    "list_dir_after_reattach",
     "file_upload_before_kill",
     "file_download_after_reattach",
     "retained_filesystem_proven",
@@ -44,6 +48,11 @@ def evaluate(report: dict) -> list[str]:
             f"file_upload_request_id={upload_id!r} "
             f"(expected {KEYED_FILE_UPLOAD_BEFORE!r})"
         )
+    mkdir_id = report.get("mkdir_request_id")
+    if mkdir_id != KEYED_MKDIR_BEFORE:
+        failures.append(
+            f"mkdir_request_id={mkdir_id!r} (expected {KEYED_MKDIR_BEFORE!r})"
+        )
     for forbidden in FORBIDDEN:
         if report.get(forbidden):
             failures.append(f"{forbidden} must stay false")
@@ -55,6 +64,7 @@ def passing_report() -> dict:
         "schema_version": SCHEMA,
         "status": "passed",
         "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
+        "mkdir_request_id": KEYED_MKDIR_BEFORE,
     }
     for required in REQUIRED_TRUE:
         report[required] = True
@@ -68,54 +78,35 @@ def self_test() -> int:
         print("self-test: passing report was rejected", file=sys.stderr)
         return 1
     bad_cases = [
-        {"schema_version": "v4", "status": "passed", "retained_stream_handle_proven": True},
+        {"schema_version": "v5", "status": "passed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "failed", "retained_stream_handle_proven": True},
         {"schema_version": SCHEMA, "status": "passed", "retained_stream_handle_proven": False},
         {
-            "schema_version": SCHEMA,
-            "status": "passed",
-            "retained_stream_handle_proven": True,
-            "file_upload_before_kill": True,
-            "file_download_after_reattach": True,
-            "retained_filesystem_proven": True,
-            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
+            **passing_report(),
             "b2_process_session_recovery_closed": True,
         },
         {
-            "schema_version": SCHEMA,
-            "status": "passed",
-            "retained_stream_handle_proven": True,
-            "file_upload_before_kill": True,
-            "file_download_after_reattach": True,
-            "retained_filesystem_proven": True,
-            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
+            **passing_report(),
             "fixture_stream_continuity_claimed": True,
         },
         {
-            "schema_version": SCHEMA,
-            "status": "passed",
-            "retained_stream_handle_proven": True,
-            "file_upload_before_kill": True,
-            "file_download_after_reattach": False,
-            "retained_filesystem_proven": True,
-            "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
+            **passing_report(),
+            "list_dir_after_reattach": False,
         },
         {
-            "schema_version": SCHEMA,
-            "status": "passed",
-            "retained_stream_handle_proven": True,
-            "file_upload_before_kill": True,
-            "file_download_after_reattach": True,
-            "retained_filesystem_proven": True,
+            **passing_report(),
+            "mkdir_before_kill": False,
+        },
+        {
+            **passing_report(),
+            "mkdir_request_id": None,
+        },
+        {
+            **passing_report(),
             "file_upload_request_id": None,
         },
         {
-            "schema_version": SCHEMA,
-            "status": "passed",
-            "retained_stream_handle_proven": True,
-            "file_upload_before_kill": True,
-            "file_download_after_reattach": True,
-            "retained_filesystem_proven": True,
+            **passing_report(),
             "file_upload_request_id": "unkeyed-or-wrong-id",
         },
     ]
@@ -148,21 +139,18 @@ def main(argv: list[str]) -> int:
         return 2
     path = Path(argv[1])
     if not path.is_file():
-        print(f"missing live-session report: {path}", file=sys.stderr)
+        print(f"missing report: {path}", file=sys.stderr)
         return 1
     report = json.loads(path.read_text(encoding="utf-8"))
     failures = evaluate(report)
     if failures:
-        print("live-session report failed honesty checks:", file=sys.stderr)
-        for item in failures:
-            print(f"  {item}", file=sys.stderr)
+        print("native live-session report honesty check failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
         return 1
-    print(
-        "live-session v5 retained-stream+keyed-filesystem proven; "
-        "B2/fixture/KVM/utility-VM claims remain false"
-    )
+    print("native live-session report honesty check passed")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    sys.exit(main(sys.argv))
