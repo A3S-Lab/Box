@@ -142,14 +142,16 @@ impl LinuxKvmOciMigrationConfig {
 
     pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
         parse_linux_kvm_environment(
-            std::env::var_os(OCI_MIGRATION_ENV),
-            std::env::var_os(OCI_HOST_ROOT_ENV),
-            std::env::var_os(OCI_KVM_ENDPOINT_ENV),
-            std::env::var_os(OCI_KVM_BOX_OWNED_ENV),
-            std::env::var_os(OCI_KVM_SERVICE_ROOT_ENV),
-            std::env::var_os(OCI_KVM_SERVICE_BIN_ENV),
-            std::env::var_os(OCI_KVM_SERVICE_SHIM_ENV),
-            std::env::var_os(OCI_KVM_SERVICE_MANIFEST_ENV),
+            LinuxKvmEnvironmentInputs {
+                mode: std::env::var_os(OCI_MIGRATION_ENV),
+                runtime_root: std::env::var_os(OCI_HOST_ROOT_ENV),
+                endpoint: std::env::var_os(OCI_KVM_ENDPOINT_ENV),
+                box_owned: std::env::var_os(OCI_KVM_BOX_OWNED_ENV),
+                service_root: std::env::var_os(OCI_KVM_SERVICE_ROOT_ENV),
+                service_bin: std::env::var_os(OCI_KVM_SERVICE_BIN_ENV),
+                service_shim: std::env::var_os(OCI_KVM_SERVICE_SHIM_ENV),
+                service_manifest: std::env::var_os(OCI_KVM_SERVICE_MANIFEST_ENV),
+            },
             home_dir,
         )
     }
@@ -841,7 +843,8 @@ fn parse_windows_environment(
     WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
 }
 
-fn parse_linux_kvm_environment(
+#[derive(Default)]
+struct LinuxKvmEnvironmentInputs {
     mode: Option<OsString>,
     runtime_root: Option<OsString>,
     endpoint: Option<OsString>,
@@ -850,8 +853,22 @@ fn parse_linux_kvm_environment(
     service_bin: Option<OsString>,
     service_shim: Option<OsString>,
     service_manifest: Option<OsString>,
+}
+
+fn parse_linux_kvm_environment(
+    inputs: LinuxKvmEnvironmentInputs,
     home_dir: &Path,
 ) -> ExecutionManagerResult<Option<LinuxKvmOciMigrationConfig>> {
+    let LinuxKvmEnvironmentInputs {
+        mode,
+        runtime_root,
+        endpoint,
+        box_owned,
+        service_root,
+        service_bin,
+        service_shim,
+        service_manifest,
+    } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -922,13 +939,9 @@ fn parse_linux_kvm_environment(
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| service_root.join("runtime.sock"));
-        return LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?.with_box_owned_owner(
-            service_root,
-            service_bin,
-            service_shim,
-            service_manifest,
-        )
-        .map(Some);
+        return LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?
+            .with_box_owned_owner(service_root, service_bin, service_shim, service_manifest)
+            .map(Some);
     }
 
     let endpoint = endpoint
@@ -1063,27 +1076,19 @@ mod tests {
         let home = absolute("a3s-oci-config-home");
         let endpoint = absolute("a3s-oci-kvm-box-runtime.sock");
         assert!(parse_linux_kvm_environment(
-            Some(OsString::from("microvm")),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                ..Default::default()
+            },
             &home
         )
         .is_err());
         assert_eq!(
             parse_linux_kvm_environment(
-                Some(OsString::from("sandbox")),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                LinuxKvmEnvironmentInputs {
+                    mode: Some(OsString::from("sandbox")),
+                    ..Default::default()
+                },
                 &home
             )
             .unwrap(),
@@ -1091,14 +1096,12 @@ mod tests {
         );
 
         let config = parse_linux_kvm_environment(
-            Some(OsString::from("microvm")),
-            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
-            Some(endpoint.clone().into_os_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                runtime_root: Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+                endpoint: Some(endpoint.clone().into_os_string()),
+                ..Default::default()
+            },
             &home,
         )
         .unwrap()
@@ -1120,27 +1123,29 @@ mod tests {
         let service_root = absolute("a3s-oci-kvm-service");
         let endpoint = service_root.join("runtime.sock");
         assert!(parse_linux_kvm_environment(
-            Some(OsString::from("microvm")),
-            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
-            Some(endpoint.clone().into_os_string()),
-            Some(OsString::from("1")),
-            Some(service_root.clone().into_os_string()),
-            None,
-            None,
-            None,
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                runtime_root: Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+                endpoint: Some(endpoint.clone().into_os_string()),
+                box_owned: Some(OsString::from("1")),
+                service_root: Some(service_root.clone().into_os_string()),
+                ..Default::default()
+            },
             &home,
         )
         .is_err());
 
         let config = parse_linux_kvm_environment(
-            Some(OsString::from("kvm")),
-            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
-            None,
-            Some(OsString::from("true")),
-            Some(service_root.clone().into_os_string()),
-            Some(absolute("a3s-oci").into_os_string()),
-            Some(absolute("a3s-oci-kvm-shim").into_os_string()),
-            Some(absolute("system-image.json").into_os_string()),
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("kvm")),
+                runtime_root: Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+                box_owned: Some(OsString::from("true")),
+                service_root: Some(service_root.clone().into_os_string()),
+                service_bin: Some(absolute("a3s-oci").into_os_string()),
+                service_shim: Some(absolute("a3s-oci-kvm-shim").into_os_string()),
+                service_manifest: Some(absolute("system-image.json").into_os_string()),
+                ..Default::default()
+            },
             &home,
         )
         .unwrap()

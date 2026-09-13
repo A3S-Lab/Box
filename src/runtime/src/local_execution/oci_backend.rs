@@ -1426,8 +1426,12 @@ impl OciLocalExecutionBackend {
     }
 
     /// Enable identity-fenced KVM qualification Host respawn for retained-manager Live reopen.
+    ///
+    /// Prefer [`super::LinuxKvmOciMigrationConfig::with_box_owned_owner`]; this
+    /// recovery hook is crate-internal once the migration composition has
+    /// certified artifacts.
     #[cfg(all(feature = "vm", target_os = "linux"))]
-    pub fn with_linux_kvm_owner_recovery(
+    pub(crate) fn with_linux_kvm_owner_recovery(
         mut self,
         service_root: impl Into<PathBuf>,
         artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
@@ -1441,7 +1445,7 @@ impl OciLocalExecutionBackend {
     }
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
-    pub fn with_linux_kvm_owner_recovery(
+    pub(crate) fn with_linux_kvm_owner_recovery(
         self,
         _service_root: impl Into<PathBuf>,
         _artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,

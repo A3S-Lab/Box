@@ -11,12 +11,12 @@ pub use lifecycle_lock::{
 };
 mod logs;
 mod oci_backend;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+mod oci_kvm_owner;
 #[cfg(feature = "vm")]
 mod oci_log_projection;
 #[cfg(feature = "vm")]
 mod oci_migration;
-#[cfg(all(feature = "vm", target_os = "linux"))]
-mod oci_kvm_owner;
 #[cfg(all(feature = "vm", not(target_os = "linux")))]
 mod oci_kvm_owner {
     //! Stub types so KVM owner recovery builders compile off Linux.
