@@ -179,6 +179,24 @@ pub(crate) fn should_retry_guest_file_upload(
         && is_ambiguous_filesystem_transport(error)
 }
 
+/// Downloads are side-effect-free reads: one fresh-stream retry is safe after
+/// ambiguous transport loss (parity with `Stat` / `ListDir`).
+pub(crate) fn should_retry_guest_file_download(
+    request: &a3s_box_core::exec::FileRequest,
+    error: &BoxError,
+) -> bool {
+    matches!(request.op, a3s_box_core::FileOp::Download)
+        && is_ambiguous_filesystem_transport(error)
+}
+
+/// Combined guest file-transfer retry policy for ExecClient and MicroVM session.
+pub(crate) fn should_retry_guest_file_transfer(
+    request: &a3s_box_core::exec::FileRequest,
+    error: &BoxError,
+) -> bool {
+    should_retry_guest_file_upload(request, error) || should_retry_guest_file_download(request, error)
+}
+
 /// Keyed one-shot exec can replay the guest journal with the same `request_id`.
 pub(crate) fn should_retry_keyed_guest_exec(
     request: &a3s_box_core::exec::ExecRequest,
@@ -437,15 +455,15 @@ impl ExecClient {
     ///
     /// Sends a discriminated JSON file request and reads a JSON FileResponse.
     /// Keyed uploads retry once on ambiguous transport loss so the guest journal
-    /// can replay one write. Unkeyed uploads and downloads stay single-shot here
-    /// (downloads are reissued by callers that treat them as idempotent reads).
+    /// can replay one write. Downloads retry once as naturally idempotent reads
+    /// (parity with `Stat` / `ListDir`). Unkeyed uploads stay single-shot.
     pub async fn file_transfer(
         &self,
         request: &a3s_box_core::exec::FileRequest,
     ) -> Result<a3s_box_core::exec::FileResponse> {
         match self.file_transfer_once(request).await {
             Ok(response) => Ok(response),
-            Err(error) if should_retry_guest_file_upload(request, &error) => {
+            Err(error) if should_retry_guest_file_transfer(request, &error) => {
                 self.file_transfer_once(request).await
             }
             Err(error) => Err(error),
@@ -1539,6 +1557,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_download_retries_after_lost_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("file-download-retry.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_server = frames.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(reader);
+            drop(w);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let _ = reader.read_frame().await.unwrap().unwrap();
+            frames_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let payload = serde_json::to_vec(&a3s_box_core::FileResponse {
+                success: true,
+                data: Some("aGVsbG8=".into()),
+                size: 5,
+                error: None,
+            })
+            .unwrap();
+            let frame = a3s_transport::Frame::data(payload);
+            tokio::io::AsyncWriteExt::write_all(&mut w, &frame.encode().unwrap())
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .file_transfer(&a3s_box_core::FileRequest {
+                op: a3s_box_core::FileOp::Download,
+                guest_path: "/tmp/x".into(),
+                data: None,
+                user: None,
+                max_bytes: None,
+                request_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert_eq!(response.size, 5);
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn test_archive_rootfs_streams_data_until_done_marker() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sock_path = tmp.path().join("archive.sock");
@@ -2409,6 +2485,11 @@ mod keyed_exec_tests {
         assert!(should_retry_guest_file_upload(&keyed, &lost));
         assert!(!should_retry_guest_file_upload(&unkeyed, &lost));
         assert!(!should_retry_guest_file_upload(&download, &lost));
+        assert!(should_retry_guest_file_download(&download, &lost));
+        assert!(!should_retry_guest_file_download(&keyed, &lost));
+        assert!(should_retry_guest_file_transfer(&download, &lost));
+        assert!(should_retry_guest_file_transfer(&keyed, &lost));
+        assert!(!should_retry_guest_file_transfer(&unkeyed, &lost));
     }
 
     #[test]
@@ -2419,8 +2500,8 @@ mod keyed_exec_tests {
             "MicroVM session filesystem must rebind through should_retry_guest_filesystem so #344 journals reach product callers"
         );
         assert!(
-            source.contains("should_retry_guest_file_upload"),
-            "MicroVM session file transfer must rebind through should_retry_guest_file_upload so keyed uploads reach product callers"
+            source.contains("should_retry_guest_file_transfer"),
+            "MicroVM session file transfer must rebind through should_retry_guest_file_transfer (keyed upload + download)"
         );
     }
 }

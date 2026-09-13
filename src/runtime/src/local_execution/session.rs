@@ -171,8 +171,9 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .await?;
         match client.file_transfer_on_stream(stream, &request).await {
             Ok(response) => Ok(response),
-            Err(error) if crate::vm::should_retry_guest_file_upload(&request, &error) => {
-                // Same request_id: guest upload journal reconciles a lost write.
+            Err(error) if crate::vm::should_retry_guest_file_transfer(&request, &error) => {
+                // Keyed uploads: guest journal reconciles a lost write.
+                // Downloads: naturally idempotent reads (parity with Stat/ListDir).
                 // Rebind: the first stream is not reusable after transport loss.
                 let (client, stream) = self
                     .bind_exec_record(&record, execution_id, generation)

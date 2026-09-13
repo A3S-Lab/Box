@@ -16,7 +16,8 @@ mod windows_stop;
 
 #[cfg(unix)]
 pub(crate) use crate::grpc::{
-    should_retry_guest_file_upload, should_retry_guest_filesystem, should_retry_keyed_guest_exec,
+    should_retry_guest_file_transfer, should_retry_guest_file_upload,
+    should_retry_guest_filesystem, should_retry_keyed_guest_exec,
 };
 pub(crate) use layout::{
     legacy_sandbox_runtime_root, persistent_rootfs_generation_exists, runtime_socket_dir,
