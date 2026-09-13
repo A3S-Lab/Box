@@ -222,7 +222,11 @@ requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for an externally launched
 `box-kvm-qualification-service`, or `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service
 root/bin/shim/manifest so Box identity-fences and (re)spawns that Host under
 `{service_root}/runtime.sock`. Box-owned KVM ensure does not claim production
-MicroVM cutover.
+MicroVM cutover. Windows WHPX qualification likewise accepts an externally
+launched `box-whpx-qualification-service` pipe, or
+`A3S_BOX_WHPX_OCI_BOX_OWNED=1` plus service root/bin/shim/vm-rootfs so Box
+identity-fences and (re)spawns that Host under a deterministic named pipe.
+Box-owned WHPX ensure does not claim WHPX MicroVM production cutover.
 Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI

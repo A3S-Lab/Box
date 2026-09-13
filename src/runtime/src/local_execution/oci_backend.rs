@@ -1351,6 +1351,14 @@ pub struct LinuxKvmOwnerRecovery {
     artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
 }
 
+/// Retained-manager recovery for the qualification-only Windows WHPX OCI owner.
+#[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+#[derive(Debug, Clone)]
+pub struct WindowsWhpxOwnerRecovery {
+    service_root: PathBuf,
+    artifacts: super::oci_whpx_owner::WindowsWhpxOwnerArtifacts,
+}
+
 /// Opt-in canonical local-execution backend over one A3S OCI host service.
 #[derive(Clone)]
 pub struct OciLocalExecutionBackend {
@@ -1360,6 +1368,8 @@ pub struct OciLocalExecutionBackend {
     native_linux_owner: Option<Arc<NativeLinuxOwnerRecovery>>,
     #[cfg(all(feature = "vm", target_os = "linux"))]
     linux_kvm_owner: Option<Arc<LinuxKvmOwnerRecovery>>,
+    #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+    windows_whpx_owner: Option<Arc<WindowsWhpxOwnerRecovery>>,
 }
 
 impl OciLocalExecutionBackend {
@@ -1376,6 +1386,8 @@ impl OciLocalExecutionBackend {
             native_linux_owner: None,
             #[cfg(all(feature = "vm", target_os = "linux"))]
             linux_kvm_owner: None,
+            #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+            windows_whpx_owner: None,
         })
     }
 
@@ -1391,6 +1403,8 @@ impl OciLocalExecutionBackend {
             native_linux_owner: None,
             #[cfg(all(feature = "vm", target_os = "linux"))]
             linux_kvm_owner: None,
+            #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+            windows_whpx_owner: None,
         })
     }
 
@@ -1445,10 +1459,35 @@ impl OciLocalExecutionBackend {
     }
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    #[allow(dead_code)]
     pub(crate) fn with_linux_kvm_owner_recovery(
         self,
         _service_root: impl Into<PathBuf>,
         _artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
+    ) -> Self {
+        self
+    }
+
+    /// Enable identity-fenced WHPX qualification Host respawn for retained-manager reopen.
+    #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+    pub(crate) fn with_windows_whpx_owner_recovery(
+        mut self,
+        service_root: impl Into<PathBuf>,
+        artifacts: super::oci_whpx_owner::WindowsWhpxOwnerArtifacts,
+    ) -> Self {
+        self.windows_whpx_owner = Some(Arc::new(WindowsWhpxOwnerRecovery {
+            service_root: service_root.into(),
+            artifacts,
+        }));
+        self
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "windows", target_arch = "x86_64")))]
+    #[allow(dead_code)]
+    pub(crate) fn with_windows_whpx_owner_recovery(
+        self,
+        _service_root: impl Into<PathBuf>,
+        _artifacts: super::oci_whpx_owner::WindowsWhpxOwnerArtifacts,
     ) -> Self {
         self
     }
@@ -1501,15 +1540,34 @@ impl OciLocalExecutionBackend {
         Ok(())
     }
 
-    #[cfg(all(feature = "vm", target_os = "linux"))]
-    async fn ensure_owner_recovery(&self) -> ExecutionManagerResult<()> {
-        self.ensure_native_linux_owner().await?;
-        self.ensure_linux_kvm_owner().await
+    #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+    async fn ensure_windows_whpx_owner(&self) -> ExecutionManagerResult<()> {
+        let Some(recovery) = self.windows_whpx_owner.as_ref() else {
+            return Ok(());
+        };
+        let endpoint = super::oci_whpx_owner::ensure_windows_whpx_oci_owner(
+            &recovery.service_root,
+            &recovery.artifacts,
+        )
+        .await?;
+        if endpoint != self.adapter.endpoint {
+            return Err(ExecutionManagerError::Internal(format!(
+                "Windows WHPX OCI owner recovery returned a different endpoint ({endpoint:?}) than the retained SDK binding ({:?})",
+                self.adapter.endpoint
+            )));
+        }
+        Ok(())
     }
 
-    #[cfg(not(all(feature = "vm", target_os = "linux")))]
-    async fn ensure_owner_recovery(&self) -> ExecutionManagerResult<()> {
+    #[cfg(not(all(feature = "vm", target_os = "windows", target_arch = "x86_64")))]
+    async fn ensure_windows_whpx_owner(&self) -> ExecutionManagerResult<()> {
         Ok(())
+    }
+
+    async fn ensure_owner_recovery(&self) -> ExecutionManagerResult<()> {
+        self.ensure_native_linux_owner().await?;
+        self.ensure_linux_kvm_owner().await?;
+        self.ensure_windows_whpx_owner().await
     }
 
     pub(super) fn metadata<'a>(

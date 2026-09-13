@@ -452,6 +452,13 @@ $env:A3S_BOX_OCI_WHPX_ENDPOINT = '\\.\pipe\a3s-oci-box-qualification'
 a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
 ```
 
+Alternatively, set `A3S_BOX_WHPX_OCI_BOX_OWNED=1` with absolute
+`A3S_BOX_WHPX_OCI_SERVICE_ROOT` / `_BIN` / `_SHIM` / `_VM_ROOTFS` so Box
+identity-fences and (re)spawns that Host under a deterministic named pipe
+derived from the service root. Script `-BoxOwned` uses this path, including
+Host `taskkill` → ensure reconnect. This remains qualification-only and does
+not promote WHPX MicroVM to production.
+
 For the exact product gate, download the Box `windows-whpx` artifact and the
 pinned OCI Runtime `windows-whpx-qualification` and `guest-agents-musl`
 artifacts, preserving each artifact's `artifact-manifest.json`, then run:
@@ -463,6 +470,9 @@ artifacts, preserving each artifact's `artifact-manifest.json`, then run:
   -OciGuestArtifactDirectory C:\artifacts\oci-agents `
   -RootfsArchive C:\images\alpine-minirootfs-3.22.5-x86_64.tar.gz
 ```
+
+Add `-BoxOwned` to skip the external Host start and recover through Box
+ensure (`box_owned_ensure_proven`).
 
 The runner accepts only artifacts whose source commits match this Box checkout
 and its exact OCI pin, requires both OCI bundles to come from one workflow run,
