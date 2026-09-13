@@ -41,6 +41,12 @@ MODEL_REQUIREMENTS: tuple[str, ...] = (
 ROADMAP_REQUIREMENTS: tuple[str, ...] = (
     "retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart",
     "b2_process_session_recovery_closed` stays false",
+    "exit gate remains open",
+    "Observation matrix greened",
+)
+
+FORBIDDEN_ROADMAP: tuple[str, ...] = (
+    "**Closed** by aggregated existing-host",
 )
 
 FORBIDDEN_FIXTURE: tuple[str, ...] = (
@@ -81,6 +87,11 @@ def evaluate_tree(root: Path) -> list[str]:
         for needle in ROADMAP_REQUIREMENTS:
             if needle not in text:
                 failures.append(f"ROADMAP.md missing {needle!r}")
+        for forbidden in FORBIDDEN_ROADMAP:
+            if forbidden in text:
+                failures.append(
+                    f"ROADMAP.md must not use overclaim wording {forbidden!r}"
+                )
 
     return failures
 
@@ -105,6 +116,24 @@ def self_test() -> int:
             print("self-test: passing fixture was rejected", file=sys.stderr)
             print("\n".join(evaluate_tree(root)), file=sys.stderr)
             return 1
+
+        bad_roadmap = root / "ROADMAP.md"
+        bad_roadmap.write_text(
+            "\n".join(ROADMAP_REQUIREMENTS)
+            + "\n**Closed** by aggregated existing-host\n",
+            encoding="utf-8",
+        )
+        failures = evaluate_tree(root)
+        if not any("overclaim wording" in failure for failure in failures):
+            print(
+                "self-test: expected Closed overclaim wording to fail",
+                file=sys.stderr,
+            )
+            return 1
+        bad_roadmap.write_text(
+            "\n".join(ROADMAP_REQUIREMENTS) + "\n",
+            encoding="utf-8",
+        )
 
         bad = fixture_dir / "process_restart.rs"
         bad.write_text(
