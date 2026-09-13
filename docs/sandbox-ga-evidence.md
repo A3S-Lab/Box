@@ -34,6 +34,27 @@ Authoritative hosted gate. Steps that matter for GA:
 6. Native Live v4 retained stream + filesystem continuity, verified by
    `scripts/verify-linux-native-live-session-report.py`.
 
+## Operator setuid launcher evidence (self-hosted)
+
+Product fail-closed: non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER`
+requires a root-owned setuid launcher (mode `4755`). Lab setpriv remains the
+hosted CI path and is **not** a substitute.
+
+Self-hosted / lab proof on a **suid-capable** root filesystem:
+
+```bash
+sudo bash scripts/proof-linux-sandbox-setuid-launcher.sh \
+  --a3s-oci /absolute/path/to/a3s-oci \
+  --box-bin /absolute/path/to/bin \
+  --report /absolute/path/to/setuid-launcher-proof.json
+```
+
+The script installs via `prepare-linux-sandbox-host.sh --install-launcher`,
+refuses nosuid installs where `chmod 4755` does not stick, unsets the CI
+setpriv wrapper, and runs a non-root `a3s-box run --isolation sandbox` smoke.
+Report schema: `a3s.box.linux-sandbox-setuid-launcher-proof.v1`. This gate is
+not required to flip B2 or MicroVM cutover.
+
 ## Proven Sandbox surfaces
 
 | Surface | Evidence |
@@ -57,7 +78,8 @@ Authoritative hosted gate. Steps that matter for GA:
 - Fixture `process_restart` as driver Live evidence.
 - Cloud `BX0.3` / hardware TEE.
 - CI setpriv as a substitute for an operator setuid install at
-  `/usr/local/libexec/a3s-box-sandbox-oci-launcher`.
+  `/usr/local/libexec/a3s-box-sandbox-oci-launcher` (use the self-hosted
+  setuid proof gate instead; hosted CI remains setpriv-on-nosuid).
 
 ## Operator host preparation
 

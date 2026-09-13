@@ -400,8 +400,11 @@ policy or cutover.
 Live Host-reopen continuity is Native-Linux-driver-only today. For **product**
 Sandbox hosts, use `scripts/prepare-linux-sandbox-host.sh` (setuid libexec +
 delegated cgroup) as documented in
-[Installation](docs/installation.md#linux-sandbox-host-preparation). For this
-**observation gate**, prepare a delegated cgroup with the CI wrapper
+[Installation](docs/installation.md#linux-sandbox-host-preparation); prove it
+with `scripts/proof-linux-sandbox-setuid-launcher.sh` on a suid-capable FS.
+Non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` fail-closes unless
+the launcher is root-owned mode `4755`. For this **observation gate**, prepare
+a delegated cgroup with the CI wrapper
 (`scripts/prepare-linux-sandbox-ci-host.sh` via sudo), then run the root-owned
 runner. It mirrors Sandbox CI: the runner starts as root, then
 `elevate-linux-sandbox-owner.sh` setpriv-execs the example (`euid=0`, sandbox
