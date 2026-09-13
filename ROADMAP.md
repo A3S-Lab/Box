@@ -289,7 +289,11 @@ non-Unix hosts. The pinned real-driver prerequisite now also proves binary
 upload/download, changed-request conflict fencing, stat/list/move, exact
 mutation replay, recursive removal, and post-cleanup `NotFound` through native
 Linux and utility-VM lifecycle harnesses. Cross-process filesystem-session
-recovery remains a release gate rather than claimed evidence.
+recovery against the durable owner fixture is covered by
+`retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`
+(mkdir + keyed upload survive owner SIGKILL; list/download after reconnect).
+That fixture is **not** real-driver B2 evidence —
+`b2_process_session_recovery_closed` stays false.
 
 ## Delivery Milestones
 
@@ -470,7 +474,7 @@ retain process or filesystem sessions after its owner dies.
   stdout/stderr log projection) through the persisted OCI route.
 - [x] Prove process-session recovery across an out-of-process runtime-service
   restart on real native Linux and utility-VM drivers.
-  **Closed** by aggregated existing-host WSL2 evidence on Box
+  **Observation matrix greened** by aggregated existing-host WSL2 evidence on Box
   `5f74b5c2356aca534bf35fa5b4d80043c95a691c` + OCI
   `61f77712e420c176dfc1a5d7ba2457e8c8299dcf`: Native Live v4 stream+filesystem
   report SHA-256
@@ -481,8 +485,9 @@ retain process or filesystem sessions after its owner dies.
   (`retained_stream_handle_proven=true`, `retained_filesystem_proven=true`,
   `kvm_microvm_live_claimed=true`). That satisfies W2's Native + one
   utility-VM driver matrix for live process, I/O, and filesystem reattach.
-  Harness report schemas keep `b2_process_session_recovery_closed=false` by
-  design (individual reports never self-certify B2 close). Does **not** flip
+  The B2 **exit gate remains open**: harness report schemas keep
+  `b2_process_session_recovery_closed=false` by design (individual reports
+  never self-certify B2 close). Does **not** flip
   default create Host-bound policy, cutover, HostRuntimeService registration,
   fixture `process_restart` continuity, fresh-host promotion, or broader
   Utility-VM product claims beyond the observation-scoped KVM MicroVM gate.
@@ -535,7 +540,9 @@ retain process or filesystem sessions after its owner dies.
     `a3s.box.live-session.keyed-file.before-owner-kill`) and shared
     Unavailable retry for upload/download (parity with keyed exec). Fail-closed
     verifier requires the keyed id. Does **not** close B2 or claim MicroVM
-    guest `file_replay` on the Sandbox OCI Live path.
+    guest `file_replay` on the Sandbox OCI Live path. Existing-host greening of
+    a v5 report digest (with the keyed upload id) remains pending; published
+    digests above remain v4-scoped.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -589,7 +596,10 @@ retain process or filesystem sessions after its owner dies.
     a harness-stable keyed file-upload identity (`file_upload_request_id` =
     `a3s.box.live-session.keyed-file.before-owner-kill`) and shared Unavailable
     retry for upload/download. Fail-closed verifier requires the keyed id.
-    Does **not** close B2 or claim MicroVM cutover.- [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
+    Does **not** close B2 or claim MicroVM cutover. Existing-host greening of a
+    v3 report digest (with the keyed upload id) remains pending; published
+    digests above remain v2-scoped.
+  - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
   terminal or Failed-on-vanish instead of stuck transitional states; snapshot
@@ -615,9 +625,12 @@ recreation, and terminal-exit races. The cross-platform deterministic owner
 contract now keeps the original Box process stream and input handle alive,
 exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
-one exec dispatch. Native Linux and KVM MicroVM Live reattachment on real
-hosts is checklist-closed under the process-session recovery parent above
-(existing-host WSL2 digests); harness reports still keep
+one exec dispatch. The same fixture owner also recovers keyed file upload and
+mutating filesystem state across owner replacement without flipping B2. Native
+Linux and KVM MicroVM Live reattachment on real hosts is observation-greened under
+the process-session recovery parent above
+(existing-host WSL2 digests); the B2 exit gate remains open and harness reports
+still keep
 `b2_process_session_recovery_closed=false`. Box-owned native Host spawn forces
 supervised create for production SandboxViaOci; external Hosts without the env
 remain Host-bound. Fresh construction reaps supervised orphans on dead-Host
@@ -635,8 +648,10 @@ owner replacement, and must publish final drain evidence before deletion.
 The standalone CRI adapter now reconciles persisted sandboxes to `NotReady`
 after a service restart, marks containers without a live VM exited, reclaims
 their bridge-network endpoints, and removes leaked CRI rootfs trees. This is
-resource-safe restart reconciliation, not process-session reattachment; the
-real native-driver recovery gate below remains open.
+resource-safe restart reconciliation, not process-session reattachment (that
+Live observation matrix is observation-greened above; the B2 exit gate remains
+open and harness reports still keep
+`b2_process_session_recovery_closed=false`).
 
 ### B3 - Storage And Networking Attachments
 

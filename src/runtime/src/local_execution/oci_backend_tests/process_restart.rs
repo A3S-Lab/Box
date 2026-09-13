@@ -3,14 +3,23 @@
 //! `retained_backend_recovers_after_runtime_owner_process_restart` proves the
 //! Box client contract: one create/start/exec, expose `Unavailable` on owner
 //! death, reconnect, continue stdin/output/signal/wait on the same process
-//! handle. That is **not** real Native Linux or utility-VM driver evidence and
-//! must not be cited as closing ROADMAP B2. Real-driver Live observation lives
-//! in `linux-native-live-session-qualification` (fresh manager + keyed exec;
-//! no retained-stream claim).
+//! handle.
+//!
+//! `retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`
+//! proves the same owner-death / reconnect contract for keyed file upload and
+//! mutating filesystem state that lives in the durable fixture journal (mkdir,
+//! list, download after reconnect).
+//!
+//! Neither test is real Native Linux or utility-VM driver evidence and must
+//! not be cited as closing ROADMAP B2 (`b2_process_session_recovery_closed`
+//! stays false). Real-driver Live observation lives in
+//! `linux-native-live-session-qualification` (fresh manager + keyed exec /
+//! keyed upload; no retained-stream claim).
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,10 +34,24 @@ const STATE_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_STATE";
 const ENDPOINT_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_ENDPOINT";
 const READY_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_READY";
 const CALL_LOG_ENV: &str = "A3S_BOX_TEST_RUNTIME_OWNER_CALL_LOG";
-const CHILD_TEST_NAME: &str = concat!(
+const PROCESS_CHILD_TEST_NAME: &str = concat!(
     "local_execution::oci_backend::tests::process_restart::",
     "retained_backend_recovers_after_runtime_owner_process_restart"
 );
+const FILESYSTEM_CHILD_TEST_NAME: &str = concat!(
+    "local_execution::oci_backend::tests::process_restart::",
+    "retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart"
+);
+
+fn fixture_isolation() -> ExecutionIsolation {
+    // Product policy rejects Sandbox on Windows; the durable fixture owner still
+    // models retained backend recovery for either isolation class.
+    if cfg!(windows) {
+        ExecutionIsolation::Microvm
+    } else {
+        ExecutionIsolation::Sandbox
+    }
+}
 
 #[async_trait]
 impl OciRuntimeService for DurableFixtureService {
@@ -51,6 +74,8 @@ impl OciRuntimeService for DurableFixtureService {
                     | RuntimeOperation::CloseStdin
                     | RuntimeOperation::SignalProcess
                     | RuntimeOperation::WaitProcess
+                    | RuntimeOperation::File
+                    | RuntimeOperation::Filesystem
             )
         });
         Ok(info)
@@ -95,6 +120,10 @@ impl OciRuntimeService for DurableFixtureService {
                 start_operation: None,
                 exit_status: None,
                 process: None,
+                directories: Default::default(),
+                files: Default::default(),
+                file_operations: Default::default(),
+                filesystem_operations: Default::default(),
             },
             "process-fixture-create",
         )?;
@@ -546,6 +575,396 @@ impl OciRuntimeService for DurableFixtureService {
             .retryable(true)
         })
     }
+
+    async fn file(&self, request: OciFileRequest) -> OciResult<OciFileResponse> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-file", error))?;
+        let mut state = self.load("process-fixture-file")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-file",
+                "durable process fixture is absent",
+            )
+        })?;
+        validate_target(&request.target, &state.record, "process-fixture-file")?;
+        if state.record.state.status() != &ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "process-fixture-file",
+                "durable process fixture is not running",
+            ));
+        }
+
+        let response = match request.op {
+            OciFileOp::Upload => {
+                let operation = request
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| {
+                        oci_error(
+                            ErrorCode::InvalidArgument,
+                            "process-fixture-file",
+                            "durable upload requires an operation context",
+                        )
+                    })?
+                    .operation_id
+                    .to_string();
+                if let Some(previous) = state.file_operations.get(&operation) {
+                    if previous != &request {
+                        return Err(oci_error(
+                            ErrorCode::Conflict,
+                            "process-fixture-file",
+                            "upload operation identity was reused with different content",
+                        ));
+                    }
+                    let size = STANDARD
+                        .decode(previous.data.as_deref().unwrap_or_default())
+                        .map(|bytes| bytes.len() as u64)
+                        .unwrap_or(0);
+                    return Ok(OciFileResponse {
+                        target: request.target.clone(),
+                        data: None,
+                        size,
+                    });
+                }
+                let decoded = STANDARD
+                    .decode(request.data.as_deref().unwrap_or_default())
+                    .map_err(|error| {
+                        oci_error(
+                            ErrorCode::InvalidArgument,
+                            "process-fixture-file",
+                            format!("invalid base64 upload: {error}"),
+                        )
+                    })?;
+                ensure_parent_directories(&mut state.directories, &request.path);
+                state
+                    .files
+                    .insert(request.path.clone(), STANDARD.encode(&decoded));
+                state.file_operations.insert(operation, request.clone());
+                self.store(&state, "process-fixture-file")?;
+                self.append_call("file-upload")?;
+                OciFileResponse {
+                    target: request.target.clone(),
+                    data: None,
+                    size: decoded.len() as u64,
+                }
+            }
+            OciFileOp::Download => {
+                let encoded = state.files.get(&request.path).ok_or_else(|| {
+                    oci_error(
+                        ErrorCode::NotFound,
+                        "process-fixture-file",
+                        format!("durable file {} is absent", request.path),
+                    )
+                })?;
+                let decoded = STANDARD.decode(encoded).map_err(|error| {
+                    oci_error(
+                        ErrorCode::Internal,
+                        "process-fixture-file",
+                        format!("corrupt durable file payload: {error}"),
+                    )
+                })?;
+                self.append_call("file-download")?;
+                OciFileResponse {
+                    target: request.target.clone(),
+                    data: Some(encoded.clone()),
+                    size: decoded.len() as u64,
+                }
+            }
+        };
+        Ok(response)
+    }
+
+    async fn filesystem(&self, request: OciFilesystemRequest) -> OciResult<OciFilesystemResponse> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|error| lock_error("process-fixture-filesystem", error))?;
+        let mut state = self.load("process-fixture-filesystem")?.ok_or_else(|| {
+            oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-filesystem",
+                "durable process fixture is absent",
+            )
+        })?;
+        validate_target(&request.target, &state.record, "process-fixture-filesystem")?;
+        if state.record.state.status() != &ContainerState::Running {
+            return Err(oci_error(
+                ErrorCode::FailedPrecondition,
+                "process-fixture-filesystem",
+                "durable process fixture is not running",
+            ));
+        }
+
+        if request.op.is_mutating() {
+            let operation = request
+                .context
+                .as_ref()
+                .ok_or_else(|| {
+                    oci_error(
+                        ErrorCode::InvalidArgument,
+                        "process-fixture-filesystem",
+                        "durable filesystem mutation requires an operation context",
+                    )
+                })?
+                .operation_id
+                .to_string();
+            if let Some(previous) = state.filesystem_operations.get(&operation) {
+                if previous != &request {
+                    return Err(oci_error(
+                        ErrorCode::Conflict,
+                        "process-fixture-filesystem",
+                        "filesystem operation identity was reused with different content",
+                    ));
+                }
+                return Ok(filesystem_mutation_response(&request));
+            }
+            apply_filesystem_mutation(&mut state, &request)?;
+            state
+                .filesystem_operations
+                .insert(operation, request.clone());
+            self.store(&state, "process-fixture-filesystem")?;
+            self.append_call("filesystem-mutation")?;
+            return Ok(filesystem_mutation_response(&request));
+        }
+
+        let response = match request.op {
+            OciFilesystemOp::Stat => {
+                let entry = durable_stat_entry(&state, &request.path).ok_or_else(|| {
+                    oci_error(
+                        ErrorCode::NotFound,
+                        "process-fixture-filesystem",
+                        format!("durable path {} is absent", request.path),
+                    )
+                })?;
+                self.append_call("filesystem-stat")?;
+                OciFilesystemResponse {
+                    target: request.target.clone(),
+                    entry: Some(entry),
+                    entries: Vec::new(),
+                }
+            }
+            OciFilesystemOp::ListDir => {
+                let entries = durable_list_entries(&state, &request.path);
+                self.append_call("filesystem-listdir")?;
+                OciFilesystemResponse {
+                    target: request.target.clone(),
+                    entry: None,
+                    entries,
+                }
+            }
+            OciFilesystemOp::MakeDir | OciFilesystemOp::Move | OciFilesystemOp::Remove => {
+                unreachable!("mutating filesystem ops are handled above")
+            }
+        };
+        Ok(response)
+    }
+}
+
+fn normalize_guest_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn ensure_parent_directories(directories: &mut std::collections::BTreeSet<String>, path: &str) {
+    let normalized = normalize_guest_path(path);
+    let Some((parent, _)) = normalized.rsplit_once('/') else {
+        return;
+    };
+    if parent.is_empty() {
+        return;
+    }
+    ensure_directory_tree(directories, parent);
+}
+
+fn ensure_directory_tree(directories: &mut std::collections::BTreeSet<String>, path: &str) {
+    let normalized = normalize_guest_path(path);
+    if normalized == "/" {
+        return;
+    }
+    let mut current = String::new();
+    for part in normalized.trim_start_matches('/').split('/') {
+        current.push('/');
+        current.push_str(part);
+        directories.insert(current.clone());
+    }
+}
+
+fn durable_entry(path: &str, kind: OciFilesystemEntryKind, size: u64) -> OciFilesystemEntry {
+    let mut entry = fake_filesystem_entry(path, kind);
+    entry.size = size as i64;
+    entry
+}
+
+fn durable_stat_entry(state: &DurableFixtureState, path: &str) -> Option<OciFilesystemEntry> {
+    let normalized = normalize_guest_path(path);
+    if let Some(encoded) = state.files.get(&normalized) {
+        let size = STANDARD
+            .decode(encoded)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        return Some(durable_entry(
+            &normalized,
+            OciFilesystemEntryKind::File,
+            size,
+        ));
+    }
+    if state.directories.contains(&normalized) {
+        return Some(durable_entry(
+            &normalized,
+            OciFilesystemEntryKind::Directory,
+            0,
+        ));
+    }
+    None
+}
+
+fn durable_list_entries(state: &DurableFixtureState, path: &str) -> Vec<OciFilesystemEntry> {
+    let normalized = normalize_guest_path(path);
+    let prefix = if normalized == "/" {
+        "/".to_string()
+    } else {
+        format!("{normalized}/")
+    };
+    let mut entries = Vec::new();
+    for directory in &state.directories {
+        if let Some(rest) = directory.strip_prefix(&prefix) {
+            if !rest.is_empty() && !rest.contains('/') {
+                entries.push(durable_entry(
+                    directory,
+                    OciFilesystemEntryKind::Directory,
+                    0,
+                ));
+            }
+        }
+    }
+    for (file_path, encoded) in &state.files {
+        if let Some(rest) = file_path.strip_prefix(&prefix) {
+            if !rest.is_empty() && !rest.contains('/') {
+                let size = STANDARD
+                    .decode(encoded)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0);
+                entries.push(durable_entry(file_path, OciFilesystemEntryKind::File, size));
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries
+}
+
+fn apply_filesystem_mutation(
+    state: &mut DurableFixtureState,
+    request: &OciFilesystemRequest,
+) -> OciResult<()> {
+    match request.op {
+        OciFilesystemOp::MakeDir => {
+            ensure_directory_tree(&mut state.directories, &request.path);
+            Ok(())
+        }
+        OciFilesystemOp::Move => {
+            let source = normalize_guest_path(&request.path);
+            let destination = normalize_guest_path(request.destination.as_deref().unwrap_or(""));
+            if destination.is_empty() || destination == "/" {
+                return Err(oci_error(
+                    ErrorCode::InvalidArgument,
+                    "process-fixture-filesystem",
+                    "durable move requires a destination path",
+                ));
+            }
+            if let Some(payload) = state.files.remove(&source) {
+                ensure_parent_directories(&mut state.directories, &destination);
+                state.files.insert(destination, payload);
+                return Ok(());
+            }
+            if state.directories.remove(&source) {
+                ensure_directory_tree(&mut state.directories, &destination);
+                let source_prefix = format!("{source}/");
+                let destination_prefix = format!("{destination}/");
+                let child_dirs: Vec<String> = state
+                    .directories
+                    .iter()
+                    .filter(|path| path.starts_with(&source_prefix))
+                    .cloned()
+                    .collect();
+                for child in child_dirs {
+                    state.directories.remove(&child);
+                    let suffix = child.trim_start_matches(&source_prefix);
+                    state
+                        .directories
+                        .insert(format!("{destination_prefix}{suffix}"));
+                }
+                let child_files: Vec<(String, String)> = state
+                    .files
+                    .iter()
+                    .filter(|(path, _)| path.starts_with(&source_prefix))
+                    .map(|(path, payload)| (path.clone(), payload.clone()))
+                    .collect();
+                for (child, payload) in child_files {
+                    state.files.remove(&child);
+                    let suffix = child.trim_start_matches(&source_prefix);
+                    state
+                        .files
+                        .insert(format!("{destination_prefix}{suffix}"), payload);
+                }
+                return Ok(());
+            }
+            Err(oci_error(
+                ErrorCode::NotFound,
+                "process-fixture-filesystem",
+                format!("durable path {source} is absent"),
+            ))
+        }
+        OciFilesystemOp::Remove => {
+            let target = normalize_guest_path(&request.path);
+            let prefix = format!("{target}/");
+            state
+                .files
+                .retain(|path, _| path != &target && !path.starts_with(&prefix));
+            state
+                .directories
+                .retain(|path| path != &target && !path.starts_with(&prefix));
+            Ok(())
+        }
+        OciFilesystemOp::Stat | OciFilesystemOp::ListDir => unreachable!("read-only ops"),
+    }
+}
+
+fn filesystem_mutation_response(request: &OciFilesystemRequest) -> OciFilesystemResponse {
+    match request.op {
+        OciFilesystemOp::MakeDir => OciFilesystemResponse {
+            target: request.target.clone(),
+            entry: Some(durable_entry(
+                &normalize_guest_path(&request.path),
+                OciFilesystemEntryKind::Directory,
+                0,
+            )),
+            entries: Vec::new(),
+        },
+        OciFilesystemOp::Move => OciFilesystemResponse {
+            target: request.target.clone(),
+            entry: Some(durable_entry(
+                &normalize_guest_path(request.destination.as_deref().unwrap_or_default()),
+                OciFilesystemEntryKind::File,
+                0,
+            )),
+            entries: Vec::new(),
+        },
+        OciFilesystemOp::Remove => OciFilesystemResponse {
+            target: request.target.clone(),
+            entry: None,
+            entries: Vec::new(),
+        },
+        OciFilesystemOp::Stat | OciFilesystemOp::ListDir => {
+            unreachable!("read-only ops use dedicated response builders")
+        }
+    }
 }
 
 struct RuntimeOwnerChild {
@@ -555,6 +974,7 @@ struct RuntimeOwnerChild {
 
 impl RuntimeOwnerChild {
     fn spawn(
+        child_test_name: &str,
         state_path: &Path,
         endpoint: &OsStr,
         ready_path: &Path,
@@ -563,7 +983,7 @@ impl RuntimeOwnerChild {
     ) -> Self {
         let stderr = std::fs::File::create(&stderr_path).expect("create owner stderr file");
         let child = Command::new(std::env::current_exe().expect("resolve runtime test executable"))
-            .args(["--exact", CHILD_TEST_NAME, "--nocapture"])
+            .args(["--exact", child_test_name, "--nocapture"])
             .env(CHILD_ENV, "1")
             .env(STATE_ENV, state_path)
             .env(ENDPOINT_ENV, endpoint)
@@ -706,8 +1126,18 @@ fn process_restart_module_docs_refuse_b2_overclaim() {
         "process_restart must keep an explicit anti-overfit B2 disclaimer"
     );
     assert!(
+        docs.contains("b2_process_session_recovery_closed"),
+        "process_restart must name the B2 gate that stays false"
+    );
+    assert!(
         docs.contains("linux-native-live-session-qualification"),
         "process_restart must point reviewers at the real-driver observation gate"
+    );
+    assert!(
+        docs.contains(
+            "retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart"
+        ),
+        "process_restart must document the cross-process filesystem-session fixture"
     );
 }
 
@@ -724,6 +1154,7 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
     let (endpoint_value, endpoint) = process_endpoint(&directory);
     let first_ready = directory.path().join("owner-1.ready");
     let mut first_owner = RuntimeOwnerChild::spawn(
+        PROCESS_CHILD_TEST_NAME,
         &state_path,
         &endpoint_value,
         &first_ready,
@@ -744,7 +1175,7 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
     let operation = box_operation("runtime-owner-process-restart-operation");
     let running = manager
         .create_and_start(
-            request("runtime-owner-process-restart", ExecutionIsolation::Sandbox),
+            request("runtime-owner-process-restart", fixture_isolation()),
             &operation,
         )
         .await
@@ -791,6 +1222,7 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
 
     let second_ready = directory.path().join("owner-2.ready");
     let mut second_owner = RuntimeOwnerChild::spawn(
+        PROCESS_CHILD_TEST_NAME,
         &state_path,
         &endpoint_value,
         &second_ready,
@@ -874,6 +1306,199 @@ async fn retained_backend_recovers_after_runtime_owner_process_restart() {
     assert!(
         !state_path.exists(),
         "container cleanup must remove durable process-session state"
+    );
+
+    second_owner.terminate();
+    drop(manager);
+}
+
+#[tokio::test]
+async fn retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart() {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        run_child().await;
+        return;
+    }
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let state_path = directory.path().join("runtime-state.json");
+    let call_log = directory.path().join("runtime-calls.log");
+    let (endpoint_value, endpoint) = process_endpoint(&directory);
+    let first_ready = directory.path().join("owner-1.ready");
+    let mut first_owner = RuntimeOwnerChild::spawn(
+        FILESYSTEM_CHILD_TEST_NAME,
+        &state_path,
+        &endpoint_value,
+        &first_ready,
+        &call_log,
+        directory.path().join("owner-1.stderr"),
+    );
+    first_owner.wait_until_ready(&first_ready);
+
+    let provider = Arc::new(FakeBundleProvider::default());
+    let backend = OciLocalExecutionBackend::connect(endpoint.clone(), provider.clone())
+        .await
+        .expect("connect Box backend to first runtime-owner process");
+    let manager = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        Arc::new(backend),
+    );
+    let operation = box_operation("runtime-owner-filesystem-restart-operation");
+    let running = manager
+        .create_and_start(
+            request("runtime-owner-filesystem-restart", fixture_isolation()),
+            &operation,
+        )
+        .await
+        .expect("initial launch through first runtime-owner process");
+
+    let created = manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::MakeDir,
+                path: "/work/tree".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some("fixture-fs-mkdir-before-owner-kill".to_string()),
+            },
+        )
+        .await
+        .expect("mkdir through first runtime owner");
+    assert_eq!(
+        created.entry.expect("created directory").kind,
+        BoxFilesystemEntryKind::Directory
+    );
+
+    let payload = b"cross-process filesystem session\n";
+    let upload = manager
+        .transfer_file(
+            &running.execution_id,
+            running.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Upload,
+                guest_path: "/work/tree/payload.txt".to_string(),
+                data: Some(STANDARD.encode(payload)),
+                user: None,
+                max_bytes: None,
+                request_id: Some("fixture-file-upload-before-owner-kill".to_string()),
+            },
+        )
+        .await
+        .expect("upload through first runtime owner");
+    assert!(upload.success);
+    assert_eq!(upload.size, payload.len() as u64);
+
+    first_owner.terminate();
+    let error = manager
+        .reconcile(&operation)
+        .await
+        .expect_err("the request that observes owner death must fail");
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+
+    let second_ready = directory.path().join("owner-2.ready");
+    let mut second_owner = RuntimeOwnerChild::spawn(
+        FILESYSTEM_CHILD_TEST_NAME,
+        &state_path,
+        &endpoint_value,
+        &second_ready,
+        &call_log,
+        directory.path().join("owner-2.stderr"),
+    );
+    second_owner.wait_until_ready(&second_ready);
+    let ReconcileOutcome::Ready(recovered) = manager
+        .reconcile(&operation)
+        .await
+        .expect("retained Box backend must reconnect and reconcile")
+    else {
+        panic!("expected the filesystem-restarted execution to remain ready")
+    };
+    assert_eq!(recovered.execution_id, running.execution_id);
+    assert_eq!(recovered.generation, running.generation);
+    assert_eq!(provider.prepares.load(Ordering::SeqCst), 1);
+
+    let listing = manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::ListDir,
+                path: "/work/tree".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: None,
+            },
+        )
+        .await
+        .expect("list recovered directory through replacement owner");
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].path, "/work/tree/payload.txt");
+    assert_eq!(listing.entries[0].kind, BoxFilesystemEntryKind::File);
+
+    let download = manager
+        .transfer_file(
+            &running.execution_id,
+            running.generation,
+            BoxFileRequest {
+                op: BoxFileOp::Download,
+                guest_path: "/work/tree/payload.txt".to_string(),
+                data: None,
+                user: None,
+                max_bytes: None,
+                request_id: None,
+            },
+        )
+        .await
+        .expect("download recovered file through replacement owner");
+    assert!(download.success);
+    assert_eq!(
+        STANDARD
+            .decode(download.data.expect("download payload"))
+            .expect("valid download base64"),
+        payload
+    );
+
+    manager
+        .kill(&running.execution_id, running.generation)
+        .await
+        .expect("clean up recovered container");
+
+    let calls = std::fs::read_to_string(&call_log).expect("read runtime-owner call log");
+    assert_eq!(calls.lines().filter(|call| *call == "create").count(), 1);
+    assert_eq!(calls.lines().filter(|call| *call == "start").count(), 1);
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| *call == "filesystem-mutation")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls.lines().filter(|call| *call == "file-upload").count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| *call == "filesystem-listdir")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| *call == "file-download")
+            .count(),
+        1
+    );
+    assert_eq!(calls.lines().filter(|call| *call == "kill").count(), 1);
+    assert_eq!(calls.lines().filter(|call| *call == "delete").count(), 1);
+    assert!(
+        !state_path.exists(),
+        "container cleanup must remove durable filesystem-session state"
     );
 
     second_owner.terminate();
