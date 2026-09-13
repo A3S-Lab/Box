@@ -864,7 +864,7 @@ pub(crate) fn handle_connection(
 
     match serde_json::from_slice::<GuestSessionRequest>(&payload) {
         Ok(GuestSessionRequest::File(request)) => {
-            let response_payload = serde_json::to_vec(&handle_file_request(request))?;
+            let response_payload = serde_json::to_vec(&dispatch_file_request(request))?;
             write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
             return Ok(());
         }
@@ -1101,6 +1101,52 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
 const MAX_FILESYSTEM_DEPTH: u32 = 64;
 const MAX_FILESYSTEM_ENTRIES: usize = 4096;
 const MAX_FILESYSTEM_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+fn dispatch_file_request(request: FileRequest) -> FileResponse {
+    use crate::file_replay::{
+        file_replay_cache, file_request_digest, is_keyed_upload, FileReplayAcquire,
+    };
+
+    if !is_keyed_upload(&request) {
+        return handle_file_request(request);
+    }
+    let request_id = request
+        .request_id
+        .as_deref()
+        .expect("keyed upload filtered above");
+    let digest = match file_request_digest(&request) {
+        Ok(digest) => digest,
+        Err(error) => {
+            return FileResponse {
+                success: false,
+                data: None,
+                size: 0,
+                error: Some(error),
+            };
+        }
+    };
+    match file_replay_cache().acquire(request_id, digest) {
+        Ok(FileReplayAcquire::Replay(response)) => (*response).clone(),
+        Ok(FileReplayAcquire::Execute(claim)) => {
+            let response = handle_file_request(request);
+            match claim.complete(response.clone()) {
+                Ok(shared) => (*shared).clone(),
+                Err(error) => FileResponse {
+                    success: false,
+                    data: None,
+                    size: 0,
+                    error: Some(error),
+                },
+            }
+        }
+        Err(error) => FileResponse {
+            success: false,
+            data: None,
+            size: 0,
+            error: Some(error),
+        },
+    }
+}
 
 fn dispatch_filesystem_request(request: FilesystemRequest) -> FilesystemResponse {
     use crate::filesystem_replay::{
@@ -3734,6 +3780,7 @@ mod tests {
             data: Some(STANDARD.encode(&data)),
             user: None,
             max_bytes: None,
+            request_id: None,
         });
         assert!(uploaded.success, "{:?}", uploaded.error);
         assert_eq!(uploaded.size, data.len() as u64);
@@ -3745,6 +3792,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: Some(data.len() as u64),
+            request_id: None,
         });
         assert!(downloaded.success, "{:?}", downloaded.error);
         assert_eq!(downloaded.size, data.len() as u64);
@@ -3763,6 +3811,7 @@ mod tests {
             data: Some(STANDARD.encode(b"replacement")),
             user: None,
             max_bytes: Some(5),
+            request_id: None,
         });
         assert!(!invalid_upload.success);
         assert!(invalid_upload
@@ -3777,6 +3826,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: Some(5),
+            request_id: None,
         });
         assert!(!oversized.success);
         assert!(oversized.error.unwrap().contains("max_bytes is 5"));
@@ -3788,6 +3838,7 @@ mod tests {
                 data: None,
                 user: None,
                 max_bytes: Some(limit),
+                request_id: None,
             });
             assert!(!invalid.success);
             assert!(invalid.error.unwrap().contains("must be between"));
@@ -3802,6 +3853,7 @@ mod tests {
             data: Some("not-base64!".to_string()),
             user: None,
             max_bytes: None,
+            request_id: None,
         });
         assert!(!invalid.success);
         assert!(invalid.error.unwrap().contains("valid base64"));
@@ -3812,6 +3864,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: Some(1024),
+            request_id: None,
         });
         assert!(!missing.success);
         assert!(missing.error.unwrap().contains("file not found"));
@@ -3822,6 +3875,7 @@ mod tests {
             data: None,
             user: None,
             max_bytes: Some(1024),
+            request_id: None,
         }))
         .unwrap();
         assert!(declares_guest_session_request(&envelope));

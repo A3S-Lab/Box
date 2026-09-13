@@ -121,6 +121,7 @@ impl Filesystem {
                 data: Some(STANDARD.encode(data.as_ref())),
                 user: options.user,
                 max_bytes: None,
+                request_id: Some(format!("file-{}", uuid::Uuid::new_v4())),
             })
             .await?;
         require_file_success(response).map(|response| WriteInfo {
@@ -168,6 +169,7 @@ impl Filesystem {
                 data: None,
                 user: options.user,
                 max_bytes,
+                request_id: None,
             })
             .await?;
         let response = require_file_success(response)?;

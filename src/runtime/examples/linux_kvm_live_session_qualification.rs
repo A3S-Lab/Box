@@ -962,6 +962,7 @@ mod qualification {
                     data: Some(STANDARD.encode(FS_PAYLOAD)),
                     user: None,
                     max_bytes: None,
+                    request_id: None,
                 },
             )
             .await
@@ -1000,6 +1001,7 @@ mod qualification {
             data: None,
             user: None,
             max_bytes: Some(FS_PAYLOAD.len() as u64),
+            request_id: None,
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let response = loop {

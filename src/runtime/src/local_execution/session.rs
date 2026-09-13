@@ -169,10 +169,21 @@ impl ExecutionSessionManager for LocalExecutionManager {
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
-        client
-            .file_transfer_on_stream(stream, &request)
-            .await
-            .map_err(|error| session_error(execution_id, "transfer file", error))
+        match client.file_transfer_on_stream(stream, &request).await {
+            Ok(response) => Ok(response),
+            Err(error) if crate::vm::should_retry_guest_file_upload(&request, &error) => {
+                // Same request_id: guest upload journal reconciles a lost write.
+                // Rebind: the first stream is not reusable after transport loss.
+                let (client, stream) = self
+                    .bind_exec_record(&record, execution_id, generation)
+                    .await?;
+                client
+                    .file_transfer_on_stream(stream, &request)
+                    .await
+                    .map_err(|error| session_error(execution_id, "transfer file", error))
+            }
+            Err(error) => Err(session_error(execution_id, "transfer file", error)),
+        }
     }
 
     async fn filesystem(
