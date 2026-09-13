@@ -102,6 +102,29 @@ def evaluate_tree(root: Path) -> list[str]:
             if pending not in text:
                 failures.append(f"ROADMAP.md missing {pending!r}")
 
+    readme = root / "README.md"
+    if not readme.is_file():
+        failures.append("missing README.md")
+    else:
+        text = readme.read_text(encoding="utf-8")
+        for forbidden in (
+            "lifecycle + Native Live v4)",
+            "and Native Live v4 retained stream",
+            "the Native Live v4 observation gate",
+            "and Native Live v4 use the production",
+        ):
+            if forbidden in text:
+                failures.append(
+                    f"README.md overclaims tip Live as {forbidden!r}; "
+                    "require tip harness v6 with v4-scoped greened digests"
+                )
+        for required in (
+            "tip harness v6",
+            "greened digests remain v4-scoped",
+        ):
+            if required not in text:
+                failures.append(f"README.md missing honesty phrase {required!r}")
+
     return failures
 
 
@@ -142,10 +165,28 @@ def self_test() -> int:
             "greening of a v4 digest remains pending\n",
             encoding="utf-8",
         )
+        (root / "README.md").write_text(
+            "tip harness v6; published greened digests remain v4-scoped\n",
+            encoding="utf-8",
+        )
         if evaluate_tree(root):
             print("self-test: passing fixture was rejected", file=sys.stderr)
             print("\n".join(evaluate_tree(root)), file=sys.stderr)
             return 1
+
+        bad_readme = root / "README.md"
+        bad_readme.write_text(
+            "lifecycle + Native Live v4) proves the route\n",
+            encoding="utf-8",
+        )
+        failures = evaluate_tree(root)
+        if not any("overclaims tip Live" in failure for failure in failures):
+            print("self-test: expected README Live v4 overclaim to fail", file=sys.stderr)
+            return 1
+        bad_readme.write_text(
+            "tip harness v6; published greened digests remain v4-scoped\n",
+            encoding="utf-8",
+        )
 
         bad = root / NATIVE_VERIFIER
         bad.write_text(
