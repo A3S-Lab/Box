@@ -26,7 +26,8 @@ pub use events::{
     DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS,
 };
 pub use filesystem::{
-    Artifact, ArtifactExportOptions, Filesystem, FilesystemOptions, WriteInfo, MAX_ARTIFACT_BYTES,
+    Artifact, ArtifactExportOptions, Filesystem, FilesystemOptions, MutateInfo, WriteInfo,
+    MAX_ARTIFACT_BYTES,
 };
 pub use lifecycle::{SandboxLogOptions, SandboxRestartOptions};
 pub use options::{

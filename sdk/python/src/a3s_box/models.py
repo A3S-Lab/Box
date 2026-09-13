@@ -23,6 +23,13 @@ class WriteInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class MutateInfo:
+    """Result of a successful mutating filesystem op (make_dir / rename / remove)."""
+
+    request_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Artifact:
     path: str
     data: bytes

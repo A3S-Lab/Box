@@ -173,7 +173,7 @@ func run(ctx context.Context, isolation box.Isolation) (returnErr error) {
 	if value, err := files.ReadString(ctx, "/cache/marker.txt"); err != nil || value != "cache-ok" {
 		return fmt.Errorf("named volume cache has unexpected contents: %q: %w", value, err)
 	}
-	if err := files.MakeDir(ctx, "/workspace/artifacts"); err != nil {
+	if _, err := files.MakeDir(ctx, "/workspace/artifacts"); err != nil {
 		return err
 	}
 	if _, err := files.WriteString(ctx, "/workspace/artifacts/result.txt", "hello"); err != nil {
@@ -195,13 +195,13 @@ func run(ctx context.Context, isolation box.Isolation) (returnErr error) {
 	if entries, err := files.List(ctx, "/workspace/artifacts", 1); err != nil || len(entries) == 0 {
 		return fmt.Errorf("artifact directory is empty: %w", err)
 	}
-	if err := files.Move(ctx, "/workspace/artifacts/result.txt", "/workspace/artifacts/final.txt"); err != nil {
+	if _, err := files.Move(ctx, "/workspace/artifacts/result.txt", "/workspace/artifacts/final.txt"); err != nil {
 		return err
 	}
 	if value, err := files.ReadString(ctx, "/workspace/artifacts/final.txt"); err != nil || value != "hello" {
 		return fmt.Errorf("moved artifact has unexpected contents: %q: %w", value, err)
 	}
-	if err := files.Remove(ctx, "/workspace/artifacts"); err != nil {
+	if _, err := files.Remove(ctx, "/workspace/artifacts"); err != nil {
 		return err
 	}
 	if logs, err := sandbox.Logs(ctx, 20); err != nil || len(logs) > 20 {

@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Mutating filesystem success responses now return the durable `request_id`
+  (SDK-minted `fs-*` or caller-supplied), matching `file_write` / `WriteInfo`
+  parity: Rust `MutateInfo`, bridge `filesystem_make_dir` /
+  `filesystem_move` / `filesystem_remove` success JSON, and Go / Python /
+  TypeScript SDK surfaces. Does **not** flip B2, invent Live digests, or claim
+  Sandbox guest `filesystem_replay` closed.
+
 ### Added
 
 - Live-session observation harness bumps to Native
@@ -44,10 +53,10 @@ All notable changes to A3S Box will be documented in this file.
   way one-shot command Unavailable does, so callers can retry Host reopen /
   backend-not-ready failures against the existing guest journal. Bridge
   `file_write` / `filesystem_make_dir` / `filesystem_move` /
-  `filesystem_remove` accept optional `request_id`; `file_write` success
-  returns `request_id`. Go / Python / TypeScript SDKs expose the same identity
-  surface. Does **not** key downloads, flip B2, or claim Sandbox Live FS
-  recovery closed.
+  `filesystem_remove` accept optional `request_id`; success returns
+  `request_id` (`WriteInfo` / `MutateInfo`). Go / Python / TypeScript SDKs
+  expose the same identity surface. Does **not** key downloads, flip B2, or
+  claim Sandbox Live FS recovery closed.
 
 ### Fixed
 

@@ -73,6 +73,7 @@ export {
   type TmpfsMount,
   type UpdateResourcesOptions,
   type VolumeMount,
+  type MutateInfo,
   type WriteInfo,
 } from './sandbox.js'
 

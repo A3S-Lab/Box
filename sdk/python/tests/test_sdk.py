@@ -423,11 +423,14 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         "sandbox_kill",
         "sandbox_pause",
         "sandbox_resume",
+    }:
+        return {"ok": True}
+    if operation in {
         "filesystem_make_dir",
         "filesystem_move",
         "filesystem_remove",
     }:
-        return {"ok": True}
+        return {"ok": True, "request_id": "fs-test"}
     raise AssertionError(f"unexpected operation: {operation}")
 
 

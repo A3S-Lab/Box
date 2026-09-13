@@ -51,6 +51,7 @@ from .models import (
     TmpfsMount,
     VolumeInfo,
     VolumeMount,
+    MutateInfo,
     WriteInfo,
 )
 from .runtime import (
@@ -131,5 +132,6 @@ __all__ = [
     "VolumeBuilder",
     "VolumeInfo",
     "VolumeMount",
+    "MutateInfo",
     "WriteInfo",
 ]

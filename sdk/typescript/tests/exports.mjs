@@ -309,7 +309,7 @@ class FakeRuntime {
       case 'filesystem_make_dir':
       case 'filesystem_move':
       case 'filesystem_remove':
-        return { ok: true }
+        return { ok: true, request_id: 'fs-test' }
       default:
         throw new Error(`unexpected operation: ${request.operation}`)
     }

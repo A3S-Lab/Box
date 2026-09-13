@@ -775,7 +775,7 @@ async fn filesystem_make_dir_unavailable_preserves_request_id_for_retry() {
     );
     assert!(message.contains("prepare-filesystem"));
 
-    sandbox
+    let recovered = sandbox
         .files
         .make_dir_with_options(
             "/workspace/out",
@@ -783,6 +783,7 @@ async fn filesystem_make_dir_unavailable_preserves_request_id_for_retry() {
         )
         .await
         .unwrap();
+    assert_eq!(recovered.request_id, request_id);
 
     let filesystem_requests = runtime.filesystem_requests.lock().unwrap();
     assert_eq!(filesystem_requests.len(), 2);
@@ -794,6 +795,46 @@ async fn filesystem_make_dir_unavailable_preserves_request_id_for_retry() {
         filesystem_requests[1].request_id.as_deref(),
         Some(request_id.as_str())
     );
+}
+
+#[tokio::test]
+async fn filesystem_mutate_success_returns_minted_request_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    let mkdir = sandbox.files.make_dir("/workspace/out").await.unwrap();
+    assert!(
+        mkdir.request_id.starts_with("fs-"),
+        "minted request_id missing: {}",
+        mkdir.request_id
+    );
+
+    let moved = sandbox
+        .files
+        .move_path("/workspace/out", "/workspace/renamed")
+        .await
+        .unwrap();
+    assert!(
+        moved.request_id.starts_with("fs-"),
+        "minted request_id missing: {}",
+        moved.request_id
+    );
+    assert_ne!(moved.request_id, mkdir.request_id);
+
+    let removed = sandbox.files.remove("/workspace/renamed").await.unwrap();
+    assert!(
+        removed.request_id.starts_with("fs-"),
+        "minted request_id missing: {}",
+        removed.request_id
+    );
+    assert_ne!(removed.request_id, mkdir.request_id);
+    assert_ne!(removed.request_id, moved.request_id);
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@ pub use client::{
 };
 pub use sandbox::{
     Artifact, ArtifactExportOptions, CommandResult, CommandRunOptions, Commands, Filesystem,
-    FilesystemOptions, Sandbox, SandboxBuilder, SandboxCommand, SandboxCreateOptions,
+    FilesystemOptions, MutateInfo, Sandbox, SandboxBuilder, SandboxCommand, SandboxCreateOptions,
     SandboxEventStream, SandboxEventStreamOptions, SandboxInfo, SandboxLogOptions, SandboxNetwork,
     SandboxRestartOptions, ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource, WriteInfo,
     DEFAULT_EVENT_STREAM_BATCH_ITEMS, DEFAULT_EVENT_STREAM_WAIT_TIMEOUT_MS, DEFAULT_SANDBOX_IMAGE,

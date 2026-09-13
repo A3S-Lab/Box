@@ -132,6 +132,12 @@ export interface WriteInfo {
   requestId: string
 }
 
+/** Result of a successful mutating filesystem op (makeDir / rename / remove). */
+export interface MutateInfo {
+  /** Durable mutate identity used for this op (SDK-minted `fs-*` or caller-supplied). */
+  requestId: string
+}
+
 export interface Artifact {
   path: string
   data: Uint8Array
@@ -1195,32 +1201,33 @@ export class Filesystem {
   async makeDir(
     path: string,
     options: { user?: string; requestId?: string } = {}
-  ): Promise<EntryInfo | undefined> {
+  ): Promise<MutateInfo> {
     const result = await this.sandbox.bridgeRequest(
       this.request('filesystem_make_dir', path, options)
     )
-    return result.entry === undefined ? undefined : entryInfo(asRecord(result.entry))
+    return { requestId: requiredString(result, 'request_id') }
   }
 
   async rename(
     oldPath: string,
     newPath: string,
     options: { user?: string; requestId?: string } = {}
-  ): Promise<EntryInfo | undefined> {
+  ): Promise<MutateInfo> {
     const result = await this.sandbox.bridgeRequest({
       ...this.request('filesystem_move', oldPath, options),
       destination: newPath,
     })
-    return result.entry === undefined ? undefined : entryInfo(asRecord(result.entry))
+    return { requestId: requiredString(result, 'request_id') }
   }
 
   async remove(
     path: string,
     options: { user?: string; requestId?: string } = {}
-  ): Promise<void> {
-    await this.sandbox.bridgeRequest(
+  ): Promise<MutateInfo> {
+    const result = await this.sandbox.bridgeRequest(
       this.request('filesystem_remove', path, options)
     )
+    return { requestId: requiredString(result, 'request_id') }
   }
 
   private async readBytes(
