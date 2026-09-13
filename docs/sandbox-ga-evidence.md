@@ -31,8 +31,11 @@ Authoritative hosted gate. Steps that matter for GA:
    `A3S_BOX_OCI_MIGRATION` **unset**.
 5. Packaged SDK smoke with `/dev/kvm` absent and inaccessible
    (`scripts/no-kvm-packaged-sdk-smoke.sh`).
-6. Native Live v5 retained stream + keyed filesystem continuity, verified by
-   `scripts/verify-linux-native-live-session-report.py`.
+6. Native Live v6 retained stream + keyed mutating filesystem continuity
+   (MakeDir + upload before kill; ListDir + download after reattach), verified
+   by `scripts/verify-linux-native-live-session-report.py`. Existing-host
+   greening of a v6 digest remains pending; published digests remain
+   v4-scoped.
 
 ## Operator setuid launcher evidence (self-hosted)
 
@@ -66,7 +69,7 @@ not required to flip B2 or MicroVM cutover.
 | Named volumes, bind/tmpfs (R17 mounts) | R17 profile gate |
 | Network: private netns, loopback-only; R17 Service host-loopback relays | R17 networking profile + design |
 | Pause/resume, filesystem snapshots | SDK Local Sandbox |
-| Native Live v5 retained stream + keyed FS across owner SIGKILL | Live-session gate + verifier |
+| Native Live v6 retained stream + keyed mutating FS across owner SIGKILL | Live-session gate + verifier (v6 greening pending) |
 | Stopped-only owner crash recovery | no-KVM recovery report |
 | Fresh ensure reaps supervised orphans after Host SIGKILL | SDK sandbox smoke + #339 |
 | Operator setuid launcher (self-hosted suid FS) | proof script + honesty verifier |
@@ -80,6 +83,8 @@ not required to flip B2 or MicroVM cutover.
 - WHPX/KVM MicroVM **production** OCI composition (qualification-only remains).
 - Flipping `b2_process_session_recovery_closed`.
 - Fixture `process_restart` as driver Live evidence.
+- Claiming Native Live v6 / KVM Live v4 existing-host greening before a
+  matching report digest is published.
 - Cloud `BX0.3` / hardware TEE.
 - CI setpriv as a substitute for an operator setuid install at
   `/usr/local/libexec/a3s-box-sandbox-oci-launcher` (use the self-hosted

@@ -6,6 +6,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Live-session observation harness bumps to Native
+  `a3s.box.linux-native-live-session.v6` and KVM
+  `a3s.box.linux-kvm-live-session.v4`: keyed MakeDir before owner kill
+  (`mkdir_request_id` =
+  `a3s.box.live-session.keyed-mkdir.before-owner-kill`) plus ListDir after
+  reattach, so mutating filesystem continuity matches the durable
+  `process_restart` fixture bar. Fail-closed report verifiers require the new
+  fields. Does **not** flip B2, claim Sandbox guest `filesystem_replay`, or
+  claim MicroVM cutover; existing-host greening of v6/v4 digests remains
+  pending.
+
 - Cross-process filesystem-session recovery fixture
   `retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`:
   durable owner journals mkdir + keyed upload across owner SIGKILL, then

@@ -543,6 +543,15 @@ retain process or filesystem sessions after its owner dies.
     guest `file_replay` on the Sandbox OCI Live path. Existing-host greening of
     a v5 report digest (with the keyed upload id) remains pending; published
     digests above remain v4-scoped.
+  - [x] Observation harness `a3s.box.linux-native-live-session.v6` extends v5
+    with keyed MakeDir before owner SIGKILL
+    (`mkdir_request_id` =
+    `a3s.box.live-session.keyed-mkdir.before-owner-kill`) and ListDir after
+    reattach, so mutating filesystem continuity matches the durable
+    `process_restart` fixture bar. Fail-closed verifier requires the mkdir id
+    and `list_dir_after_reattach`. Does **not** close B2, claim guest
+    `filesystem_replay` on Sandbox OCI Live, or MicroVM cutover. Existing-host
+    greening of a v6 digest remains pending.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -599,6 +608,13 @@ retain process or filesystem sessions after its owner dies.
     Does **not** close B2 or claim MicroVM cutover. Existing-host greening of a
     v3 report digest (with the keyed upload id) remains pending; published
     digests above remain v2-scoped.
+  - [x] Observation harness `a3s.box.linux-kvm-live-session.v4` extends v3 with
+    keyed MakeDir before Host Service SIGKILL
+    (`mkdir_request_id` =
+    `a3s.box.live-session.keyed-mkdir.before-owner-kill`) and ListDir after
+    reattach. Fail-closed verifier requires the mkdir id and
+    `list_dir_after_reattach`. Does **not** close B2 or claim MicroVM cutover.
+    Existing-host greening of a v4 digest remains pending.
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish

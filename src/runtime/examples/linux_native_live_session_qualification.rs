@@ -3,24 +3,28 @@
 //! Exercises the public Box Sandbox path with
 //! `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`, keeps the Box manager across a
 //! Native Linux Host owner SIGKILL, proves retained streaming process-handle
-//! continuity, filesystem continuity via public `transfer_file` (upload before
-//! kill, download after reattach on the same generation), plus keyed captured
-//! exec / state / inventory / stats / kill, without inventing an exit status.
+//! continuity, mutating filesystem continuity via public Box `filesystem`
+//! (keyed MakeDir before kill, ListDir after reattach) plus `transfer_file`
+//! (keyed upload before kill, download after reattach on the same generation),
+//! and keyed captured exec / state / inventory / stats / kill, without
+//! inventing an exit status.
 //!
-//! Schema `a3s.box.linux-native-live-session.v5`.
+//! Schema `a3s.box.linux-native-live-session.v6`.
 //!
 //! Honest scope (anti-overfit):
 //! - Live Host-reopen is Native-Linux-driver-only today.
 //! - `retained_stream_handle_proven` is set only when the same
 //!   `start_process` handle continues stdin/output/signal after owner reopen.
-//! - `retained_filesystem_proven` is set only when keyed upload-before-kill
-//!   bytes match download-after-reattach on the same Box generation (stable
-//!   `file_upload_request_id`, same Unavailable retry policy as keyed exec).
+//! - `retained_filesystem_proven` is set only when keyed MakeDir + keyed upload
+//!   before kill are visible after reattach (ListDir + download) on the same
+//!   Box generation (stable `mkdir_request_id` / `file_upload_request_id`,
+//!   same Unavailable retry policy as keyed exec).
 //! - Fixture `process_restart` continuity is never claimed
 //!   (`fixture_stream_continuity_claimed` stays false).
-//! - Does **not** claim KVM MicroVM Live continuity. Harness reports keep
-//!   `b2_process_session_recovery_closed=false` by design (individual reports
-//!   never self-certify ROADMAP B2 / OCI R6 close).
+//! - Does **not** claim KVM MicroVM Live continuity or guest `file_replay` /
+//!   `filesystem_replay` journals on the Sandbox OCI Live path. Harness
+//!   reports keep `b2_process_session_recovery_closed=false` by design
+//!   (individual reports never self-certify ROADMAP B2 / OCI R6 close).
 
 #[cfg(not(all(
     target_os = "linux",
@@ -57,6 +61,7 @@ mod qualification {
         ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionManager,
         ExecutionManagerError, ExecutionProcessSignal, ExecutionProcessStream,
         ExecutionSessionManager, ExecutionState, FileOp, FileRequest, FileResponse,
+        FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse,
         IsolationClass as BoxIsolationClass, NetworkMode, OperationId, ReconcileOutcome,
         ResourceConfig, StreamType,
     };
@@ -80,17 +85,19 @@ mod qualification {
     const BOX_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_BOX_SHA";
     const OCI_SHA_ENV: &str = "A3S_BOX_NATIVE_LIVE_SESSION_OCI_SHA";
     const SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v5";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v6";
     const OWNER_SCHEMA: &str = "a3s.box.native-linux-oci-owner.v1";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
     const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";
+    const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";
     const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
-    const FS_GUEST_PATH: &str = "/tmp/.a3s-box-native-live-fs.bin";
-    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv5\n";
+    const FS_GUEST_DIR: &str = "/tmp/.a3s-box-native-live-fs.d";
+    const FS_GUEST_PATH: &str = "/tmp/.a3s-box-native-live-fs.d/payload.bin";
+    const FS_PAYLOAD: &[u8] = b"a3s-box-native-live-fs\0binary\nv6\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -134,10 +141,17 @@ mod qualification {
         file_upload_before_kill: bool,
         /// Durable upload identity used before owner SIGKILL (harness-stable).
         file_upload_request_id: Option<String>,
+        /// Keyed MakeDir before owner SIGKILL via public Box `filesystem`.
+        mkdir_before_kill: bool,
+        /// Durable MakeDir identity used before owner SIGKILL (harness-stable).
+        mkdir_request_id: Option<String>,
+        /// ListDir after Live reopen sees the pre-kill directory contents.
+        list_dir_after_reattach: bool,
         /// Download after Live reopen matches the pre-kill upload payload.
         file_download_after_reattach: bool,
-        /// Aggregate: keyed upload before kill + exact download match after
-        /// reattach on the same Running generation (no invented stop).
+        /// Aggregate: keyed MakeDir + keyed upload before kill + ListDir and
+        /// exact download match after reattach on the same Running generation
+        /// (no invented stop).
         retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
@@ -197,6 +211,9 @@ mod qualification {
                 retained_stream_handle_proven: false,
                 file_upload_before_kill: false,
                 file_upload_request_id: None,
+                mkdir_before_kill: false,
+                mkdir_request_id: None,
+                list_dir_after_reattach: false,
                 file_download_after_reattach: false,
                 retained_filesystem_proven: false,
                 fixture_stream_continuity_claimed: false,
@@ -423,6 +440,16 @@ mod qualification {
         )
         .await?;
         report.keyed_captured_exec_before_owner_kill = true;
+
+        prove_mkdir_before_kill(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_MKDIR_BEFORE,
+        )
+        .await?;
+        report.mkdir_before_kill = true;
+        report.mkdir_request_id = Some(KEYED_MKDIR_BEFORE.to_string());
 
         prove_file_upload_before_kill(
             &manager,
@@ -655,6 +682,10 @@ mod qualification {
         )?;
         report.exit_code_absent_after_reopen = true;
 
+        prove_list_dir_after_reattach(&manager, &reservation.execution_id, reservation.generation)
+            .await?;
+        report.list_dir_after_reattach = true;
+
         prove_file_download_after_reattach(
             &manager,
             &reservation.execution_id,
@@ -662,8 +693,11 @@ mod qualification {
         )
         .await?;
         report.file_download_after_reattach = true;
-        report.retained_filesystem_proven = report.file_upload_before_kill
+        report.retained_filesystem_proven = report.mkdir_before_kill
+            && report.list_dir_after_reattach
+            && report.file_upload_before_kill
             && report.file_download_after_reattach
+            && report.mkdir_request_id.as_deref() == Some(KEYED_MKDIR_BEFORE)
             && report.file_upload_request_id.as_deref() == Some(KEYED_FILE_UPLOAD_BEFORE)
             && report.reconciled_ready_after_reopen
             && report.observed_running_after_reopen
@@ -854,6 +888,122 @@ mod qualification {
                 }
             }
         }
+    }
+
+    async fn filesystem_until_ready(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FilesystemRequest,
+        phase: &str,
+    ) -> Result<FilesystemResponse, AnyError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match manager
+                .filesystem(execution_id, generation, request.clone())
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(ExecutionManagerError::Unavailable(message)) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure(format!(
+                            "{phase}: execution backend unavailable: {message}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => {
+                    return Err(failure(format!("{phase}: {error}")));
+                }
+            }
+        }
+    }
+
+    async fn prove_mkdir_before_kill(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request_id: &str,
+    ) -> Result<(), AnyError> {
+        let response = filesystem_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FilesystemRequest {
+                op: FilesystemOp::MakeDir,
+                path: FS_GUEST_DIR.to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some(request_id.to_string()),
+            },
+            &format!("Live retained keyed MakeDir `{request_id}` before owner SIGKILL"),
+        )
+        .await?;
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained keyed MakeDir `{request_id}` before owner SIGKILL reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        let entry = response.entry.as_ref().ok_or_else(|| {
+            failure(format!(
+                "Live retained keyed MakeDir `{request_id}` omitted directory entry"
+            ))
+        })?;
+        require(
+            entry.kind == FilesystemEntryKind::Directory && entry.path == FS_GUEST_DIR,
+            format!(
+                "Live retained keyed MakeDir `{request_id}` returned unexpected entry kind/path"
+            ),
+        )?;
+        Ok(())
+    }
+
+    async fn prove_list_dir_after_reattach(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<(), AnyError> {
+        let response = filesystem_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FilesystemRequest {
+                op: FilesystemOp::ListDir,
+                path: FS_GUEST_DIR.to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: None,
+            },
+            "Live retained ListDir after reopen",
+        )
+        .await?;
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained ListDir after reopen reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        let saw_payload = response
+            .entries
+            .iter()
+            .any(|entry| entry.path == FS_GUEST_PATH && entry.kind == FilesystemEntryKind::File);
+        require(
+            saw_payload,
+            format!(
+                "Live retained ListDir after reopen missing uploaded payload at {FS_GUEST_PATH}; entries={:?}",
+                response
+                    .entries
+                    .iter()
+                    .map(|entry| (&entry.path, entry.kind))
+                    .collect::<Vec<_>>()
+            ),
+        )?;
+        Ok(())
     }
 
     async fn prove_file_upload_before_kill(
