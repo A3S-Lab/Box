@@ -24,6 +24,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Fail-closed MicroVM transport-retry honesty checker
+  `scripts/verify-microvm-transport-retry-honesty.py` asserts session/ExecClient
+  retry symbols and the README MicroVM lifecycle row stay aligned with keyed
+  exec, filesystem, keyed upload, and download retries. Wired into Format CI
+  (`--self-test` + live tree). Does **not** flip B2 or MicroVM cutover.
+
 - Guest file uploads accept an optional durable `request_id`. When set, guest
   init journals the exact response and the MicroVM guest channel retries once
   on ambiguous transport loss (same at-most-once pattern as keyed exec /
