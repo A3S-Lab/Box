@@ -160,10 +160,12 @@ artifacts are published from the same versioned release tag. See the
 > `b2_process_session_recovery_closed=false` (reports never self-certify B2
 > close). Fixture `process_restart` is not driver Live evidence.
 > **Still open (out of Sandbox GA):** default MicroVM → OCI cutover, WHPX/KVM
-> MicroVM *production* composition (qualification-only remains), HostRuntime
-> Service registration as the default create path, and broader Cloud `BX0.3`
-> hardware-TEE claims. The default omit-isolation → MicroVM split above is
-> still authoritative until a separate MicroVM cutover ships.
+> MicroVM *production* composition (qualification-only remains), and broader
+> Cloud `BX0.3` hardware-TEE claims. Box-owned native Host spawn now forces
+> supervised create (`A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`) for production
+> `SandboxViaOci`; external Hosts that omit the env remain Host-bound.
+> The default omit-isolation → MicroVM split above is still authoritative
+> until a separate MicroVM cutover ships.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload

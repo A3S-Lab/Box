@@ -6,6 +6,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Box-owned native Linux Host spawn now forces
+  `A3S_OCI_NATIVE_SESSION_SUPERVISOR=1` so production `SandboxViaOci` create
+  and Live reopen share Host → Supervisor → Launcher. SDK sandbox smoke
+  requires `sessionSupervisor` in `native-linux-recovery.v6`. The owner-death
+  smoke tears down that supervisor after Host SIGKILL so stopped-only
+  reconcile still proves a tombstone (Live harness keeps the supervisor).
+  External operator-launched Hosts that omit the env remain Host-bound. Does
+  **not** flip `b2_process_session_recovery_closed`, MicroVM cutover, or
+  WHPX/KVM MicroVM production claims.
+
 - Qualification-only Windows WHPX OCI **Box-owned Host ensure/recovery**
   (`a3s.box.windows-whpx-oci-owner.v1`): identity-fenced spawn of
   `box-whpx-qualification-service`, refuse unowned ready evidence, reclaim
