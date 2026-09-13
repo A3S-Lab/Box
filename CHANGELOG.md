@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Fail-closed Live-session schema alignment checker
+  `scripts/verify-live-session-schema-alignment.py` (Format CI) asserts Native
+  v6 / KVM v4 example `SCHEMA_VERSION` and keyed upload/mkdir IDs match their
+  report verifiers, and that ROADMAP still records tip-schema greening as
+  pending. Does **not** flip B2 or invent existing-host digests.
+
 - Live-session observation harness bumps to Native
   `a3s.box.linux-native-live-session.v6` and KVM
   `a3s.box.linux-kvm-live-session.v4`: keyed MakeDir before owner kill
