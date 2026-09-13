@@ -70,6 +70,7 @@ mod qualification {
     const SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_SHIM";
     const SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_MANIFEST";
     const SERVICE_LOG_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_LOG";
+    const BOX_OWNED_ENV: &str = "A3S_BOX_KVM_OCI_BOX_OWNED";
     const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-oci-qualification.v2";
     const STDOUT_MARKER: &str = "a3s-box-kvm-oci-stdout";
     const STDERR_MARKER: &str = "a3s-box-kvm-oci-stderr";
@@ -79,7 +80,10 @@ mod qualification {
 
     #[derive(Debug, Clone)]
     struct ServiceRestartInputs {
-        pid: u32,
+        /// Operator-supplied Host pid for the external-start path; unused when
+        /// `box_owned` (pid is read from `box-owner.json` at kill time).
+        pid: Option<u32>,
+        box_owned: bool,
         service_bin: PathBuf,
         service_root: PathBuf,
         service_shim: PathBuf,
@@ -95,6 +99,7 @@ mod qualification {
         endpoint: PathBuf,
         image: String,
         service_restart: Option<ServiceRestartInputs>,
+        box_owned: bool,
     }
 
     #[derive(Debug, Serialize)]
@@ -274,7 +279,15 @@ mod qualification {
         )?;
         let image = required_environment_string(IMAGE_ENV)?;
         let state_path = home_dir.join("managed-executions.json");
-        let service_restart = load_service_restart_inputs()?;
+        let box_owned = matches!(
+            std::env::var(BOX_OWNED_ENV).ok().as_deref(),
+            Some("1" | "true" | "on" | "yes" | "box-owned")
+        );
+        let service_restart = if box_owned {
+            load_box_owned_restart_inputs()?
+        } else {
+            load_service_restart_inputs()?
+        };
         report.runtime_service_restart_requested = service_restart.is_some();
 
         report.home_dir = Some(home_dir.clone());
@@ -289,6 +302,7 @@ mod qualification {
             endpoint,
             image,
             service_restart,
+            box_owned,
         })
     }
 
@@ -302,13 +316,68 @@ mod qualification {
             .map_err(|_| failure(format!("{SERVICE_PID_ENV} must be a positive pid")))?;
         require(pid > 1, format!("{SERVICE_PID_ENV} must be a positive pid"))?;
         Ok(Some(ServiceRestartInputs {
-            pid,
+            pid: Some(pid),
+            box_owned: false,
             service_bin: absolute_environment_path(SERVICE_BIN_ENV)?,
             service_root: absolute_environment_path(SERVICE_ROOT_ENV)?,
             service_shim: absolute_environment_path(SERVICE_SHIM_ENV)?,
             system_image_manifest: absolute_environment_path(SERVICE_MANIFEST_ENV)?,
             service_log: absolute_environment_path(SERVICE_LOG_ENV)?,
         }))
+    }
+
+    /// Box-owned phase 2: kill the identity-fenced owner; reconnect calls ensure.
+    fn load_box_owned_restart_inputs() -> Result<Option<ServiceRestartInputs>, AnyError> {
+        let service_root = match std::env::var_os(SERVICE_ROOT_ENV) {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => return Ok(None),
+        };
+        require(
+            service_root.is_absolute(),
+            format!("{SERVICE_ROOT_ENV} must be absolute for Box-owned restart"),
+        )?;
+        Ok(Some(ServiceRestartInputs {
+            pid: None,
+            box_owned: true,
+            service_bin: absolute_environment_path(SERVICE_BIN_ENV)?,
+            service_root,
+            service_shim: absolute_environment_path(SERVICE_SHIM_ENV)?,
+            system_image_manifest: absolute_environment_path(SERVICE_MANIFEST_ENV)?,
+            service_log: absolute_environment_path(SERVICE_LOG_ENV)?,
+        }))
+    }
+
+    fn owner_pid_from_box_record(service_root: &Path) -> Result<u32, AnyError> {
+        let path = service_root.join("box-owner.json");
+        let bytes = std::fs::read(&path).map_err(|error| {
+            failure(format!(
+                "failed to read Box-owned KVM owner record {}: {error}",
+                path.display()
+            ))
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            failure(format!(
+                "Box-owned KVM owner record {} is invalid JSON: {error}",
+                path.display()
+            ))
+        })?;
+        let pid = value
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                failure(format!(
+                    "Box-owned KVM owner record {} is missing pid",
+                    path.display()
+                ))
+            })?;
+        let pid = u32::try_from(pid).map_err(|_| {
+            failure(format!(
+                "Box-owned KVM owner record {} has an out-of-range pid",
+                path.display()
+            ))
+        })?;
+        require(pid > 1, "Box-owned KVM owner pid must be greater than 1")?;
+        Ok(pid)
     }
 
     async fn exercise(
@@ -661,14 +730,20 @@ mod qualification {
         service: &ServiceRestartInputs,
         endpoint: &Path,
     ) -> Result<(), AnyError> {
-        // SAFETY: qualification-only SIGKILL of the exact operator-supplied pid.
-        let kill_rc = unsafe { libc::kill(service.pid as i32, libc::SIGKILL) };
+        let pid = if service.box_owned {
+            owner_pid_from_box_record(&service.service_root)?
+        } else {
+            service.pid.ok_or_else(|| {
+                failure("external Host restart requires A3S_BOX_KVM_OCI_SERVICE_PID")
+            })?
+        };
+        // SAFETY: qualification-only SIGKILL of the exact Host owner pid.
+        let kill_rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         if kill_rc != 0 {
             let err = io::Error::last_os_error();
             if err.kind() != io::ErrorKind::NotFound {
                 return Err(failure(format!(
-                    "failed to SIGKILL Host Service pid {}: {err}",
-                    service.pid
+                    "failed to SIGKILL Host Service pid {pid}: {err}"
                 )));
             }
         }
@@ -676,19 +751,29 @@ mod qualification {
         let gone_deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < gone_deadline {
             // SAFETY: existence probe for the exact pid we killed.
-            let still_alive = unsafe { libc::kill(service.pid as i32, 0) } == 0;
+            let still_alive = unsafe { libc::kill(pid as i32, 0) } == 0;
             if !still_alive && !endpoint.exists() {
                 break;
             }
-            if endpoint.exists() {
+            if !service.box_owned && endpoint.exists() {
+                // External path removes the stale socket before respawn.
+                // Box-owned ensure reclaims via the identity record.
                 let _ = std::fs::remove_file(endpoint);
+            }
+            if service.box_owned && !still_alive {
+                break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         require(
-            unsafe { libc::kill(service.pid as i32, 0) } != 0,
+            unsafe { libc::kill(pid as i32, 0) } != 0,
             "Host Service pid remained alive after SIGKILL",
         )?;
+
+        if service.box_owned {
+            // Retained-manager reconnect must respawn through ensure_linux_kvm_oci_owner.
+            return Ok(());
+        }
 
         if let Some(parent) = service.service_log.parent() {
             std::fs::create_dir_all(parent)?;
@@ -738,8 +823,16 @@ mod qualification {
     }
 
     async fn connect(inputs: &Inputs) -> Result<LocalExecutionManager, AnyError> {
-        let config =
+        let mut config =
             LinuxKvmOciMigrationConfig::new(inputs.runtime_root.clone(), inputs.endpoint.clone())?;
+        if inputs.box_owned {
+            config = config.with_box_owned_owner(
+                absolute_environment_path(SERVICE_ROOT_ENV)?,
+                absolute_environment_path(SERVICE_BIN_ENV)?,
+                absolute_environment_path(SERVICE_SHIM_ENV)?,
+                absolute_environment_path(SERVICE_MANIFEST_ENV)?,
+            )?;
+        }
         Ok(LocalExecutionManager::with_linux_kvm_oci_qualification(
             &inputs.state_path,
             &inputs.home_dir,

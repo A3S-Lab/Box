@@ -317,6 +317,15 @@ sidecars, Snapshot, or persistence. Rust applications can construct
 `LinuxKvmOciMigrationConfig` explicitly or use
 `A3sBoxClient::with_configured_paths(...).await`.
 
+For Box-owned Host ensure/recovery (identity-fenced `box-owner.json`, refuse
+unowned sockets, reclaim dead owners, retained-manager respawn), set
+`A3S_BOX_KVM_OCI_BOX_OWNED=1` together with the service root/bin/shim/manifest
+env vars and do **not** pre-bind the endpoint. The qualification script
+`--box-owned` mode uses this path, including Host SIGKILL → ensure respawn.
+External operator-launched Hosts remain supported when `BOX_OWNED` is unset.
+This is still qualification-only; it does not promote KVM MicroVM to production
+or change default omit→MicroVM routing.
+
 For the exact public-lifecycle vertical slice (create replay, Box-manager
 reopen, start, exact exit status, delete, residual cleanup, plus Host Service
 SIGKILL/restart while a generation is running), build and run:
@@ -365,9 +374,12 @@ Service SIGKILL, proves retained streaming `start_process` handle continuity
 (`retained_stream_handle_proven` / `kvm_microvm_live_claimed`), and proves
 filesystem continuity via public `transfer_file` (upload before kill,
 download after reattach on the same generation;
-`retained_filesystem_proven`). Fixture continuity stays unclaimed
-(`fixture_stream_continuity_claimed` stays false). Together with Native Live
-v4, this closes the ROADMAP process-session recovery parent; harness reports
+`retained_filesystem_proven`). Add `--box-owned` to skip external Host start
+and recover through Box ensure (`box_owned_ensure_proven`);
+`b2_process_session_recovery_closed` stays false. Fixture continuity stays
+unclaimed (`fixture_stream_continuity_claimed` stays false). Together with
+Native Live v4, this closes the ROADMAP process-session recovery parent;
+harness reports
 still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). Pin OCI Runtime at
 `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on

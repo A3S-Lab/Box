@@ -19,6 +19,8 @@
 //! - `fixture_stream_continuity_claimed` and `b2_process_session_recovery_closed`
 //!   stay false in harness reports by design (individual reports never
 //!   self-certify ROADMAP B2 close).
+//! - `box_owned_ensure_proven` is true only when Host SIGKILL recovery went
+//!   through Box identity-fenced ensure (not example-local Host respawn).
 
 #[cfg(not(all(
     target_os = "linux",
@@ -83,6 +85,7 @@ mod qualification {
     const SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_LIVE_SESSION_SERVICE_SHIM";
     const SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_LIVE_SESSION_SERVICE_MANIFEST";
     const SERVICE_LOG_ENV: &str = "A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG";
+    const BOX_OWNED_ENV: &str = "A3S_BOX_KVM_OCI_BOX_OWNED";
     const SESSION_OWNER_ENV: &str = "A3S_OCI_KVM_SESSION_OWNER";
     const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-live-session.v2";
     const KVM_LIVE_BINDING_SCHEMA: &str = "a3s.oci.kvm-live-session-binding.v1";
@@ -100,7 +103,10 @@ mod qualification {
 
     #[derive(Debug, Clone)]
     struct ServiceRestartInputs {
-        pid: u32,
+        /// External-start path supplies the Host pid; Box-owned reads it from
+        /// `box-owner.json` after ensure publishes the identity record.
+        pid: Option<u32>,
+        box_owned: bool,
         service_bin: PathBuf,
         service_root: PathBuf,
         service_shim: PathBuf,
@@ -162,6 +168,8 @@ mod qualification {
         fixture_stream_continuity_claimed: bool,
         /// Always false: harness reports never self-certify ROADMAP B2 close.
         b2_process_session_recovery_closed: bool,
+        /// True only when Host recovery used Box-owned ensure (not script respawn).
+        box_owned_ensure_proven: bool,
         supervised_create_required: bool,
         supervised_create_enabled: bool,
         session_supervisor_recorded: bool,
@@ -219,6 +227,7 @@ mod qualification {
                 retained_filesystem_proven: false,
                 fixture_stream_continuity_claimed: false,
                 b2_process_session_recovery_closed: false,
+                box_owned_ensure_proven: false,
                 supervised_create_required: true,
                 supervised_create_enabled: false,
                 session_supervisor_recorded: false,
@@ -377,19 +386,78 @@ mod qualification {
     }
 
     fn load_service_restart_inputs() -> Result<ServiceRestartInputs, AnyError> {
+        let box_owned = matches!(
+            std::env::var(BOX_OWNED_ENV).ok().as_deref(),
+            Some("1" | "true" | "on" | "yes" | "box-owned")
+        );
+        if box_owned {
+            return Ok(ServiceRestartInputs {
+                pid: None,
+                box_owned: true,
+                service_bin: absolute_environment_path(SERVICE_BIN_ENV)?,
+                service_root: absolute_environment_path(SERVICE_ROOT_ENV)?,
+                service_shim: absolute_environment_path(SERVICE_SHIM_ENV)?,
+                system_image_manifest: absolute_environment_path(SERVICE_MANIFEST_ENV)?,
+                service_log: absolute_environment_path(SERVICE_LOG_ENV)?,
+            });
+        }
         let pid_raw = required_environment_string(SERVICE_PID_ENV)?;
         let pid: u32 = pid_raw
             .parse()
             .map_err(|_| failure(format!("{SERVICE_PID_ENV} must be a positive pid")))?;
         require(pid > 1, format!("{SERVICE_PID_ENV} must be a positive pid"))?;
         Ok(ServiceRestartInputs {
-            pid,
+            pid: Some(pid),
+            box_owned: false,
             service_bin: absolute_environment_path(SERVICE_BIN_ENV)?,
             service_root: absolute_environment_path(SERVICE_ROOT_ENV)?,
             service_shim: absolute_environment_path(SERVICE_SHIM_ENV)?,
             system_image_manifest: absolute_environment_path(SERVICE_MANIFEST_ENV)?,
             service_log: absolute_environment_path(SERVICE_LOG_ENV)?,
         })
+    }
+
+    fn owner_pid_from_box_record(service_root: &Path) -> Result<u32, AnyError> {
+        let path = service_root.join("box-owner.json");
+        let bytes = std::fs::read(&path).map_err(|error| {
+            failure(format!(
+                "failed to read Box-owned KVM owner record {}: {error}",
+                path.display()
+            ))
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            failure(format!(
+                "Box-owned KVM owner record {} is invalid JSON: {error}",
+                path.display()
+            ))
+        })?;
+        let pid = value
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| {
+                failure(format!(
+                    "Box-owned KVM owner record {} is missing pid",
+                    path.display()
+                ))
+            })?;
+        let pid = u32::try_from(pid).map_err(|_| {
+            failure(format!(
+                "Box-owned KVM owner record {} has an out-of-range pid",
+                path.display()
+            ))
+        })?;
+        require(pid > 1, "Box-owned KVM owner pid must be greater than 1")?;
+        Ok(pid)
+    }
+
+    fn resolve_host_service_pid(service: &ServiceRestartInputs) -> Result<u32, AnyError> {
+        if service.box_owned {
+            owner_pid_from_box_record(&service.service_root)
+        } else {
+            service.pid.ok_or_else(|| {
+                failure("external Host Live path requires A3S_BOX_KVM_LIVE_SESSION_SERVICE_PID")
+            })
+        }
     }
 
     async fn exercise(
@@ -467,7 +535,8 @@ mod qualification {
             .await?;
         report.file_upload_before_kill = true;
 
-        let host_service = host_service_identity(inputs.service.pid)?;
+        let host_pid = resolve_host_service_pid(&inputs.service)?;
+        let host_service = host_service_identity(host_pid)?;
         report.owner_before_kill = Some(host_service.clone());
         let live_binding = load_kvm_live_binding(&inputs.runtime_root, &binding)?;
         report.recovery_schema_version = Some(live_binding.schema_version.clone());
@@ -542,13 +611,9 @@ mod qualification {
         .await?;
 
         // Keep the Box manager: retained-handle continuity is the v1 gate.
-        sigkill_host_service(inputs.service.pid)?;
+        sigkill_host_service(host_pid)?;
         report.owner_sigkilled = true;
-        wait_host_service_gone(
-            inputs.service.pid,
-            &inputs.endpoint,
-            Duration::from_secs(30),
-        )?;
+        wait_host_service_gone(host_pid, &inputs.endpoint, Duration::from_secs(30))?;
         report.owner_gone = true;
 
         require_live_identity(
@@ -570,11 +635,15 @@ mod qualification {
             ),
         )?;
 
-        restart_host_service(&inputs.service, &inputs.endpoint)?;
-        let replacement_host = read_replacement_host_service_pid(&inputs.service.service_root)?;
-        report.owner_rebound = replacement_host.pid != host_service.pid
-            || replacement_host.start_time_ticks != host_service.start_time_ticks;
-        report.owner_after_reopen = Some(replacement_host);
+        if inputs.service.box_owned {
+            // Retained-manager reconcile/inspect must respawn via ensure.
+        } else {
+            restart_host_service(&inputs.service, &inputs.endpoint)?;
+            let replacement_host = read_replacement_host_service_pid(&inputs.service.service_root)?;
+            report.owner_rebound = replacement_host.pid != host_service.pid
+                || replacement_host.start_time_ticks != host_service.start_time_ticks;
+            report.owner_after_reopen = Some(replacement_host);
+        }
 
         let mut outcome = None;
         let reconcile_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
@@ -625,6 +694,19 @@ mod qualification {
                     "Host Service reopen lost the Box operation before Live reconciliation",
                 ));
             }
+        }
+
+        if inputs.service.box_owned {
+            let replacement_host =
+                host_service_identity(owner_pid_from_box_record(&inputs.service.service_root)?)?;
+            report.owner_rebound = replacement_host.pid != host_service.pid
+                || replacement_host.start_time_ticks != host_service.start_time_ticks;
+            report.owner_after_reopen = Some(replacement_host);
+            require(
+                report.owner_rebound,
+                "Box-owned ensure did not publish a distinct Host identity after SIGKILL",
+            )?;
+            report.box_owned_ensure_proven = true;
         }
 
         input
@@ -1063,8 +1145,16 @@ mod qualification {
             std::env::var(SESSION_OWNER_ENV).as_deref() == Ok("1"),
             format!("{SESSION_OWNER_ENV}=1 must remain set for Live reconnect"),
         )?;
-        let config =
+        let mut config =
             LinuxKvmOciMigrationConfig::new(inputs.runtime_root.clone(), inputs.endpoint.clone())?;
+        if inputs.service.box_owned {
+            config = config.with_box_owned_owner(
+                inputs.service.service_root.clone(),
+                inputs.service.service_bin.clone(),
+                inputs.service.service_shim.clone(),
+                inputs.service.system_image_manifest.clone(),
+            )?;
+        }
         Ok(LocalExecutionManager::with_linux_kvm_oci_qualification(
             &inputs.state_path,
             &inputs.home_dir,
