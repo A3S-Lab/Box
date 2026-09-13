@@ -683,10 +683,7 @@ fn reap_orphaned_kvm_session_children(runtime_root: &Path) -> ExecutionManagerRe
     Ok(())
 }
 
-fn collect_kvm_live_bindings(
-    root: &Path,
-    found: &mut Vec<PathBuf>,
-) -> ExecutionManagerResult<()> {
+fn collect_kvm_live_bindings(root: &Path, found: &mut Vec<PathBuf>) -> ExecutionManagerResult<()> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -957,17 +954,14 @@ mod tests {
 
     #[test]
     fn collect_kvm_live_bindings_walks_nested_shares() {
-        let root = std::env::temp_dir().join(format!(
-            "a3s-kvm-live-binding-walk-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("a3s-kvm-live-binding-walk-{}", std::process::id()));
         let nested = root.join("shares").join("a").join("b");
         std::fs::create_dir_all(&nested).expect("create nested shares");
         let binding = nested.join(KVM_LIVE_BINDING_FILE);
         std::fs::write(&binding, b"{}").expect("write binding");
         let mut found = Vec::new();
-        collect_kvm_live_bindings(root.join("shares").as_path(), &mut found)
-            .expect("walk shares");
+        collect_kvm_live_bindings(root.join("shares").as_path(), &mut found).expect("walk shares");
         assert_eq!(found, vec![binding]);
         let _ = std::fs::remove_dir_all(&root);
     }
