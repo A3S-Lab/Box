@@ -381,6 +381,11 @@ fn spawn_owner(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    // Live qualification exports A3S_OCI_KVM_SESSION_OWNER=1; preserve it so
+    // ensure-spawned Hosts retain session-owner create behavior.
+    if let Some(value) = std::env::var_os("A3S_OCI_KVM_SESSION_OWNER") {
+        command.env("A3S_OCI_KVM_SESSION_OWNER", value);
+    }
     // SAFETY: setsid only; no shared Rust state between fork and exec.
     unsafe {
         command.pre_exec(|| {

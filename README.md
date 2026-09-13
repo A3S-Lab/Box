@@ -374,9 +374,12 @@ Service SIGKILL, proves retained streaming `start_process` handle continuity
 (`retained_stream_handle_proven` / `kvm_microvm_live_claimed`), and proves
 filesystem continuity via public `transfer_file` (upload before kill,
 download after reattach on the same generation;
-`retained_filesystem_proven`). Fixture continuity stays unclaimed
-(`fixture_stream_continuity_claimed` stays false). Together with Native Live
-v4, this closes the ROADMAP process-session recovery parent; harness reports
+`retained_filesystem_proven`). Add `--box-owned` to skip external Host start
+and recover through Box ensure (`box_owned_ensure_proven`);
+`b2_process_session_recovery_closed` stays false. Fixture continuity stays
+unclaimed (`fixture_stream_continuity_claimed` stays false). Together with
+Native Live v4, this closes the ROADMAP process-session recovery parent;
+harness reports
 still keep `b2_process_session_recovery_closed=false` (reports never
 self-certify B2 close). Pin OCI Runtime at
 `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on

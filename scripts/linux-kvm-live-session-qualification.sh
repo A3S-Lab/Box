@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Local Linux KVM MicroVM live-session gate for Box over OCI Runtime.
 #
-# Starts box-kvm-qualification-service with A3S_OCI_KVM_SESSION_OWNER=1, then
-# runs the destructive live-session qualification: retained streaming handle
-# continuity across Host Service SIGKILL/restart, filesystem continuity via
-# transfer_file (upload before kill, download after reattach), keyed captured
-# exec, inventory, stats, and Live kill without inventing exit status.
+# Default: starts box-kvm-qualification-service with A3S_OCI_KVM_SESSION_OWNER=1,
+# then runs the destructive live-session qualification.
 #
-# Observation-only. Does not claim fresh-host or AArch64 promotion.
+# With --box-owned: Box identity-fences and (re)spawns the Host; Host SIGKILL
+# recovery goes through retained-manager ensure (not example-local respawn).
+#
+# Observation-only. Does not claim fresh-host, AArch64 promotion, B2 close, or
+# MicroVM production cutover.
 
 set -euo pipefail
 
@@ -24,11 +25,13 @@ Usage:
     --report ABS_JSON \
     [--home ABS_DIR] \
     [--box-sha SHA] \
-    [--oci-sha SHA]
+    [--oci-sha SHA] \
+    [--box-owned]
 
 Environment:
   LD_LIBRARY_PATH may need the directory that contains libkrun.so.1.
   Forces A3S_OCI_KVM_SESSION_OWNER=1 for durable session-owner create.
+  --box-owned sets A3S_BOX_KVM_OCI_BOX_OWNED=1 and skips external Host start.
 EOF
 }
 
@@ -43,6 +46,7 @@ HOME_DIR=""
 BOX_SHA=""
 OCI_SHA=""
 SERVICE_PID=""
+BOX_OWNED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --home) HOME_DIR="${2:?}"; shift 2 ;;
     --box-sha) BOX_SHA="${2:?}"; shift 2 ;;
     --oci-sha) OCI_SHA="${2:?}"; shift 2 ;;
+    --box-owned) BOX_OWNED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "unknown argument: $1" >&2
@@ -155,11 +160,49 @@ cleanup() {
     kill -TERM "${SERVICE_PID}" 2>/dev/null || true
     wait "${SERVICE_PID}" 2>/dev/null || true
   fi
+  if [[ "${BOX_OWNED}" -eq 1 && -f "${SERVICE_ROOT}/box-owner.json" ]]; then
+    local owner_pid
+    owner_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${SERVICE_ROOT}/box-owner.json" | head -n1 || true)"
+    if [[ -n "${owner_pid:-}" ]] && kill -0 "${owner_pid}" 2>/dev/null; then
+      kill -TERM "${owner_pid}" 2>/dev/null || true
+    fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
 
 export A3S_OCI_KVM_SESSION_OWNER=1
+export PATH="${BOX_BIN}:${PATH}"
+export A3S_HOME="${HOME_DIR}"
+export A3S_BOX_OCI_HOST_ROOT="${RUNTIME_ROOT}"
+export A3S_BOX_OCI_KVM_ENDPOINT="${KVM_ENDPOINT}"
+export A3S_BOX_OCI_MIGRATION="${A3S_BOX_OCI_MIGRATION:-microvm}"
+export A3S_BOX_KVM_LIVE_SESSION_IMAGE="${IMAGE}"
+export A3S_BOX_KVM_LIVE_SESSION_REPORT="${REPORT}"
+export A3S_BOX_KVM_LIVE_SESSION_BOX_SHA="${BOX_SHA}"
+export A3S_BOX_KVM_LIVE_SESSION_OCI_SHA="${OCI_SHA}"
+export A3S_BOX_KVM_LIVE_SESSION_QUALIFICATION=1
+export A3S_BOX_KVM_LIVE_SESSION_SERVICE_BIN="${A3S_OCI}"
+export A3S_BOX_KVM_LIVE_SESSION_SERVICE_ROOT="${SERVICE_ROOT}"
+export A3S_BOX_KVM_LIVE_SESSION_SERVICE_SHIM="${SHIM}"
+export A3S_BOX_KVM_LIVE_SESSION_SERVICE_MANIFEST="${MANIFEST}"
+export A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG="${SERVICE_LOG}"
+
+if [[ "${BOX_OWNED}" -eq 1 ]]; then
+  export A3S_BOX_KVM_OCI_BOX_OWNED=1
+  : >"${SERVICE_LOG}"
+  echo "running Linux KVM live-session qualification v2 (Box-owned Host ensure)"
+  echo "  home=${A3S_HOME}"
+  echo "  service-root=${SERVICE_ROOT}"
+  echo "  image=${IMAGE}"
+  echo "  box-sha=${BOX_SHA}"
+  echo "  oci-sha=${OCI_SHA}"
+  echo "  report=${REPORT}"
+  echo "  session-owner=${A3S_OCI_KVM_SESSION_OWNER}"
+  "${EXAMPLE_BIN}"
+  exit $?
+fi
+
 nohup env A3S_OCI_KVM_SESSION_OWNER=1 "${A3S_OCI}" box-kvm-qualification-service \
   --root "${SERVICE_ROOT}" \
   --shim "${SHIM}" \
@@ -184,21 +227,7 @@ if [[ ! -S "${KVM_ENDPOINT}" ]]; then
   exit 1
 fi
 
-export PATH="${BOX_BIN}:${PATH}"
-export A3S_HOME="${HOME_DIR}"
-export A3S_BOX_OCI_HOST_ROOT="${RUNTIME_ROOT}"
-export A3S_BOX_OCI_KVM_ENDPOINT="${KVM_ENDPOINT}"
-export A3S_BOX_KVM_LIVE_SESSION_IMAGE="${IMAGE}"
-export A3S_BOX_KVM_LIVE_SESSION_REPORT="${REPORT}"
-export A3S_BOX_KVM_LIVE_SESSION_BOX_SHA="${BOX_SHA}"
-export A3S_BOX_KVM_LIVE_SESSION_OCI_SHA="${OCI_SHA}"
-export A3S_BOX_KVM_LIVE_SESSION_QUALIFICATION=1
 export A3S_BOX_KVM_LIVE_SESSION_SERVICE_PID="${SERVICE_PID}"
-export A3S_BOX_KVM_LIVE_SESSION_SERVICE_BIN="${A3S_OCI}"
-export A3S_BOX_KVM_LIVE_SESSION_SERVICE_ROOT="${SERVICE_ROOT}"
-export A3S_BOX_KVM_LIVE_SESSION_SERVICE_SHIM="${SHIM}"
-export A3S_BOX_KVM_LIVE_SESSION_SERVICE_MANIFEST="${MANIFEST}"
-export A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG="${SERVICE_LOG}"
 
 echo "running Linux KVM live-session qualification v2"
 echo "  home=${A3S_HOME}"
