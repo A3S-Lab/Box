@@ -155,6 +155,17 @@ fn has_filesystem_request_id(request: &a3s_box_core::FilesystemRequest) -> bool 
         .is_some_and(|request_id| !request_id.is_empty())
 }
 
+/// Guest filesystem calls that are safe to retry once after ambiguous transport
+/// loss: read-only ops (naturally idempotent) or keyed mutating ops (guest journal).
+pub(crate) fn should_retry_guest_filesystem(
+    request: &a3s_box_core::FilesystemRequest,
+    error: &BoxError,
+) -> bool {
+    let retryable_op = is_idempotent_filesystem_op(&request.op)
+        || (is_mutating_filesystem_op(&request.op) && has_filesystem_request_id(request));
+    retryable_op && is_ambiguous_filesystem_transport(error)
+}
+
 /// Keyed one-shot exec can replay the guest journal with the same `request_id`.
 pub(crate) fn should_retry_keyed_guest_exec(
     request: &a3s_box_core::exec::ExecRequest,
@@ -477,14 +488,9 @@ impl ExecClient {
         &self,
         request: &a3s_box_core::FilesystemRequest,
     ) -> Result<a3s_box_core::FilesystemResponse> {
-        let keyed_mutation =
-            is_mutating_filesystem_op(&request.op) && has_filesystem_request_id(request);
         match self.filesystem_once(request).await {
             Ok(response) => Ok(response),
-            Err(error)
-                if (is_idempotent_filesystem_op(&request.op) || keyed_mutation)
-                    && is_ambiguous_filesystem_transport(&error) =>
-            {
+            Err(error) if should_retry_guest_filesystem(request, &error) => {
                 self.filesystem_once(request).await
             }
             Err(error) => Err(error),
@@ -2214,5 +2220,44 @@ mod keyed_exec_tests {
             &keyed,
             &BoxError::ExecError("policy denied".to_string())
         ));
+    }
+
+    #[test]
+    fn guest_filesystem_retry_policy_matches_journal_contract() {
+        let lost = BoxError::ExecError("Filesystem response read failed: closed".to_string());
+        let policy = BoxError::ExecError("directory already exists".to_string());
+        let keyed_mkdir = a3s_box_core::FilesystemRequest {
+            op: a3s_box_core::FilesystemOp::MakeDir,
+            path: "/tmp/x".into(),
+            destination: None,
+            depth: 0,
+            user: None,
+            request_id: Some("fs-mkdir-1".into()),
+        };
+        let unkeyed_mkdir = a3s_box_core::FilesystemRequest {
+            request_id: None,
+            ..keyed_mkdir.clone()
+        };
+        let stat = a3s_box_core::FilesystemRequest {
+            op: a3s_box_core::FilesystemOp::Stat,
+            path: "/tmp/x".into(),
+            destination: None,
+            depth: 0,
+            user: None,
+            request_id: None,
+        };
+        assert!(should_retry_guest_filesystem(&keyed_mkdir, &lost));
+        assert!(!should_retry_guest_filesystem(&unkeyed_mkdir, &lost));
+        assert!(should_retry_guest_filesystem(&stat, &lost));
+        assert!(!should_retry_guest_filesystem(&keyed_mkdir, &policy));
+    }
+
+    #[test]
+    fn microvm_session_wires_filesystem_retry_policy() {
+        let source = include_str!("../local_execution/session.rs");
+        assert!(
+            source.contains("should_retry_guest_filesystem"),
+            "MicroVM session filesystem must rebind through should_retry_guest_filesystem so #344 journals reach product callers"
+        );
     }
 }

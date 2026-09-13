@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM `LocalExecutionManager::filesystem` now shares the guest filesystem
+  retry policy with `ExecClient::filesystem` (rebind + one retry on ambiguous
+  transport for read-only ops and keyed mutating ops). SDK-minted `fs-*` IDs
+  from #344 reach the production session path. Does **not** add file-upload
+  journals, flip B2, or claim Sandbox Live FS recovery closed.
+
 - Pin `a3s-runtime` to the relative-only Exec control-plane slack fix so short
   R17 `timeout_ms` budgets (guest command time) are not consumed by lease /
   capability waits as `request expired before provider dispatch`. Does **not**
