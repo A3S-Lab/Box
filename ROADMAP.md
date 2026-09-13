@@ -235,7 +235,11 @@ Box-owned native Linux Host spawn forces
 Host → Supervisor → Launcher; external Hosts that omit the env remain
 Host-bound. Fresh SandboxViaOci construction reaps supervised orphans when
 reclaiming a dead Host (stopped-only); retained-manager Live reopen does not.
-This does not flip B2 harness close or MicroVM cutover.
+Non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` fail-closes unless the
+Sandbox OCI launcher is root-owned mode `4755`; hosted CI setpriv on nosuid
+runners remains lab-only (self-hosted
+`scripts/proof-linux-sandbox-setuid-launcher.sh`). This does not flip B2
+harness close or MicroVM cutover.
 Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
@@ -606,8 +610,10 @@ hosts is checklist-closed under the process-session recovery parent above
 `b2_process_session_recovery_closed=false`. Box-owned native Host spawn forces
 supervised create for production SandboxViaOci; external Hosts without the env
 remain Host-bound. Fresh construction reaps supervised orphans on dead-Host
-reclaim; Live retained-manager reopen does not. Cutover, fresh-host promotion,
-and broader Utility-VM product claims remain open. The production Linux smoke now
+reclaim; Live retained-manager reopen does not. Operator setuid launcher
+evidence is fail-closed at spawn (CI setpriv is lab-only). Cutover, fresh-host
+promotion, and broader Utility-VM product claims remain open. The production
+Linux smoke now
 drives the Rust, Python, TypeScript, and Go SDK lifecycle, exec, filesystem,
 route-aware stats, pause/resume, snapshot, restart and cleanup surfaces; the
 CLI `top`, `stats`, `cp`, live update, attach, and init-log projections now
