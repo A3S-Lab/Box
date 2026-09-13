@@ -34,6 +34,8 @@ jobs:
         run: bash scripts/check-oci-pins.sh
       - name: Verify live-session report honesty checker
         run: python3 scripts/verify-linux-native-live-session-report.py --self-test
+      - name: Verify setuid-launcher proof honesty checker
+        run: python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py --self-test
       - name: Enforce live-session script +x and keyed-exec retry identity
         shell: bash
         run: |
