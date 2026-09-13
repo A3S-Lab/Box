@@ -6,8 +6,8 @@
 #   2) Host Service SIGKILL/restart while a generation is running → stopped-only
 #      reconcile without invented exit status → delete
 #
-# With --box-owned: Box identity-fences and (re)spawns the Host; phase 2 Host
-# restart inputs are omitted until the example restart path uses owner ensure.
+# With --box-owned: Box identity-fences and (re)spawns the Host; phase 2 SIGKILL
+# reads box-owner.json and relies on ensure for replacement (no external respawn).
 #
 # Observation-only. Does not claim fresh-host, AArch64 promotion, or MicroVM
 # production cutover.
@@ -167,7 +167,8 @@ export A3S_BOX_KVM_OCI_SERVICE_LOG="${SERVICE_LOG}"
 
 if [[ "${BOX_OWNED}" -eq 1 ]]; then
   export A3S_BOX_KVM_OCI_BOX_OWNED=1
-  echo "running Linux KVM OCI qualification v2 (Box-owned Host ensure; phase 2 restart omitted)"
+  : >"${SERVICE_LOG}"
+  echo "running Linux KVM OCI qualification v2 (Box-owned Host ensure + phase 2 restart via ensure)"
   echo "  home=${A3S_HOME}"
   echo "  service-root=${SERVICE_ROOT}"
   echo "  image=${IMAGE}"

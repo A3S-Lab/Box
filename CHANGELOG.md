@@ -12,9 +12,9 @@ All notable changes to A3S Box will be documented in this file.
   owners, retained-manager respawn via `with_linux_kvm_owner_recovery`.
   Opt in with `LinuxKvmOciMigrationConfig::with_box_owned_owner` or
   `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service root/bin/shim/manifest.
-  Script `--box-owned` skips external Host start (phase 2 Host restart
-  omitted until example restart uses ensure). Does **not** claim MicroVM
-  production cutover, B2 close, or default omit→OCI routing.
+  Script `--box-owned` skips external Host start and exercises Host SIGKILL
+  recovery through Box ensure. Does **not** claim MicroVM production cutover,
+  B2 close, or default omit→OCI routing.
 
 ### Changed
 

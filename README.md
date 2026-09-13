@@ -320,10 +320,11 @@ sidecars, Snapshot, or persistence. Rust applications can construct
 For Box-owned Host ensure/recovery (identity-fenced `box-owner.json`, refuse
 unowned sockets, reclaim dead owners, retained-manager respawn), set
 `A3S_BOX_KVM_OCI_BOX_OWNED=1` together with the service root/bin/shim/manifest
-env vars and do **not** pre-bind the endpoint. External operator-launched Hosts
-remain supported when `BOX_OWNED` is unset. This is still qualification-only;
-it does not promote KVM MicroVM to production or change default omit→MicroVM
-routing.
+env vars and do **not** pre-bind the endpoint. The qualification script
+`--box-owned` mode uses this path, including Host SIGKILL → ensure respawn.
+External operator-launched Hosts remain supported when `BOX_OWNED` is unset.
+This is still qualification-only; it does not promote KVM MicroVM to production
+or change default omit→MicroVM routing.
 
 For the exact public-lifecycle vertical slice (create replay, Box-manager
 reopen, start, exact exit status, delete, residual cleanup, plus Host Service
