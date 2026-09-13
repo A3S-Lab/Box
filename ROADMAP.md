@@ -218,7 +218,11 @@ bridge and async Rust SDK constructor default Linux Sandbox records to
 `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent (explicit `off` keeps the
 legacy route; explicit `sandbox` hard-fails if the owner is not launch-ready).
 The qualification-only `A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path still
-requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for `box-kvm-qualification-service`.
+requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for an externally launched
+`box-kvm-qualification-service`, or `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service
+root/bin/shim/manifest so Box identity-fences and (re)spawns that Host under
+`{service_root}/runtime.sock`. Box-owned KVM ensure does not claim production
+MicroVM cutover.
 Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI

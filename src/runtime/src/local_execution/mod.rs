@@ -16,6 +16,23 @@ mod oci_log_projection;
 #[cfg(feature = "vm")]
 mod oci_migration;
 #[cfg(all(feature = "vm", target_os = "linux"))]
+mod oci_kvm_owner;
+#[cfg(all(feature = "vm", not(target_os = "linux")))]
+mod oci_kvm_owner {
+    //! Stub types so KVM owner recovery builders compile off Linux.
+    use std::path::PathBuf;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct LinuxKvmOwnerArtifacts {
+        pub runtime_path: PathBuf,
+        pub runtime_sha256: String,
+        pub shim_path: PathBuf,
+        pub shim_sha256: String,
+        pub system_image_manifest: PathBuf,
+        pub system_image_manifest_sha256: String,
+    }
+}
+#[cfg(all(feature = "vm", target_os = "linux"))]
 mod oci_owner;
 #[cfg(feature = "vm")]
 pub(crate) mod oci_portable_rootfs;
@@ -67,7 +84,8 @@ pub use oci_backend::{
 };
 #[cfg(feature = "vm")]
 pub use oci_migration::{
-    LinuxKvmOciMigrationConfig, NativeLinuxOciMigrationConfig, WindowsWhpxOciMigrationConfig,
+    LinuxKvmBoxOwnedOwner, LinuxKvmOciMigrationConfig, NativeLinuxOciMigrationConfig,
+    WindowsWhpxOciMigrationConfig,
 };
 #[cfg(feature = "vm")]
 pub use oci_production::{

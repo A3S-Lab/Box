@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Local Linux KVM MicroVM vertical-slice gate for Box over OCI Runtime.
 #
-# Starts box-kvm-qualification-service, then runs:
+# Default: starts box-kvm-qualification-service externally, then runs:
 #   1) create replay → Box-manager reopen → start → exact exit 23 → delete
 #   2) Host Service SIGKILL/restart while a generation is running → stopped-only
 #      reconcile without invented exit status → delete
 #
-# Observation-only. Does not claim fresh-host or AArch64 promotion.
+# With --box-owned: Box identity-fences and (re)spawns the Host; phase 2 Host
+# restart inputs are omitted until the example restart path uses owner ensure.
+#
+# Observation-only. Does not claim fresh-host, AArch64 promotion, or MicroVM
+# production cutover.
 
 set -euo pipefail
 
@@ -21,10 +25,12 @@ Usage:
     --system-image-manifest ABS_JSON \
     --image REF \
     --report ABS_JSON \
-    [--home ABS_DIR]
+    [--home ABS_DIR] \
+    [--box-owned]
 
 Environment:
   LD_LIBRARY_PATH may need the directory that contains libkrun.so.1.
+  --box-owned sets A3S_BOX_KVM_OCI_BOX_OWNED=1 and skips external Host start.
 EOF
 }
 
@@ -37,6 +43,7 @@ IMAGE=""
 REPORT=""
 HOME_DIR=""
 SERVICE_PID=""
+BOX_OWNED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE="${2:?}"; shift 2 ;;
     --report) REPORT="${2:?}"; shift 2 ;;
     --home) HOME_DIR="${2:?}"; shift 2 ;;
+    --box-owned) BOX_OWNED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "unknown argument: $1" >&2
@@ -131,9 +139,42 @@ cleanup() {
     kill -TERM "${SERVICE_PID}" 2>/dev/null || true
     wait "${SERVICE_PID}" 2>/dev/null || true
   fi
+  # Box-owned owners write box-owner.json; attempt a polite stop via peer pid.
+  if [[ "${BOX_OWNED}" -eq 1 && -f "${SERVICE_ROOT}/box-owner.json" ]]; then
+    local owner_pid
+    owner_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${SERVICE_ROOT}/box-owner.json" | head -n1 || true)"
+    if [[ -n "${owner_pid:-}" ]] && kill -0 "${owner_pid}" 2>/dev/null; then
+      kill -TERM "${owner_pid}" 2>/dev/null || true
+    fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
+
+export PATH="${BOX_BIN}:${PATH}"
+export A3S_HOME="${HOME_DIR}"
+export A3S_BOX_OCI_HOST_ROOT="${RUNTIME_ROOT}"
+export A3S_BOX_OCI_KVM_ENDPOINT="${KVM_ENDPOINT}"
+export A3S_BOX_OCI_MIGRATION="${A3S_BOX_OCI_MIGRATION:-microvm}"
+export A3S_BOX_KVM_OCI_IMAGE="${IMAGE}"
+export A3S_BOX_KVM_OCI_REPORT="${REPORT}"
+export A3S_BOX_KVM_OCI_QUALIFICATION=1
+export A3S_BOX_KVM_OCI_SERVICE_BIN="${A3S_OCI}"
+export A3S_BOX_KVM_OCI_SERVICE_ROOT="${SERVICE_ROOT}"
+export A3S_BOX_KVM_OCI_SERVICE_SHIM="${SHIM}"
+export A3S_BOX_KVM_OCI_SERVICE_MANIFEST="${MANIFEST}"
+export A3S_BOX_KVM_OCI_SERVICE_LOG="${SERVICE_LOG}"
+
+if [[ "${BOX_OWNED}" -eq 1 ]]; then
+  export A3S_BOX_KVM_OCI_BOX_OWNED=1
+  echo "running Linux KVM OCI qualification v2 (Box-owned Host ensure; phase 2 restart omitted)"
+  echo "  home=${A3S_HOME}"
+  echo "  service-root=${SERVICE_ROOT}"
+  echo "  image=${IMAGE}"
+  echo "  report=${REPORT}"
+  "${EXAMPLE_BIN}"
+  exit $?
+fi
 
 nohup "${A3S_OCI}" box-kvm-qualification-service \
   --root "${SERVICE_ROOT}" \
@@ -159,19 +200,7 @@ if [[ ! -S "${KVM_ENDPOINT}" ]]; then
   exit 1
 fi
 
-export PATH="${BOX_BIN}:${PATH}"
-export A3S_HOME="${HOME_DIR}"
-export A3S_BOX_OCI_HOST_ROOT="${RUNTIME_ROOT}"
-export A3S_BOX_OCI_KVM_ENDPOINT="${KVM_ENDPOINT}"
-export A3S_BOX_KVM_OCI_IMAGE="${IMAGE}"
-export A3S_BOX_KVM_OCI_REPORT="${REPORT}"
-export A3S_BOX_KVM_OCI_QUALIFICATION=1
 export A3S_BOX_KVM_OCI_SERVICE_PID="${SERVICE_PID}"
-export A3S_BOX_KVM_OCI_SERVICE_BIN="${A3S_OCI}"
-export A3S_BOX_KVM_OCI_SERVICE_ROOT="${SERVICE_ROOT}"
-export A3S_BOX_KVM_OCI_SERVICE_SHIM="${SHIM}"
-export A3S_BOX_KVM_OCI_SERVICE_MANIFEST="${MANIFEST}"
-export A3S_BOX_KVM_OCI_SERVICE_LOG="${SERVICE_LOG}"
 
 echo "running Linux KVM OCI qualification v2"
 echo "  home=${A3S_HOME}"

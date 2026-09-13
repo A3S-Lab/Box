@@ -30,10 +30,13 @@ pub const OCI_RUNTIME_PATH_ENV: &str = "A3S_BOX_OCI_RUNTIME_PATH";
 pub const OCI_AGENT_PATH_ENV: &str = "A3S_BOX_OCI_AGENT_PATH";
 pub const OCI_WHPX_ENDPOINT_ENV: &str = "A3S_BOX_OCI_WHPX_ENDPOINT";
 pub const OCI_KVM_ENDPOINT_ENV: &str = "A3S_BOX_OCI_KVM_ENDPOINT";
+pub const OCI_KVM_BOX_OWNED_ENV: &str = "A3S_BOX_KVM_OCI_BOX_OWNED";
+pub const OCI_KVM_SERVICE_ROOT_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_ROOT";
+pub const OCI_KVM_SERVICE_BIN_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_BIN";
+pub const OCI_KVM_SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_SHIM";
+pub const OCI_KVM_SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_MANIFEST";
 #[cfg(test)]
 const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
-#[cfg(test)]
-const DEFAULT_OCI_KVM_ENDPOINT: &str = "/tmp/a3s-oci-kvm-box/runtime.sock";
 
 /// Explicit native-Linux owner and artifact selection for Sandbox migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,11 +53,44 @@ pub struct WindowsWhpxOciMigrationConfig {
     endpoint: super::OciRuntimeEndpoint,
 }
 
-/// Explicit connection to an externally owned qualification-only Linux KVM service.
+/// Optional Box-owned Host ensure inputs for Linux KVM qualification.
+///
+/// When set, construction identity-fences and (re)spawns
+/// `box-kvm-qualification-service` under `service_root`. External-only connect
+/// remains available when this is absent so existing operator-launched Hosts
+/// keep working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxKvmBoxOwnedOwner {
+    service_root: PathBuf,
+    runtime_path: PathBuf,
+    shim_path: PathBuf,
+    system_image_manifest: PathBuf,
+}
+
+impl LinuxKvmBoxOwnedOwner {
+    pub fn service_root(&self) -> &Path {
+        &self.service_root
+    }
+
+    pub fn runtime_path(&self) -> &Path {
+        &self.runtime_path
+    }
+
+    pub fn shim_path(&self) -> &Path {
+        &self.shim_path
+    }
+
+    pub fn system_image_manifest(&self) -> &Path {
+        &self.system_image_manifest
+    }
+}
+
+/// Explicit connection to a qualification-only Linux KVM service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxKvmOciMigrationConfig {
     runtime_root: PathBuf,
     endpoint: super::OciRuntimeEndpoint,
+    box_owned_owner: Option<LinuxKvmBoxOwnedOwner>,
 }
 
 impl LinuxKvmOciMigrationConfig {
@@ -65,9 +101,31 @@ impl LinuxKvmOciMigrationConfig {
         let config = Self {
             runtime_root: runtime_root.into(),
             endpoint: super::OciRuntimeEndpoint::unix_socket(endpoint)?,
+            box_owned_owner: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Attach Box-owned Host ensure/recovery for the qualification service.
+    ///
+    /// The configured endpoint must be `{service_root}/runtime.sock`. This does
+    /// not select production MicroVM routing.
+    pub fn with_box_owned_owner(
+        mut self,
+        service_root: impl Into<PathBuf>,
+        runtime_path: impl Into<PathBuf>,
+        shim_path: impl Into<PathBuf>,
+        system_image_manifest: impl Into<PathBuf>,
+    ) -> ExecutionManagerResult<Self> {
+        self.box_owned_owner = Some(LinuxKvmBoxOwnedOwner {
+            service_root: service_root.into(),
+            runtime_path: runtime_path.into(),
+            shim_path: shim_path.into(),
+            system_image_manifest: system_image_manifest.into(),
+        });
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn runtime_root(&self) -> &Path {
@@ -78,11 +136,20 @@ impl LinuxKvmOciMigrationConfig {
         &self.endpoint
     }
 
+    pub fn box_owned_owner(&self) -> Option<&LinuxKvmBoxOwnedOwner> {
+        self.box_owned_owner.as_ref()
+    }
+
     pub fn from_environment(home_dir: &Path) -> ExecutionManagerResult<Option<Self>> {
         parse_linux_kvm_environment(
             std::env::var_os(OCI_MIGRATION_ENV),
             std::env::var_os(OCI_HOST_ROOT_ENV),
             std::env::var_os(OCI_KVM_ENDPOINT_ENV),
+            std::env::var_os(OCI_KVM_BOX_OWNED_ENV),
+            std::env::var_os(OCI_KVM_SERVICE_ROOT_ENV),
+            std::env::var_os(OCI_KVM_SERVICE_BIN_ENV),
+            std::env::var_os(OCI_KVM_SERVICE_SHIM_ENV),
+            std::env::var_os(OCI_KVM_SERVICE_MANIFEST_ENV),
             home_dir,
         )
     }
@@ -90,7 +157,26 @@ impl LinuxKvmOciMigrationConfig {
     fn validate(&self) -> ExecutionManagerResult<()> {
         validate_absolute_normalized(&self.runtime_root, "KVM OCI runtime root")?;
         match &self.endpoint {
-            super::OciRuntimeEndpoint::UnixSocket { .. } => Ok(()),
+            super::OciRuntimeEndpoint::UnixSocket { path } => {
+                if let Some(owner) = &self.box_owned_owner {
+                    validate_absolute_normalized(&owner.service_root, "KVM OCI service root")?;
+                    validate_absolute_normalized(&owner.runtime_path, "KVM OCI runtime binary")?;
+                    validate_absolute_normalized(&owner.shim_path, "KVM OCI shim")?;
+                    validate_absolute_normalized(
+                        &owner.system_image_manifest,
+                        "KVM OCI system-image manifest",
+                    )?;
+                    let expected = owner.service_root.join("runtime.sock");
+                    if path != &expected {
+                        return Err(ExecutionManagerError::InvalidRequest(format!(
+                            "Box-owned KVM OCI endpoint must be {} (got {})",
+                            expected.display(),
+                            path.display()
+                        )));
+                    }
+                }
+                Ok(())
+            }
             super::OciRuntimeEndpoint::WindowsNamedPipe { .. } => {
                 Err(ExecutionManagerError::InvalidRequest(
                     "KVM OCI qualification requires a Unix-domain socket endpoint".to_string(),
@@ -378,10 +464,34 @@ impl LocalExecutionManager {
             if let Some(progress) = pull_progress_fn.as_ref() {
                 provider = provider.with_pull_progress_fn(progress.clone());
             }
-            let oci = Arc::new(
-                OciLocalExecutionBackend::connect(config.endpoint().clone(), Arc::new(provider))
-                    .await?,
-            );
+            let provider = Arc::new(provider);
+            let oci = if let Some(owner) = config.box_owned_owner() {
+                let artifacts = super::oci_kvm_owner::LinuxKvmOwnerArtifacts::certify(
+                    owner.runtime_path.clone(),
+                    owner.shim_path.clone(),
+                    owner.system_image_manifest.clone(),
+                )?;
+                let endpoint = super::oci_kvm_owner::ensure_linux_kvm_oci_owner(
+                    &owner.service_root,
+                    &artifacts,
+                )
+                .await?;
+                if &endpoint != config.endpoint() {
+                    return Err(ExecutionManagerError::Internal(format!(
+                        "Linux KVM OCI owner ensure returned a different endpoint ({endpoint:?}) than configured ({:?})",
+                        config.endpoint()
+                    )));
+                }
+                Arc::new(
+                    OciLocalExecutionBackend::connect(endpoint, provider)
+                        .await?
+                        .with_linux_kvm_owner_recovery(owner.service_root.clone(), artifacts),
+                )
+            } else {
+                Arc::new(
+                    OciLocalExecutionBackend::connect(config.endpoint().clone(), provider).await?,
+                )
+            };
             Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
                 home_dir,
@@ -735,6 +845,11 @@ fn parse_linux_kvm_environment(
     mode: Option<OsString>,
     runtime_root: Option<OsString>,
     endpoint: Option<OsString>,
+    box_owned: Option<OsString>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_manifest: Option<OsString>,
     home_dir: &Path,
 ) -> ExecutionManagerResult<Option<LinuxKvmOciMigrationConfig>> {
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
@@ -760,6 +875,62 @@ fn parse_linux_kvm_environment(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default_service_root(home_dir));
+    let box_owned = box_owned
+        .as_ref()
+        .and_then(|value| value.to_str())
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "off" | "no" => false,
+            "1" | "true" | "on" | "yes" | "box-owned" => true,
+            _ => false,
+        })
+        .unwrap_or(false);
+
+    if box_owned {
+        let service_root = service_root
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_KVM_SERVICE_ROOT_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_bin = service_bin
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_KVM_SERVICE_BIN_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_shim = service_shim
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_KVM_SERVICE_SHIM_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let service_manifest = service_manifest
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_KVM_SERVICE_MANIFEST_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
+        let endpoint = endpoint
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| service_root.join("runtime.sock"));
+        return LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?.with_box_owned_owner(
+            service_root,
+            service_bin,
+            service_shim,
+            service_manifest,
+        )
+        .map(Some);
+    }
+
     let endpoint = endpoint
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -890,32 +1061,101 @@ mod tests {
     #[test]
     fn linux_kvm_environment_requires_explicit_socket_and_accepts_microvm() {
         let home = absolute("a3s-oci-config-home");
-        assert!(
-            parse_linux_kvm_environment(Some(OsString::from("microvm")), None, None, &home)
-                .is_err()
-        );
+        let endpoint = absolute("a3s-oci-kvm-box-runtime.sock");
+        assert!(parse_linux_kvm_environment(
+            Some(OsString::from("microvm")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &home
+        )
+        .is_err());
         assert_eq!(
-            parse_linux_kvm_environment(Some(OsString::from("sandbox")), None, None, &home)
-                .unwrap(),
+            parse_linux_kvm_environment(
+                Some(OsString::from("sandbox")),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &home
+            )
+            .unwrap(),
             None
         );
 
         let config = parse_linux_kvm_environment(
             Some(OsString::from("microvm")),
             Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
-            Some(OsString::from(DEFAULT_OCI_KVM_ENDPOINT)),
+            Some(endpoint.clone().into_os_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
             &home,
         )
         .unwrap()
         .unwrap();
         assert_eq!(
             config.endpoint(),
-            &crate::local_execution::OciRuntimeEndpoint::unix_socket(DEFAULT_OCI_KVM_ENDPOINT)
-                .unwrap()
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(&endpoint).unwrap()
         );
         assert_eq!(
             config.runtime_root(),
             absolute("a3s-oci-kvm-runtime").as_path()
+        );
+        assert!(config.box_owned_owner().is_none());
+    }
+
+    #[test]
+    fn linux_kvm_box_owned_requires_service_artifacts_and_fences_endpoint() {
+        let home = absolute("a3s-oci-config-home");
+        let service_root = absolute("a3s-oci-kvm-service");
+        let endpoint = service_root.join("runtime.sock");
+        assert!(parse_linux_kvm_environment(
+            Some(OsString::from("microvm")),
+            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+            Some(endpoint.clone().into_os_string()),
+            Some(OsString::from("1")),
+            Some(service_root.clone().into_os_string()),
+            None,
+            None,
+            None,
+            &home,
+        )
+        .is_err());
+
+        let config = parse_linux_kvm_environment(
+            Some(OsString::from("kvm")),
+            Some(absolute("a3s-oci-kvm-runtime").into_os_string()),
+            None,
+            Some(OsString::from("true")),
+            Some(service_root.clone().into_os_string()),
+            Some(absolute("a3s-oci").into_os_string()),
+            Some(absolute("a3s-oci-kvm-shim").into_os_string()),
+            Some(absolute("system-image.json").into_os_string()),
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(&endpoint).unwrap()
+        );
+        let owner = config.box_owned_owner().expect("box-owned owner");
+        assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(owner.runtime_path(), absolute("a3s-oci").as_path());
+        assert_eq!(owner.shim_path(), absolute("a3s-oci-kvm-shim").as_path());
+        assert_eq!(
+            owner.system_image_manifest(),
+            absolute("system-image.json").as_path()
         );
     }
 }

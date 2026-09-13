@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Qualification-only Linux KVM OCI **Box-owned Host ensure/recovery**
+  (`a3s.box.linux-kvm-oci-owner.v1`): identity-fenced spawn of
+  `box-kvm-qualification-service`, refuse unowned sockets, reclaim dead
+  owners, retained-manager respawn via `with_linux_kvm_owner_recovery`.
+  Opt in with `LinuxKvmOciMigrationConfig::with_box_owned_owner` or
+  `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service root/bin/shim/manifest.
+  Script `--box-owned` skips external Host start (phase 2 Host restart
+  omitted until example restart uses ensure). Does **not** claim MicroVM
+  production cutover, B2 close, or default omit→OCI routing.
+
 ### Changed
 
 - Website installation and quick-start document Linux Sandbox GA host prep for

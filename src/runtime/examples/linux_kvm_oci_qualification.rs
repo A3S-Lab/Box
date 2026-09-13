@@ -70,6 +70,7 @@ mod qualification {
     const SERVICE_SHIM_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_SHIM";
     const SERVICE_MANIFEST_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_MANIFEST";
     const SERVICE_LOG_ENV: &str = "A3S_BOX_KVM_OCI_SERVICE_LOG";
+    const BOX_OWNED_ENV: &str = "A3S_BOX_KVM_OCI_BOX_OWNED";
     const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-oci-qualification.v2";
     const STDOUT_MARKER: &str = "a3s-box-kvm-oci-stdout";
     const STDERR_MARKER: &str = "a3s-box-kvm-oci-stderr";
@@ -95,6 +96,7 @@ mod qualification {
         endpoint: PathBuf,
         image: String,
         service_restart: Option<ServiceRestartInputs>,
+        box_owned: bool,
     }
 
     #[derive(Debug, Serialize)]
@@ -274,7 +276,17 @@ mod qualification {
         )?;
         let image = required_environment_string(IMAGE_ENV)?;
         let state_path = home_dir.join("managed-executions.json");
-        let service_restart = load_service_restart_inputs()?;
+        let box_owned = matches!(
+            std::env::var(BOX_OWNED_ENV).ok().as_deref(),
+            Some("1" | "true" | "on" | "yes" | "box-owned")
+        );
+        let service_restart = if box_owned {
+            // Example-local Host respawn does not write box-owner.json; keep
+            // phase 2 off until restart goes through Box owner ensure.
+            None
+        } else {
+            load_service_restart_inputs()?
+        };
         report.runtime_service_restart_requested = service_restart.is_some();
 
         report.home_dir = Some(home_dir.clone());
@@ -289,6 +301,7 @@ mod qualification {
             endpoint,
             image,
             service_restart,
+            box_owned,
         })
     }
 
@@ -738,8 +751,16 @@ mod qualification {
     }
 
     async fn connect(inputs: &Inputs) -> Result<LocalExecutionManager, AnyError> {
-        let config =
+        let mut config =
             LinuxKvmOciMigrationConfig::new(inputs.runtime_root.clone(), inputs.endpoint.clone())?;
+        if inputs.box_owned {
+            config = config.with_box_owned_owner(
+                absolute_environment_path(SERVICE_ROOT_ENV)?,
+                absolute_environment_path(SERVICE_BIN_ENV)?,
+                absolute_environment_path(SERVICE_SHIM_ENV)?,
+                absolute_environment_path(SERVICE_MANIFEST_ENV)?,
+            )?;
+        }
         Ok(LocalExecutionManager::with_linux_kvm_oci_qualification(
             &inputs.state_path,
             &inputs.home_dir,

@@ -1343,6 +1343,14 @@ pub struct NativeLinuxOwnerRecovery {
     artifacts: crate::sandbox::CertifiedA3sOci,
 }
 
+/// Retained-manager recovery for the qualification-only Linux KVM OCI owner.
+#[cfg(all(feature = "vm", target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct LinuxKvmOwnerRecovery {
+    service_root: PathBuf,
+    artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
+}
+
 /// Opt-in canonical local-execution backend over one A3S OCI host service.
 #[derive(Clone)]
 pub struct OciLocalExecutionBackend {
@@ -1350,6 +1358,8 @@ pub struct OciLocalExecutionBackend {
     provider: Arc<dyn OciBundleProvider>,
     #[cfg(all(feature = "vm", target_os = "linux"))]
     native_linux_owner: Option<Arc<NativeLinuxOwnerRecovery>>,
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    linux_kvm_owner: Option<Arc<LinuxKvmOwnerRecovery>>,
 }
 
 impl OciLocalExecutionBackend {
@@ -1364,6 +1374,8 @@ impl OciLocalExecutionBackend {
             provider,
             #[cfg(all(feature = "vm", target_os = "linux"))]
             native_linux_owner: None,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            linux_kvm_owner: None,
         })
     }
 
@@ -1377,6 +1389,8 @@ impl OciLocalExecutionBackend {
             provider,
             #[cfg(all(feature = "vm", target_os = "linux"))]
             native_linux_owner: None,
+            #[cfg(all(feature = "vm", target_os = "linux"))]
+            linux_kvm_owner: None,
         })
     }
 
@@ -1397,6 +1411,7 @@ impl OciLocalExecutionBackend {
             service_root: service_root.into(),
             artifacts,
         }));
+        self.linux_kvm_owner = None;
         self
     }
 
@@ -1406,6 +1421,30 @@ impl OciLocalExecutionBackend {
         self,
         _service_root: impl Into<PathBuf>,
         _artifacts: crate::sandbox::CertifiedA3sOci,
+    ) -> Self {
+        self
+    }
+
+    /// Enable identity-fenced KVM qualification Host respawn for retained-manager Live reopen.
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    pub fn with_linux_kvm_owner_recovery(
+        mut self,
+        service_root: impl Into<PathBuf>,
+        artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
+    ) -> Self {
+        self.linux_kvm_owner = Some(Arc::new(LinuxKvmOwnerRecovery {
+            service_root: service_root.into(),
+            artifacts,
+        }));
+        self.native_linux_owner = None;
+        self
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    pub fn with_linux_kvm_owner_recovery(
+        self,
+        _service_root: impl Into<PathBuf>,
+        _artifacts: super::oci_kvm_owner::LinuxKvmOwnerArtifacts,
     ) -> Self {
         self
     }
@@ -1431,6 +1470,41 @@ impl OciLocalExecutionBackend {
 
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     async fn ensure_native_linux_owner(&self) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    async fn ensure_linux_kvm_owner(&self) -> ExecutionManagerResult<()> {
+        let Some(recovery) = self.linux_kvm_owner.as_ref() else {
+            return Ok(());
+        };
+        let endpoint = super::oci_kvm_owner::ensure_linux_kvm_oci_owner(
+            &recovery.service_root,
+            &recovery.artifacts,
+        )
+        .await?;
+        if endpoint != self.adapter.endpoint {
+            return Err(ExecutionManagerError::Internal(format!(
+                "Linux KVM OCI owner recovery returned a different endpoint ({endpoint:?}) than the retained SDK binding ({:?})",
+                self.adapter.endpoint
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    async fn ensure_linux_kvm_owner(&self) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    async fn ensure_owner_recovery(&self) -> ExecutionManagerResult<()> {
+        self.ensure_native_linux_owner().await?;
+        self.ensure_linux_kvm_owner().await
+    }
+
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    async fn ensure_owner_recovery(&self) -> ExecutionManagerResult<()> {
         Ok(())
     }
 
@@ -1813,7 +1887,7 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
             Err(ExecutionManagerError::Unavailable(_)) => {
                 // Retained manager: respawn the Host under the same socket path
                 // so the next SDK call can reconnect and Live-recover.
-                self.ensure_native_linux_owner().await?;
+                self.ensure_owner_recovery().await?;
                 self.current_runtime(record).await?
             }
             Err(error) => return Err(error),
