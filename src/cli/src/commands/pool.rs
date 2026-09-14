@@ -34,6 +34,8 @@ use a3s_box_runtime::pool::{
 use a3s_box_runtime::pool::{PoolStats, WarmPool};
 #[cfg(target_os = "linux")]
 use a3s_box_runtime::vm::reap::reap_orphaned_box;
+// Stub returns 0 on non-Linux; call site must compile on macOS pool CLI.
+use a3s_box_runtime::vm::reap::reap_orphaned_boxes_for_home;
 #[cfg(not(windows))]
 use tokio::task::JoinSet;
 
@@ -1052,6 +1054,20 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         }
         if args.boot_concurrency == 0 {
             return Err("--boot-concurrency must be greater than 0".into());
+        }
+
+        // Pool VM ownership is in-memory only. After a previous daemon SIGKILL,
+        // orphan shims stay reparented to init with box dirs under A3S_HOME.
+        // Reap them before bind/prewarm so pool stop / capacity cannot hide
+        // invisible MicroVMs (#373). Does not reattach and does not kill
+        // shims still owned by a live parent.
+        let home = a3s_box_core::dirs_home();
+        let reaped = reap_orphaned_boxes_for_home(&home);
+        if reaped > 0 {
+            eprintln!(
+                "reaped {reaped} orphan pool microVM(s) under {}",
+                home.display()
+            );
         }
 
         // Optional Prometheus metrics for the long-lived daemon. One shared registry
