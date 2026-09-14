@@ -2247,6 +2247,90 @@ async fn abandoned_starting_claim_force_kills_to_stopped_then_removes() {
 }
 
 #[tokio::test]
+async fn inspect_retires_abandoned_starting_claim_when_backend_is_absent() {
+    // Follow-on to #372: force kill/stop/rm --force already clear abandoned
+    // Starting claims. Inspect must also converge durable state when observation
+    // proves NotFound — projecting Creating while persisting Starting forever
+    // is a present-tense inventory lie (prune skips it; operators see "creating").
+    // Lifecycle lock serializes against live start/reconcile, so NotFound here
+    // means no in-flight start owns the claim. Does not invent exit codes or
+    // auto-restart via recover_start.
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-inspect-abandoned-start");
+    let execution_id = ExecutionId::new("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+    let starting = reserve_starting(&manager, &execution_id, &operation_id).await;
+    assert_eq!(
+        starting.managed_state().unwrap(),
+        Some(ManagedExecutionState::Starting)
+    );
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+
+    let status = manager.inspect(&execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Stopped);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+
+    let stopped = persisted(&manager, &execution_id);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert!(
+        stopped.exit_code.is_none(),
+        "abandoned Starting retire must not invent an exit code"
+    );
+}
+
+#[tokio::test]
+async fn inspect_does_not_retire_restart_starting_when_backend_is_absent() {
+    // RestartStarting keeps projecting Creating until reconcile resumes the
+    // restart owner. Inspect must not invent Stopped for that distinct claim.
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("operation-restart-inspect-create");
+    let running = manager
+        .create_and_start(request("sandbox-restart-inspect"), &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    backend.executions.lock().unwrap().remove(&record.id);
+
+    let restart_operation = operation("operation-restart-inspect");
+    let stopping = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::RestartStopping,
+            RuntimeUpdate::RestartClaim {
+                operation_id: restart_operation,
+                options: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let restarting = manager
+        .transition(
+            &stopping,
+            ManagedExecutionState::RestartStopping,
+            ManagedExecutionState::RestartStarting,
+            RuntimeUpdate::RestartAdvance,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarting.managed_state().unwrap(),
+        Some(ManagedExecutionState::RestartStarting)
+    );
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(status.state, ExecutionState::Creating);
+    let durable = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        durable.managed_state().unwrap(),
+        Some(ManagedExecutionState::RestartStarting)
+    );
+    drop(directory);
+}
+
+#[tokio::test]
 async fn startup_reconciliation_publishes_an_already_started_backend_once() {
     let (_directory, manager, backend) = harness();
     let operation_id = operation("operation-1");

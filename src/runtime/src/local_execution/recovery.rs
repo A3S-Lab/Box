@@ -90,13 +90,30 @@ impl LocalExecutionManager {
         let observation = match self.backend.inspect(&record).await {
             Ok(observation) => observation,
             Err(ExecutionManagerError::NotFound(_)) => {
+                // Restart in-flight claims keep projecting Creating until the
+                // restart owner resumes; do not invent a terminal here.
                 if matches!(
                     internal,
-                    ManagedExecutionState::Starting
-                        | ManagedExecutionState::RestartStopping
-                        | ManagedExecutionState::RestartStarting
+                    ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting
                 ) {
                     return Ok((record, ExecutionState::Creating));
+                }
+                // Abandoned Starting (client death mid-run, no backend): same
+                // NotFound-honest converge as force kill (#372). Lifecycle lock
+                // serializes against live start/reconcile, so absence here is
+                // durable — projecting Creating forever while persisting
+                // Starting is an inventory lie. Do not recover_start on inspect.
+                if internal == ManagedExecutionState::Starting {
+                    self.release_execution_resources(&record).await?;
+                    let record = self
+                        .transition(
+                            &record,
+                            ManagedExecutionState::Starting,
+                            ManagedExecutionState::Stopped,
+                            RuntimeUpdate::Terminal(None),
+                        )
+                        .await?;
+                    return Ok((record, ExecutionState::Stopped));
                 }
                 let terminal = if internal == ManagedExecutionState::Killing {
                     ManagedExecutionState::Stopped
