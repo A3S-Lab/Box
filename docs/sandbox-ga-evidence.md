@@ -34,9 +34,12 @@ Authoritative hosted gate. Steps that matter for GA:
 6. Native Live v7 retained stream + keyed mutating filesystem continuity
    (MakeDir / Move / Remove + upload before kill; ListDir + download of the
    moved tree after reattach), verified by
-   `scripts/verify-linux-native-live-session-report.py`. Existing-host
-   greening of a v7 digest remains pending; published digests remain
-   v4-scoped.
+   `scripts/verify-linux-native-live-session-report.py`. **CI-greened** on run
+   `34805883757`: SHA-256
+   `71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd`
+   (linux-x86_64) /
+   `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
+   (linux-arm64). Does **not** flip B2; KVM tip v5 greening remains pending.
 
 ## Operator setuid launcher evidence (self-hosted)
 
@@ -70,7 +73,7 @@ not required to flip B2 or MicroVM cutover.
 | Named volumes, bind/tmpfs (R17 mounts) | R17 profile gate |
 | Network: private netns, loopback-only; R17 Service host-loopback relays | R17 networking profile + design |
 | Pause/resume, filesystem snapshots | SDK Local Sandbox |
-| Native Live v7 retained stream + keyed mutating FS across owner SIGKILL | Live-session gate + verifier (v7 greening pending) |
+| Native Live v7 retained stream + keyed mutating FS across owner SIGKILL | Live-session gate + verifier (CI-greened digests above) |
 | Stopped-only owner crash recovery | no-KVM recovery report |
 | Fresh ensure reaps supervised orphans after Host SIGKILL | SDK sandbox smoke + #339 |
 | Operator setuid launcher (self-hosted suid FS) | proof script + honesty verifier |
@@ -84,8 +87,8 @@ not required to flip B2 or MicroVM cutover.
 - WHPX/KVM MicroVM **production** OCI composition (qualification-only remains).
 - Flipping `b2_process_session_recovery_closed`.
 - Fixture `process_restart` as driver Live evidence.
-- Claiming Native Live v7 / KVM Live v5 existing-host greening before a
-  matching report digest is published.
+- Claiming KVM Live v5 existing-host greening before a matching report digest
+  is published (Native Live v7 is CI-greened; do not invent KVM digests).
 - Cloud `BX0.3` / hardware TEE.
 - CI setpriv as a substitute for an operator setuid install at
   `/usr/local/libexec/a3s-box-sandbox-oci-launcher` (use the self-hosted

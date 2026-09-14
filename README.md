@@ -83,7 +83,7 @@ runtime fixes from `main`:
 
 | Area | Latest behavior |
 | --- | --- |
-| Linux Sandbox GA | Absent `A3S_BOX_OCI_MIGRATION` defaults new Sandbox records to `SandboxViaOci`; hosted x86_64/aarch64 CI proves the route with the env unset (lifecycle + Native Live observation gate; tip harness v7, published greened digests remain v4-scoped). Operator host prep: `scripts/prepare-linux-sandbox-host.sh`. Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md). Not a MicroVM/`BX0.3` claim. |
+| Linux Sandbox GA | Absent `A3S_BOX_OCI_MIGRATION` defaults new Sandbox records to `SandboxViaOci`; hosted x86_64/aarch64 CI proves the route with the env unset (lifecycle + Native Live observation gate; tip harness v7, CI-greened digests v7-scoped). Operator host prep: `scripts/prepare-linux-sandbox-host.sh`. Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md). Not a MicroVM/`BX0.3` claim. |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` drain idle VMs and leases with bounded concurrency; destroy failures best-effort reap orphans (idle, lease release/expiry, oneshot `pool run`, mid-replenish, and template teardown); snapshot template dirs (`~/.a3s/pool/tpl-*`) are removed even after a Failing/Unavailable build. |
 | MicroVM lifecycle | Guest stop is skipped when the workload already exited; Unix cold boot fail-closes without an exec heartbeat; crash-detection grace is 80ms. Transport retries cover ambiguous ACK/stream loss on keyed exec, read-only filesystem ops, keyed mutating filesystem ops (`MakeDir`/`Move`/`Remove` with `request_id`), keyed file uploads, and file downloads. SDK/bridge `Unavailable` for keyed upload and mutate preserves `request_id` for caller retry (parity with keyed exec). |
 | CRI | PodSandbox creation defers the agent workload until `StartContainer`; cancel and destroy paths best-effort reap orphans when VM teardown fails. |
@@ -154,7 +154,7 @@ artifacts are published from the same versioned release tag. See the
 > `A3S_BOX_OCI_MIGRATION`. Hosted CI on x86_64/aarch64 (SDK Local Sandbox)
 > proves that path with the env unset: lifecycle, exec, filesystem,
 > pause/resume, snapshot, restart, cleanup, and the Native Live observation
-> gate (tip harness v7; published greened digests remain v4-scoped) for
+> gate (tip harness v7; CI-greened digests v7-scoped) for
 > retained stream + filesystem continuity across owner SIGKILL. Explicit `off`
 > keeps the
 > VM-only backend; explicit `sandbox` hard-fails when the owner is not ready.
@@ -284,8 +284,8 @@ generations. That **stopped-only** crash recovery is qualified on real x86_64
 and aarch64 Linux hosts.
 
 Separately, the Native Live observation gate (SDK Local Sandbox CI; tip harness
-`a3s.box.linux-native-live-session.v7`, published greened digests remain
-v4-scoped) proves **retained** streaming exec handles and filesystem continuity
+`a3s.box.linux-native-live-session.v7`, CI-greened digests v7-scoped) proves
+**retained** streaming exec handles and filesystem continuity
 across Host owner SIGKILL when the Box manager is kept — see
 [Exercise Native Linux live-session Host reopen](#exercise-native-linux-live-session-host-reopen-observation).
 Do not confuse stopped-only reconcile with Live reattach; both are real, and
@@ -458,16 +458,17 @@ Live tip `a3s.box.linux-kvm-live-session.v5`, this observation-greens the
 ROADMAP process-session recovery matrix; the B2 exit gate remains open and
 harness reports still keep `b2_process_session_recovery_closed=false`
 (reports never self-certify B2 close). It does not alone claim KVM MicroVM Live
-continuity or Sandbox guest `filesystem_replay`. Pin OCI Runtime at
-`05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on
-`61f77712…` / Native Live filesystem #290). Existing-host WSL2 evidence on Box
-`d07648d0…` / CI run `34542747784`: report SHA-256
-`36f91361c3851ea995ac7530bcfe05f0c9216d6e9a5b7e130b48f151cd4b9a75`
+continuity or Sandbox guest `filesystem_replay`. **CI-greened** Native Live v7
+on PR #358 / run `34805883757` (report `box_commit_sha` `76dc560e…`; OCI
+`931def0b…`): report SHA-256
+`71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd`
 (linux-x86_64) and
-`8454044deabe77a08d7f193cd970e8f3117566a8651b3f9d4023cb2223321423`
+`43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
 (linux-arm64) (`retained_filesystem_proven=true`,
-`retained_stream_handle_proven=true`; v4-scoped digests — v7 greening pending).
-Does not flip default create Host-bound policy or cutover.
+`retained_stream_handle_proven=true`, keyed Move/Remove ids present; B2 stays
+false). Prior WSL2 v4-scoped digests remain historical
+(`36f91361…` / `8454044d…` on CI run `34542747784`). KVM tip v5 greening remains
+pending. Does not flip default create Host-bound policy or cutover.
 
 ### Exercise the qualification-only WHPX handoff on Windows
 
@@ -801,7 +802,7 @@ operation returns a typed availability error before dispatch.
 | Linux MicroVM | Primary local path through KVM/libkrun; Runtime 0.5 readiness/liveness and bounded graceful-stop cases are wired into the advertised provider profiles alongside self-hosted lifecycle, SDK, CRI, race, leak, snapshot-fork, and soak gates | The current revision still requires an enrolled KVM run of all capability-triggered lifecycle cases plus the longer `G2`/`R24` profiles |
 | macOS MicroVM | Apple Silicon/HVF build and packaging path plus physical persistent/crash recovery, mount-free filesystem snapshot, legacy migration, maintenance, and published-port regression gates | The [`integration-hvf` gate](docs/ci-hvf-runner.md) requires an enrolled physical Apple Silicon runner; Intel macOS is unsupported |
 | Windows MicroVM | Real x86_64 WHPX soak covering lifecycle, exec, copy, stats, ports, bind/named volumes, commit, snapshots, and cleanup | One vCPU; no interactive PTY, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and the Native Live observation gate (tip harness v7; greened digests v4-scoped) use the production owner route with `A3S_BOX_OCI_MIGRATION` unset (Sandbox GA default). Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **Production** shared-kernel path for `--isolation sandbox` (not default omit-isolation). Host prep: [Installation](docs/installation.md#linux-sandbox-host-preparation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
+| Linux Sandbox | Installed, self-contained x86_64/aarch64 product packages run every A3S OCI Runtime profile plus the Rust, Python, TypeScript, and Go SDK lifecycle with `/dev/kvm` both absent and inaccessible; Runtime 0.5 lifecycle cases and the Native Live observation gate (tip harness v7; CI-greened digests v7-scoped) use the production owner route with `A3S_BOX_OCI_MIGRATION` unset (Sandbox GA default). Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **Production** shared-kernel path for `--isolation sandbox` (not default omit-isolation). Host prep: [Installation](docs/installation.md#linux-sandbox-host-preparation). VM-only controls rejected. Host reports keep `b2_process_session_recovery_closed=false`. Not a MicroVM/TEE/`BX0.3` claim. |
 | Kubernetes | CRI v1 server and containerd runtime-v2 shim preview | Complete CRI conformance is not claimed |
 | TEE | Runtime-bound RA-TLS artifacts, exact identity-attachment binding, attestation-before-execution for confidential Tasks and Services, and an opt-in simulated KVM conformance profile; a separately armed SEV-SNP hardware gate pins the launch measurement | Identity attachment is advertised only by an explicitly configured confidential provider; simulation and an unexecuted hardware job are not hardware security evidence |
 
