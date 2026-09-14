@@ -274,43 +274,64 @@ func (filesystem *Filesystem) MakeDir(
 	ctx context.Context,
 	path string,
 	options ...FileOption,
-) error {
+) (MutateInfo, error) {
 	const op = "filesystem_make_dir"
 	fields, err := filesystem.fields(op, path, options)
 	if err != nil {
-		return err
+		return MutateInfo{}, err
 	}
-	return filesystem.sandbox.readRequest(ctx, op, fields, &struct{}{}, true)
+	var result MutateInfo
+	if err := filesystem.sandbox.readRequest(ctx, op, fields, &result, true); err != nil {
+		return MutateInfo{}, err
+	}
+	if result.RequestID == "" {
+		return MutateInfo{}, sdkError(op, CodeProtocol, "filesystem mutate result is missing request_id", nil)
+	}
+	return result, nil
 }
 
 func (filesystem *Filesystem) Move(
 	ctx context.Context,
 	path, destination string,
 	options ...FileOption,
-) error {
+) (MutateInfo, error) {
 	const op = "filesystem_move"
 	if strings.TrimSpace(destination) == "" {
-		return invalid(op, "filesystem destination cannot be empty")
+		return MutateInfo{}, invalid(op, "filesystem destination cannot be empty")
 	}
 	fields, err := filesystem.fields(op, path, options)
 	if err != nil {
-		return err
+		return MutateInfo{}, err
 	}
 	fields["destination"] = destination
-	return filesystem.sandbox.readRequest(ctx, op, fields, &struct{}{}, true)
+	var result MutateInfo
+	if err := filesystem.sandbox.readRequest(ctx, op, fields, &result, true); err != nil {
+		return MutateInfo{}, err
+	}
+	if result.RequestID == "" {
+		return MutateInfo{}, sdkError(op, CodeProtocol, "filesystem mutate result is missing request_id", nil)
+	}
+	return result, nil
 }
 
 func (filesystem *Filesystem) Remove(
 	ctx context.Context,
 	path string,
 	options ...FileOption,
-) error {
+) (MutateInfo, error) {
 	const op = "filesystem_remove"
 	fields, err := filesystem.fields(op, path, options)
 	if err != nil {
-		return err
+		return MutateInfo{}, err
 	}
-	return filesystem.sandbox.readRequest(ctx, op, fields, &struct{}{}, true)
+	var result MutateInfo
+	if err := filesystem.sandbox.readRequest(ctx, op, fields, &result, true); err != nil {
+		return MutateInfo{}, err
+	}
+	if result.RequestID == "" {
+		return MutateInfo{}, sdkError(op, CodeProtocol, "filesystem mutate result is missing request_id", nil)
+	}
+	return result, nil
 }
 
 func (filesystem *Filesystem) fields(

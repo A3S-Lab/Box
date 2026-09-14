@@ -26,6 +26,14 @@ pub struct WriteInfo {
     pub request_id: String,
 }
 
+/// Metadata returned after a successful mutating filesystem op (`MakeDir` /
+/// `Move` / `Remove`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutateInfo {
+    /// Durable mutate identity used for this op (SDK-minted `fs-*` or caller-supplied).
+    pub request_id: String,
+}
+
 /// One verified guest file exported as a bounded build or test artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
@@ -371,7 +379,7 @@ impl Filesystem {
         Ok(require_filesystem_success(response)?.entries)
     }
 
-    pub async fn make_dir(&self, path: impl Into<String>) -> Result<()> {
+    pub async fn make_dir(&self, path: impl Into<String>) -> Result<MutateInfo> {
         self.make_dir_with_options(path, FilesystemOptions::default())
             .await
     }
@@ -380,7 +388,7 @@ impl Filesystem {
         &self,
         path: impl Into<String>,
         options: FilesystemOptions,
-    ) -> Result<()> {
+    ) -> Result<MutateInfo> {
         self.mutate(FilesystemRequest {
             op: FilesystemOp::MakeDir,
             path: path.into(),
@@ -396,7 +404,7 @@ impl Filesystem {
         &self,
         source: impl Into<String>,
         destination: impl Into<String>,
-    ) -> Result<()> {
+    ) -> Result<MutateInfo> {
         self.move_path_with_options(source, destination, FilesystemOptions::default())
             .await
     }
@@ -406,7 +414,7 @@ impl Filesystem {
         source: impl Into<String>,
         destination: impl Into<String>,
         options: FilesystemOptions,
-    ) -> Result<()> {
+    ) -> Result<MutateInfo> {
         self.mutate(FilesystemRequest {
             op: FilesystemOp::Move,
             path: source.into(),
@@ -418,7 +426,7 @@ impl Filesystem {
         .await
     }
 
-    pub async fn remove(&self, path: impl Into<String>) -> Result<()> {
+    pub async fn remove(&self, path: impl Into<String>) -> Result<MutateInfo> {
         self.remove_with_options(path, FilesystemOptions::default())
             .await
     }
@@ -427,7 +435,7 @@ impl Filesystem {
         &self,
         path: impl Into<String>,
         options: FilesystemOptions,
-    ) -> Result<()> {
+    ) -> Result<MutateInfo> {
         self.mutate(FilesystemRequest {
             op: FilesystemOp::Remove,
             path: path.into(),
@@ -439,11 +447,11 @@ impl Filesystem {
         .await
     }
 
-    async fn mutate(&self, mut request: FilesystemRequest) -> Result<()> {
+    async fn mutate(&self, mut request: FilesystemRequest) -> Result<MutateInfo> {
         let request_id = resolve_durable_request_id(request.request_id.take(), "fs")?;
         request.request_id = Some(request_id.clone());
         match self.filesystem(request).await {
-            Ok(response) => require_filesystem_success(response).map(|_| ()),
+            Ok(response) => require_filesystem_success(response).map(|_| MutateInfo { request_id }),
             Err(ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(
                 message,
             ))) => Err(ClientError::CommandUnavailable {

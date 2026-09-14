@@ -554,7 +554,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 		case "filesystem_list":
 			return map[string]any{"entries": []EntryInfo{{Name: "data.bin", Type: "file", Path: "/data.bin"}}}, nil
 		case "filesystem_make_dir", "filesystem_move", "filesystem_remove":
-			return map[string]any{"ok": true}, nil
+			return map[string]any{"ok": true, "request_id": "fs-test"}, nil
 		default:
 			return nil, errors.New("unexpected operation")
 		}
@@ -601,13 +601,13 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("list=%+v err=%v", entries, err)
 	}
-	if err := files.MakeDir(ctx, "/new"); err != nil {
+	if _, err := files.MakeDir(ctx, "/new"); err != nil {
 		t.Fatal(err)
 	}
-	if err := files.Move(ctx, "/new", "/renamed"); err != nil {
+	if _, err := files.Move(ctx, "/new", "/renamed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := files.Remove(ctx, "/renamed"); err != nil {
+	if _, err := files.Remove(ctx, "/renamed"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -84,9 +84,9 @@ func TestPublicAPIExercisesEveryBridgeOperation(t *testing.T) {
 	check(files.Stat(ctx, "/tmp/value"))
 	check(files.Export(ctx, "/tmp/value"))
 	check(files.List(ctx, "/tmp", 1))
-	mustNoError(t, files.MakeDir(ctx, "/tmp/dir"))
-	mustNoError(t, files.Move(ctx, "/tmp/dir", "/tmp/moved"))
-	mustNoError(t, files.Remove(ctx, "/tmp/moved"))
+	check(files.MakeDir(ctx, "/tmp/dir"))
+	check(files.Move(ctx, "/tmp/dir", "/tmp/moved"))
+	check(files.Remove(ctx, "/tmp/moved"))
 	mustNoError(t, sandbox.Kill(ctx))
 
 	removable := newSandbox(runtime, SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateStopped, Isolation: IsolationMicroVM})
@@ -224,7 +224,7 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "filesystem_list":
 		return map[string]any{"entries": []EntryInfo{}}, nil
 	case "filesystem_make_dir", "filesystem_move", "filesystem_remove":
-		return map[string]any{"ok": true}, nil
+		return map[string]any{"ok": true, "request_id": "fs-test"}, nil
 	case "filesystem_snapshot_list":
 		return map[string]any{"snapshots": []FilesystemSnapshotSummary{{ID: "snap-1"}}}, nil
 	case "filesystem_snapshot_get":

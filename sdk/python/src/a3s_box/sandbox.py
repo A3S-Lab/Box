@@ -51,6 +51,7 @@ from .models import (
     TmpfsMount,
     VolumeMount,
     WriteInfo,
+    MutateInfo,
 )
 from .runtime import (
     A3SAsyncLocalRuntime,
@@ -1012,14 +1013,13 @@ class Filesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> EntryInfo | None:
+    ) -> MutateInfo:
         result = self._sandbox._runtime.request(
             self._request(
                 "filesystem_make_dir", path, user=user, request_id=request_id
             )
         )
-        entry = result.get("entry")
-        return None if entry is None else _entry_info(_mapping(entry))
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     def rename(
         self,
@@ -1028,7 +1028,7 @@ class Filesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> EntryInfo | None:
+    ) -> MutateInfo:
         result = self._sandbox._runtime.request(
             {
                 **self._request(
@@ -1040,8 +1040,7 @@ class Filesystem:
                 "destination": new_path,
             }
         )
-        entry = result.get("entry")
-        return None if entry is None else _entry_info(_mapping(entry))
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     def remove(
         self,
@@ -1049,12 +1048,13 @@ class Filesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> None:
-        self._sandbox._runtime.request(
+    ) -> MutateInfo:
+        result = self._sandbox._runtime.request(
             self._request(
                 "filesystem_remove", path, user=user, request_id=request_id
             )
         )
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     def _request(
         self,
@@ -1723,14 +1723,13 @@ class AsyncFilesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> EntryInfo | None:
+    ) -> MutateInfo:
         result = await self._sandbox._runtime.request(
             self._request(
                 "filesystem_make_dir", path, user=user, request_id=request_id
             )
         )
-        entry = result.get("entry")
-        return None if entry is None else _entry_info(_mapping(entry))
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     async def rename(
         self,
@@ -1739,7 +1738,7 @@ class AsyncFilesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> EntryInfo | None:
+    ) -> MutateInfo:
         result = await self._sandbox._runtime.request(
             {
                 **self._request(
@@ -1751,8 +1750,7 @@ class AsyncFilesystem:
                 "destination": new_path,
             }
         )
-        entry = result.get("entry")
-        return None if entry is None else _entry_info(_mapping(entry))
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     async def remove(
         self,
@@ -1760,12 +1758,13 @@ class AsyncFilesystem:
         *,
         user: str | None = None,
         request_id: str | None = None,
-    ) -> None:
-        await self._sandbox._runtime.request(
+    ) -> MutateInfo:
+        result = await self._sandbox._runtime.request(
             self._request(
                 "filesystem_remove", path, user=user, request_id=request_id
             )
         )
+        return MutateInfo(request_id=_string(result["request_id"]))
 
     def _request(
         self,

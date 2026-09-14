@@ -780,11 +780,11 @@ async fn execute_request(
             request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            sandbox
+            let result = sandbox
                 .files
                 .make_dir_with_options(path, FilesystemOptions { user, request_id })
                 .await?;
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "ok": true, "request_id": result.request_id }))
         }
         BridgeRequest::FilesystemMove {
             sandbox_id,
@@ -795,11 +795,11 @@ async fn execute_request(
             request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            sandbox
+            let result = sandbox
                 .files
                 .move_path_with_options(path, destination, FilesystemOptions { user, request_id })
                 .await?;
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "ok": true, "request_id": result.request_id }))
         }
         BridgeRequest::FilesystemRemove {
             sandbox_id,
@@ -809,11 +809,11 @@ async fn execute_request(
             request_id,
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
-            sandbox
+            let result = sandbox
                 .files
                 .remove_with_options(path, FilesystemOptions { user, request_id })
                 .await?;
-            Ok(json!({ "ok": true }))
+            Ok(json!({ "ok": true, "request_id": result.request_id }))
         }
     }
 }

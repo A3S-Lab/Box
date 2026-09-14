@@ -285,6 +285,11 @@ type WriteInfo struct {
 	RequestID string `json:"request_id"`
 }
 
+// MutateInfo is returned after a successful MakeDir / Move / Remove.
+type MutateInfo struct {
+	RequestID string `json:"request_id"`
+}
+
 // Artifact is one verified, bounded guest file and its SHA-256 digest.
 type Artifact struct {
 	Path     string
