@@ -2201,6 +2201,52 @@ async fn startup_reconciliation_restarts_a_claim_without_backend_evidence() {
 }
 
 #[tokio::test]
+async fn abandoned_starting_claim_force_kills_to_stopped_then_removes() {
+    // Issue #372: client death mid-start leaves Starting with no backend.
+    // Force cleanup must abort via Killing → Stopped (NotFound-honest) then
+    // remove — without inventing exit codes or flipping B2.
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-abandoned-start");
+    let execution_id = ExecutionId::new("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    let starting = reserve_starting(&manager, &execution_id, &operation_id).await;
+    assert_eq!(
+        starting.managed_state().unwrap(),
+        Some(ManagedExecutionState::Starting)
+    );
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+    let generation = starting.managed_execution.as_ref().unwrap().generation;
+
+    let outcome = manager
+        .kill_with_options(
+            &execution_id,
+            generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, KillOutcome::AlreadyStopped);
+
+    let stopped = persisted(&manager, &execution_id);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert!(stopped.exit_code.is_none());
+
+    assert!(manager
+        .remove_execution(
+            &execution_id,
+            stopped.managed_execution.as_ref().unwrap().generation,
+        )
+        .await
+        .unwrap());
+    assert!(manager.get(&execution_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn startup_reconciliation_publishes_an_already_started_backend_once() {
     let (_directory, manager, backend) = harness();
     let operation_id = operation("operation-1");

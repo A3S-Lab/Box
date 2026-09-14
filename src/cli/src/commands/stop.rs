@@ -191,6 +191,8 @@ fn stop_plan(
         ManagedExecutionState::Running
             | ManagedExecutionState::Paused
             | ManagedExecutionState::Killing
+            | ManagedExecutionState::Creating
+            | ManagedExecutionState::Starting
     ) {
         return Err(format!(
             "Cannot stop box {} because it is {state}. Use `a3s-box ps -a` to inspect state.",
@@ -228,31 +230,39 @@ mod tests {
     use super::*;
     use crate::test_helpers::fixtures::make_record;
     use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation, OperationId};
-    use a3s_box_runtime::ManagedExecutionMetadata;
+    use a3s_box_runtime::{ManagedExecutionMetadata, ManagedExecutionOperation};
     use std::collections::BTreeMap;
 
     fn managed_record(state: ManagedExecutionState) -> crate::state::BoxRecord {
         let id = "11111111-1111-4111-8111-111111111111";
         let mut record = make_record(id, "managed", state.as_status(), None);
         record.isolation = ExecutionIsolation::Sandbox;
-        record.managed_execution = Some(
-            ManagedExecutionMetadata::new(
-                OperationId::new("operation-create").unwrap(),
-                ExecutionGeneration::INITIAL,
-                CreateExecutionRequest {
-                    external_sandbox_id: "external-1".to_string(),
-                    config: BoxConfig {
-                        isolation: ExecutionIsolation::Sandbox,
-                        image: record.image.clone(),
-                        ..Default::default()
-                    },
-                    labels: BTreeMap::new(),
-                    policy: Default::default(),
-                    rootfs_snapshot_id: None,
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("operation-create").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "external-1".to_string(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Sandbox,
+                    image: record.image.clone(),
+                    ..Default::default()
                 },
-            )
-            .unwrap(),
-        );
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        if state == ManagedExecutionState::Starting {
+            metadata.pending_operation = Some(ManagedExecutionOperation::Start);
+        }
+        if state == ManagedExecutionState::Killing {
+            metadata.pending_operation = Some(ManagedExecutionOperation::Kill {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            });
+        }
+        record.managed_execution = Some(metadata);
         record
     }
 
@@ -313,5 +323,20 @@ mod tests {
             .to_string();
 
         assert!(error.contains("because it is stopped"));
+    }
+
+    #[test]
+    fn managed_stop_terminates_abandoned_starting_claims() {
+        assert_eq!(
+            stop_plan(&managed_record(ManagedExecutionState::Starting), None).unwrap(),
+            StopPlan::Managed {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                options: KillExecutionOptions {
+                    signal: Some(15),
+                    timeout_secs: Some(10),
+                },
+            }
+        );
     }
 }
