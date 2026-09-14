@@ -149,7 +149,14 @@ fn rm_plan(
         | ManagedExecutionState::Removing => false,
         ManagedExecutionState::Running
         | ManagedExecutionState::Paused
-        | ManagedExecutionState::Killing => {
+        | ManagedExecutionState::Killing
+        | ManagedExecutionState::Creating
+        | ManagedExecutionState::Starting => {
+            // Abandoned Creating/Starting claims (client death mid-run) have no
+            // live concurrent start under the lifecycle lock; force terminates
+            // via Starting/Creating → Killing → Stopped (NotFound-honest), then
+            // remove. Without --force, refuse so operators do not race an active
+            // create/start claim.
             if !force {
                 return Err(format!(
                     "Box {} is {state}. Use --force to remove an active box.",
@@ -193,31 +200,39 @@ mod tests {
     use super::*;
     use crate::test_helpers::fixtures::make_record;
     use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation, OperationId};
-    use a3s_box_runtime::ManagedExecutionMetadata;
+    use a3s_box_runtime::{ManagedExecutionMetadata, ManagedExecutionOperation};
     use std::collections::BTreeMap;
 
     fn managed_record(state: ManagedExecutionState) -> crate::state::BoxRecord {
         let id = "11111111-1111-4111-8111-111111111111";
         let mut record = make_record(id, "managed", state.as_status(), None);
         record.isolation = ExecutionIsolation::Sandbox;
-        record.managed_execution = Some(
-            ManagedExecutionMetadata::new(
-                OperationId::new("operation-create").unwrap(),
-                ExecutionGeneration::INITIAL,
-                CreateExecutionRequest {
-                    external_sandbox_id: "external-1".to_string(),
-                    config: BoxConfig {
-                        isolation: ExecutionIsolation::Sandbox,
-                        image: record.image.clone(),
-                        ..Default::default()
-                    },
-                    labels: BTreeMap::new(),
-                    policy: Default::default(),
-                    rootfs_snapshot_id: None,
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("operation-create").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "external-1".to_string(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Sandbox,
+                    image: record.image.clone(),
+                    ..Default::default()
                 },
-            )
-            .unwrap(),
-        );
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        if state == ManagedExecutionState::Starting {
+            metadata.pending_operation = Some(ManagedExecutionOperation::Start);
+        }
+        if state == ManagedExecutionState::Killing {
+            metadata.pending_operation = Some(ManagedExecutionOperation::Kill {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            });
+        }
+        record.managed_execution = Some(metadata);
         record
     }
 
@@ -269,6 +284,40 @@ mod tests {
                 execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
                 generation: ExecutionGeneration::INITIAL,
                 terminate: false,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_rm_force_terminates_abandoned_starting_claims() {
+        assert_eq!(
+            rm_plan(&managed_record(ManagedExecutionState::Starting), true).unwrap(),
+            RmPlan::Managed {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                terminate: true,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_rm_rejects_starting_without_force() {
+        let error = rm_plan(&managed_record(ManagedExecutionState::Starting), false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("--force"));
+        assert!(error.contains("starting"));
+    }
+
+    #[test]
+    fn managed_rm_force_terminates_abandoned_creating_claims() {
+        assert_eq!(
+            rm_plan(&managed_record(ManagedExecutionState::Creating), true).unwrap(),
+            RmPlan::Managed {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                terminate: true,
             }
         );
     }

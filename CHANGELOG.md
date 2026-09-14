@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
+  can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now
+  terminate those states the same way the execution manager already allowed
+  (`Starting`/`Creating` → `Killing` → `Stopped`, NotFound-honest) instead of
+  treating them as forbidden `other`. Without `--force`, `rm` still refuses
+  so operators do not race an in-flight start. Closes #372. Does **not** flip
+  B2, invent Live digests, or claim auto-converge on inspect.
+
 ### Changed
 
 - Publish CI-greened Native Live
