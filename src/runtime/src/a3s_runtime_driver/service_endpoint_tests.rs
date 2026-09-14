@@ -204,9 +204,35 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
         .pop()
         .unwrap();
     let metadata = record.managed_execution.unwrap();
+    // First apply probes both ports, re-apply and inspect each re-probe both
+    // retained advertised URLs, then traffic uses the api port once.
     assert_eq!(
         connector.calls(),
         vec![
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(9_090).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(9_090).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
             ConnectCall {
                 execution_id: ExecutionId::new(record.id.clone()).unwrap(),
                 generation: metadata.generation,
@@ -265,6 +291,63 @@ async fn rejecting_guest_relay_does_not_publish_advertised_endpoints() {
     assert!(
         driver.manager.managed_records().await.unwrap().is_empty(),
         "failed R17 advertised-URL probe must not leave a Running Service in inventory"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_service_lease_is_withdrawn_when_guest_relay_later_rejects() {
+    struct FlipConnector {
+        reject: std::sync::atomic::AtomicBool,
+        held_peers: Mutex<Vec<DuplexStream>>,
+    }
+
+    #[async_trait]
+    impl ExecutionPortConnector for FlipConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: Duration,
+        ) -> ExecutionManagerResult<ExecutionPortStream> {
+            if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ExecutionManagerError::Unavailable(
+                    "MicroVM port 8080 rejected the connection".into(),
+                ));
+            }
+            let (connector_stream, workload_stream) = tokio::io::duplex(1_024);
+            self.held_peers.lock().unwrap().push(workload_stream);
+            Ok(Box::pin(connector_stream))
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(DriverFakeBackend::default());
+    let connector = Arc::new(FlipConnector {
+        reject: std::sync::atomic::AtomicBool::new(false),
+        held_peers: Mutex::new(Vec::new()),
+    });
+    let driver =
+        fake_driver_with_backend_and_connector(&directory, backend, Arc::clone(&connector));
+    let spec = service_spec("service-endpoint-flip", 1, &[("api", 8_080)]);
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    assert!(!running.service_endpoints().unwrap().is_empty());
+
+    connector
+        .reject
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = driver.apply(&spec, &running).await.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeError::ProviderUnavailable(message)
+                if message.contains("is not reachable through the advertised host URL")
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        driver.manager.managed_records().await.unwrap().is_empty(),
+        "re-apply after a dead advertised URL must retire the generation"
     );
 }
 

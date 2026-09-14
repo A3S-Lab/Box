@@ -27,9 +27,10 @@ All notable changes to A3S Box will be documented in this file.
   relay opened. Rejected MicroVM port-forward no longer leaves Running
   observations with dead URLs. When that probe (or any Service observation
   path) fails during `apply`, Box retires the generation so durable inventory
-  does not keep a Running unit the caller was told never applied. Does
-  **not** flip B2, invent Live digests, or start Cloud sole-Runtime (#172)
-  cutover.
+  does not keep a Running unit the caller was told never applied. Retained
+  leases are re-probed on later apply/inspect; a dead URL is withdrawn
+  instead of being republished from identity match. Does **not** flip B2,
+  invent Live digests, or start Cloud sole-Runtime (#172) cutover.
 
 - Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
   can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now

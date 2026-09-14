@@ -658,7 +658,8 @@ retain process or filesystem sessions after its owner dies.
   reconcile probe fails (#370); Runtime Service (R17) advertised
   host endpoints are likewise published only after a live listener probe
   proves the guest relay opened, and a failed probe during `apply` retires
-  the generation instead of leaving an orphan Running Service.
+  the generation instead of leaving an orphan Running Service. Retained R17
+  leases are re-probed rather than republished from identity match.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
