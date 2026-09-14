@@ -882,6 +882,97 @@ class SdkTests(unittest.TestCase):
         self.assertNotIn("request_id", ops[0])
         self.assertEqual(ops[1]["request_id"], "fs-minted-1")
 
+    def test_filesystem_move_unavailable_preserves_request_id_for_retry(
+        self,
+    ) -> None:
+        class UnavailableOnceRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self._fail_next_move = True
+
+            def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+                payload = dict(request)
+                if payload["operation"] != "sdk_capabilities":
+                    self.requests.append(payload)
+                if (
+                    payload["operation"] == "filesystem_move"
+                    and self._fail_next_move
+                ):
+                    self._fail_next_move = False
+                    raise A3SBoxError(
+                        "prepare-filesystem response was lost",
+                        code="unavailable",
+                        request_id="fs-minted-move-1",
+                    )
+                return response_for(payload)
+
+        runtime = UnavailableOnceRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.rename("/workspace/out", "/workspace/renamed")
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "fs-minted-move-1")
+
+        result = sandbox.files.rename(
+            "/workspace/out",
+            "/workspace/renamed",
+            request_id=raised.exception.request_id,
+        )
+        self.assertEqual(result.request_id, "fs-minted-move-1")
+        ops = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "filesystem_move"
+        ]
+        self.assertEqual(len(ops), 2)
+        self.assertNotIn("request_id", ops[0])
+        self.assertEqual(ops[1]["request_id"], "fs-minted-move-1")
+
+    def test_filesystem_remove_unavailable_preserves_request_id_for_retry(
+        self,
+    ) -> None:
+        class UnavailableOnceRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self._fail_next_remove = True
+
+            def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+                payload = dict(request)
+                if payload["operation"] != "sdk_capabilities":
+                    self.requests.append(payload)
+                if (
+                    payload["operation"] == "filesystem_remove"
+                    and self._fail_next_remove
+                ):
+                    self._fail_next_remove = False
+                    raise A3SBoxError(
+                        "prepare-filesystem response was lost",
+                        code="unavailable",
+                        request_id="fs-minted-remove-1",
+                    )
+                return response_for(payload)
+
+        runtime = UnavailableOnceRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.remove("/workspace/out")
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "fs-minted-remove-1")
+
+        result = sandbox.files.remove(
+            "/workspace/out",
+            request_id=raised.exception.request_id,
+        )
+        self.assertEqual(result.request_id, "fs-minted-remove-1")
+        ops = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "filesystem_remove"
+        ]
+        self.assertEqual(len(ops), 2)
+        self.assertNotIn("request_id", ops[0])
+        self.assertEqual(ops[1]["request_id"], "fs-minted-remove-1")
+
     def test_filesystem_mutate_success_returns_request_id(self) -> None:
         runtime = FakeRuntime()
         sandbox = Sandbox.create(runtime=runtime)

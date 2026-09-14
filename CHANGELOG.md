@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Language SDK Unavailable-retry locks now cover Move / Remove as well as
+  MakeDir (Rust SDK + Go / Python / TypeScript), and
+  `scripts/verify-fs-mutate-request-id-honesty.py` requires those markers.
+  Does **not** flip B2 or invent Live digests.
+
 - Language SDK tests lock MakeDir / Move / Remove success `request_id`
   surfaces and MakeDir `Unavailable` retry reuse (Go / Python / TypeScript),
   matching the existing `file_write` Unavailable retry bar. Format CI
