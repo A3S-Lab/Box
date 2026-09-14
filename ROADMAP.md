@@ -654,7 +654,9 @@ retain process or filesystem sessions after its owner dies.
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
   succeeds in-guest via TSI `-EPERM` so scale host relays can reach the
   workload, and `ready_replicas` counts a declared endpoint only after the
-  advertised URL serves a request (#370).
+  advertised URL serves a request (#370); Runtime Service (R17) advertised
+  host endpoints are likewise published only after a live listener probe
+  proves the guest relay opened.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.

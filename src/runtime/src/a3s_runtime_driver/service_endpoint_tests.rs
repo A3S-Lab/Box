@@ -63,11 +63,13 @@ impl ExecutionPortConnector for TestConnector {
             port,
             timeout,
         });
-        self.streams.lock().unwrap().pop_front().ok_or_else(|| {
-            ExecutionManagerError::Unavailable(
-                "test connector has no queued workload stream".into(),
-            )
-        })
+        if let Some(stream) = self.streams.lock().unwrap().pop_front() {
+            return Ok(stream);
+        }
+        // Advertised-URL probes and unmanaged traffic get an idle duplex so
+        // OPEN succeeds without a controlled peer.
+        let (connector_stream, _workload_stream) = tokio::io::duplex(1_024);
+        Ok(Box::pin(connector_stream))
     }
 }
 
@@ -125,7 +127,6 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(DriverFakeBackend::default());
     let connector = Arc::new(TestConnector::default());
-    let mut workload_stream = connector.queue_stream();
     let driver =
         fake_driver_with_backend_and_connector(&directory, backend.clone(), connector.clone());
     let spec = service_spec(
@@ -144,6 +145,15 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
     assert!(endpoints.iter().all(|endpoint| {
         endpoint.protocol == TransportProtocol::Tcp && endpoint.address.is_loopback()
     }));
+    // Apply probed each advertised URL before publishing evidence.
+    assert_eq!(
+        connector
+            .calls()
+            .iter()
+            .map(|call| call.port.get())
+            .collect::<Vec<_>>(),
+        vec![8_080, 9_090]
+    );
 
     let replayed = driver.apply(&spec, &running).await.unwrap();
     assert_eq!(replayed.service_endpoints().unwrap(), endpoints);
@@ -154,6 +164,7 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
     };
     assert_eq!(observation.service_endpoints().unwrap(), endpoints);
 
+    let mut workload_stream = connector.queue_stream();
     let api_address = endpoint(&observation, "api").socket_addr();
     let mut host_stream = connect_endpoint(api_address).await;
     host_stream.write_all(b"host-to-workload").await.unwrap();
@@ -190,12 +201,61 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
     let metadata = record.managed_execution.unwrap();
     assert_eq!(
         connector.calls(),
-        vec![ConnectCall {
-            execution_id: ExecutionId::new(record.id).unwrap(),
-            generation: metadata.generation,
-            port: NonZeroU16::new(8_080).unwrap(),
-            timeout: Duration::from_secs(5),
-        }]
+        vec![
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(9_090).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejecting_guest_relay_does_not_publish_advertised_endpoints() {
+    struct RejectingConnector;
+
+    #[async_trait]
+    impl ExecutionPortConnector for RejectingConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: Duration,
+        ) -> ExecutionManagerResult<ExecutionPortStream> {
+            Err(ExecutionManagerError::Unavailable(
+                "MicroVM port 8080 rejected the connection".into(),
+            ))
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(DriverFakeBackend::default());
+    let driver =
+        fake_driver_with_backend_and_connector(&directory, backend, Arc::new(RejectingConnector));
+    let spec = service_spec("service-endpoint-reject", 1, &[("api", 8_080)]);
+    let error = driver.apply(&spec, &accepted(&spec)).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RuntimeError::ProviderUnavailable(message)
+                if message.contains("is not reachable through the advertised host URL")
+        ),
+        "unexpected error: {error:?}"
     );
 }
 
@@ -232,9 +292,8 @@ async fn driver_restart_reconstructs_only_its_in_memory_endpoint_owner() {
     let first_address = endpoint(&first_running, "api").socket_addr();
 
     let second_connector = Arc::new(TestConnector::default());
-    let mut workload_stream = second_connector.queue_stream();
     let second_driver =
-        fake_driver_with_backend_and_connector(&directory, backend, second_connector);
+        fake_driver_with_backend_and_connector(&directory, backend, second_connector.clone());
     let second_running = second_driver.apply(&spec, &first_running).await.unwrap();
     let second_address = endpoint(&second_running, "api").socket_addr();
     assert_ne!(second_address, first_address);
@@ -245,6 +304,7 @@ async fn driver_restart_reconstructs_only_its_in_memory_endpoint_owner() {
 
     drop(first_driver);
     assert_socket_closes(first_address).await;
+    let mut workload_stream = second_connector.queue_stream();
     let mut host_stream = connect_endpoint(second_address).await;
     host_stream.write_all(b"reconstructed").await.unwrap();
     let mut received = [0_u8; 13];
