@@ -24,14 +24,14 @@ flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`4fd16a222e3ff952d74a284f36a1108517526687fcdff48f4a356e7a7fbb687d`).
+`4d746f80e87fad36c9671f965812b9e9781f122dccf6f130b1c275464cafd13b`).
 The deterministic archive was generated from local tooling commit
-`4ebb0f250a6e8506901037c46cf5b522d2ab9a6f`; that revision snapshots macOS
-VirtioFS directory entries for each open handle, returns mutation-stable
-synthetic FUSE resume cookies, and keeps directory-stream ownership independent
-from the retained file handle, in addition to the existing retryable
-Unix-datagram TX backpressure handling. It does not change the packaged Windows
-runtime. Its
+`a1078ed12a7c68b3ce87c1ea899d2470017297c3`; that revision refuses host binds
+for unmapped TSI guest listen ports (allowlist-only `host_port_map`), on top of
+the prior macOS VirtioFS directory-entry snapshotting, mutation-stable
+synthetic FUSE resume cookies, directory-stream ownership independent from the
+retained file handle, and retryable Unix-datagram TX backpressure handling. It
+does not change the packaged Windows runtime. Its
 `corresponding-source/2692169` directory preserves the exact wrapper source
 for the packaged firmware DLL. The archive also contains the Apache-2.0
 license and the EDK2 source notices.
