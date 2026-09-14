@@ -108,13 +108,47 @@ impl ServiceEndpointOwner {
                 .map(|port| (port.name.clone(), port.container_port))
                 .collect(),
         };
-        let mut leases = self.leases.lock().await;
-        if let Some(existing) = leases.get(&key) {
-            if existing.identity == identity {
-                attach_endpoints(spec, &mut observation, &existing.endpoints)?;
-                return Ok(observation);
+        let retained_addrs = {
+            let leases = self.leases.lock().await;
+            leases.get(&key).and_then(|existing| {
+                (existing.identity == identity).then(|| {
+                    existing
+                        .endpoints
+                        .iter()
+                        .map(|endpoint| (endpoint.port_name.clone(), endpoint.socket_addr()))
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        if let Some(addrs) = retained_addrs {
+            let mut reachable = true;
+            for (port_name, address) in &addrs {
+                if let Err(error) = probe_advertised_tcp_endpoint(*address).await {
+                    tracing::warn!(
+                        unit_id = %spec.unit_id,
+                        port_name,
+                        %address,
+                        %error,
+                        "Runtime Service advertised endpoint stopped answering; withdrawing lease"
+                    );
+                    reachable = false;
+                    break;
+                }
+            }
+            if reachable {
+                let leases = self.leases.lock().await;
+                if let Some(existing) = leases.get(&key) {
+                    if existing.identity == identity {
+                        attach_endpoints(spec, &mut observation, &existing.endpoints)?;
+                        return Ok(observation);
+                    }
+                }
+            } else {
+                self.leases.lock().await.remove(&key);
             }
         }
+
+        let mut leases = self.leases.lock().await;
 
         // Keep every listener bound until the complete endpoint set has been
         // validated. A partial bind is never published into Runtime evidence.
