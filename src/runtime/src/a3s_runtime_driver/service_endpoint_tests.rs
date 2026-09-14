@@ -204,9 +204,35 @@ async fn endpoints_are_exact_stable_unique_and_relay_bidirectional_tcp() {
         .pop()
         .unwrap();
     let metadata = record.managed_execution.unwrap();
+    // First apply probes both ports, re-apply and inspect each re-probe both
+    // retained advertised URLs, then traffic uses the api port once.
     assert_eq!(
         connector.calls(),
         vec![
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(9_090).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(8_080).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
+            ConnectCall {
+                execution_id: ExecutionId::new(record.id.clone()).unwrap(),
+                generation: metadata.generation,
+                port: NonZeroU16::new(9_090).unwrap(),
+                timeout: Duration::from_secs(5),
+            },
             ConnectCall {
                 execution_id: ExecutionId::new(record.id.clone()).unwrap(),
                 generation: metadata.generation,
