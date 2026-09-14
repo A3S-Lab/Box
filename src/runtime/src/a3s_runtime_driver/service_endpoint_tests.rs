@@ -32,6 +32,9 @@ struct ConnectCall {
 #[derive(Default)]
 struct TestConnector {
     streams: Mutex<VecDeque<ExecutionPortStream>>,
+    /// Keep auto-created duplex peers alive so advertised-URL probes do not
+    /// see an immediate EOF from a dropped workload half.
+    held_peers: Mutex<Vec<DuplexStream>>,
     calls: Mutex<Vec<ConnectCall>>,
 }
 
@@ -67,8 +70,10 @@ impl ExecutionPortConnector for TestConnector {
             return Ok(stream);
         }
         // Advertised-URL probes and unmanaged traffic get an idle duplex so
-        // OPEN succeeds without a controlled peer.
-        let (connector_stream, _workload_stream) = tokio::io::duplex(1_024);
+        // OPEN succeeds without a controlled peer. Hold the peer half so the
+        // host connection stays open while copy_bidirectional waits.
+        let (connector_stream, workload_stream) = tokio::io::duplex(1_024);
+        self.held_peers.lock().unwrap().push(workload_stream);
         Ok(Box::pin(connector_stream))
     }
 }
