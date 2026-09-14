@@ -10,8 +10,10 @@ All notable changes to A3S Box will be documented in this file.
   `a3s.box.linux-native-live-session.v7` and KVM
   `a3s.box.linux-kvm-live-session.v5`: keyed Move / Remove before owner kill
   plus ListDir/download of the moved tree after reattach. Fail-closed report
-  verifiers and schema-alignment gate require the new ids. Does **not** flip
-  B2 or invent existing-host digests (greening of tip digests remains pending).
+  verifiers and schema-alignment gate require the new ids. CI Native Live
+  artifact labels track tip schema v7 (not published greened digests). Does
+  **not** flip B2 or invent existing-host digests (greening of tip digests
+  remains pending).
 
 - Language SDK Unavailable-retry locks now cover Move / Remove as well as
   MakeDir (Rust SDK + Go / Python / TypeScript), and

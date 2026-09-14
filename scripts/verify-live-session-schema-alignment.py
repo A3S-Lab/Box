@@ -126,18 +126,49 @@ def evaluate_tree(root: Path) -> list[str]:
             "and Native Live v4 retained stream",
             "the Native Live v4 observation gate",
             "and Native Live v4 use the production",
+            "a3s.box.linux-native-live-session.v6",
+            "a3s.box.linux-kvm-live-session.v4",
+            "Native Live v6",
+            "v6 greening pending",
         ):
             if forbidden in text:
                 failures.append(
-                    f"README.md overclaims tip Live as {forbidden!r}; "
-                    "require tip harness v7 with v4-scoped greened digests"
+                    f"README.md overclaims or stale tip Live as {forbidden!r}; "
+                    "require tip harness v7 / KVM v5 with v4-scoped greened digests"
                 )
         for required in (
             "tip harness v7",
             "greened digests remain v4-scoped",
+            "a3s.box.linux-native-live-session.v7",
+            "a3s.box.linux-kvm-live-session.v5",
         ):
             if required not in text:
                 failures.append(f"README.md missing honesty phrase {required!r}")
+
+    ci = root / ".github/workflows/ci.yml"
+    if not ci.is_file():
+        failures.append("missing .github/workflows/ci.yml")
+    else:
+        text = ci.read_text(encoding="utf-8")
+        for required in (
+            "Qualify Native Linux live-session retained-stream+fs (v7)",
+            "a3s-box-linux-native-live-session-v7.json",
+            "a3s-box-linux-native-live-session-v7-",
+        ):
+            if required not in text:
+                failures.append(
+                    f"ci.yml missing tip Live artifact honesty marker {required!r}"
+                )
+        for forbidden in (
+            "Qualify Native Linux live-session retained-stream+fs (v6)",
+            "a3s-box-linux-native-live-session-v6.json",
+            "a3s-box-linux-native-live-session-v6-",
+        ):
+            if forbidden in text:
+                failures.append(
+                    f"ci.yml stale tip Live artifact label {forbidden!r}; "
+                    "require v7 artifact names matching tip schema"
+                )
 
     return failures
 
@@ -147,6 +178,7 @@ def self_test() -> int:
         root = Path(tmp)
         (root / "src/runtime/examples").mkdir(parents=True)
         (root / "scripts").mkdir(parents=True)
+        (root / ".github/workflows").mkdir(parents=True)
 
         (root / NATIVE_EXAMPLE).write_text(
             'const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v7";\n'
@@ -188,7 +220,15 @@ def self_test() -> int:
             encoding="utf-8",
         )
         (root / "README.md").write_text(
-            "tip harness v7; published greened digests remain v4-scoped\n",
+            "tip harness v7; published greened digests remain v4-scoped\n"
+            "a3s.box.linux-native-live-session.v7\n"
+            "a3s.box.linux-kvm-live-session.v5\n",
+            encoding="utf-8",
+        )
+        (root / ".github/workflows/ci.yml").write_text(
+            "Qualify Native Linux live-session retained-stream+fs (v7)\n"
+            'report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v7.json"\n'
+            "name: a3s-box-linux-native-live-session-v7-${{ matrix.platform }}\n",
             encoding="utf-8",
         )
         if evaluate_tree(root):
@@ -198,15 +238,38 @@ def self_test() -> int:
 
         bad_readme = root / "README.md"
         bad_readme.write_text(
-            "lifecycle + Native Live v4) proves the route\n",
+            "lifecycle + Native Live v4) proves the route\n"
+            "tip harness v7; published greened digests remain v4-scoped\n"
+            "a3s.box.linux-native-live-session.v7\n"
+            "a3s.box.linux-kvm-live-session.v5\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
-        if not any("overclaims tip Live" in failure for failure in failures):
+        if not any("overclaims or stale tip Live" in failure for failure in failures):
             print("self-test: expected README Live v4 overclaim to fail", file=sys.stderr)
             return 1
         bad_readme.write_text(
-            "tip harness v7; published greened digests remain v4-scoped\n",
+            "tip harness v7; published greened digests remain v4-scoped\n"
+            "a3s.box.linux-native-live-session.v7\n"
+            "a3s.box.linux-kvm-live-session.v5\n",
+            encoding="utf-8",
+        )
+
+        bad_ci = root / ".github/workflows/ci.yml"
+        bad_ci.write_text(
+            "Qualify Native Linux live-session retained-stream+fs (v6)\n"
+            'report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v6.json"\n'
+            "name: a3s-box-linux-native-live-session-v6-${{ matrix.platform }}\n",
+            encoding="utf-8",
+        )
+        failures = evaluate_tree(root)
+        if not any("stale tip Live artifact" in failure for failure in failures):
+            print("self-test: expected stale CI v6 artifact label to fail", file=sys.stderr)
+            return 1
+        bad_ci.write_text(
+            "Qualify Native Linux live-session retained-stream+fs (v7)\n"
+            'report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v7.json"\n'
+            "name: a3s-box-linux-native-live-session-v7-${{ matrix.platform }}\n",
             encoding="utf-8",
         )
 

@@ -284,7 +284,7 @@ generations. That **stopped-only** crash recovery is qualified on real x86_64
 and aarch64 Linux hosts.
 
 Separately, the Native Live observation gate (SDK Local Sandbox CI; tip harness
-`a3s.box.linux-native-live-session.v6`, published greened digests remain
+`a3s.box.linux-native-live-session.v7`, published greened digests remain
 v4-scoped) proves **retained** streaming exec handles and filesystem continuity
 across Host owner SIGKILL when the Box manager is kept — see
 [Exercise Native Linux live-session Host reopen](#exercise-native-linux-live-session-host-reopen-observation).
@@ -379,12 +379,16 @@ cargo build -p a3s-box-runtime --example linux-kvm-live-session-qualification --
   --home /tmp/a3s-box-kvm-live-session-home
 ```
 
-Schema `a3s.box.linux-kvm-live-session.v4` keeps the Box manager across Host
+Schema `a3s.box.linux-kvm-live-session.v5` keeps the Box manager across Host
 Service SIGKILL, proves retained streaming `start_process` handle continuity
 (`retained_stream_handle_proven` / `kvm_microvm_live_claimed`), and proves
 mutating filesystem continuity via keyed MakeDir
 (`mkdir_request_id` =
-`a3s.box.live-session.keyed-mkdir.before-owner-kill`; ListDir after reattach)
+`a3s.box.live-session.keyed-mkdir.before-owner-kill`), keyed Move / Remove
+(`move_request_id` /
+`a3s.box.live-session.keyed-move.before-owner-kill`;
+`remove_request_id` /
+`a3s.box.live-session.keyed-remove.before-owner-kill`; ListDir after reattach),
 plus public `transfer_file` with a harness-stable keyed upload identity
 (`file_upload_request_id` /
 `a3s.box.live-session.keyed-file.before-owner-kill`; download after reattach on
@@ -392,10 +396,10 @@ the same generation; `retained_filesystem_proven`). Add `--box-owned` to skip
 external Host start and recover through Box ensure (`box_owned_ensure_proven`);
 `b2_process_session_recovery_closed` stays false. Fixture continuity stays
 unclaimed (`fixture_stream_continuity_claimed` stays false). Together with
-Native Live v6, this observation-greens the ROADMAP process-session recovery
-matrix; the B2 exit gate remains open and harness reports still keep
-`b2_process_session_recovery_closed=false` (reports never self-certify B2
-close). Pin OCI Runtime at
+Native Live tip `a3s.box.linux-native-live-session.v7`, this observation-greens
+the ROADMAP process-session recovery matrix; the B2 exit gate remains open and
+harness reports still keep `b2_process_session_recovery_closed=false` (reports
+never self-certify B2 close). Pin OCI Runtime at
 `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on
 `61f77712…` / KVM Live filesystem #289).
 Existing-host WSL2 `/dev/kvm` evidence report SHA-256 `2fe8c2cb53ab6f8a30f8c736cfdc04f41c9fe766b9830dc94d44f09de17454d7`
@@ -433,12 +437,16 @@ sudo --preserve-env=A3S_BOX_CI_SANDBOX_UID,A3S_BOX_CI_SANDBOX_GID,A3S_BOX_SANDBO
   --home /tmp/a3s-box-native-live-session-home
 ```
 
-Schema `a3s.box.linux-native-live-session.v6` keeps the Box manager across a
+Schema `a3s.box.linux-native-live-session.v7` keeps the Box manager across a
 Native Linux Host owner SIGKILL, proves retained streaming `start_process`
 handle continuity when the path passes (`retained_stream_handle_proven`), and
 proves mutating filesystem continuity via keyed MakeDir
 (`mkdir_request_id` =
-`a3s.box.live-session.keyed-mkdir.before-owner-kill`; ListDir after reattach)
+`a3s.box.live-session.keyed-mkdir.before-owner-kill`), keyed Move / Remove
+(`move_request_id` /
+`a3s.box.live-session.keyed-move.before-owner-kill`;
+`remove_request_id` /
+`a3s.box.live-session.keyed-remove.before-owner-kill`; ListDir after reattach),
 plus public `transfer_file` with a harness-stable keyed upload identity
 (`file_upload_request_id` /
 `a3s.box.live-session.keyed-file.before-owner-kill`; download after reattach on
@@ -446,11 +454,11 @@ the same generation; `retained_filesystem_proven`). It continues authentic Live
 keyed captured exec plus state/inventory/stats/kill without inventing an exit
 status. Fixture `process_restart` is never claimed as driver evidence
 (`fixture_stream_continuity_claimed` stays false). Together with KVM MicroVM
-Live v4, this observation-greens the ROADMAP process-session recovery matrix;
-the B2 exit gate remains open and harness reports still keep
-`b2_process_session_recovery_closed=false` (reports never self-certify B2
-close). It does not alone claim KVM MicroVM Live continuity or Sandbox guest
-`filesystem_replay`. Pin OCI Runtime at
+Live tip `a3s.box.linux-kvm-live-session.v5`, this observation-greens the
+ROADMAP process-session recovery matrix; the B2 exit gate remains open and
+harness reports still keep `b2_process_session_recovery_closed=false`
+(reports never self-certify B2 close). It does not alone claim KVM MicroVM Live
+continuity or Sandbox guest `filesystem_replay`. Pin OCI Runtime at
 `05a3b2bddff0668703caafc48f38514a139ee81a` (OCI main tip; prior greening on
 `61f77712…` / Native Live filesystem #290). Existing-host WSL2 evidence on Box
 `d07648d0…` / CI run `34542747784`: report SHA-256
@@ -458,7 +466,7 @@ close). It does not alone claim KVM MicroVM Live continuity or Sandbox guest
 (linux-x86_64) and
 `8454044deabe77a08d7f193cd970e8f3117566a8651b3f9d4023cb2223321423`
 (linux-arm64) (`retained_filesystem_proven=true`,
-`retained_stream_handle_proven=true`; v4-scoped digests — v6 greening pending).
+`retained_stream_handle_proven=true`; v4-scoped digests — v7 greening pending).
 Does not flip default create Host-bound policy or cutover.
 
 ### Exercise the qualification-only WHPX handoff on Windows
