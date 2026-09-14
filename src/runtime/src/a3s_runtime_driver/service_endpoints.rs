@@ -12,6 +12,7 @@ use a3s_runtime::contract::{
     RuntimeUnitSpec, RuntimeUnitState, TransportProtocol,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -147,26 +148,51 @@ impl ServiceEndpointOwner {
             staged.push((listener, endpoint, guest_port));
         }
 
-        let endpoints = staged
-            .iter()
-            .map(|(_, endpoint, _)| endpoint.clone())
-            .collect::<Vec<_>>();
-        attach_endpoints(spec, &mut observation, &endpoints)?;
-
-        let tasks = staged
+        // Bind and serve first, then probe each advertised host URL through the
+        // live listener. Publishing before that proof lets Running observations
+        // advertise dead MicroVM relays (same honesty class as Box#370).
+        let mut prepared = staged
             .into_iter()
             .map(|(listener, endpoint, guest_port)| {
-                tokio::spawn(serve_endpoint(
+                let task = tokio::spawn(serve_endpoint(
                     listener,
                     Arc::clone(&self.connector),
                     Arc::clone(&self.connection_limit),
                     execution_id.clone(),
                     execution_generation,
                     guest_port,
-                    endpoint.port_name,
-                ))
+                    endpoint.port_name.clone(),
+                ));
+                (endpoint, task)
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        let probe_targets = prepared
+            .iter()
+            .map(|(endpoint, _)| (endpoint.port_name.clone(), endpoint.socket_addr()))
+            .collect::<Vec<_>>();
+        for (port_name, address) in probe_targets {
+            if let Err(error) = probe_advertised_tcp_endpoint(address).await {
+                for (_, task) in prepared.drain(..) {
+                    task.abort();
+                    let _ = task.await;
+                }
+                observation.clear_service_endpoints();
+                return Err(RuntimeError::ProviderUnavailable(format!(
+                    "Box Runtime Service endpoint {port_name:?} at {address} is not reachable through the advertised host URL: {error}"
+                )));
+            }
+        }
+
+        let endpoints = prepared
+            .iter()
+            .map(|(endpoint, _)| endpoint.clone())
+            .collect::<Vec<_>>();
+        attach_endpoints(spec, &mut observation, &endpoints)?;
+        let tasks = prepared
+            .into_iter()
+            .map(|(_, task)| task)
+            .collect::<Vec<_>>();
         leases.insert(
             key,
             EndpointLease {
@@ -236,6 +262,36 @@ fn attach_endpoints(
     observation
         .validate_against(spec)
         .map_err(RuntimeError::Protocol)
+}
+
+/// Prove the advertised host URL can accept traffic that reaches `connect_port`.
+///
+/// TCP accept on the host listener happens before the guest OPEN. A successful
+/// `TcpStream::connect` alone is not enough: rejection closes the accepted
+/// stream. Idle success keeps the connection open while `copy_bidirectional`
+/// waits, so surviving a short settle without peer close is the live-URL proof
+/// for non-HTTP Service ports.
+async fn probe_advertised_tcp_endpoint(address: SocketAddr) -> Result<(), String> {
+    tokio::time::timeout(SERVICE_CONNECT_TIMEOUT, async {
+        let mut stream = TcpStream::connect(address)
+            .await
+            .map_err(|error| error.to_string())?;
+        let settle = Duration::from_millis(500);
+        let mut buf = [0_u8; 1];
+        tokio::select! {
+            biased;
+            result = stream.read(&mut buf) => match result {
+                Ok(0) => Err(
+                    "peer closed before the generation-fenced guest relay opened".into(),
+                ),
+                Ok(_) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            },
+            _ = tokio::time::sleep(settle) => Ok(()),
+        }
+    })
+    .await
+    .map_err(|_| format!("timed out probing advertised endpoint {address}"))?
 }
 
 async fn serve_endpoint(
