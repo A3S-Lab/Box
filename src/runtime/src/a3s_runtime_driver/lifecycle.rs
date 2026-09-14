@@ -209,7 +209,24 @@ impl BoxRuntimeDriver {
         } else {
             record
         };
-        let observation = self.observe_service_health(&unit.spec, &record).await?;
+        // Same honesty class as apply (#380): a failed Service observation
+        // (including retained advertised-URL re-probe) must not leave a
+        // Running generation whose last-known endpoints are no longer live.
+        let observation_result = self.observe_service_health(&unit.spec, &record).await;
+        let observation = match observation_result {
+            Ok(observation) => observation,
+            Err(error) if matches!(unit.spec.class, RuntimeUnitClass::Service) => {
+                if let Err(retire_error) = self.retire_record(record, &unit.spec.unit_id).await {
+                    tracing::warn!(
+                        unit_id = %unit.spec.unit_id,
+                        error = %retire_error,
+                        "failed to retire Service after inspect observation failure"
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let observation = self
             .recover_unhealthy_liveness(&unit.spec, observation)
             .await?;

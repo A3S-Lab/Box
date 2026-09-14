@@ -29,8 +29,11 @@ All notable changes to A3S Box will be documented in this file.
   path) fails during `apply`, Box retires the generation so durable inventory
   does not keep a Running unit the caller was told never applied. Retained
   leases are re-probed on later apply/inspect; a dead URL is withdrawn
-  instead of being republished from identity match. Does **not** flip B2,
-  invent Live digests, or start Cloud sole-Runtime (#172) cutover.
+  instead of being republished from identity match. When inspect cannot
+  re-prove those endpoints, Box retires the generation the same way apply
+  does, so callers do not keep a Running Service whose last observation
+  still lists dead host URLs. Does **not** flip B2, invent Live digests,
+  or start Cloud sole-Runtime (#172) cutover.
 
 - Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
   can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now
