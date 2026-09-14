@@ -262,6 +262,10 @@ async fn rejecting_guest_relay_does_not_publish_advertised_endpoints() {
         ),
         "unexpected error: {error:?}"
     );
+    assert!(
+        driver.manager.managed_records().await.unwrap().is_empty(),
+        "failed R17 advertised-URL probe must not leave a Running Service in inventory"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

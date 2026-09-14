@@ -146,15 +146,33 @@ impl BoxRuntimeDriver {
             None
         };
 
-        let observation = match spec.class {
-            RuntimeUnitClass::Task => self.wait_for_task(spec, record).await?,
+        // Observation may fail after ensure_started (for example R17 advertised
+        // URL probe rejection). Returning Err while leaving a Running Service in
+        // inventory orphans work the caller believes never applied. Retire the
+        // generation so apply failure and durable inventory stay aligned.
+        let observation_result = match spec.class {
+            RuntimeUnitClass::Task => self.wait_for_task(spec, record.clone()).await,
             RuntimeUnitClass::Service if spec.health.is_some() => {
-                self.wait_for_service_health(spec, record).await?
+                self.wait_for_service_health(spec, record.clone()).await
             }
             RuntimeUnitClass::Service => match attested_running {
-                Some(observation) => self.finish_observation(spec, &record, observation).await?,
-                None => self.observation(spec, &record, None, None).await?,
+                Some(observation) => self.finish_observation(spec, &record, observation).await,
+                None => self.observation(spec, &record, None, None).await,
             },
+        };
+        let observation = match observation_result {
+            Ok(observation) => observation,
+            Err(error) if matches!(spec.class, RuntimeUnitClass::Service) => {
+                if let Err(retire_error) = self.retire_record(record, &spec.unit_id).await {
+                    tracing::warn!(
+                        unit_id = %spec.unit_id,
+                        error = %retire_error,
+                        "failed to retire Service after apply observation failure"
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
         };
         let observation = self.recover_unhealthy_liveness(spec, observation).await?;
         super::attestation::validate_continuity(current, &observation)?;

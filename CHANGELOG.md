@@ -23,8 +23,11 @@ All notable changes to A3S Box will be documented in this file.
 - Runtime Service (R17) advertised host endpoints are published only after a
   live probe through the bound listener proves the generation-fenced guest
   relay opened. Rejected MicroVM port-forward no longer leaves Running
-  observations with dead URLs. Does **not** flip B2, invent Live digests, or
-  start Cloud sole-Runtime (#172) cutover.
+  observations with dead URLs. When that probe (or any Service observation
+  path) fails during `apply`, Box retires the generation so durable inventory
+  does not keep a Running unit the caller was told never applied. Does
+  **not** flip B2, invent Live digests, or start Cloud sole-Runtime (#172)
+  cutover.
 
 - Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
   can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now
