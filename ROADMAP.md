@@ -647,7 +647,9 @@ retain process or filesystem sessions after its owner dies.
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
   terminal or Failed-on-vanish instead of stuck transitional states; snapshot
-  recover refuses Sandbox-only publish on non-Sandbox generations.
+  recover refuses Sandbox-only publish on non-Sandbox generations; abandoned
+  managed `Creating`/`Starting` claims are force-removable via CLI
+  `rm --force` / `kill` / `stop` matching manager kill edges (#372).
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
