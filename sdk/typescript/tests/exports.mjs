@@ -910,6 +910,87 @@ assert.equal(unavailableMakeDirs.length, 2)
 assert.equal(unavailableMakeDirs[0].request_id, undefined)
 assert.equal(unavailableMakeDirs[1].request_id, 'fs-minted-1')
 
+class UnavailableOnceMoveRuntime extends FakeRuntime {
+  #failNextMove = true
+
+  async request(request) {
+    if (request.operation === 'filesystem_move' && this.#failNextMove) {
+      this.requests.push(request)
+      this.#failNextMove = false
+      throw new A3SBoxError(
+        'prepare-filesystem response was lost',
+        'unavailable',
+        { requestId: 'fs-minted-move-1' }
+      )
+    }
+    return super.request(request)
+  }
+}
+
+const unavailableMoveRuntime = new UnavailableOnceMoveRuntime()
+const unavailableMoveSandbox = await Sandbox.create(undefined, {
+  runtime: unavailableMoveRuntime,
+})
+await assert.rejects(
+  unavailableMoveSandbox.files.rename('/workspace/out', '/workspace/renamed'),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.requestId === 'fs-minted-move-1'
+)
+const recoveredMove = await unavailableMoveSandbox.files.rename(
+  '/workspace/out',
+  '/workspace/renamed',
+  { requestId: 'fs-minted-move-1' }
+)
+assert.equal(recoveredMove.requestId, 'fs-minted-move-1')
+const unavailableMoves = unavailableMoveRuntime.requests.filter(
+  (request) => request.operation === 'filesystem_move'
+)
+assert.equal(unavailableMoves.length, 2)
+assert.equal(unavailableMoves[0].request_id, undefined)
+assert.equal(unavailableMoves[1].request_id, 'fs-minted-move-1')
+
+class UnavailableOnceRemoveRuntime extends FakeRuntime {
+  #failNextRemove = true
+
+  async request(request) {
+    if (request.operation === 'filesystem_remove' && this.#failNextRemove) {
+      this.requests.push(request)
+      this.#failNextRemove = false
+      throw new A3SBoxError(
+        'prepare-filesystem response was lost',
+        'unavailable',
+        { requestId: 'fs-minted-remove-1' }
+      )
+    }
+    return super.request(request)
+  }
+}
+
+const unavailableRemoveRuntime = new UnavailableOnceRemoveRuntime()
+const unavailableRemoveSandbox = await Sandbox.create(undefined, {
+  runtime: unavailableRemoveRuntime,
+})
+await assert.rejects(
+  unavailableRemoveSandbox.files.remove('/workspace/out'),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.requestId === 'fs-minted-remove-1'
+)
+const recoveredRemove = await unavailableRemoveSandbox.files.remove(
+  '/workspace/out',
+  { requestId: 'fs-minted-remove-1' }
+)
+assert.equal(recoveredRemove.requestId, 'fs-minted-remove-1')
+const unavailableRemoves = unavailableRemoveRuntime.requests.filter(
+  (request) => request.operation === 'filesystem_remove'
+)
+assert.equal(unavailableRemoves.length, 2)
+assert.equal(unavailableRemoves[0].request_id, undefined)
+assert.equal(unavailableRemoves[1].request_id, 'fs-minted-remove-1')
+
 const mutateSandbox = await Sandbox.create(undefined, {
   runtime: new FakeRuntime(),
 })

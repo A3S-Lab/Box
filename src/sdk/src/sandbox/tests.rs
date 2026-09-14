@@ -798,6 +798,107 @@ async fn filesystem_make_dir_unavailable_preserves_request_id_for_retry() {
 }
 
 #[tokio::test]
+async fn filesystem_move_unavailable_preserves_request_id_for_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    runtime.fail_next_filesystem();
+    let first = sandbox
+        .files
+        .move_path("/workspace/out", "/workspace/renamed")
+        .await
+        .unwrap_err();
+    let ClientError::CommandUnavailable {
+        request_id,
+        message,
+    } = first
+    else {
+        panic!("expected CommandUnavailable, got {first:?}");
+    };
+    assert!(
+        request_id.starts_with("fs-"),
+        "minted request_id missing: {request_id}"
+    );
+    assert!(message.contains("prepare-filesystem"));
+
+    let recovered = sandbox
+        .files
+        .move_path_with_options(
+            "/workspace/out",
+            "/workspace/renamed",
+            FilesystemOptions::default().request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.request_id, request_id);
+
+    let filesystem_requests = runtime.filesystem_requests.lock().unwrap();
+    assert_eq!(filesystem_requests.len(), 2);
+    assert_eq!(
+        filesystem_requests[0].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    assert_eq!(
+        filesystem_requests[1].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn filesystem_remove_unavailable_preserves_request_id_for_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20"),
+    )
+    .await
+    .unwrap();
+
+    runtime.fail_next_filesystem();
+    let first = sandbox.files.remove("/workspace/out").await.unwrap_err();
+    let ClientError::CommandUnavailable {
+        request_id,
+        message,
+    } = first
+    else {
+        panic!("expected CommandUnavailable, got {first:?}");
+    };
+    assert!(
+        request_id.starts_with("fs-"),
+        "minted request_id missing: {request_id}"
+    );
+    assert!(message.contains("prepare-filesystem"));
+
+    let recovered = sandbox
+        .files
+        .remove_with_options(
+            "/workspace/out",
+            FilesystemOptions::default().request_id(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.request_id, request_id);
+
+    let filesystem_requests = runtime.filesystem_requests.lock().unwrap();
+    assert_eq!(filesystem_requests.len(), 2);
+    assert_eq!(
+        filesystem_requests[0].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+    assert_eq!(
+        filesystem_requests[1].request_id.as_deref(),
+        Some(request_id.as_str())
+    );
+}
+
+#[tokio::test]
 async fn filesystem_mutate_success_returns_minted_request_id() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = Arc::new(RecordingRuntime::new());

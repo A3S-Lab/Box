@@ -3,8 +3,9 @@
 
 Locks Rust MutateInfo / bridge success JSON, language SDK MutateInfo fields,
 and language-SDK Unavailable-retry + success tests so MakeDir/Move/Remove
-cannot silently regress to void/ok-only returns. Does not flip B2 or invent
-Live digests.
+cannot silently regress to void/ok-only returns. Unavailable retry coverage
+includes Move and Remove, not only MakeDir. Does not flip B2 or invent Live
+digests.
 """
 
 from __future__ import annotations
@@ -46,19 +47,29 @@ SURFACE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 TEST_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "src/sdk/src/sandbox/tests.rs": (
         "filesystem_make_dir_unavailable_preserves_request_id_for_retry",
+        "filesystem_move_unavailable_preserves_request_id_for_retry",
+        "filesystem_remove_unavailable_preserves_request_id_for_retry",
         "filesystem_mutate_success_returns_minted_request_id",
     ),
     "sdk/go/sandbox_test.go": (
         "TestFilesystemMakeDirUnavailablePreservesRequestIDForRetry",
+        "TestFilesystemMoveUnavailablePreservesRequestIDForRetry",
+        "TestFilesystemRemoveUnavailablePreservesRequestIDForRetry",
         "TestFilesystemMutateSuccessReturnsRequestID",
     ),
     "sdk/python/tests/test_sdk.py": (
         "test_filesystem_make_dir_unavailable_preserves_request_id_for_retry",
+        "test_filesystem_move_unavailable_preserves_request_id_for_retry",
+        "test_filesystem_remove_unavailable_preserves_request_id_for_retry",
         "test_filesystem_mutate_success_returns_request_id",
     ),
     "sdk/typescript/tests/exports.mjs": (
         "UnavailableOnceMakeDirRuntime",
+        "UnavailableOnceMoveRuntime",
+        "UnavailableOnceRemoveRuntime",
         "recoveredMakeDir.requestId",
+        "recoveredMove.requestId",
+        "recoveredRemove.requestId",
         "mkdir.requestId",
         "moved.requestId",
         "removed.requestId",

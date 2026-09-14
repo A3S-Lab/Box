@@ -579,6 +579,129 @@ func TestFilesystemMakeDirUnavailablePreservesRequestIDForRetry(t *testing.T) {
 	}
 }
 
+func TestFilesystemMoveUnavailablePreservesRequestIDForRetry(t *testing.T) {
+	failOnce := true
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "filesystem_move" {
+			return map[string]any{}, nil
+		}
+		if failOnce {
+			failOnce = false
+			return nil, sdkErrorWithRequestID(
+				"filesystem_move",
+				CodeUnavailable,
+				"prepare-filesystem response was lost",
+				"fs-minted-move-1",
+				nil,
+			)
+		}
+		requestID := stringValue(request["request_id"])
+		return MutateInfo{RequestID: requestID}, nil
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	_, err := sandbox.Files().Move(context.Background(), "/workspace/out", "/workspace/renamed")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var first *Error
+	if !errors.As(err, &first) || first.RequestID != "fs-minted-move-1" {
+		t.Fatalf("expected minted request_id on Unavailable, got %#v", err)
+	}
+	result, err := sandbox.Files().Move(
+		context.Background(),
+		"/workspace/out",
+		"/workspace/renamed",
+		FileRequestID(first.RequestID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestID != first.RequestID {
+		t.Fatalf("retry result request_id=%q, want %q", result.RequestID, first.RequestID)
+	}
+	ops := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "filesystem_move" {
+			ops = append(ops, request)
+		}
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected two filesystem_move calls, got %d", len(ops))
+	}
+	if ops[0]["request_id"] != nil {
+		t.Fatalf("omit-path first call should omit request_id, got %#v", ops[0]["request_id"])
+	}
+	if ops[1]["request_id"] != "fs-minted-move-1" {
+		t.Fatalf("retry must reuse minted request_id, got %#v", ops[1]["request_id"])
+	}
+}
+
+func TestFilesystemRemoveUnavailablePreservesRequestIDForRetry(t *testing.T) {
+	failOnce := true
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "filesystem_remove" {
+			return map[string]any{}, nil
+		}
+		if failOnce {
+			failOnce = false
+			return nil, sdkErrorWithRequestID(
+				"filesystem_remove",
+				CodeUnavailable,
+				"prepare-filesystem response was lost",
+				"fs-minted-remove-1",
+				nil,
+			)
+		}
+		requestID := stringValue(request["request_id"])
+		return MutateInfo{RequestID: requestID}, nil
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	_, err := sandbox.Files().Remove(context.Background(), "/workspace/out")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var first *Error
+	if !errors.As(err, &first) || first.RequestID != "fs-minted-remove-1" {
+		t.Fatalf("expected minted request_id on Unavailable, got %#v", err)
+	}
+	result, err := sandbox.Files().Remove(
+		context.Background(),
+		"/workspace/out",
+		FileRequestID(first.RequestID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestID != first.RequestID {
+		t.Fatalf("retry result request_id=%q, want %q", result.RequestID, first.RequestID)
+	}
+	ops := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "filesystem_remove" {
+			ops = append(ops, request)
+		}
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected two filesystem_remove calls, got %d", len(ops))
+	}
+	if ops[0]["request_id"] != nil {
+		t.Fatalf("omit-path first call should omit request_id, got %#v", ops[0]["request_id"])
+	}
+	if ops[1]["request_id"] != "fs-minted-remove-1" {
+		t.Fatalf("retry must reuse minted request_id, got %#v", ops[1]["request_id"])
+	}
+}
+
 func TestFilesystemMutateSuccessReturnsRequestID(t *testing.T) {
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
 		switch request["operation"] {
