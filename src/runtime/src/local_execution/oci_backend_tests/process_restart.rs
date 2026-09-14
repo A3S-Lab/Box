@@ -1509,14 +1509,10 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
         .iter()
         .map(|entry| entry.path.as_str())
         .collect();
-    assert_eq!(work_paths, vec!["/work/kept"]);
-    assert!(
-        !work_paths.iter().any(|path| *path == "/work/ephemeral"),
-        "removed ephemeral directory must stay absent after reconnect"
-    );
-    assert!(
-        !work_paths.iter().any(|path| *path == "/work/tree"),
-        "pre-move tree path must stay absent after reconnect"
+    assert_eq!(
+        work_paths,
+        vec!["/work/kept"],
+        "after reconnect /work must keep only the moved tree (no ephemeral, no pre-move path)"
     );
 
     let download = manager
