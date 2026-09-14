@@ -251,7 +251,7 @@ async fn rejecting_guest_relay_does_not_publish_advertised_endpoints() {
     let error = driver.apply(&spec, &accepted(&spec)).await.unwrap_err();
     assert!(
         matches!(
-            error,
+            &error,
             RuntimeError::ProviderUnavailable(message)
                 if message.contains("is not reachable through the advertised host URL")
         ),

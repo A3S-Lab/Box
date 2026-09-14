@@ -167,8 +167,11 @@ impl ServiceEndpointOwner {
             })
             .collect::<Vec<_>>();
 
-        for (endpoint, _) in &prepared {
-            let address = endpoint.socket_addr();
+        let probe_targets = prepared
+            .iter()
+            .map(|(endpoint, _)| (endpoint.port_name.clone(), endpoint.socket_addr()))
+            .collect::<Vec<_>>();
+        for (port_name, address) in probe_targets {
             if let Err(error) = probe_advertised_tcp_endpoint(address).await {
                 for (_, task) in prepared.drain(..) {
                     task.abort();
@@ -176,8 +179,7 @@ impl ServiceEndpointOwner {
                 }
                 observation.clear_service_endpoints();
                 return Err(RuntimeError::ProviderUnavailable(format!(
-                    "Box Runtime Service endpoint {:?} at {address} is not reachable through the advertised host URL: {error}",
-                    endpoint.port_name
+                    "Box Runtime Service endpoint {port_name:?} at {address} is not reachable through the advertised host URL: {error}"
                 )));
             }
         }
