@@ -518,6 +518,105 @@ func TestFileWriteUnavailablePreservesRequestIDForRetry(t *testing.T) {
 	}
 }
 
+func TestFilesystemMakeDirUnavailablePreservesRequestIDForRetry(t *testing.T) {
+	failOnce := true
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] != "filesystem_make_dir" {
+			return map[string]any{}, nil
+		}
+		if failOnce {
+			failOnce = false
+			return nil, sdkErrorWithRequestID(
+				"filesystem_make_dir",
+				CodeUnavailable,
+				"prepare-filesystem response was lost",
+				"fs-minted-1",
+				nil,
+			)
+		}
+		requestID := stringValue(request["request_id"])
+		return MutateInfo{RequestID: requestID}, nil
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	_, err := sandbox.Files().MakeDir(context.Background(), "/workspace/out")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected unavailable, got %v", err)
+	}
+	var first *Error
+	if !errors.As(err, &first) || first.RequestID != "fs-minted-1" {
+		t.Fatalf("expected minted request_id on Unavailable, got %#v", err)
+	}
+	result, err := sandbox.Files().MakeDir(
+		context.Background(),
+		"/workspace/out",
+		FileRequestID(first.RequestID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestID != first.RequestID {
+		t.Fatalf("retry result request_id=%q, want %q", result.RequestID, first.RequestID)
+	}
+	ops := make([]map[string]any, 0, 2)
+	for _, request := range runtime.Requests() {
+		if request["operation"] == "filesystem_make_dir" {
+			ops = append(ops, request)
+		}
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected two filesystem_make_dir calls, got %d", len(ops))
+	}
+	if ops[0]["request_id"] != nil {
+		t.Fatalf("omit-path first call should omit request_id, got %#v", ops[0]["request_id"])
+	}
+	if ops[1]["request_id"] != "fs-minted-1" {
+		t.Fatalf("retry must reuse minted request_id, got %#v", ops[1]["request_id"])
+	}
+}
+
+func TestFilesystemMutateSuccessReturnsRequestID(t *testing.T) {
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		switch request["operation"] {
+		case "filesystem_make_dir", "filesystem_move", "filesystem_remove":
+			return MutateInfo{RequestID: "fs-test"}, nil
+		default:
+			return map[string]any{}, nil
+		}
+	}}
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID:  "box-1",
+		Generation: 1,
+		State:      StateRunning,
+		Isolation:  IsolationMicroVM,
+	})
+	mkdir, err := sandbox.Files().MakeDir(context.Background(), "/workspace/out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mkdir.RequestID != "fs-test" {
+		t.Fatalf("make_dir request_id=%q, want fs-test", mkdir.RequestID)
+	}
+	moved, err := sandbox.Files().Move(context.Background(), "/workspace/out", "/workspace/renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.RequestID != "fs-test" {
+		t.Fatalf("move request_id=%q, want fs-test", moved.RequestID)
+	}
+	removed, err := sandbox.Files().Remove(context.Background(), "/workspace/renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.RequestID != "fs-test" {
+		t.Fatalf("remove request_id=%q, want fs-test", removed.RequestID)
+	}
+}
+
 func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 	binaryOutput := []byte{0xff, 0x00, 'A'}
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
