@@ -1064,7 +1064,10 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         let home = a3s_box_core::dirs_home();
         let reaped = reap_orphaned_boxes_for_home(&home);
         if reaped > 0 {
-            eprintln!("reaped {reaped} orphan pool microVM(s) under {}", home.display());
+            eprintln!(
+                "reaped {reaped} orphan pool microVM(s) under {}",
+                home.display()
+            );
         }
 
         // Optional Prometheus metrics for the long-lived daemon. One shared registry
