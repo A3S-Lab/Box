@@ -14,6 +14,7 @@ use a3s_box_core::{
 };
 use thiserror::Error;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{oneshot, Mutex, Semaphore},
     task::{JoinHandle, JoinSet},
@@ -240,23 +241,6 @@ impl ScaleEndpointOwner {
                 ))
             })?;
 
-            // A running execution is not a ready HTTP replica until its declared
-            // guest port accepts a generation-fenced connection.
-            self.connector
-                .connect_port(
-                    &target.execution_id,
-                    target.generation,
-                    target.guest_port,
-                    ENDPOINT_CONNECT_TIMEOUT,
-                )
-                .await
-                .map_err(|error| {
-                    ScaleReconcileError::Lifecycle(format!(
-                        "service endpoint for {} slot {} is not ready: {error}",
-                        target.service, target.slot
-                    ))
-                })?;
-
             let endpoint = ScaleEndpoint {
                 instance_id: target.execution_id.as_str().to_string(),
                 slot: target.slot,
@@ -271,6 +255,22 @@ impl ScaleEndpointOwner {
                 shutdown_receiver,
                 self.config.drain_timeout,
             ));
+            // Probe the advertised host URL through the live listener. A
+            // generation-fenced connect that is immediately dropped does not
+            // prove the published URL can serve a request.
+            if let Err(error) = probe_advertised_endpoint(&endpoint.url).await {
+                tracing::warn!(
+                    execution_id = %target.execution_id,
+                    service = %target.service,
+                    slot = target.slot,
+                    %error,
+                    "Scale replica is running but its advertised endpoint is not reachable; excluding from ready_replicas"
+                );
+                let _ = shutdown.send(());
+                task.abort();
+                let _ = task.await;
+                continue;
+            }
             leases.insert(
                 target.execution_id.as_str().to_string(),
                 EndpointLease {
@@ -451,6 +451,44 @@ async fn serve_endpoint(
     }
 }
 
+async fn probe_advertised_endpoint(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|error| error.to_string())?;
+    if parsed.scheme() != "http" {
+        return Err(format!("advertised endpoint {url} is not http"));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("advertised endpoint {url} is missing a host"))?
+        .to_string();
+    let port = parsed
+        .port()
+        .ok_or_else(|| format!("advertised endpoint {url} is missing a port"))?;
+    let host_header = if matches!(parsed.host(), Some(url::Host::Ipv6(_))) {
+        format!("[{host}]")
+    } else {
+        host.clone()
+    };
+
+    tokio::time::timeout(ENDPOINT_CONNECT_TIMEOUT, async move {
+        let mut stream = TcpStream::connect((host.as_str(), port))
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = format!("GET / HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| format!("timed out probing advertised endpoint {url}"))?
+}
+
 async fn relay_connection(
     connector: &dyn ExecutionPortConnector,
     target: &ScaleEndpointTarget,
@@ -479,6 +517,29 @@ mod tests {
 
     struct EchoConnector;
 
+    struct RejectingConnector;
+
+    struct SelectiveConnector {
+        reject: &'static str,
+    }
+
+    fn echo_port_stream() -> ExecutionPortStream {
+        let (client, mut server) = tokio::io::duplex(1_024);
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 1_024];
+            loop {
+                let count = match server.read(&mut buffer).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(count) => count,
+                };
+                if server.write_all(&buffer[..count]).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Box::pin(client)
+    }
+
     #[async_trait]
     impl ExecutionPortConnector for EchoConnector {
         async fn connect_port(
@@ -488,20 +549,40 @@ mod tests {
             _port: NonZeroU16,
             _timeout: Duration,
         ) -> ExecutionManagerResult<ExecutionPortStream> {
-            let (client, mut server) = tokio::io::duplex(1_024);
-            tokio::spawn(async move {
-                let mut buffer = [0_u8; 1_024];
-                loop {
-                    let count = match server.read(&mut buffer).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(count) => count,
-                    };
-                    if server.write_all(&buffer[..count]).await.is_err() {
-                        return;
-                    }
-                }
-            });
-            Ok(Box::pin(client))
+            Ok(echo_port_stream())
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionPortConnector for RejectingConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: Duration,
+        ) -> ExecutionManagerResult<ExecutionPortStream> {
+            Err(a3s_box_core::ExecutionManagerError::Unavailable(
+                "MicroVM port 8080 rejected the connection".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionPortConnector for SelectiveConnector {
+        async fn connect_port(
+            &self,
+            execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: Duration,
+        ) -> ExecutionManagerResult<ExecutionPortStream> {
+            if execution_id.as_str() == self.reject {
+                return Err(a3s_box_core::ExecutionManagerError::Unavailable(
+                    "MicroVM port 8080 rejected the connection".to_string(),
+                ));
+            }
+            Ok(echo_port_stream())
         }
     }
 
@@ -560,6 +641,39 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejecting_guest_connect_does_not_publish_an_advertised_url() {
+        let owner = ScaleEndpointOwner::new(
+            ScaleEndpointConfig::loopback(),
+            Arc::new(RejectingConnector),
+        );
+        let endpoints = owner.reconcile_service("api", &[target()]).await.unwrap();
+        assert!(endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_guest_connect_publishes_only_reachable_replicas() {
+        let owner = ScaleEndpointOwner::new(
+            ScaleEndpointConfig::loopback(),
+            Arc::new(SelectiveConnector {
+                reject: "scale-api-1",
+            }),
+        );
+        let healthy = target();
+        let rejected = ScaleEndpointTarget {
+            execution_id: ExecutionId::new("scale-api-1").unwrap(),
+            slot: 1,
+            ..target()
+        };
+        let endpoints = owner
+            .reconcile_service("api", &[healthy.clone(), rejected])
+            .await
+            .unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].instance_id, healthy.execution_id.as_str());
+        assert_eq!(endpoints[0].slot, 0);
     }
 
     #[tokio::test]

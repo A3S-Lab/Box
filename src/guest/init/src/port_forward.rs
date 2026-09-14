@@ -192,6 +192,30 @@ fn run_cri_port_forward_server() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn guest_loopback_addrs(port: u16) -> [std::net::SocketAddr; 2] {
+    [
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn connect_guest_loopback(port: u16) -> io::Result<TcpStream> {
+    let mut last_error = None;
+    for addr in guest_loopback_addrs(port) {
+        match TcpStream::connect(addr) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "guest loopback connect failed",
+        )
+    }))
+}
+
 #[cfg(target_os = "linux")]
 fn connect_control() -> io::Result<std::fs::File> {
     let fd = socket(
@@ -243,7 +267,7 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                 }
 
                 let guest_port = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
-                match TcpStream::connect(("127.0.0.1", guest_port)) {
+                match connect_guest_loopback(guest_port) {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
                         let peer = stream.peer_addr().ok();
@@ -544,6 +568,16 @@ mod tests {
         assert_eq!(open.kind, FRAME_OPEN);
         assert_eq!(open.stream_id, 2);
         assert_eq!(open.payload, 8080_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn guest_loopback_addrs_try_ipv4_then_ipv6() {
+        let addrs = guest_loopback_addrs(8080);
+        assert_eq!(addrs[0], std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
+        assert_eq!(
+            addrs[1],
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080))
+        );
     }
 
     #[test]

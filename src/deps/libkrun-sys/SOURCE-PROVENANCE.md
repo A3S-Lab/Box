@@ -24,11 +24,12 @@ flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`4d746f80e87fad36c9671f965812b9e9781f122dccf6f130b1c275464cafd13b`).
+`e9c76176390785b978f151ea2475f997ff51ff006ce62e74fca45c6b875a9e93`).
 The deterministic archive was generated from local tooling commit
-`a1078ed12a7c68b3ce87c1ea899d2470017297c3`; that revision refuses host binds
-for unmapped TSI guest listen ports (allowlist-only `host_port_map`), on top of
-the prior macOS VirtioFS directory-entry snapshotting, mutation-stable
+`daec6e8498461c767f64a10d565c8a64adffcd7c`; that revision returns `-EPERM`
+for unpublished TSI listen so krun-guest keeps a native in-guest INET
+socket (A3S-Lab/libkrun#12, Box#370), on top of allowlist-only host binds,
+macOS VirtioFS directory-entry snapshotting, mutation-stable
 synthetic FUSE resume cookies, directory-stream ownership independent from the
 retained file handle, and retryable Unix-datagram TX backpressure handling. It
 does not change the packaged Windows runtime. Its
