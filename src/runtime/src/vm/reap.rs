@@ -6,8 +6,13 @@
 //! and keep running, holding their overlay mounts and box directories. On the
 //! next start the CRI has no handle to them, so without this they leak across
 //! restarts. [`reap_orphaned_box`] reclaims one such box by id.
+//!
+//! Warm-pool daemons keep VM ownership in memory only. After a pool daemon
+//! crash the same orphan shims remain; [`reap_orphaned_boxes_for_home`] discovers
+//! init-reparented shims whose `--config` paths are under a given `A3S_HOME`
+//! and reaps them before a new daemon prewarms. It never kills shims still
+//! owned by a live parent (CLI / CRI / another pool).
 
-#[cfg(target_os = "linux")]
 use std::path::Path;
 
 /// Reap an orphaned sandbox microVM left by a previous (crashed) process:
@@ -629,6 +634,184 @@ fn wait_for_exit(pids: &[i32], timeout: std::time::Duration) {
     }
 }
 
+/// Extract `box_id` from an `a3s-box-shim --config '<json>'` command line.
+///
+/// Cmdline may use NUL separators (as in `/proc/*/cmdline`) or spaces.
+pub fn extract_box_id_from_shim_cmdline(cmdline: &str) -> Option<String> {
+    if !cmdline.contains("a3s-box-shim") {
+        return None;
+    }
+    let config = shim_config_json_slice(cmdline)?;
+    let value: serde_json::Value = serde_json::from_str(config).ok()?;
+    value
+        .get("box_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// True when the shim `--config` JSON clearly binds the instance to `home`
+/// (rootfs / console paths under that directory). Avoids reaping unrelated
+/// homes when multiple `A3S_HOME` trees share a host.
+pub fn shim_cmdline_belongs_to_home(cmdline: &str, home: &Path) -> bool {
+    let Some(config) = shim_config_json_slice(cmdline) else {
+        return false;
+    };
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let home_str = home.to_string_lossy();
+    // Prefer exact path fields when JSON parses; fall back to substring fence
+    // matching the issue evidence (cmdline references A3S_HOME).
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(config) {
+        for key in ["console_output", "rootfs_path"] {
+            if let Some(path) = value.get(key).and_then(|v| v.as_str()) {
+                if path_is_under_home(Path::new(path), &home) {
+                    return true;
+                }
+            }
+        }
+        if let Some(rootfs) = value.get("rootfs") {
+            if let Some(path) = rootfs.get("path").and_then(|v| v.as_str()) {
+                if path_is_under_home(Path::new(path), &home) {
+                    return true;
+                }
+            }
+            if let Some(path) = rootfs.as_str() {
+                if path_is_under_home(Path::new(path), &home) {
+                    return true;
+                }
+            }
+        }
+    }
+    config.contains(home_str.as_ref()) || cmdline.contains(home_str.as_ref())
+}
+
+fn shim_config_json_slice(cmdline: &str) -> Option<&str> {
+    // NUL-separated argv: ...\0--config\0{json}\0...
+    if let Some(rest) = cmdline.split("\0--config\0").nth(1) {
+        let json = rest.split('\0').next().unwrap_or(rest).trim();
+        if json.starts_with('{') {
+            return Some(json);
+        }
+    }
+    // Space-separated / test fixtures: --config '{json}' or --config {json}
+    let marker = "--config";
+    let idx = cmdline.find(marker)?;
+    let after = cmdline[idx + marker.len()..].trim_start();
+    let after = after.trim_start_matches(['\0', ' ', '=']);
+    let after = after.trim_start_matches(['\'', '"']);
+    let end = after
+        .find(['\'', '"', '\0'])
+        .or_else(|| {
+            // Unquoted JSON: take through matching braces.
+            if after.starts_with('{') {
+                let mut depth = 0i32;
+                for (i, ch) in after.char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(i + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or(after.len());
+    let json = after[..end].trim_end_matches(['\'', '"']).trim();
+    json.starts_with('{').then_some(json)
+}
+
+fn path_is_under_home(path: &Path, home: &Path) -> bool {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    path.starts_with(&home)
+        || path
+            .to_string_lossy()
+            .contains(home.to_string_lossy().as_ref())
+}
+
+/// Discover init-reparented `a3s-box-shim` box ids scoped to `home`, then reap
+/// each via [`reap_orphaned_box`]. Returns the number of distinct ids reaped.
+///
+/// Used by `pool start` crash recovery (#373). Does not invent reattach and
+/// does not kill shims whose parent is still alive.
+#[cfg(target_os = "linux")]
+pub fn reap_orphaned_boxes_for_home(home: &Path) -> usize {
+    let ids = discover_orphan_shim_box_ids(home);
+    for box_id in &ids {
+        // Kill even when the box directory was already removed so a lone
+        // orphan shim cannot survive a pool restart.
+        let _ = kill_orphaned_shim(box_id);
+        reap_orphaned_box_in(home, box_id);
+    }
+    if !ids.is_empty() {
+        tracing::info!(
+            home = %home.display(),
+            count = ids.len(),
+            "Reaped home-scoped orphan microVM shims before pool start"
+        );
+    }
+    ids.len()
+}
+
+/// Non-Linux: no microVM shims to discover.
+#[cfg(not(target_os = "linux"))]
+pub fn reap_orphaned_boxes_for_home(_home: &Path) -> usize {
+    0
+}
+
+/// Scan `/proc` for orphan (PPID 1) shims whose config belongs to `home`.
+#[cfg(target_os = "linux")]
+pub fn discover_orphan_shim_box_ids(home: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        let proc_dir = Path::new("/proc").join(&name);
+        let Ok(cmdline) = std::fs::read(proc_dir.join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&cmdline);
+        if !cmdline.contains("a3s-box-shim") {
+            continue;
+        }
+        if read_ppid(pid) != Some(1) {
+            // Still owned by a live parent (CLI, CRI, or another pool daemon).
+            continue;
+        }
+        if !shim_cmdline_belongs_to_home(&cmdline, home) {
+            continue;
+        }
+        if let Some(box_id) = extract_box_id_from_shim_cmdline(&cmdline) {
+            if !ids.iter().any(|existing| existing == &box_id) {
+                ids.push(box_id);
+            }
+        }
+    }
+    ids
+}
+
+#[cfg(target_os = "linux")]
+fn read_ppid(pid: i32) -> Option<i32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        let Some(rest) = line.strip_prefix("PPid:") else {
+            continue;
+        };
+        return rest.trim().parse().ok();
+    }
+    None
+}
+
 /// Non-Linux builds are development stubs (no microVMs to reap).
 #[cfg(not(target_os = "linux"))]
 pub fn reap_orphaned_box(_box_id: &str) {}
@@ -657,6 +840,50 @@ pub(crate) fn cleanup_recorded_sandbox_runtime_in(
     _box_id: &str,
 ) -> a3s_box_core::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod discover_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn extract_box_id_from_nul_separated_shim_cmdline() {
+        let cmdline = "a3s-box-shim\0--config\0{\"box_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"rootfs\":{\"path\":\"/var/tmp/a3s-home/boxes/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/merged\"}}\0";
+        assert_eq!(
+            extract_box_id_from_shim_cmdline(cmdline).as_deref(),
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn extract_box_id_ignores_non_shim_processes() {
+        assert!(extract_box_id_from_shim_cmdline("other --config {\"box_id\":\"x\"}").is_none());
+    }
+
+    #[test]
+    fn shim_cmdline_home_fence_matches_rootfs_path() {
+        let home = PathBuf::from("/var/tmp/a3s-n4.home");
+        let cmdline = format!(
+            "a3s-box-shim\0--config\0{{\"box_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"rootfs\":{{\"kind\":\"directory\",\"path\":\"{}/boxes/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/merged\"}}}}\0",
+            home.display()
+        );
+        assert!(shim_cmdline_belongs_to_home(&cmdline, &home));
+        assert!(!shim_cmdline_belongs_to_home(
+            &cmdline,
+            Path::new("/var/tmp/other-home")
+        ));
+    }
+
+    #[test]
+    fn reap_orphaned_boxes_for_home_is_noop_without_proc_orphans() {
+        // On Windows this is always 0; on Linux with no matching PPID-1 shims
+        // for a synthetic home it is also 0.
+        assert_eq!(
+            reap_orphaned_boxes_for_home(Path::new("/var/tmp/a3s-box-no-such-home-for-reap")),
+            0
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "linux")))]

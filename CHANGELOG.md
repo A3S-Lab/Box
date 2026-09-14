@@ -13,6 +13,12 @@ All notable changes to A3S Box will be documented in this file.
   treating them as forbidden `other`. Without `--force`, `rm` still refuses
   so operators do not race an in-flight start. Closes #372. Does **not** flip
   B2, invent Live digests, or claim auto-converge on inspect.
+- `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
+  current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
+  in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to
+  `pool stop` / `ps` / `system-prune`. Discovery fences on PPID 1 plus
+  `--config` paths under home so live CLI/CRI shims are not killed. Does
+  **not** invent reattach, flip B2, or widen drain timeouts.
 
 ### Changed
 
