@@ -60,7 +60,7 @@ async fn wait_one(
     use a3s_box_core::{ExecutionId, ExecutionManager, ExecutionState};
 
     let mut heartbeat = WaitHeartbeat::new(heartbeat_interval);
-    let mut oci_manager = None;
+    let mut managed_manager = None;
     loop {
         let state = StateFile::load_default()?;
         let record = match resolve::resolve(&state, query) {
@@ -75,20 +75,20 @@ async fn wait_one(
             Err(error) => return Err(error.into()),
         };
 
-        if uses_oci_runtime(record) {
-            if oci_manager.is_none() {
+        if uses_managed_execution(record) {
+            if managed_manager.is_none() {
                 let home = a3s_box_core::dirs_home();
-                oci_manager = Some(super::configured_local_execution_manager(&home).await?);
+                managed_manager = Some(super::configured_local_execution_manager(&home).await?);
             }
-            let status = oci_manager
+            let status = managed_manager
                 .as_ref()
-                .expect("OCI manager initialized")
+                .expect("managed execution manager initialized")
                 .inspect(&ExecutionId::new(record.id.clone())?)
                 .await?;
             match status.state {
                 ExecutionState::Stopped | ExecutionState::Failed => {
-                    // inspect persisted the exact terminal result; reload it
-                    // before printing so the provider exit code is authoritative.
+                    // inspect persisted the exact terminal result (and may retire
+                    // abandoned Starting via #385/#386); reload before printing.
                     let refreshed = StateFile::load_default()?;
                     let refreshed = resolve::resolve(&refreshed, query)?;
                     println!("{}", wait_exit_code(refreshed));
@@ -115,11 +115,11 @@ async fn wait_one(
     }
 }
 
-fn uses_oci_runtime(record: &BoxRecord) -> bool {
-    record
-        .managed_execution
-        .as_ref()
-        .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
+/// Any managed record must wait through manager inspect — not only OCI-routed
+/// ones. MicroVM managed Starting otherwise hits the legacy poll path and can
+/// invent exit 0 while durable status is still `starting`.
+fn uses_managed_execution(record: &BoxRecord) -> bool {
+    record.managed_execution.is_some()
 }
 
 fn archived_wait_exit_code(query: &str) -> Result<Option<i32>, String> {
@@ -197,12 +197,20 @@ fn wait_poll_action(record: &BoxRecord) -> WaitPollAction {
                 None => WaitPollAction::Sleep,
             },
         },
-        "created" => WaitPollAction::Sleep,
-        "stopped" | "dead" => match record.exit_code {
+        // Transitional / reserved claims: keep waiting. Never invent exit 0 for
+        // `starting`/`creating`/restart claims (legacy `_ => Finish(0)` lie).
+        "created" | "creating" | "starting" | "killing" | "pausing" | "resuming"
+        | "restart_stopping" | "restart_starting" | "removing" | "snapshotting"
+        | "updating_resources" => WaitPollAction::Sleep,
+        "stopped" | "dead" | "failed" => match record.exit_code {
             Some(code) => WaitPollAction::Finish(code),
             None => WaitPollAction::Sleep,
         },
-        _ => WaitPollAction::Finish(0),
+        // Unknown status: only finish when an exit was recorded; otherwise sleep.
+        _ => match record.exit_code {
+            Some(code) => WaitPollAction::Finish(code),
+            None => WaitPollAction::Sleep,
+        },
     }
 }
 
@@ -260,6 +268,70 @@ mod tests {
         let mut record = crate::test_helpers::fixtures::make_record("id", "box", "running", None);
         record.exit_code = Some(137);
         assert_eq!(wait_poll_action(&record), WaitPollAction::Finish(137));
+
+        let mut failed = crate::test_helpers::fixtures::make_record("id", "box", "failed", None);
+        failed.exit_code = Some(1);
+        assert_eq!(wait_poll_action(&failed), WaitPollAction::Finish(1));
+    }
+
+    #[test]
+    fn test_wait_poll_action_does_not_invent_exit_for_transitional_status() {
+        for status in [
+            "starting",
+            "creating",
+            "killing",
+            "restart_starting",
+            "restart_stopping",
+            "pausing",
+            "resuming",
+            "removing",
+            "snapshotting",
+            "updating_resources",
+        ] {
+            let record = crate::test_helpers::fixtures::make_record("id", "box", status, None);
+            assert_eq!(
+                wait_poll_action(&record),
+                WaitPollAction::Sleep,
+                "status {status} must not invent Finish(0)"
+            );
+        }
+
+        let failed_no_exit =
+            crate::test_helpers::fixtures::make_record("id", "box", "failed", None);
+        assert_eq!(wait_poll_action(&failed_no_exit), WaitPollAction::Sleep);
+    }
+
+    #[test]
+    fn test_uses_managed_execution_when_metadata_present() {
+        use std::collections::BTreeMap;
+
+        use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionGeneration, OperationId};
+        use a3s_box_runtime::ManagedExecutionMetadata;
+
+        let unmanaged = crate::test_helpers::fixtures::make_record("id", "box", "starting", None);
+        assert!(!uses_managed_execution(&unmanaged));
+
+        let mut managed = crate::test_helpers::fixtures::make_record(
+            "22222222-2222-4222-8222-222222222222",
+            "box",
+            "starting",
+            None,
+        );
+        managed.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new("op-wait").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "ext".into(),
+                    config: BoxConfig::default(),
+                    labels: BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        assert!(uses_managed_execution(&managed));
     }
 
     #[test]
