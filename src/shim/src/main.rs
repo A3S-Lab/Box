@@ -493,6 +493,17 @@ fn tsi_port_map_for_spec(spec: &InstanceSpec) -> Vec<String> {
         .collect()
 }
 
+/// Whether the shim must call `krun_set_port_map` for default TSI.
+///
+/// Always configure an explicit map (including empty) so libkrun enters
+/// allowlist mode (`Some`) instead of legacy auto-publish (`None`). Skip only
+/// when bridge/passt owns publish (#371). Auto-assigned `0:guest` entries are
+/// filtered out of the map rather than leaving the shim in auto-publish mode.
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn should_configure_tsi_port_map(spec: &InstanceSpec) -> bool {
+    !native_bridge_port_forwarding_handles_spec(spec)
+}
+
 // On both macOS (netproxy) and Linux (passt), bridge-mode published ports are
 // forwarded by the native network backend, not TSI. libkrun discards the TSI
 // host_port_map once a virtio-net device is attached anyway, so feeding it the

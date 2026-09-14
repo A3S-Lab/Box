@@ -45,7 +45,7 @@ const LIBKRUN_BUILD_FEATURES: &[(&str, &str)] = &[("NET", "1"), ("BLK", "1")];
 // revision. Cargo does not recurse into Git submodules when creating a .crate,
 // so the archive is the source fallback for crates.io consumers.
 const LIBKRUN_SOURCE_ARCHIVE_SHA256: &str =
-    "4fd16a222e3ff952d74a284f36a1108517526687fcdff48f4a356e7a7fbb687d";
+    "4d746f80e87fad36c9671f965812b9e9781f122dccf6f130b1c275464cafd13b";
 
 // Deterministic XZ archive containing the exact krun.dll, krun.lib, and
 // libkrunfw.dll combination exercised by the Windows WHPX test matrix.

@@ -649,7 +649,9 @@ retain process or filesystem sessions after its owner dies.
   terminal or Failed-on-vanish instead of stuck transitional states; snapshot
   recover refuses Sandbox-only publish on non-Sandbox generations; abandoned
   managed `Creating`/`Starting` claims are force-removable via CLI
-  `rm --force` / `kill` / `stop` matching manager kill edges (#372).
+  `rm --force` / `kill` / `stop` matching manager kill edges (#372);
+  default TSI unpublished guest listeners are allowlist-gated so they do not
+  bind host `0.0.0.0` without `-p` (#371).
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
