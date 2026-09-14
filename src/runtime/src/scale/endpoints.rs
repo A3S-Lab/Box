@@ -720,10 +720,7 @@ mod tests {
         let connector = Arc::new(FlipConnector {
             reject: std::sync::atomic::AtomicBool::new(false),
         });
-        let owner = ScaleEndpointOwner::new(
-            ScaleEndpointConfig::loopback(),
-            connector.clone(),
-        );
+        let owner = ScaleEndpointOwner::new(ScaleEndpointConfig::loopback(), connector.clone());
         let first = owner.reconcile_service("api", &[target()]).await.unwrap();
         assert_eq!(first.len(), 1);
 
