@@ -18,8 +18,10 @@ All notable changes to A3S Box will be documented in this file.
   request through the live host listener succeeds (#370). Unpublished guest
   listens stay in-guest via the TSI `-EPERM` native-listen fallback
   (A3S-Lab/libkrun#12) rather than restoring scale `port_map`. Guest-init
-  port-forward tries `127.0.0.1` then `::1`. Does **not** flip B2, invent
-  Live digests, or treat #371 as the data-plane fix.
+  port-forward tries `127.0.0.1` then `::1`. Each subsequent reconcile
+  re-probes retained leases and withdraws any advertised URL that no longer
+  reaches the guest, so `ready_replicas` stays present-tense. Does **not**
+  flip B2, invent Live digests, or treat #371 as the data-plane fix.
 - Runtime Service (R17) advertised host endpoints are published only after a
   live probe through the bound listener proves the generation-fenced guest
   relay opened. Rejected MicroVM port-forward no longer leaves Running

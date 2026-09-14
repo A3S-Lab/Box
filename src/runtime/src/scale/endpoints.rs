@@ -220,6 +220,46 @@ impl ScaleEndpointOwner {
         };
         drain_leases(stale).await;
 
+        // Present-tense readiness: a prior successful probe is not enough.
+        // Re-verify retained advertised URLs each reconcile and withdraw any
+        // lease whose guest relay no longer answers through the host listener.
+        let retained_urls = {
+            let leases = self.leases.lock().await;
+            leases
+                .iter()
+                .filter_map(|(execution_id, lease)| {
+                    let retain = lease.target.service == service
+                        && lease.task.as_ref().is_some_and(|task| !task.is_finished())
+                        && desired
+                            .get(execution_id)
+                            .is_some_and(|target| lease.target == **target);
+                    retain.then(|| (execution_id.clone(), lease.endpoint.url.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut unreachable = Vec::new();
+        for (execution_id, url) in retained_urls {
+            if let Err(error) = probe_advertised_endpoint(&url).await {
+                tracing::warn!(
+                    %execution_id,
+                    service,
+                    %error,
+                    "Scale advertised endpoint stopped answering; withdrawing from ready_replicas"
+                );
+                unreachable.push(execution_id);
+            }
+        }
+        if !unreachable.is_empty() {
+            let withdrawn = {
+                let mut leases = self.leases.lock().await;
+                unreachable
+                    .into_iter()
+                    .filter_map(|execution_id| leases.remove(&execution_id))
+                    .collect::<Vec<_>>()
+            };
+            drain_leases(withdrawn).await;
+        }
+
         let mut leases = self.leases.lock().await;
 
         for target in targets {
@@ -651,6 +691,47 @@ mod tests {
         );
         let endpoints = owner.reconcile_service("api", &[target()]).await.unwrap();
         assert!(endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retained_lease_is_withdrawn_when_guest_relay_later_rejects() {
+        struct FlipConnector {
+            reject: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl ExecutionPortConnector for FlipConnector {
+            async fn connect_port(
+                &self,
+                _execution_id: &ExecutionId,
+                _generation: ExecutionGeneration,
+                _port: NonZeroU16,
+                _timeout: Duration,
+            ) -> ExecutionManagerResult<ExecutionPortStream> {
+                if self.reject.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(a3s_box_core::ExecutionManagerError::Unavailable(
+                        "MicroVM port 8080 rejected the connection".to_string(),
+                    ));
+                }
+                Ok(echo_port_stream())
+            }
+        }
+
+        let connector = Arc::new(FlipConnector {
+            reject: std::sync::atomic::AtomicBool::new(false),
+        });
+        let owner = ScaleEndpointOwner::new(ScaleEndpointConfig::loopback(), connector.clone());
+        let first = owner.reconcile_service("api", &[target()]).await.unwrap();
+        assert_eq!(first.len(), 1);
+
+        connector
+            .reject
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let after_reject = owner.reconcile_service("api", &[target()]).await.unwrap();
+        assert!(
+            after_reject.is_empty(),
+            "ready_replicas must not keep a lease whose advertised URL no longer reaches the guest"
+        );
     }
 
     #[tokio::test]
