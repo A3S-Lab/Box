@@ -29,6 +29,10 @@ FIXTURE_REQUIREMENTS: tuple[str, ...] = (
     "RuntimeOperation::File",
     "RuntimeOperation::Filesystem",
     "linux-native-live-session-qualification",
+    "BoxFilesystemOp::Move",
+    "BoxFilesystemOp::Remove",
+    "fixture-fs-move-before-owner-kill",
+    "fixture-fs-remove-before-owner-kill",
 )
 
 MODEL_REQUIREMENTS: tuple[str, ...] = (
@@ -40,6 +44,7 @@ MODEL_REQUIREMENTS: tuple[str, ...] = (
 
 ROADMAP_REQUIREMENTS: tuple[str, ...] = (
     "retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart",
+    "mkdir + keyed upload + move/remove survive owner SIGKILL",
     "b2_process_session_recovery_closed` stays false",
     "exit gate remains open",
     "Observation matrix greened",

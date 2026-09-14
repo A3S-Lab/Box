@@ -291,8 +291,8 @@ mutation replay, recursive removal, and post-cleanup `NotFound` through native
 Linux and utility-VM lifecycle harnesses. Cross-process filesystem-session
 recovery against the durable owner fixture is covered by
 `retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`
-(mkdir + keyed upload survive owner SIGKILL; list/download after reconnect).
-That fixture is **not** real-driver B2 evidence —
+(mkdir + keyed upload + move/remove survive owner SIGKILL; list/download after
+reconnect). That fixture is **not** real-driver B2 evidence —
 `b2_process_session_recovery_closed` stays false.
 
 ## Delivery Milestones

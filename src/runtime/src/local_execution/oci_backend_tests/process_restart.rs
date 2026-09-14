@@ -8,7 +8,7 @@
 //! `retained_backend_recovers_filesystem_session_after_runtime_owner_process_restart`
 //! proves the same owner-death / reconnect contract for keyed file upload and
 //! mutating filesystem state that lives in the durable fixture journal (mkdir,
-//! list, download after reconnect).
+//! move, remove, list, download after reconnect).
 //!
 //! Neither test is real Native Linux or utility-VM driver evidence and must
 //! not be cited as closing ROADMAP B2 (`b2_process_session_recovery_closed`
@@ -1139,6 +1139,10 @@ fn process_restart_module_docs_refuse_b2_overclaim() {
         ),
         "process_restart must document the cross-process filesystem-session fixture"
     );
+    assert!(
+        docs.contains("move, remove"),
+        "process_restart must document Move/Remove journal coverage in the filesystem fixture"
+    );
 }
 
 #[tokio::test]
@@ -1391,6 +1395,53 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
     assert!(upload.success);
     assert_eq!(upload.size, payload.len() as u64);
 
+    manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Move,
+                path: "/work/tree".to_string(),
+                destination: Some("/work/kept".to_string()),
+                depth: 0,
+                user: None,
+                request_id: Some("fixture-fs-move-before-owner-kill".to_string()),
+            },
+        )
+        .await
+        .expect("move through first runtime owner");
+
+    manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::MakeDir,
+                path: "/work/ephemeral".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some("fixture-fs-mkdir-ephemeral-before-owner-kill".to_string()),
+            },
+        )
+        .await
+        .expect("ephemeral mkdir through first runtime owner");
+    manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::Remove,
+                path: "/work/ephemeral".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some("fixture-fs-remove-before-owner-kill".to_string()),
+            },
+        )
+        .await
+        .expect("remove through first runtime owner");
+
     first_owner.terminate();
     let error = manager
         .reconcile(&operation)
@@ -1425,7 +1476,7 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
             running.generation,
             BoxFilesystemRequest {
                 op: BoxFilesystemOp::ListDir,
-                path: "/work/tree".to_string(),
+                path: "/work/kept".to_string(),
                 destination: None,
                 depth: 0,
                 user: None,
@@ -1433,10 +1484,40 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
             },
         )
         .await
-        .expect("list recovered directory through replacement owner");
+        .expect("list moved directory through replacement owner");
     assert_eq!(listing.entries.len(), 1);
-    assert_eq!(listing.entries[0].path, "/work/tree/payload.txt");
+    assert_eq!(listing.entries[0].path, "/work/kept/payload.txt");
     assert_eq!(listing.entries[0].kind, BoxFilesystemEntryKind::File);
+
+    let work_listing = manager
+        .filesystem(
+            &running.execution_id,
+            running.generation,
+            BoxFilesystemRequest {
+                op: BoxFilesystemOp::ListDir,
+                path: "/work".to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: None,
+            },
+        )
+        .await
+        .expect("list /work through replacement owner");
+    let work_paths: Vec<&str> = work_listing
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(work_paths, vec!["/work/kept"]);
+    assert!(
+        !work_paths.iter().any(|path| *path == "/work/ephemeral"),
+        "removed ephemeral directory must stay absent after reconnect"
+    );
+    assert!(
+        !work_paths.iter().any(|path| *path == "/work/tree"),
+        "pre-move tree path must stay absent after reconnect"
+    );
 
     let download = manager
         .transfer_file(
@@ -1444,7 +1525,7 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
             running.generation,
             BoxFileRequest {
                 op: BoxFileOp::Download,
-                guest_path: "/work/tree/payload.txt".to_string(),
+                guest_path: "/work/kept/payload.txt".to_string(),
                 data: None,
                 user: None,
                 max_bytes: None,
@@ -1474,7 +1555,8 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
             .lines()
             .filter(|call| *call == "filesystem-mutation")
             .count(),
-        1
+        4,
+        "mkdir tree + move + mkdir ephemeral + remove"
     );
     assert_eq!(
         calls.lines().filter(|call| *call == "file-upload").count(),
@@ -1485,7 +1567,8 @@ async fn retained_backend_recovers_filesystem_session_after_runtime_owner_proces
             .lines()
             .filter(|call| *call == "filesystem-listdir")
             .count(),
-        1
+        2,
+        "list moved tree + list /work"
     );
     assert_eq!(
         calls
