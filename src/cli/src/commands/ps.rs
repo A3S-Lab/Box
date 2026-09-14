@@ -27,7 +27,9 @@ pub struct PsArgs {
 }
 
 pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
+    // Present-tense inventory: retire abandoned managed Starting via manager
+    // inspect (#385) before listing, without observing every Running box.
+    let state = super::observe_inventory::refresh_default_home_after_starting_observation().await?;
     let boxes = select_records(&state, args.all);
 
     // Apply filters

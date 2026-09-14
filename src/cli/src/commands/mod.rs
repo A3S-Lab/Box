@@ -33,6 +33,7 @@ mod monitor;
 mod monitor_metrics;
 mod monitor_service;
 pub(crate) mod network;
+mod observe_inventory;
 mod pause;
 mod pool;
 mod port;

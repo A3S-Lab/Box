@@ -40,13 +40,16 @@ All notable changes to A3S Box will be documented in this file.
   terminate those states the same way the execution manager already allowed
   (`Starting`/`Creating` → `Killing` → `Stopped`, NotFound-honest) instead of
   treating them as forbidden `other`. Without `--force`, `rm` still refuses
-  so operators do not race an in-flight start. Closes #372. Inspect under the
-  execution lifecycle lock now also retires durable `Starting` when backend
-  observation is `NotFound` (AlreadyStopped-honest, no invented exit), so
-  inventory/`system-prune` no longer keep a forever-Creating projection with
-  no process. `RestartStarting` / `RestartStopping` keep projecting Creating
-  until reconcile resumes them; inspect does **not** call `recover_start`.
-  Does **not** flip B2 or invent Live digests.
+  so operators do not race an in-flight start. Closes #372. Manager inspect
+  under the execution lifecycle lock retires durable `Starting` when backend
+  observation is `NotFound` (AlreadyStopped-honest, no invented exit). CLI
+  `inspect`, `ps`, `prune`, and `system-prune` now drive that observation
+  before projecting status or selecting reclaim targets, so operator inventory
+  no longer keeps a forever-`starting` row that prune skipped. Only managed
+  `Starting` is observed on those paths (not every Running box).
+  `RestartStarting` / `RestartStopping` keep projecting Creating until
+  reconcile resumes them; inspect does **not** call `recover_start`. Does
+  **not** flip B2, invent Live digests, or invent pool `ps` inventory.
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
   in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to

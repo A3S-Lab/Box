@@ -22,7 +22,11 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
     // an image so `inspect <image>` works the same as `inspect <container>`.
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
-            println!("{}", inspect_json(record)?);
+            // Drive manager observation before projecting JSON so abandoned
+            // managed Starting claims converge (#385) instead of forever-"starting".
+            let record =
+                super::observe_inventory::refresh_managed_starting_record(record.clone()).await?;
+            println!("{}", inspect_json(&record)?);
             Ok(())
         }
         Err(ResolveError::NotFound(_)) => {
