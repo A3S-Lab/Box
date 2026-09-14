@@ -659,7 +659,9 @@ retain process or filesystem sessions after its owner dies.
   host endpoints are likewise published only after a live listener probe
   proves the guest relay opened, and a failed probe during `apply` retires
   the generation instead of leaving an orphan Running Service. Retained R17
-  leases are re-probed rather than republished from identity match.
+  leases are re-probed rather than republished from identity match, and
+  inspect retires the generation when re-probe fails (same inventory honesty
+  as apply).
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
