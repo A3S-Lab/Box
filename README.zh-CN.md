@@ -57,7 +57,7 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 
 | 领域 | 最新行为 |
 | --- | --- |
-| Linux Sandbox GA | 未设置 `A3S_BOX_OCI_MIGRATION` 时，新的 Sandbox 记录默认走 `SandboxViaOci`；托管 x86_64/aarch64 CI 在未设置该变量时证明该路由（生命周期 + Native Live 观察门；tip harness 为 v7，已 green 的摘要仍为 v4 范围）。主机准备：`scripts/prepare-linux-sandbox-host.sh`。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md)。不是 MicroVM/`BX0.3` 宣称。 |
+| Linux Sandbox GA | 未设置 `A3S_BOX_OCI_MIGRATION` 时，新的 Sandbox 记录默认走 `SandboxViaOci`；托管 x86_64/aarch64 CI 在未设置该变量时证明该路由（生命周期 + Native Live 观察门；tip harness 为 v7，CI-greened digests v7-scoped）。主机准备：`scripts/prepare-linux-sandbox-host.sh`。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md)。不是 MicroVM/`BX0.3` 宣称。 |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` 以有界并发排空空闲 VM 与租约；销毁失败尽力回收孤儿（空闲、租约释放/过期、一次性 `pool run`、补充中途与模板拆除）；即使构建为 Failing/Unavailable，也会移除快照模板目录（`~/.a3s/pool/tpl-*`）。 |
 | MicroVM lifecycle | 工作负载已退出时跳过 guest stop；Unix 冷启动在无 exec 心跳时失败即关闭；崩溃检测宽限为 80ms。传输层对带 key 的 exec 与只读文件系统操作覆盖歧义 ACK/流丢失重试。 |
 | CRI | PodSandbox 创建将 agent 工作负载推迟到 `StartContainer`；取消与销毁路径在 VM 拆除失败时尽力回收孤儿。 |
@@ -77,7 +77,7 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 > - 将分离的 init stdout/stderr 投影到 Box 日志，以及只读与 PTY CLI attach，且无遗留 runtime-socket 回退。
 >
 > 调用经能力检查并绑定到确切运行时目标。文件与文件系统变更对显式可重试的丢失响应复用同一操作身份，并验证仅生效一次；读响应有大小边界，若目标或形状漂移则拒绝。资源意图在变更前持久化，并以同一操作身份恢复。快照 freezer 声明也持久化其运行时变更是否已应用，因此崩溃恢复从不重放已完成的 thaw，同时原始创建身份保持不可变。保留的本地 SDK 客户端现在暴露首个断开流结果，然后在后续显式对账时重连并重新协商。通用 Box/OCI 契约还在两个不同的 runtime-owner 测试进程间恢复一个 manager，恰好一次 create、start 与 exec；原始实时进程流与输入句柄通过替换所有者继续清单、stdin、输出、signal、wait 与清理。原始运行时输出与结构化 Box 日志保持分离。固定运行时资格验证现在在 Box SDK 套件运行前，对其真实原生与 utility-VM 驱动执行二进制文件传输与描述符受限的 mkdir/stat/list/move/remove。固定运行时现在提供长期多容器 Native Linux 主机所有者，Box 现在提供其生产直连进程 bundle 编译器、受保护的身份围栏所有者启动，以及显式 CLI/SDK 组合。在 bundle 构造前，资源守卫校验托管 home、持久附加产品卷与网络，并安装经验证的快照 lower，失败即关闭回滚。直连 SDK argv 命令在 OCI 调度前使用有效容器 `PATH`，对照已准备的 rootfs 解析 `argv[0]`，在不削弱运行时规范化绝对路径契约的前提下保留无 shell 的 `Argv("printf", ...)` 行为。阻塞式 Native Linux x86_64 与 aarch64 真实主机通道现在通过 Rust、Python、TypeScript 与 Go SDK 的生命周期、exec、文件系统、路由感知统计、pause/resume、快照恢复、重启与清理表面传递此生产所有者组合。两条通道在运行中的 Sandbox 下杀死确切已认证的 OCI 所有者，证明其 launcher 与 init 身份终止，并用新的 Box SDK-bridge 进程重新绑定所有者端点，将对账代际视为已停止且不捏造退出状态，删除其确切运行时墓碑，并重启下一 Box 与 OCI 代际。代际围栏的 Box worker 在 OCI init 启动前就绪，消费运行时的有序输出游标，写入常规拆分控制台文件，喂给配置的保留/脱敏驱动，在 runtime-service 所有者替换后重连，并在删除运行时代际前发布排空证据。
-> **Sandbox（Native Linux）宣称面：** Linux 默认将新的 Sandbox 记录路由到生产 OCI 所有者（`SandboxViaOci`），无需 `A3S_BOX_OCI_MIGRATION`。托管 CI（x86_64/aarch64 SDK Local Sandbox）在未设置该变量时证明：生命周期、exec、文件系统、pause/resume、快照、重启、清理，以及 Native Live 观察门（tip harness v7；已 green 摘要仍为 v4 范围）在所有者 SIGKILL 后保留流句柄与文件系统连续性。显式 `off` 保留仅 VM 后端；显式 `sandbox` 在所有者未就绪时硬失败。主机 harness 报告仍保持 `b2_process_session_recovery_closed=false`（报告永不自证关闭 B2）。fixture `process_restart` 不是 driver Live 证据。
+> **Sandbox（Native Linux）宣称面：** Linux 默认将新的 Sandbox 记录路由到生产 OCI 所有者（`SandboxViaOci`），无需 `A3S_BOX_OCI_MIGRATION`。托管 CI（x86_64/aarch64 SDK Local Sandbox）在未设置该变量时证明：生命周期、exec、文件系统、pause/resume、快照、重启、清理，以及 Native Live 观察门（tip harness v7；CI-greened digests v7-scoped）在所有者 SIGKILL 后保留流句柄与文件系统连续性。显式 `off` 保留仅 VM 后端；显式 `sandbox` 在所有者未就绪时硬失败。主机 harness 报告仍保持 `b2_process_session_recovery_closed=false`（报告永不自证关闭 B2）。fixture `process_restart` 不是 driver Live 证据。
 > **仍开放（不在 Sandbox GA 范围）：** 默认 MicroVM → OCI cutover、WHPX/KVM MicroVM *生产* 组合（资格验证-only 仍有效）、HostRuntimeService 作为默认 create 路径，以及更广的 Cloud `BX0.3` 硬件 TEE 宣称。省略 `--isolation` → MicroVM 的默认拆分仍具权威性，直至单独的 MicroVM cutover。
 > 遵循[迁移路线图](ROADMAP.md)中已检查的门。
 
@@ -173,9 +173,9 @@ Box 操作启动不同的身份围栏所有者，将已认证的旧代际视为�
 的崩溃恢复已在真实 x86_64 与 aarch64 Linux 主机上资格验证。
 
 另外，Native Live 观察门（SDK Local Sandbox CI；tip harness
-`a3s.box.linux-native-live-session.v7`，已 green 摘要仍为 v4 范围）在保留 Box manager 时证明
+`a3s.box.linux-native-live-session.v7`，CI-greened digests v7-scoped）在保留 Box manager 时证明
 Host 所有者 SIGKILL 后的 **保留** 流式 exec 句柄与文件系统连续性 — 见英文 README
-Native Live 小节。勿将仅停止对账与 Live 重附着混淆；二者皆真，且都不翻转
+Native Live 小节与已发布的 CI 摘要。勿将仅停止对账与 Live 重附着混淆；二者皆真，且都不翻转
 `b2_process_session_recovery_closed`。
 
 Rust 应用通过 `A3sBoxClient::with_configured_paths(...).await` 选择同一路径，或显式构造 `NativeLinuxOciMigrationConfig`。同步的 `new`、`from_home` 与 `with_paths` 构造器为 API 兼容保留遗留行为。
@@ -355,7 +355,7 @@ Python、TypeScript 与 Go 与 `a3s-box sdk-bridge` 交换结构化 protocol-v3 
 | Linux MicroVM | 经 KVM/libkrun 的主要本地路径；Runtime 0.5 就绪/存活与有界优雅停止用例已接线到已宣告的提供方配置文件，与自托管生命周期、SDK、CRI、竞态、泄漏、snapshot-fork 与 soak 门并列 | 当前修订仍要求一次已登记的 KVM 运行覆盖所有能力触发的生命周期用例，加上更长的 `G2`/`R24` 配置文件 |
 | macOS MicroVM | Apple Silicon/HVF 构建与打包路径，加上物理持久/崩溃恢复、无挂载文件系统快照、遗留迁移、维护与已发布端口回归门 | [`integration-hvf` 门](docs/ci-hvf-runner.md) 需要已登记的物理 Apple Silicon runner；Intel macOS 不受支持 |
 | Windows MicroVM | 覆盖生命周期、exec、copy、stats、端口、bind/命名卷、commit、快照与清理的真实 x86_64 WHPX soak | 一个 vCPU；无交互 PTY、桥接网络、TEE、snapshot-fork 或 CRI |
-| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期与 Native Live 观察门（tip harness v7；已 green 摘要为 v4 范围）在未设置 `A3S_BOX_OCI_MIGRATION` 时使用生产所有者路由（Sandbox GA 默认）。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **生产** 共享内核路径（`--isolation sandbox`；非默认省略 isolation）。主机准备：[Installation](docs/installation.md#linux-sandbox-host-preparation)。仅 VM 控制被拒绝。主机报告保持 `b2_process_session_recovery_closed=false`。不是 MicroVM/TEE/`BX0.3` 宣称。 |
+| Linux Sandbox | 已安装、自包含的 x86_64/aarch64 产品包运行每个 A3S OCI Runtime 配置文件，以及在 `/dev/kvm` 缺失与不可访问时的 Rust、Python、TypeScript 与 Go SDK 生命周期；Runtime 0.5 生命周期与 Native Live 观察门（tip harness v7；CI-greened digests v7-scoped）在未设置 `A3S_BOX_OCI_MIGRATION` 时使用生产所有者路由（Sandbox GA 默认）。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md) | **生产** 共享内核路径（`--isolation sandbox`；非默认省略 isolation）。主机准备：[Installation](docs/installation.md#linux-sandbox-host-preparation)。仅 VM 控制被拒绝。主机报告保持 `b2_process_session_recovery_closed=false`。不是 MicroVM/TEE/`BX0.3` 宣称。 |
 | Kubernetes | CRI v1 服务器与 containerd runtime-v2 shim 预览 | 不声明完整 CRI 符合性 |
 | TEE | 运行时绑定的 RA-TLS 产物、确切身份附件绑定、机密 Tasks 与 Services 的执行前证明，以及可选的模拟 KVM 符合性配置文件；单独武装的 SEV-SNP 硬件门固定启动测量 | 身份附件仅由显式配置的机密提供方宣告；模拟与未执行的硬件作业不是硬件安全证据 |
 

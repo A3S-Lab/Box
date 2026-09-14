@@ -559,8 +559,18 @@ retain process or filesystem sessions after its owner dies.
     `remove_request_id` /
     `a3s.box.live-session.keyed-remove.before-owner-kill`) and ListDir /
     download of the moved tree after reattach. Fail-closed verifier requires
-    those ids. Does **not** close B2, invent digests, or claim guest
-    `filesystem_replay`. Existing-host greening of a v7 digest remains pending.
+    those ids. Does **not** close B2 or claim guest `filesystem_replay`.
+    **CI-greened** on PR #358 / run `34805883757` (report
+    `box_commit_sha` `76dc560e4bf40f88fa50614798772fc694c3e8f3`; landed tip
+    `6ef55b09…`; OCI `931def0b8c32313802262bbdbebfda669956ca4f`): report
+    SHA-256 `71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd`
+    (linux-x86_64) and
+    `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
+    (linux-arm64) (`status=passed`, `retained_filesystem_proven=true`,
+    `retained_stream_handle_proven=true`, `move_before_kill=true`,
+    `remove_before_kill=true`, keyed Move/Remove ids present; B2 / fixture /
+    KVM / utility-VM claims stay false). Prior published digests above remain
+    v4-scoped historical evidence.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
