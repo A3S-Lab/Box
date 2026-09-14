@@ -275,6 +275,52 @@ fn test_tsi_port_map_for_spec_filters_auto_assigned_host_ports() {
     );
 }
 
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[test]
+fn test_should_configure_tsi_port_map_empty_default_tsi() {
+    // No -p: still configure an empty allowlist so libkrun does not auto-publish.
+    let spec = InstanceSpec {
+        port_map: Vec::new(),
+        ..Default::default()
+    };
+    assert!(should_configure_tsi_port_map(&spec));
+    assert!(tsi_port_map_for_spec(&spec).is_empty());
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[test]
+fn test_should_configure_tsi_port_map_explicit_publish() {
+    let spec = InstanceSpec {
+        port_map: vec!["8080:80".to_string()],
+        ..Default::default()
+    };
+    assert!(should_configure_tsi_port_map(&spec));
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[test]
+fn test_should_configure_tsi_port_map_auto_assigned_still_allowlists() {
+    // `0:guest` cannot be fed to libkrun, but skipping the call would leave
+    // auto-publish (None) and leak every guest listener. Configure empty.
+    let spec = InstanceSpec {
+        port_map: vec!["0:80".to_string()],
+        ..Default::default()
+    };
+    assert!(should_configure_tsi_port_map(&spec));
+    assert!(tsi_port_map_for_spec(&spec).is_empty());
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[test]
+fn test_should_configure_tsi_port_map_skips_bridge() {
+    let spec = InstanceSpec {
+        port_map: vec!["8080:80".to_string()],
+        network: Some(test_network_config()),
+        ..Default::default()
+    };
+    assert!(!should_configure_tsi_port_map(&spec));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn test_tsi_port_map_for_spec_skips_macos_bridge_ports() {

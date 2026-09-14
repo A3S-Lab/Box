@@ -6,6 +6,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Default TSI no longer auto-publishes unpublished guest listeners onto host
+  `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
+  allowlist (including empty when `-p` is absent), and vendored libkrun
+  `try_listen` refuses unmapped guest TCP/UDP ports instead of falling back to
+  the guest bind address. Explicit `-p` publish and bridge/passt-owned maps are
+  unchanged. Does **not** flip B2, invent Live digests, or change `--network
+  none` semantics.
+
 - Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
   can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now
   terminate those states the same way the execution manager already allowed

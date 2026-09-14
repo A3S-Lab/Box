@@ -218,25 +218,28 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         &spec.entrypoint.env,
     )?;
 
-    // TSI port mapping for inbound connections (host -> guest)
-    // This allows external connections to reach services inside the guest.
+    // TSI port mapping for inbound connections (host -> guest).
     // Must be called before add_vsock_port to avoid EINVAL from libkrun.
-    // Skip entries handled by bridge-native forwarding or host_port=0
-    // auto-assignment, which would fail with EINVAL in libkrun's TSI.
+    //
+    // Always pass an explicit map for default TSI — including empty — so
+    // libkrun uses allowlist mode (Some) instead of legacy auto-publish
+    // (None). Unmapped guest listeners must not bind host 0.0.0.0 (#371).
+    // Skip only when bridge/passt owns publish (virtio-net discards the TSI
+    // host_port_map). Auto-assigned `0:guest` entries are omitted from the
+    // map (EINVAL in libkrun) rather than leaving auto-publish enabled.
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
-        let valid_port_map = tsi_port_map_for_spec(spec);
-
-        if !valid_port_map.is_empty() {
+        if should_configure_tsi_port_map(spec) {
+            let valid_port_map = tsi_port_map_for_spec(spec);
             tracing::info!(
                 port_map = ?valid_port_map,
                 "Configuring TSI port mapping for inbound connections"
             );
             ctx.set_port_map(&valid_port_map)?;
-        } else if !spec.port_map.is_empty() {
+        } else {
             tracing::debug!(
                 port_map = ?spec.port_map,
-                "Skipping TSI port mapping; native bridge port forwarding or auto-assigned host ports handle these entries"
+                "Skipping TSI port mapping; native bridge port forwarding handles these entries"
             );
         }
     }
