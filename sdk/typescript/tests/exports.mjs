@@ -309,7 +309,7 @@ class FakeRuntime {
       case 'filesystem_make_dir':
       case 'filesystem_move':
       case 'filesystem_remove':
-        return { ok: true, request_id: 'fs-test' }
+        return { ok: true, request_id: request.request_id ?? 'fs-test' }
       default:
         throw new Error(`unexpected operation: ${request.operation}`)
     }
@@ -869,6 +869,57 @@ const unavailableWrites = unavailableFileRuntime.requests.filter(
 assert.equal(unavailableWrites.length, 2)
 assert.equal(unavailableWrites[0].request_id, undefined)
 assert.equal(unavailableWrites[1].request_id, 'file-minted-1')
+
+class UnavailableOnceMakeDirRuntime extends FakeRuntime {
+  #failNextMakeDir = true
+
+  async request(request) {
+    if (request.operation === 'filesystem_make_dir' && this.#failNextMakeDir) {
+      this.requests.push(request)
+      this.#failNextMakeDir = false
+      throw new A3SBoxError(
+        'prepare-filesystem response was lost',
+        'unavailable',
+        { requestId: 'fs-minted-1' }
+      )
+    }
+    return super.request(request)
+  }
+}
+
+const unavailableMakeDirRuntime = new UnavailableOnceMakeDirRuntime()
+const unavailableMakeDirSandbox = await Sandbox.create(undefined, {
+  runtime: unavailableMakeDirRuntime,
+})
+await assert.rejects(
+  unavailableMakeDirSandbox.files.makeDir('/workspace/out'),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.requestId === 'fs-minted-1'
+)
+const recoveredMakeDir = await unavailableMakeDirSandbox.files.makeDir(
+  '/workspace/out',
+  { requestId: 'fs-minted-1' }
+)
+assert.equal(recoveredMakeDir.requestId, 'fs-minted-1')
+const unavailableMakeDirs = unavailableMakeDirRuntime.requests.filter(
+  (request) => request.operation === 'filesystem_make_dir'
+)
+assert.equal(unavailableMakeDirs.length, 2)
+assert.equal(unavailableMakeDirs[0].request_id, undefined)
+assert.equal(unavailableMakeDirs[1].request_id, 'fs-minted-1')
+
+const mutateSandbox = await Sandbox.create(undefined, {
+  runtime: new FakeRuntime(),
+})
+const mkdir = await mutateSandbox.files.makeDir('/tmp/dir')
+assert.equal(mkdir.requestId, 'fs-test')
+const moved = await mutateSandbox.files.rename('/tmp/dir', '/tmp/moved')
+assert.equal(moved.requestId, 'fs-test')
+const removed = await mutateSandbox.files.remove('/tmp/moved')
+assert.equal(removed.requestId, 'fs-test')
+await mutateSandbox.kill()
 
 const write = await sandbox.files.write('/workspace/notes.txt', 'hello')
 assert.equal(write.size, 5)

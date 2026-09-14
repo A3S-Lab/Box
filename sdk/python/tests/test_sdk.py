@@ -430,7 +430,7 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         "filesystem_move",
         "filesystem_remove",
     }:
-        return {"ok": True, "request_id": "fs-test"}
+        return {"ok": True, "request_id": request.get("request_id") or "fs-test"}
     raise AssertionError(f"unexpected operation: {operation}")
 
 
@@ -836,6 +836,61 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(len(writes), 2)
         self.assertNotIn("request_id", writes[0])
         self.assertEqual(writes[1]["request_id"], "file-minted-1")
+
+    def test_filesystem_make_dir_unavailable_preserves_request_id_for_retry(
+        self,
+    ) -> None:
+        class UnavailableOnceRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self._fail_next_mkdir = True
+
+            def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+                payload = dict(request)
+                if payload["operation"] != "sdk_capabilities":
+                    self.requests.append(payload)
+                if (
+                    payload["operation"] == "filesystem_make_dir"
+                    and self._fail_next_mkdir
+                ):
+                    self._fail_next_mkdir = False
+                    raise A3SBoxError(
+                        "prepare-filesystem response was lost",
+                        code="unavailable",
+                        request_id="fs-minted-1",
+                    )
+                return response_for(payload)
+
+        runtime = UnavailableOnceRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        with self.assertRaises(A3SBoxError) as raised:
+            sandbox.files.make_dir("/workspace/out")
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertEqual(raised.exception.request_id, "fs-minted-1")
+
+        result = sandbox.files.make_dir(
+            "/workspace/out",
+            request_id=raised.exception.request_id,
+        )
+        self.assertEqual(result.request_id, "fs-minted-1")
+        ops = [
+            request
+            for request in runtime.requests
+            if request["operation"] == "filesystem_make_dir"
+        ]
+        self.assertEqual(len(ops), 2)
+        self.assertNotIn("request_id", ops[0])
+        self.assertEqual(ops[1]["request_id"], "fs-minted-1")
+
+    def test_filesystem_mutate_success_returns_request_id(self) -> None:
+        runtime = FakeRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+        mkdir = sandbox.files.make_dir("/tmp/dir")
+        self.assertEqual(mkdir.request_id, "fs-test")
+        moved = sandbox.files.rename("/tmp/dir", "/tmp/moved")
+        self.assertEqual(moved.request_id, "fs-test")
+        removed = sandbox.files.remove("/tmp/moved")
+        self.assertEqual(removed.request_id, "fs-test")
 
     def test_exports_native_local_clients(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)

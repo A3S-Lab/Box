@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Language SDK tests lock MakeDir / Move / Remove success `request_id`
+  surfaces and MakeDir `Unavailable` retry reuse (Go / Python / TypeScript),
+  matching the existing `file_write` Unavailable retry bar. Does **not** flip
+  B2 or invent Live digests.
+
 ### Changed
 
 - Mutating filesystem success responses now return the durable `request_id`
