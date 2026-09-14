@@ -6,8 +6,6 @@
 
 use clap::Args;
 
-use crate::state::StateFile;
-
 #[derive(Args)]
 pub struct PruneArgs {
     /// Skip confirmation prompt
@@ -24,7 +22,10 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    let mut state = StateFile::load_default()?;
+    // Observe managed Starting under the lifecycle lock so #385 NotFound→Stopped
+    // retires are visible before prune selection (durable "starting" is skipped).
+    let mut state =
+        super::observe_inventory::refresh_default_home_after_starting_observation().await?;
     let to_remove: Vec<crate::state::BoxRecord> = state
         .list(true)
         .iter()
