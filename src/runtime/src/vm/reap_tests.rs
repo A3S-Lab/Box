@@ -245,7 +245,9 @@ fn home_fenced_ppid1_shim_orphan_is_reaped() {
     std::fs::create_dir_all(box_dir.join("merged")).unwrap();
 
     let shim = home.path().join("a3s-box-shim");
-    std::fs::write(&shim, "#!/bin/sh\nexec sleep 300\n").unwrap();
+    // Stay as the shebang shell so /proc/cmdline keeps the script path and
+    // `--config` JSON. `exec sleep` would replace argv and hide the shim fence.
+    std::fs::write(&shim, "#!/bin/sh\nsleep 300\n").unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let config = format!(
