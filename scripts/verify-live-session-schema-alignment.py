@@ -24,11 +24,13 @@ NATIVE_VERIFIER = "scripts/verify-linux-native-live-session-report.py"
 KVM_VERIFIER = "scripts/verify-linux-kvm-live-session-report.py"
 
 CONST_RE = re.compile(
-    r'const\s+(SCHEMA_VERSION|KEYED_FILE_UPLOAD_BEFORE|KEYED_MKDIR_BEFORE)\s*:\s*&str\s*=\s*"([^"]+)"'
+    r'const\s+(SCHEMA_VERSION|KEYED_FILE_UPLOAD_BEFORE|KEYED_MKDIR_BEFORE|'
+    r'KEYED_MOVE_BEFORE|KEYED_REMOVE_BEFORE)\s*:\s*&str\s*=\s*"([^"]+)"'
 )
 PY_SCHEMA_RE = re.compile(r'^SCHEMA\s*=\s*"([^"]+)"\s*$', re.M)
 PY_CONST_RE = re.compile(
-    r'^(KEYED_FILE_UPLOAD_BEFORE|KEYED_MKDIR_BEFORE)\s*=\s*"([^"]+)"\s*$',
+    r'^(KEYED_FILE_UPLOAD_BEFORE|KEYED_MKDIR_BEFORE|KEYED_MOVE_BEFORE|'
+    r'KEYED_REMOVE_BEFORE)\s*=\s*"([^"]+)"\s*$',
     re.M,
 )
 
@@ -52,8 +54,8 @@ def py_consts(path: Path) -> dict[str, str]:
 def evaluate_tree(root: Path) -> list[str]:
     failures: list[str] = []
     pairs = (
-        ("native", NATIVE_EXAMPLE, NATIVE_VERIFIER, "v6"),
-        ("kvm", KVM_EXAMPLE, KVM_VERIFIER, "v4"),
+        ("native", NATIVE_EXAMPLE, NATIVE_VERIFIER, "v7"),
+        ("kvm", KVM_EXAMPLE, KVM_VERIFIER, "v5"),
     )
     for label, example_rel, verifier_rel, tip_tag in pairs:
         example = root / example_rel
@@ -70,12 +72,19 @@ def evaluate_tree(root: Path) -> list[str]:
             "SCHEMA_VERSION",
             "KEYED_FILE_UPLOAD_BEFORE",
             "KEYED_MKDIR_BEFORE",
+            "KEYED_MOVE_BEFORE",
+            "KEYED_REMOVE_BEFORE",
         ):
             if key not in rust:
                 failures.append(f"{example_rel} missing const {key}")
         if "SCHEMA" not in py:
             failures.append(f"{verifier_rel} missing SCHEMA")
-        for key in ("KEYED_FILE_UPLOAD_BEFORE", "KEYED_MKDIR_BEFORE"):
+        for key in (
+            "KEYED_FILE_UPLOAD_BEFORE",
+            "KEYED_MKDIR_BEFORE",
+            "KEYED_MOVE_BEFORE",
+            "KEYED_REMOVE_BEFORE",
+        ):
             if key not in py:
                 failures.append(f"{verifier_rel} missing {key}")
         if "SCHEMA_VERSION" in rust and "SCHEMA" in py:
@@ -84,7 +93,12 @@ def evaluate_tree(root: Path) -> list[str]:
                     f"{label} schema drift: example={rust['SCHEMA_VERSION']!r} "
                     f"verifier={py['SCHEMA']!r}"
                 )
-        for key in ("KEYED_FILE_UPLOAD_BEFORE", "KEYED_MKDIR_BEFORE"):
+        for key in (
+            "KEYED_FILE_UPLOAD_BEFORE",
+            "KEYED_MKDIR_BEFORE",
+            "KEYED_MOVE_BEFORE",
+            "KEYED_REMOVE_BEFORE",
+        ):
             if key in rust and key in py and rust[key] != py[key]:
                 failures.append(
                     f"{label} {key} drift: example={rust[key]!r} verifier={py[key]!r}"
@@ -116,10 +130,10 @@ def evaluate_tree(root: Path) -> list[str]:
             if forbidden in text:
                 failures.append(
                     f"README.md overclaims tip Live as {forbidden!r}; "
-                    "require tip harness v6 with v4-scoped greened digests"
+                    "require tip harness v7 with v4-scoped greened digests"
                 )
         for required in (
-            "tip harness v6",
+            "tip harness v7",
             "greened digests remain v4-scoped",
         ):
             if required not in text:
@@ -135,38 +149,46 @@ def self_test() -> int:
         (root / "scripts").mkdir(parents=True)
 
         (root / NATIVE_EXAMPLE).write_text(
-            'const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v6";\n'
+            'const SCHEMA_VERSION: &str = "a3s.box.linux-native-live-session.v7";\n'
             'const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";\n'
-            'const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";\n',
+            'const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";\n'
+            'const KEYED_MOVE_BEFORE: &str = "a3s.box.live-session.keyed-move.before-owner-kill";\n'
+            'const KEYED_REMOVE_BEFORE: &str = "a3s.box.live-session.keyed-remove.before-owner-kill";\n',
             encoding="utf-8",
         )
         (root / KVM_EXAMPLE).write_text(
-            'const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-live-session.v4";\n'
+            'const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-live-session.v5";\n'
             'const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";\n'
-            'const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";\n',
+            'const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";\n'
+            'const KEYED_MOVE_BEFORE: &str = "a3s.box.live-session.keyed-move.before-owner-kill";\n'
+            'const KEYED_REMOVE_BEFORE: &str = "a3s.box.live-session.keyed-remove.before-owner-kill";\n',
             encoding="utf-8",
         )
         (root / NATIVE_VERIFIER).write_text(
-            'SCHEMA = "a3s.box.linux-native-live-session.v6"\n'
+            'SCHEMA = "a3s.box.linux-native-live-session.v7"\n'
             'KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"\n'
-            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n',
+            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n'
+            'KEYED_MOVE_BEFORE = "a3s.box.live-session.keyed-move.before-owner-kill"\n'
+            'KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"\n',
             encoding="utf-8",
         )
         (root / KVM_VERIFIER).write_text(
-            'SCHEMA = "a3s.box.linux-kvm-live-session.v4"\n'
+            'SCHEMA = "a3s.box.linux-kvm-live-session.v5"\n'
             'KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"\n'
-            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n',
+            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n'
+            'KEYED_MOVE_BEFORE = "a3s.box.live-session.keyed-move.before-owner-kill"\n'
+            'KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"\n',
             encoding="utf-8",
         )
         (root / "ROADMAP.md").write_text(
-            "a3s.box.linux-native-live-session.v6\n"
-            "greening of a v6 digest remains pending\n"
-            "a3s.box.linux-kvm-live-session.v4\n"
-            "greening of a v4 digest remains pending\n",
+            "a3s.box.linux-native-live-session.v7\n"
+            "greening of a v7 digest remains pending\n"
+            "a3s.box.linux-kvm-live-session.v5\n"
+            "greening of a v5 digest remains pending\n",
             encoding="utf-8",
         )
         (root / "README.md").write_text(
-            "tip harness v6; published greened digests remain v4-scoped\n",
+            "tip harness v7; published greened digests remain v4-scoped\n",
             encoding="utf-8",
         )
         if evaluate_tree(root):
@@ -184,15 +206,17 @@ def self_test() -> int:
             print("self-test: expected README Live v4 overclaim to fail", file=sys.stderr)
             return 1
         bad_readme.write_text(
-            "tip harness v6; published greened digests remain v4-scoped\n",
+            "tip harness v7; published greened digests remain v4-scoped\n",
             encoding="utf-8",
         )
 
         bad = root / NATIVE_VERIFIER
         bad.write_text(
-            'SCHEMA = "a3s.box.linux-native-live-session.v5"\n'
+            'SCHEMA = "a3s.box.linux-native-live-session.v6"\n'
             'KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"\n'
-            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n',
+            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n'
+            'KEYED_MOVE_BEFORE = "a3s.box.live-session.keyed-move.before-owner-kill"\n'
+            'KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"\n',
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
