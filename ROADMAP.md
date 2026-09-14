@@ -653,7 +653,9 @@ retain process or filesystem sessions after its owner dies.
   manager inspect retires durable `Starting` when backend observation is
   `NotFound` (lifecycle-lock serialized; no `recover_start` / invented exit),
   with CLI `inspect` / `ps` / `prune` / `system-prune` driving that observe
-  before status projection or reclaim selection (managed Starting only);
+  before status projection or reclaim selection (managed Starting only), and
+  `wait` driving manager inspect for any managed record while refusing to
+  invent exit `0` for transitional durable statuses;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

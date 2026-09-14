@@ -47,9 +47,13 @@ All notable changes to A3S Box will be documented in this file.
   before projecting status or selecting reclaim targets, so operator inventory
   no longer keeps a forever-`starting` row that prune skipped. Only managed
   `Starting` is observed on those paths (not every Running box).
-  `RestartStarting` / `RestartStopping` keep projecting Creating until
-  reconcile resumes them; inspect does **not** call `recover_start`. Does
-  **not** flip B2, invent Live digests, or invent pool `ps` inventory.
+  `a3s-box wait` likewise routes **any** `managed_execution` record through
+  manager inspect (not only OCI-routed ones) and never invents exit `0` for
+  transitional durable statuses (`starting`/`creating`/restart claims, etc.)
+  on the legacy poll path. `RestartStarting` / `RestartStopping` keep
+  projecting Creating until reconcile resumes them; inspect does **not** call
+  `recover_start`. Does **not** flip B2, invent Live digests, or invent pool
+  `ps` inventory.
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
   in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to
