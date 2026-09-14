@@ -23,8 +23,8 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
             // Drive manager observation before projecting JSON so abandoned
-            // managed Starting/Killing claims converge (#385) instead of forever-
-            // transitional inventory.
+            // managed Starting/Killing/Pausing/Resuming claims converge (#385)
+            // instead of forever-transitional inventory.
             let record =
                 super::observe_inventory::refresh_managed_inventory_record(record.clone()).await?;
             println!("{}", inspect_json(&record)?);
