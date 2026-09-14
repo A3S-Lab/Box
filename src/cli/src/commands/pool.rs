@@ -1665,21 +1665,34 @@ async fn execute_run(_args: PoolRunArgs) -> Result<(), Box<dyn std::error::Error
 
 #[cfg(not(windows))]
 async fn execute_stop(args: PoolStopArgs) -> Result<(), Box<dyn std::error::Error>> {
-    match stop_client(&args.socket).await {
-        Ok(()) => {
-            if args.json {
-                println!(r#"{{"stopped":true}}"#);
-            } else {
-                println!("Warm pool daemon stopped.");
-            }
+    let stopped = match stop_client(&args.socket).await {
+        Ok(()) => true,
+        Err(_) => false,
+    };
+
+    // Pool ownership is in-memory. After a SIGKILL'd daemon, orphan shims stay
+    // reparented to init under A3S_HOME and remain invisible to a socket-only
+    // stop. Reap the same home-fenced PPID-1 set as `pool start` (#373) so
+    // "pool compute is gone" is honest when the daemon is already dead.
+    let home = a3s_box_core::dirs_home();
+    let reaped = reap_orphaned_boxes_for_home(&home);
+
+    if args.json {
+        if stopped {
+            println!(r#"{{"stopped":true,"reaped":{reaped}}}"#);
+        } else {
+            println!(r#"{{"stopped":false,"reason":"not_running","reaped":{reaped}}}"#);
         }
-        Err(_) => {
-            if args.json {
-                println!(r#"{{"stopped":false,"reason":"not_running"}}"#);
-            } else {
-                println!("No pool daemon running.");
-            }
-        }
+    } else if stopped {
+        println!("Warm pool daemon stopped.");
+    } else {
+        println!("No pool daemon running.");
+    }
+    if reaped > 0 {
+        eprintln!(
+            "reaped {reaped} orphan pool microVM(s) under {}",
+            home.display()
+        );
     }
     Ok(())
 }
@@ -2474,6 +2487,20 @@ mod tests {
         let result = execute_stop(PoolStopArgs {
             socket: "/tmp/a3s-box-pool-does-not-exist.sock".to_string(),
             json: false,
+        })
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_execute_stop_json_reports_reaped_when_daemon_absent() {
+        // Socket-absent stop must still succeed and advertise the home-fenced
+        // orphan reap count (0 when this process tree has no matching PPID-1
+        // shims). Proves stop no longer short-circuits before crash recovery.
+        let result = execute_stop(PoolStopArgs {
+            socket: "/tmp/a3s-box-pool-does-not-exist-json.sock".to_string(),
+            json: true,
         })
         .await;
         assert!(result.is_ok());

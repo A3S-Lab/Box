@@ -737,8 +737,8 @@ fn path_is_under_home(path: &Path, home: &Path) -> bool {
 /// Discover init-reparented `a3s-box-shim` box ids scoped to `home`, then reap
 /// each via [`reap_orphaned_box`]. Returns the number of distinct ids reaped.
 ///
-/// Used by `pool start` crash recovery (#373). Does not invent reattach and
-/// does not kill shims whose parent is still alive.
+/// Used by `pool start` and `pool stop` crash recovery (#373). Does not invent
+/// reattach and does not kill shims whose parent is still alive.
 #[cfg(target_os = "linux")]
 pub fn reap_orphaned_boxes_for_home(home: &Path) -> usize {
     let ids = discover_orphan_shim_box_ids(home);

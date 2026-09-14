@@ -46,8 +46,11 @@ All notable changes to A3S Box will be documented in this file.
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
   in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to
   `pool stop` / `ps` / `system-prune`. Discovery fences on PPID 1 plus
-  `--config` paths under home so live CLI/CRI shims are not killed. Does
-  **not** invent reattach, flip B2, or widen drain timeouts.
+  `--config` paths under home so live CLI/CRI shims are not killed. `pool
+  stop` now runs the same home-fenced reap after socket stop (or when no
+  daemon is listening), so "pool compute is gone" does not leave invisible
+  MicroVMs when the daemon was already dead. Does **not** invent reattach,
+  invent `ps` inventory, flip B2, or widen drain timeouts.
 
 ### Changed
 

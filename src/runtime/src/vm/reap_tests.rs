@@ -228,3 +228,68 @@ fn cleanup_reaps_a_terminal_recovered_log_worker() {
         "cleanup must not leave its completed child as a zombie"
     );
 }
+
+/// Crash-recovery honesty for #373 / pool stop: a PPID-1 shim whose `--config`
+/// fences under `home` must be discoverable and cleared by
+/// [`reap_orphaned_boxes_for_home`] (the same helper `pool start` and
+/// `pool stop` invoke).
+#[test]
+fn home_fenced_ppid1_shim_orphan_is_reaped() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::Duration;
+
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    let box_dir = home.path().join("boxes").join(box_id);
+    std::fs::create_dir_all(box_dir.join("merged")).unwrap();
+
+    let shim = home.path().join("a3s-box-shim");
+    // Stay as the shebang shell so /proc/cmdline keeps the script path and
+    // `--config` JSON. `exec sleep` would replace argv and hide the shim fence.
+    std::fs::write(&shim, "#!/bin/sh\nsleep 300\n").unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = format!(
+        r#"{{"box_id":"{box_id}","rootfs":{{"path":"{}/boxes/{box_id}/merged"}}}}"#,
+        home.path().display()
+    );
+    // Background the shim in a subshell so it is reparented to init when the
+    // short-lived bash exits (PPID 1 fence).
+    let status = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "({shim} --config '{config}' >/dev/null 2>&1 &) ; sleep 0.4",
+            shim = shim.display(),
+            config = config.replace('\'', r#"'\''"#),
+        ))
+        .status()
+        .expect("spawn orphan shim helper");
+    assert!(status.success(), "orphan shim helper failed: {status}");
+
+    let mut discovered = Vec::new();
+    for _ in 0..40 {
+        discovered = discover_orphan_shim_box_ids(home.path());
+        if discovered.iter().any(|id| id == box_id) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        discovered.iter().any(|id| id == box_id),
+        "PPID-1 shim under home must be discoverable before reap; got {discovered:?}"
+    );
+
+    let reaped = reap_orphaned_boxes_for_home(home.path());
+    assert!(reaped >= 1, "reap must claim at least the spawned orphan");
+    assert!(
+        !discover_orphan_shim_box_ids(home.path())
+            .iter()
+            .any(|id| id == box_id),
+        "reaped orphan must no longer appear under home"
+    );
+    assert!(
+        !box_dir.exists(),
+        "home-fenced orphan box directory must be removed"
+    );
+}
