@@ -50,7 +50,9 @@ All notable changes to A3S Box will be documented in this file.
   `a3s-box wait` likewise routes **any** `managed_execution` record through
   manager inspect (not only OCI-routed ones) and never invents exit `0` for
   transitional durable statuses (`starting`/`creating`/restart claims, etc.)
-  on the legacy poll path. `RestartStarting` / `RestartStopping` keep
+  on the legacy poll path. Inventory observe also covers durable managed
+  `Killing` (NotFound → Stopped, no invented exit) so forever-`killing` rows
+  do not skip prune. `RestartStarting` / `RestartStopping` keep
   projecting Creating until reconcile resumes them; inspect does **not** call
   `recover_start`. Does **not** flip B2, invent Live digests, or invent pool
   `ps` inventory.

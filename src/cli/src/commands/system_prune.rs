@@ -49,7 +49,7 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
     // Phase 1: Remove stopped/dead boxes. Observe managed Starting first so
     // abandoned claims retired by manager inspect (#385) become prunable.
     let mut state =
-        super::observe_inventory::refresh_default_home_after_starting_observation().await?;
+        super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let all_boxes = state.list(true);
 
     let to_remove: Vec<crate::state::BoxRecord> = all_boxes
