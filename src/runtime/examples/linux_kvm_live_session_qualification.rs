@@ -192,8 +192,8 @@ mod qualification {
         list_dir_after_reattach: bool,
         /// Download after Live reopen matches the pre-kill upload payload.
         file_download_after_reattach: bool,
-        /// Aggregate: keyed MakeDir + Move + Remove + keyed upload before kill
-        /// + ListDir and exact download match after reattach on the same
+        /// Aggregate: keyed MakeDir, Move, Remove, and keyed upload before kill,
+        /// plus ListDir and exact download match after reattach on the same
         /// Running generation (no invented stop).
         retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
