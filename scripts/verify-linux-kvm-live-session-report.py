@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v4 reports.
+"""Fail-closed honesty checks for a3s.box.linux-kvm-live-session.v5 reports.
 
-Retained-stream proof, retained-filesystem proof (keyed MakeDir + keyed upload
-IDs, ListDir after reattach), and kvm_microvm_live_claimed are required
-together. B2, fixture continuity, and utility-VM claims must stay false.
+Retained-stream proof, retained-filesystem proof (keyed MakeDir / Move / Remove
++ keyed upload IDs, ListDir after reattach), and kvm_microvm_live_claimed are
+required together. B2, fixture continuity, and utility-VM claims must stay false.
 """
 
 from __future__ import annotations
@@ -13,13 +13,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCHEMA = "a3s.box.linux-kvm-live-session.v4"
+SCHEMA = "a3s.box.linux-kvm-live-session.v5"
 KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"
 KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"
+KEYED_MOVE_BEFORE = "a3s.box.live-session.keyed-move.before-owner-kill"
+KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"
 REQUIRED_TRUE = (
     "retained_stream_handle_proven",
     "kvm_microvm_live_claimed",
     "mkdir_before_kill",
+    "move_before_kill",
+    "remove_before_kill",
     "list_dir_after_reattach",
     "file_upload_before_kill",
     "file_download_after_reattach",
@@ -54,6 +58,14 @@ def evaluate(report: dict) -> list[str]:
         failures.append(
             f"mkdir_request_id={mkdir_id!r} (expected {KEYED_MKDIR_BEFORE!r})"
         )
+    move_id = report.get("move_request_id")
+    if move_id != KEYED_MOVE_BEFORE:
+        failures.append(f"move_request_id={move_id!r} (expected {KEYED_MOVE_BEFORE!r})")
+    remove_id = report.get("remove_request_id")
+    if remove_id != KEYED_REMOVE_BEFORE:
+        failures.append(
+            f"remove_request_id={remove_id!r} (expected {KEYED_REMOVE_BEFORE!r})"
+        )
     for forbidden in FORBIDDEN:
         if report.get(forbidden):
             failures.append(f"{forbidden} must stay false")
@@ -66,6 +78,8 @@ def passing_report() -> dict:
         "status": "passed",
         "file_upload_request_id": KEYED_FILE_UPLOAD_BEFORE,
         "mkdir_request_id": KEYED_MKDIR_BEFORE,
+        "move_request_id": KEYED_MOVE_BEFORE,
+        "remove_request_id": KEYED_REMOVE_BEFORE,
     }
     for required in REQUIRED_TRUE:
         report[required] = True
@@ -81,7 +95,7 @@ def self_test() -> int:
     bad_cases = [
         {
             **passing_report(),
-            "schema_version": "a3s.box.linux-kvm-live-session.v3",
+            "schema_version": "a3s.box.linux-kvm-live-session.v4",
         },
         {
             **passing_report(),
@@ -102,7 +116,23 @@ def self_test() -> int:
         },
         {
             **passing_report(),
+            "move_before_kill": False,
+        },
+        {
+            **passing_report(),
+            "remove_before_kill": False,
+        },
+        {
+            **passing_report(),
             "mkdir_request_id": None,
+        },
+        {
+            **passing_report(),
+            "move_request_id": None,
+        },
+        {
+            **passing_report(),
+            "remove_request_id": None,
         },
         {
             **passing_report(),
@@ -120,11 +150,11 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "report.json"
         path.write_text(json.dumps(passing_report()), encoding="utf-8")
-        if main(["verify", str(path)]) != 0:
+        if main(["verify-linux-kvm-live-session-report.py", str(path)]) != 0:
             print("self-test: passing file was rejected", file=sys.stderr)
             return 1
         missing = Path(tmp) / "missing.json"
-        if main(["verify", str(missing)]) == 0:
+        if main(["verify-linux-kvm-live-session-report.py", str(missing)]) == 0:
             print("self-test: missing file was accepted", file=sys.stderr)
             return 1
     print("kvm live-session report verifier self-test passed")

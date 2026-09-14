@@ -552,6 +552,15 @@ retain process or filesystem sessions after its owner dies.
     and `list_dir_after_reattach`. Does **not** close B2, claim guest
     `filesystem_replay` on Sandbox OCI Live, or MicroVM cutover. Existing-host
     greening of a v6 digest remains pending.
+  - [x] Observation harness `a3s.box.linux-native-live-session.v7` extends v6
+    with keyed Move / Remove before owner SIGKILL
+    (`move_request_id` /
+    `a3s.box.live-session.keyed-move.before-owner-kill`,
+    `remove_request_id` /
+    `a3s.box.live-session.keyed-remove.before-owner-kill`) and ListDir /
+    download of the moved tree after reattach. Fail-closed verifier requires
+    those ids. Does **not** close B2, invent digests, or claim guest
+    `filesystem_replay`. Existing-host greening of a v7 digest remains pending.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -615,6 +624,15 @@ retain process or filesystem sessions after its owner dies.
     reattach. Fail-closed verifier requires the mkdir id and
     `list_dir_after_reattach`. Does **not** close B2 or claim MicroVM cutover.
     Existing-host greening of a v4 digest remains pending.
+  - [x] Observation harness `a3s.box.linux-kvm-live-session.v5` extends v4 with
+    keyed Move / Remove before Host Service SIGKILL
+    (`move_request_id` /
+    `a3s.box.live-session.keyed-move.before-owner-kill`,
+    `remove_request_id` /
+    `a3s.box.live-session.keyed-remove.before-owner-kill`) and ListDir /
+    download of the moved tree after reattach. Fail-closed verifier requires
+    those ids. Does **not** close B2 or invent digests. Existing-host
+    greening of a v5 digest remains pending.
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish

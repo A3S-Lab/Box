@@ -3,21 +3,23 @@
 //! Exercises MicroVM via `box-kvm-qualification-service` with
 //! `A3S_OCI_KVM_SESSION_OWNER=1`, keeps the Box manager across Host Service
 //! SIGKILL, proves retained streaming process-handle continuity, mutating
-//! filesystem continuity via public Box `filesystem` (keyed MakeDir before
-//! kill, ListDir after reattach) plus `transfer_file` (keyed upload before
-//! kill, download after reattach on the same generation), and keyed captured
-//! exec / state / inventory / stats / kill, without inventing an exit.
+//! filesystem continuity via public Box `filesystem` (keyed MakeDir / Move /
+//! Remove before kill, ListDir after reattach) plus `transfer_file` (keyed
+//! upload before kill, download after reattach on the same generation), and
+//! keyed captured exec / state / inventory / stats / kill, without inventing
+//! an exit.
 //!
-//! Schema `a3s.box.linux-kvm-live-session.v4`.
+//! Schema `a3s.box.linux-kvm-live-session.v5`.
 //!
 //! Honest scope (anti-overfit):
 //! - Distinct from stopped-only `linux-kvm-oci-qualification`.
 //! - Distinct from OCI smoke `retained_exec_io_proven` / filesystem smoke.
 //! - `retained_stream_handle_proven` / `kvm_microvm_live_claimed` only when the
 //!   same Box `start_process` handle continues after Host Service reopen.
-//! - `retained_filesystem_proven` only when keyed MakeDir + keyed upload before
-//!   kill are visible after reattach (ListDir + download) on the same Box
-//!   generation (stable `mkdir_request_id` / `file_upload_request_id`, same
+//! - `retained_filesystem_proven` only when keyed MakeDir + Move + Remove +
+//!   keyed upload before kill are visible after reattach (ListDir + download
+//!   of the moved tree) on the same Box generation (stable `mkdir_request_id` /
+//!   `move_request_id` / `remove_request_id` / `file_upload_request_id`, same
 //!   Unavailable retry policy as keyed exec).
 //! - `fixture_stream_continuity_claimed` and `b2_process_session_recovery_closed`
 //!   stay false in harness reports by design (individual reports never
@@ -92,20 +94,25 @@ mod qualification {
     const SERVICE_LOG_ENV: &str = "A3S_BOX_KVM_LIVE_SESSION_SERVICE_LOG";
     const BOX_OWNED_ENV: &str = "A3S_BOX_KVM_OCI_BOX_OWNED";
     const SESSION_OWNER_ENV: &str = "A3S_OCI_KVM_SESSION_OWNER";
-    const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-live-session.v4";
+    const SCHEMA_VERSION: &str = "a3s.box.linux-kvm-live-session.v5";
     const KVM_LIVE_BINDING_SCHEMA: &str = "a3s.oci.kvm-live-session-binding.v1";
     const KVM_LIVE_BINDING_FILE: &str = ".a3s-oci-kvm-live-session-binding.json";
     const KEYED_EXEC_BEFORE: &str = "a3s.box.live-session.keyed-exec.before-owner-kill";
     const KEYED_EXEC_AFTER: &str = "a3s.box.live-session.keyed-exec.after-reopen";
     const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";
     const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";
+    const KEYED_MOVE_BEFORE: &str = "a3s.box.live-session.keyed-move.before-owner-kill";
+    const KEYED_REMOVE_BEFORE: &str = "a3s.box.live-session.keyed-remove.before-owner-kill";
     const KEYED_EXEC_MARKER: &[u8] = b"live-session-keyed-ok\n";
     const STREAM_MARKER: &[u8] = b"live-session-stream-ok\n";
     const STREAM_ECHO_BEFORE: &[u8] = b"before-owner-kill\n";
     const STREAM_ECHO_AFTER: &[u8] = b"after-owner-reopen\n";
     const FS_GUEST_DIR: &str = "/tmp/.a3s-box-kvm-live-fs.d";
     const FS_GUEST_PATH: &str = "/tmp/.a3s-box-kvm-live-fs.d/payload.bin";
-    const FS_PAYLOAD: &[u8] = b"a3s-box-kvm-live-fs\0binary\nv4\n";
+    const FS_GUEST_DIR_KEPT: &str = "/tmp/.a3s-box-kvm-live-fs.kept.d";
+    const FS_GUEST_PATH_KEPT: &str = "/tmp/.a3s-box-kvm-live-fs.kept.d/payload.bin";
+    const FS_GUEST_EPHEMERAL: &str = "/tmp/.a3s-box-kvm-live-fs.ephemeral.d";
+    const FS_PAYLOAD: &[u8] = b"a3s-box-kvm-live-fs\0binary\nv5\n";
 
     type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -173,13 +180,21 @@ mod qualification {
         mkdir_before_kill: bool,
         /// Durable MakeDir identity used before Host Service SIGKILL (harness-stable).
         mkdir_request_id: Option<String>,
+        /// Keyed Move before Host Service SIGKILL via public Box `filesystem`.
+        move_before_kill: bool,
+        /// Durable Move identity used before Host Service SIGKILL (harness-stable).
+        move_request_id: Option<String>,
+        /// Keyed Remove before Host Service SIGKILL via public Box `filesystem`.
+        remove_before_kill: bool,
+        /// Durable Remove identity used before Host Service SIGKILL (harness-stable).
+        remove_request_id: Option<String>,
         /// ListDir after Live reopen sees the pre-kill directory contents.
         list_dir_after_reattach: bool,
         /// Download after Live reopen matches the pre-kill upload payload.
         file_download_after_reattach: bool,
-        /// Set only when keyed MakeDir + keyed upload before kill are visible
-        /// after reattach (ListDir + download) on the same Box generation that
-        /// stayed Ready/Running without exit.
+        /// Aggregate: keyed MakeDir, Move, Remove, and keyed upload before kill,
+        /// plus ListDir and exact download match after reattach on the same
+        /// Running generation (no invented stop).
         retained_filesystem_proven: bool,
         /// Always false: fixture `process_restart` continuity is not this gate.
         fixture_stream_continuity_claimed: bool,
@@ -243,6 +258,10 @@ mod qualification {
                 file_upload_request_id: None,
                 mkdir_before_kill: false,
                 mkdir_request_id: None,
+                move_before_kill: false,
+                move_request_id: None,
+                remove_before_kill: false,
+                remove_request_id: None,
                 list_dir_after_reattach: false,
                 file_download_after_reattach: false,
                 retained_filesystem_proven: false,
@@ -572,6 +591,26 @@ mod qualification {
         report.file_upload_before_kill = true;
         report.file_upload_request_id = Some(KEYED_FILE_UPLOAD_BEFORE.to_string());
 
+        prove_move_before_kill(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_MOVE_BEFORE,
+        )
+        .await?;
+        report.move_before_kill = true;
+        report.move_request_id = Some(KEYED_MOVE_BEFORE.to_string());
+
+        prove_remove_before_kill(
+            &manager,
+            &reservation.execution_id,
+            reservation.generation,
+            KEYED_REMOVE_BEFORE,
+        )
+        .await?;
+        report.remove_before_kill = true;
+        report.remove_request_id = Some(KEYED_REMOVE_BEFORE.to_string());
+
         let host_pid = resolve_host_service_pid(&inputs.service)?;
         let host_service = host_service_identity(host_pid)?;
         report.owner_before_kill = Some(host_service.clone());
@@ -827,10 +866,14 @@ mod qualification {
         .await?;
         report.file_download_after_reattach = true;
         report.retained_filesystem_proven = report.mkdir_before_kill
+            && report.move_before_kill
+            && report.remove_before_kill
             && report.list_dir_after_reattach
             && report.file_upload_before_kill
             && report.file_download_after_reattach
             && report.mkdir_request_id.as_deref() == Some(KEYED_MKDIR_BEFORE)
+            && report.move_request_id.as_deref() == Some(KEYED_MOVE_BEFORE)
+            && report.remove_request_id.as_deref() == Some(KEYED_REMOVE_BEFORE)
             && report.file_upload_request_id.as_deref() == Some(KEYED_FILE_UPLOAD_BEFORE)
             && report.reconciled_ready_after_reopen
             && report.observed_running_after_reopen
@@ -1094,6 +1137,83 @@ mod qualification {
         Ok(())
     }
 
+    async fn prove_move_before_kill(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request_id: &str,
+    ) -> Result<(), AnyError> {
+        let response = filesystem_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FilesystemRequest {
+                op: FilesystemOp::Move,
+                path: FS_GUEST_DIR.to_string(),
+                destination: Some(FS_GUEST_DIR_KEPT.to_string()),
+                depth: 0,
+                user: None,
+                request_id: Some(request_id.to_string()),
+            },
+            &format!("Live retained keyed Move `{request_id}` before Host Service SIGKILL"),
+        )
+        .await?;
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained keyed Move `{request_id}` before Host Service SIGKILL reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        Ok(())
+    }
+
+    async fn prove_remove_before_kill(
+        manager: &LocalExecutionManager,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request_id: &str,
+    ) -> Result<(), AnyError> {
+        filesystem_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FilesystemRequest {
+                op: FilesystemOp::MakeDir,
+                path: FS_GUEST_EPHEMERAL.to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some(format!("{request_id}.mkdir-ephemeral")),
+            },
+            &format!("Live retained ephemeral MakeDir before Remove `{request_id}`"),
+        )
+        .await?;
+        let response = filesystem_until_ready(
+            manager,
+            execution_id,
+            generation,
+            FilesystemRequest {
+                op: FilesystemOp::Remove,
+                path: FS_GUEST_EPHEMERAL.to_string(),
+                destination: None,
+                depth: 0,
+                user: None,
+                request_id: Some(request_id.to_string()),
+            },
+            &format!("Live retained keyed Remove `{request_id}` before Host Service SIGKILL"),
+        )
+        .await?;
+        require(
+            response.success && response.error.is_none(),
+            format!(
+                "Live retained keyed Remove `{request_id}` before Host Service SIGKILL reported failure: {:?}",
+                response.error
+            ),
+        )?;
+        Ok(())
+    }
+
     async fn prove_list_dir_after_reattach(
         manager: &LocalExecutionManager,
         execution_id: &ExecutionId,
@@ -1105,7 +1225,7 @@ mod qualification {
             generation,
             FilesystemRequest {
                 op: FilesystemOp::ListDir,
-                path: FS_GUEST_DIR.to_string(),
+                path: FS_GUEST_DIR_KEPT.to_string(),
                 destination: None,
                 depth: 0,
                 user: None,
@@ -1121,14 +1241,13 @@ mod qualification {
                 response.error
             ),
         )?;
-        let saw_payload = response
-            .entries
-            .iter()
-            .any(|entry| entry.path == FS_GUEST_PATH && entry.kind == FilesystemEntryKind::File);
+        let saw_payload = response.entries.iter().any(|entry| {
+            entry.path == FS_GUEST_PATH_KEPT && entry.kind == FilesystemEntryKind::File
+        });
         require(
             saw_payload,
             format!(
-                "Live retained ListDir after reopen missing uploaded payload at {FS_GUEST_PATH}; entries={:?}",
+                "Live retained ListDir after reopen missing uploaded payload at {FS_GUEST_PATH_KEPT}; entries={:?}",
                 response
                     .entries
                     .iter()
@@ -1189,7 +1308,7 @@ mod qualification {
             generation,
             FileRequest {
                 op: FileOp::Download,
-                guest_path: FS_GUEST_PATH.to_string(),
+                guest_path: FS_GUEST_PATH_KEPT.to_string(),
                 data: None,
                 user: None,
                 max_bytes: Some(FS_PAYLOAD.len() as u64),

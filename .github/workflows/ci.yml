@@ -719,9 +719,10 @@ jobs:
             echo "::error title=Local SDK smoke failure::$diagnostic"
           fi
           exit "$status"
-      # Tip harness schema is v6 (keyed MakeDir + ListDir). Artifact name tracks
-      # tip schema only — does not claim published greened digests or close B2.
-      - name: Qualify Native Linux live-session retained-stream+fs (v6)
+      # Tip harness schema is v7 (keyed MakeDir + Move + Remove + ListDir).
+      # Artifact name tracks tip schema only — does not claim published greened
+      # digests or close B2.
+      - name: Qualify Native Linux live-session retained-stream+fs (v7)
         env:
           LIVE_SESSION_IMAGE: docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
         run: |
@@ -744,7 +745,7 @@ jobs:
           mkdir -p "$staging/lib"
           cp -a "$package_lib"/. "$staging/lib/"
           install -m 755 "$example_bin" "$staging/linux-native-live-session-qualification"
-          report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v6.json"
+          report="$RUNNER_TEMP/a3s-box-linux-native-live-session-v7.json"
           rm -f "$report"
           # Root entry matches the local gate: migrate into the existing probe
           # cgroup, then matched-cred setpriv via run-linux-sandbox-ci (not
@@ -765,12 +766,12 @@ jobs:
               --oci-sha "$A3S_OCI_RUNTIME_REV"
           python3 "$GITHUB_WORKSPACE/scripts/verify-linux-native-live-session-report.py" \
             "$report"
-      - name: Upload Native Linux live-session v6 evidence
+      - name: Upload Native Linux live-session v7 evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: a3s-box-linux-native-live-session-v6-${{ matrix.platform }}
-          path: ${{ runner.temp }}/a3s-box-linux-native-live-session-v6.json
+          name: a3s-box-linux-native-live-session-v7-${{ matrix.platform }}
+          path: ${{ runner.temp }}/a3s-box-linux-native-live-session-v7.json
           if-no-files-found: warn
           retention-days: 14
       - name: Upload native OCI owner-recovery evidence
