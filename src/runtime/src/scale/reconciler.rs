@@ -1,6 +1,10 @@
 //! Desired-state reconciliation against the durable local execution facade.
 
-use std::{collections::BTreeMap, num::NonZeroU16, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU16,
+    sync::Arc,
+};
 
 use a3s_box_core::{
     scale::ScaleEndpoint, CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease,
@@ -294,8 +298,22 @@ impl LocalScaleReconciler {
                 ))
             }
         };
+        let published = endpoints
+            .iter()
+            .map(|endpoint| endpoint.instance_id.as_str())
+            .collect::<BTreeSet<_>>();
+        // Ready executions without a declared guest port stay inventory-ready.
+        // Declared service endpoints count only after the advertised host URL
+        // actually served a request.
+        let ready_replicas = ready
+            .values()
+            .filter(|execution| {
+                execution.guest_port.is_none()
+                    || published.contains(execution.execution_id.as_str())
+            })
+            .count() as u32;
         Ok(ScaleReconcileObservation {
-            ready_replicas: ready.len() as u32,
+            ready_replicas,
             endpoints,
         })
     }
@@ -686,6 +704,8 @@ mod tests {
 
     struct EchoConnector;
 
+    struct RejectingConnector;
+
     #[async_trait]
     impl ExecutionPortConnector for EchoConnector {
         async fn connect_port(
@@ -709,6 +729,21 @@ mod tests {
                 }
             });
             Ok(Box::pin(client))
+        }
+    }
+
+    #[async_trait]
+    impl ExecutionPortConnector for RejectingConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: std::time::Duration,
+        ) -> ExecutionManagerResult<a3s_box_core::ExecutionPortStream> {
+            Err(ExecutionManagerError::Unavailable(
+                "MicroVM port 8080 rejected the connection".to_string(),
+            ))
         }
     }
 
@@ -843,6 +878,30 @@ mod tests {
             .unwrap();
         assert_eq!(report.removed, 1);
         assert!(lifecycle.inventory().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn declared_endpoints_are_not_ready_until_the_advertised_url_works() {
+        let lifecycle = Arc::new(FakeLifecycle::new());
+        let catalog = ScaleServiceCatalog::from_acl_str(
+            ENDPOINT_CATALOG,
+            "gateway-scale",
+            ExecutionIsolation::Sandbox,
+        )
+        .unwrap();
+        let reconciler = LocalScaleReconciler::with_lifecycle_and_endpoint(
+            catalog,
+            lifecycle.clone(),
+            Arc::new(RejectingConnector),
+            ScaleEndpointConfig::loopback(),
+        );
+        let up = reconciler.reconcile("api", 2).await.unwrap();
+        assert_eq!(lifecycle.inventory().await.unwrap().len(), 2);
+        assert!(up.endpoints.is_empty());
+        assert_eq!(up.ready_replicas, 0);
+        let observed = reconciler.observation("api", 2).await.unwrap();
+        assert_eq!(observed.ready_replicas, 0);
+        assert!(observed.endpoints.is_empty());
     }
 
     #[tokio::test]

@@ -9,10 +9,17 @@ All notable changes to A3S Box will be documented in this file.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
-  `try_listen` refuses unmapped guest TCP/UDP ports instead of falling back to
-  the guest bind address. Explicit `-p` publish and bridge/passt-owned maps are
-  unchanged. Does **not** flip B2, invent Live digests, or change `--network
-  none` semantics.
+  `try_listen` refuses **host bind** for unmapped guest TCP/UDP ports. Guest
+  `listen()` still succeeds: the VMM returns `-EPERM` so krun-guest keeps the
+  native INET socket (`-EADDRNOTAVAIL` would fail listen instead of falling
+  back). Explicit `-p` publish and bridge/passt-owned maps are unchanged. Does
+  **not** flip B2, invent Live digests, or change `--network none` semantics.
+- Scale advertised URLs are not counted in `ready_replicas` until a real
+  request through the live host listener succeeds (#370). Unpublished guest
+  listens stay in-guest via the TSI `-EPERM` native-listen fallback
+  (A3S-Lab/libkrun#12) rather than restoring scale `port_map`. Guest-init
+  port-forward tries `127.0.0.1` then `::1`. Does **not** flip B2, invent
+  Live digests, or treat #371 as the data-plane fix.
 
 - Abandoned managed `Creating` / `Starting` claims (client death mid-`run`)
   can be cleaned with `a3s-box rm --force`, `kill`, and `stop`. CLI plans now

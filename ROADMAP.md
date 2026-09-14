@@ -651,7 +651,10 @@ retain process or filesystem sessions after its owner dies.
   managed `Creating`/`Starting` claims are force-removable via CLI
   `rm --force` / `kill` / `stop` matching manager kill edges (#372);
   default TSI unpublished guest listeners are allowlist-gated so they do not
-  bind host `0.0.0.0` without `-p` (#371).
+  bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
+  succeeds in-guest via TSI `-EPERM` so scale host relays can reach the
+  workload, and `ready_replicas` counts a declared endpoint only after the
+  advertised URL serves a request (#370).
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.

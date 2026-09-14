@@ -396,6 +396,16 @@ mod tests {
         }
     }
 
+    fn facade_isolation() -> ExecutionIsolation {
+        // RecordingBackend never launches a guest; isolation only has to pass
+        // host config validation so the HTTP facade can exercise reconcile.
+        if cfg!(windows) {
+            ExecutionIsolation::Microvm
+        } else {
+            ExecutionIsolation::Sandbox
+        }
+    }
+
     fn reconciled_state(
         authority_path: &std::path::Path,
         box_state_path: &std::path::Path,
@@ -407,7 +417,7 @@ mod tests {
         let catalog = ScaleServiceCatalog::from_acl_str(
             r#"service "api" { image = "api:v1" }"#,
             "gateway-scale",
-            ExecutionIsolation::Sandbox,
+            facade_isolation(),
         )
         .unwrap();
         ScaleApiState::with_reconciler(authority, LocalScaleReconciler::new(manager, catalog))
@@ -441,17 +451,15 @@ mod tests {
         let first_server = tokio::spawn(serve_scale_api(address, first_state));
         wait_for_server(&client, &url).await;
         let up = request("scale-v1-facade-up", "0");
-        let accepted: ScaleOperationResponse = client
-            .post(&url)
-            .json(&up)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let accepted_response = client.post(&url).json(&up).send().await.unwrap();
+        let accepted_status = accepted_response.status();
+        let accepted_body = accepted_response.text().await.unwrap();
+        assert_eq!(
+            accepted_status,
+            reqwest::StatusCode::OK,
+            "scale up failed: {accepted_body}"
+        );
+        let accepted: ScaleOperationResponse = serde_json::from_str(&accepted_body).unwrap();
         assert_eq!(accepted.actual_replicas, 2);
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
         let observation: ScaleObservation = client
