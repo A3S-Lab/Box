@@ -654,7 +654,8 @@ retain process or filesystem sessions after its owner dies.
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
   succeeds in-guest via TSI `-EPERM` so scale host relays can reach the
   workload, and `ready_replicas` counts a declared endpoint only after the
-  advertised URL serves a request (#370); Runtime Service (R17) advertised
+  advertised URL serves a request and withdraws the lease when a later
+  reconcile probe fails (#370); Runtime Service (R17) advertised
   host endpoints are likewise published only after a live listener probe
   proves the guest relay opened, and a failed probe during `apply` retires
   the generation instead of leaving an orphan Running Service.
