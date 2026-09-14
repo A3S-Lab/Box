@@ -656,7 +656,8 @@ retain process or filesystem sessions after its owner dies.
   workload, and `ready_replicas` counts a declared endpoint only after the
   advertised URL serves a request (#370); Runtime Service (R17) advertised
   host endpoints are likewise published only after a live listener probe
-  proves the guest relay opened.
+  proves the guest relay opened, and a failed probe during `apply` retires
+  the generation instead of leaving an orphan Running Service.
 
 Exit gate: the existing Box execution, health, logs, resources, recovery, and
 SDK suites pass through `OciLocalExecutionBackend` on every advertised driver.
