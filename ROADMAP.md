@@ -704,6 +704,8 @@ retain process or filesystem sessions after its owner dies.
   inventing Ready/Running from layout path presence alone (named-pipe
   heartbeat + `guest-control.ready`); Windows pool `wait_for_exec_available`
   fails closed instead of unconditional `Ok(())`;
+  `attach_running_process` refuses inventing Ready from shim PID / layout
+  path alone (authenticated exec heartbeat, else `Created`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
