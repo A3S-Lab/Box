@@ -147,10 +147,21 @@ impl VmManager {
                 }
                 return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
             }
-            #[cfg(not(unix))]
-            if self.try_wait_exit().await?.is_some() {
-                tracing::debug!("VM exited before exec server became ready");
-                return Ok(());
+            #[cfg(windows)]
+            if let Some(exit_code) = self.try_wait_exit().await? {
+                // try_wait_exit already ran collect_windows_guest_result. Treat
+                // authenticated completion as boot-terminal — never invent
+                // exec-ready success from a dead shim (#407 parity).
+                tracing::debug!(
+                    exit_code,
+                    "WHPX guest completed before exec server became ready"
+                );
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "WHPX guest completed with exit code {exit_code} before the exec server became ready"
+                    ),
+                    hint: None,
+                });
             }
             if let Some(ref handler) = *self.handler.read().await {
                 if handler.has_exited() {
@@ -166,10 +177,14 @@ impl VmManager {
                         }
                         return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
                     }
-                    #[cfg(not(unix))]
+                    #[cfg(windows)]
                     {
-                        tracing::debug!("VM exited before exec server became ready");
-                        return Ok(());
+                        // Bare has_exited without a reaped/collected result must
+                        // not invent Ok(()) — durable guest status is checked
+                        // below; otherwise fail closed like Unix.
+                        if super::windows_guest_persisted_exit_code(&box_dir).is_none() {
+                            return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
+                        }
                     }
                 }
             }
@@ -269,7 +284,6 @@ impl VmManager {
     }
 }
 
-#[cfg(unix)]
 fn vm_exited_before_exec_ready(box_dir: &std::path::Path, exit_code: Option<i32>) -> BoxError {
     let message = match exit_code {
         Some(exit_code) => format!(

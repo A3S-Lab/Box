@@ -688,7 +688,10 @@ retain process or filesystem sessions after its owner dies.
   boot-failure cleanup likewise refuses provider/stop `0` when the guest never
   completed and durable status is absent; Windows operator destroy/stop uses
   `collect_windows_guest_result` instead of raw provider exit so clean `0`
-  without durable status stays Absent;
+  without durable status stays Absent; Windows `wait_for_exec_ready` refuses
+  inventing exec-ready success on bare provider/`has_exited` without durable
+  guest status (Unix fail-closed parity; authenticated WHPX completion still
+  surfaces as `BoxBootError`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

@@ -245,6 +245,62 @@ async fn test_windows_exit_file_waits_for_shim_log_relay() {
 
 #[cfg(target_os = "windows")]
 #[tokio::test]
+async fn test_wait_for_exec_ready_rejects_provider_exit_without_guest_status() {
+    // Provider/shim exit alone must not invent exec-ready success — Unix
+    // already fails closed; Windows historically returned Ok(()) on has_exited.
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-windows-provider-exit-before-ready".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(tmp.path().join("boxes").join(&box_id).join("rootfs")).unwrap();
+    *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: true }));
+
+    let error = vm
+        .wait_for_exec_ready(&tmp.path().join("missing-exec.sock"))
+        .await
+        .expect_err("provider exit without durable guest status must not invent ready")
+        .to_string();
+
+    assert!(
+        error.contains("before the guest exec server became ready")
+            || error.contains("before the exec server became ready"),
+        "{error}"
+    );
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "must not invent shim_exit_code from bare provider exit"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn test_wait_for_exec_ready_rejects_collected_provider_exit_without_guest_file() {
+    // Nonzero provider reap authenticates collect_windows_guest_result without a
+    // guest exit file — still must not invent Ok(()) for exec readiness.
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-windows-collected-provider-before-ready".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(tmp.path().join("boxes").join(&box_id).join("rootfs")).unwrap();
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 1 }));
+
+    let error = vm
+        .wait_for_exec_ready(&tmp.path().join("missing-exec.sock"))
+        .await
+        .expect_err("collected provider exit must classify as boot failure, not ready")
+        .to_string();
+
+    assert!(
+        error.contains("exit code 1") || error.contains("before"),
+        "{error}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
 async fn test_wait_for_exec_ready_classifies_persisted_windows_exit() {
     let tmp = tempfile::tempdir().unwrap();
     let box_id = "box-windows-completed-before-ready".to_string();

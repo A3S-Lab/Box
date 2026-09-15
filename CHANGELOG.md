@@ -131,6 +131,11 @@ All notable changes to A3S Box will be documented in this file.
   goes through `collect_windows_guest_result` (false-success refusal) with
   nonzero provider crash evidence kept. Does **not** flip B2 or invent Live
   digests.
+- Windows `wait_for_exec_ready` no longer invents exec-ready success when the
+  shim has exited without durable guest status (or after a collected
+  provider-only exit). Mirrors Unix fail-closed classification and the
+  persisted-exit `BoxBootError` path so boot cannot proceed to Ready without
+  an exec channel. Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
