@@ -72,6 +72,14 @@ All notable changes to A3S Box will be documented in this file.
   does **not** NotFound-retire or call `recover_start`. Does **not** flip B2,
   invent Live digests, invent pool `ps` inventory, or widen prune beyond
   `stopped|dead|created`.
+- Managed `a3s-box wait` no longer prints invented exit `0` when manager
+  inspect reports `Stopped`/`Failed` but durable `exit_code` is still absent
+  (abandoned Starting/Killing retire paths). It reuses the same
+  `wait_poll_action` gate as the legacy poll path and keeps waiting until an
+  authoritative code is recorded (or `--timeout`). Archive-backed wait after
+  remove / NotFound likewise refuses `unwrap_or(0)` when the archive has no
+  exit. Does **not** invent exits in the manager, flip B2, or widen timeouts.
+
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
   in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to

@@ -66,11 +66,21 @@ async fn wait_one(
         let record = match resolve::resolve(&state, query) {
             Ok(record) => record,
             Err(error @ resolve::ResolveError::NotFound(_)) => {
-                if let Some(exit_code) = archived_wait_exit_code(query)? {
-                    println!("{exit_code}");
-                    return Ok(());
+                match archived_wait_exit_code(query)? {
+                    Some(exit_code) => {
+                        println!("{exit_code}");
+                        return Ok(());
+                    }
+                    None => {
+                        if crate::log_archive::resolve_archive(query)?.is_some() {
+                            return Err(format!(
+                                "box {query} was removed without a recorded exit code"
+                            )
+                            .into());
+                        }
+                        return Err(error.into());
+                    }
                 }
-                return Err(error.into());
             }
             Err(error) => return Err(error.into()),
         };
@@ -95,10 +105,20 @@ async fn wait_one(
                         format!("box {} lost managed generation while waiting", record.id)
                     })?;
                 let _ = manager.remove(&execution_id, generation).await?;
-                // Remove forgets the row; prefer archived exit when present.
-                let exit_code = archived_wait_exit_code(query)?.unwrap_or(0);
-                println!("{exit_code}");
-                return Ok(());
+                // Remove forgets the row; only finish when archive recorded an
+                // exit — never invent success (0) for an unknown code.
+                match archived_wait_exit_code(query)? {
+                    Some(exit_code) => {
+                        println!("{exit_code}");
+                        return Ok(());
+                    }
+                    None => {
+                        return Err(format!(
+                            "box {query} was removed without a recorded exit code"
+                        )
+                        .into());
+                    }
+                }
             }
             // Abandoned RestartStopping/RestartStarting: inspect keeps Creating
             // forever — resume via reconcile(create operation), then re-poll.
@@ -120,12 +140,17 @@ async fn wait_one(
                 .await?;
             match status.state {
                 ExecutionState::Stopped | ExecutionState::Failed => {
-                    // inspect persisted the exact terminal result (and may retire
-                    // abandoned Starting via #385/#386); reload before printing.
+                    // inspect persisted the terminal result (and may retire
+                    // abandoned Starting via #385/#386 without inventing exit).
+                    // Reuse the legacy poll gate so missing exit keeps waiting.
                     let refreshed = StateFile::load_default()?;
                     let refreshed = resolve::resolve(&refreshed, query)?;
-                    println!("{}", wait_exit_code(refreshed));
-                    return Ok(());
+                    if let WaitPollAction::Finish(exit_code) =
+                        managed_terminal_wait_action(refreshed)
+                    {
+                        println!("{exit_code}");
+                        return Ok(());
+                    }
                 }
                 ExecutionState::Created | ExecutionState::Creating => {}
                 ExecutionState::Running | ExecutionState::Paused => {}
@@ -156,7 +181,7 @@ fn uses_managed_execution(record: &BoxRecord) -> bool {
 }
 
 fn archived_wait_exit_code(query: &str) -> Result<Option<i32>, String> {
-    Ok(crate::log_archive::resolve_archive(query)?.map(|archive| archive.exit_code.unwrap_or(0)))
+    Ok(crate::log_archive::resolve_archive(query)?.and_then(|archive| archive.exit_code))
 }
 
 fn wait_heartbeat_interval(args: &WaitArgs) -> Option<std::time::Duration> {
@@ -247,8 +272,9 @@ fn wait_poll_action(record: &BoxRecord) -> WaitPollAction {
     }
 }
 
-fn wait_exit_code(record: &BoxRecord) -> i32 {
-    record.exit_code.unwrap_or(0)
+/// Managed inspect Stopped/Failed finish decision — same gate as legacy poll.
+fn managed_terminal_wait_action(record: &BoxRecord) -> WaitPollAction {
+    wait_poll_action(record)
 }
 
 #[cfg(test)]
@@ -256,16 +282,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_wait_exit_code_defaults_to_success() {
-        let record = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
-        assert_eq!(wait_exit_code(&record), 0);
-    }
+    fn test_managed_terminal_wait_does_not_invent_exit_zero() {
+        let stopped = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
+        assert_eq!(
+            managed_terminal_wait_action(&stopped),
+            WaitPollAction::Sleep,
+            "managed wait must not Finish(0) when exit_code is absent after inspect retire"
+        );
 
-    #[test]
-    fn test_wait_exit_code_uses_recorded_code() {
-        let mut record = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
-        record.exit_code = Some(42);
-        assert_eq!(wait_exit_code(&record), 42);
+        let failed = crate::test_helpers::fixtures::make_record("id", "box", "failed", None);
+        assert_eq!(managed_terminal_wait_action(&failed), WaitPollAction::Sleep);
+
+        let mut with_exit =
+            crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
+        with_exit.exit_code = Some(137);
+        assert_eq!(
+            managed_terminal_wait_action(&with_exit),
+            WaitPollAction::Finish(137)
+        );
     }
 
     #[test]
