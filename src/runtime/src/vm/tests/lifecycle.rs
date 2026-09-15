@@ -366,6 +366,34 @@ async fn test_cleanup_boot_failure_refuses_invented_provider_zero_without_durabl
 }
 
 #[tokio::test]
+async fn test_cleanup_boot_failure_refuses_live_stop_provider_zero_without_durable_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-live-stop-provider-zero-no-durable".to_string();
+    let config = BoxConfig {
+        persistent: true,
+        ..BoxConfig::default()
+    };
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+    *vm.handler.write().await = Some(Box::new(LiveBootStoppedProviderZeroHandler {
+        stopped: false,
+    }));
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+
+    vm.cleanup_boot_failure().await;
+
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "live boot stop must not invent guest success from clean provider exit 0"
+    );
+    assert!(!vm.preserve_rootfs_on_boot_failure);
+}
+
+#[tokio::test]
 async fn test_cleanup_boot_failure_preserves_persistent_rootfs() {
     let tmp = tempfile::tempdir().unwrap();
     let box_id = "box-persistent-boot-failure".to_string();

@@ -684,7 +684,9 @@ retain process or filesystem sessions after its owner dies.
   status is absent and no legacy rootfs marker exists (PendingOrInvalid
   parity); boot-failure delayed terminal poll
   (`wait_for_delayed_terminal_exit`) uses the same refusal so cleanup cannot
-  re-invent success after resolve filtered provider `0`;
+  re-invent success after resolve filtered provider `0`; Windows live
+  boot-failure cleanup likewise refuses provider/stop `0` when the guest never
+  completed and durable status is absent;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
