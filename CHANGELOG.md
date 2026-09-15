@@ -50,7 +50,7 @@ All notable changes to A3S Box will be documented in this file.
   or poll inventory (`info` box counts, `df` reclaim sizing, `events` initial
   + each poll,   `compose wait` healthy/completed loops, `compose ps` /
   `compose logs` project box selection, `stats` target selection each poll,
-  and per-box `top` / `port` via record refresh) so those paths do
+  per-box `top` / `port` / `logs` / `attach` via record refresh) so those paths do
   not report stale forever-transitional rows while `ps` already cleaned them.
   Only managed transitional claims in scope are observed on those paths
   (`Starting` / `Killing` / `Pausing` / `Resuming` / `Snapshotting` /

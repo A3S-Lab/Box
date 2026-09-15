@@ -658,8 +658,8 @@ retain process or filesystem sessions after its owner dies.
   Snapshotting/UpdatingResources NotFound → Failed without invented exit or
   published snapshot), the same home-scoped refresh on `info` / `df` /
   `events` / `compose wait` / `compose ps` / `compose logs` / `stats` /
-  `top` / `port` so read-only inventory projections stay present-tense with
-  `ps`,
+  `top` / `port` / `logs` / `attach` so read-only inventory projections stay
+  present-tense with `ps`,
   and resume of durable managed `Removing` via remove-retry (`finish_remove`)
   on those surfaces and `wait` (not inspect NotFound retirement; prune filter
   stays `stopped|dead|created`), resume of durable managed

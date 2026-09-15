@@ -53,7 +53,13 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
-            let record = record.clone();
+            let record =
+                match super::observe_inventory::refresh_managed_inventory_record(record.clone())
+                    .await?
+                {
+                    Some(record) => record,
+                    None => return Err(format!("No such container: {}", args.r#box).into()),
+                };
             let box_id = record.id.clone();
 
             // If logging is disabled, tell the user
@@ -290,7 +296,8 @@ async fn should_exit_follow_at_eof(
     let box_running = if let Some(target) = managed_target {
         managed_log_target_is_live(target).await
     } else {
-        StateFile::load_default()
+        super::observe_inventory::refresh_default_home_after_inventory_observation()
+            .await
             .ok()
             .and_then(|state| {
                 state
@@ -377,7 +384,8 @@ async fn wait_for_log_source(
     managed_target: Option<&ManagedLogTarget>,
 ) -> Result<Option<LogSource>, Box<dyn std::error::Error>> {
     loop {
-        let state = StateFile::load_default()?;
+        let state =
+            super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
         let Some(record) = state.find_by_id(box_id) else {
             return Ok(None);
         };
