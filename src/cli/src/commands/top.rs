@@ -47,12 +47,11 @@ struct TopProcess {
 pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
-    let record = match super::observe_inventory::refresh_managed_inventory_record(record.clone())
-        .await?
-    {
-        Some(record) => record,
-        None => return Err(format!("No such container: {}", args.r#box).into()),
-    };
+    let record =
+        match super::observe_inventory::refresh_managed_inventory_record(record.clone()).await? {
+            Some(record) => record,
+            None => return Err(format!("No such container: {}", args.r#box).into()),
+        };
 
     let cmd = build_ps_command(args.format, &args.ps_args);
 
