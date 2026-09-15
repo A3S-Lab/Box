@@ -93,14 +93,18 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
-    let oci_session = uses_oci_session(record);
+    let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
+        Some(record) => record,
+        None => return Err(format!("No such container: {}", args.r#box).into()),
+    };
+    let oci_session = uses_oci_session(&record);
     if oci_session {
         if record.status != "running" {
             return Err(format!("Box {} is not running", record.name).into());
         }
     } else {
-        crate::socket_paths::require_running(record, "exec")
+        crate::socket_paths::require_running(&record, "exec")
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     }
 
@@ -118,9 +122,9 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         #[cfg(not(windows))]
         return if oci_session {
-            execute_managed_pty(args, record, user).await
+            execute_managed_pty(args, &record, user).await
         } else {
-            execute_pty(args, record, user).await
+            execute_pty(args, &record, user).await
         };
     }
 
@@ -155,7 +159,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         streaming: false,
     };
 
-    let output = match execute_captured(record, request).await {
+    let output = match execute_captured(&record, request).await {
         Ok(output) => output,
         Err(error) => return Err(annotate_unavailable_with_request_id(error, &request_id)),
     };

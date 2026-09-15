@@ -670,7 +670,8 @@ retain process or filesystem sessions after its owner dies.
   terminal durable statuses whose `exit_code` is still absent after inspect
   retire (same `wait_poll_action` gate as legacy; archive wait also refuses
   inventing `0`); health workers fail closed when durable state cannot be
-  loaded;
+  loaded; interaction surfaces `exec` / `shell` / `cp` refresh one managed
+  claim before require-running (inspect/top/port/attach parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

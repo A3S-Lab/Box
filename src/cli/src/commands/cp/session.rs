@@ -131,8 +131,13 @@ pub(super) async fn connect_copy_session(
     box_name: &str,
 ) -> Result<CopySession, Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, box_name)?;
-    match resolve_copy_route(record)? {
+    let record = resolve::resolve(&state, box_name)?.clone();
+    let record =
+        match super::super::observe_inventory::refresh_managed_inventory_record(record).await? {
+            Some(record) => record,
+            None => return Err(format!("No such container: {box_name}").into()),
+        };
+    match resolve_copy_route(&record)? {
         CopyRoute::Managed {
             execution_id,
             generation,

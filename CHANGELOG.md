@@ -85,6 +85,11 @@ All notable changes to A3S Box will be documented in this file.
   workers fail closed when durable state cannot be loaded (`health_worker_is_current`
   returns false instead of treating unknown as still current). Does **not**
   flip B2, invent exits, or observe every Running box.
+- Interaction surfaces `exec` / `shell` / `cp` refresh one managed inventory
+  claim (observe / remove-retry / restart-reconcile) before require-running /
+  route selection — inspect / `top` / `port` / `attach` parity — so abandoned
+  transitional claims are not treated as live sessions. Does **not** flip B2
+  or invent exits.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
