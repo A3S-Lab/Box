@@ -535,6 +535,106 @@ async fn test_wait_for_vm_running_cold_grace_stays_sub_quarter_second() {
     );
 }
 
+#[tokio::test]
+async fn test_try_wait_exit_refuses_cached_shim_zero_without_durable_guest_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-cached-shim-zero-no-durable".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+    std::fs::create_dir_all(box_dir.join("upper")).unwrap();
+    // Cached provider/shim zero without a durable guest exit must not invent
+    // success for pool deferred-main / start-during-startup consumers (#409
+    // left this bypass open at the VmManager cache).
+    vm.shim_exit_code = Some(0);
+
+    assert_eq!(
+        vm.try_wait_exit().await.unwrap(),
+        None,
+        "cached shim zero without durable guest exit must not invent success"
+    );
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "exit_code() must not project inventable cached shim zero"
+    );
+    assert!(
+        !vm.has_exited().await,
+        "has_exited must not treat inventable cached shim zero as provider completion"
+    );
+}
+
+#[tokio::test]
+async fn test_try_wait_exit_accepts_cached_shim_zero_with_durable_guest_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-cached-shim-zero-with-durable".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    #[cfg(target_os = "windows")]
+    {
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "ok\n").unwrap();
+        std::fs::write(
+            rootfs.join(WINDOWS_GUEST_STDERR),
+            concat!(
+                "init.krun: mount_filesystems ok\n",
+                "init.krun: execvp(/bin/app) starting\n",
+            ),
+        )
+        .unwrap();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let exit_path = box_dir.join("upper").join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(&exit_path, "0\n").unwrap();
+    }
+    vm.shim_exit_code = Some(0);
+
+    assert_eq!(vm.try_wait_exit().await.unwrap(), Some(0));
+    assert_eq!(vm.exit_code(), Some(0));
+    assert!(vm.has_exited().await);
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn test_cleanup_boot_failure_refuses_provider_zero_when_guest_collect_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-boot-cleanup-collect-fail-no-invent".to_string();
+    let mut vm = VmManager::with_box_id(
+        BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        },
+        EventEmitter::new(16),
+        box_id.clone(),
+    );
+    vm.home_dir = tmp.path().to_path_buf();
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 0 }));
+
+    // Empty rootfs: collect_windows_guest_result fails (no guest exit / console
+    // evidence). Completed-before-cleanup Err fallback must not invent 0.
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+    std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+
+    vm.cleanup_boot_failure().await;
+
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "boot cleanup must not invent guest success when Windows guest collect fails"
+    );
+}
+
 #[cfg(not(target_os = "windows"))]
 #[tokio::test]
 async fn test_try_wait_exit_reads_guest_persisted_exit_code() {

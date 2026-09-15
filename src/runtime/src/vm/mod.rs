@@ -587,8 +587,11 @@ impl VmManager {
                                     error = %error,
                                     "Failed to collect the completed Windows guest during boot cleanup"
                                 );
-                                self.shim_exit_code =
-                                    guest_exit_before_cleanup.or(provider_exit_code);
+                                // Prefer durable guest exit; keep nonzero provider
+                                // crash evidence only — never invent clean zero
+                                // when collect fails (destroy / try_wait_exit parity).
+                                self.shim_exit_code = guest_exit_before_cleanup
+                                    .or_else(|| provider_exit_code.filter(|code| *code != 0));
                             }
                         }
                     } else {

@@ -694,6 +694,10 @@ retain process or filesystem sessions after its owner dies.
   surfaces as `BoxBootError`); managed terminal observation
   (`finish_registered_terminal`) refuses inventing `Stopped` from cached
   shim/provider `0` without durable guest status (Unavailable + retain runtime);
+  `VmManager::{try_wait_exit,exit_code,has_exited}` authenticate cached
+  shim/provider `0` at source (pool deferred-main / start-during-startup
+  cannot bypass terminal observation); Windows `cleanup_boot_failure`
+  collect-Err fallback refuses inventing clean provider `0`;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
