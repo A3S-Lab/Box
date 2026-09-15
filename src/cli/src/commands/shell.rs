@@ -49,9 +49,13 @@ pub async fn execute(args: ShellArgs) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
+    let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
+        Some(record) => record,
+        None => return Err(format!("No such container: {}", args.r#box).into()),
+    };
     let pty_socket_path = crate::socket_paths::require_runtime_socket(
-        record,
+        &record,
         crate::socket_paths::RuntimeSocket::Pty,
     )
     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
