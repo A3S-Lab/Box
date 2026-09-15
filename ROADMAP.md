@@ -700,7 +700,10 @@ retain process or filesystem sessions after its owner dies.
   collect-Err fallback refuses inventing clean provider `0`; Unix
   `wait_for_exec_ready` refuses inventing Ready/`Ok(())` when durable guest
   exit is already persisted before the exec heartbeat (Windows `#407`/`#408`
-  fail-closed parity);
+  fail-closed parity); Windows managed observe/`promote_if_ready` refuses
+  inventing Ready/Running from layout path presence alone (named-pipe
+  heartbeat + `guest-control.ready`); Windows pool `wait_for_exec_available`
+  fails closed instead of unconditional `Ok(())`;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

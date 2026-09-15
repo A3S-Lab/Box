@@ -153,6 +153,11 @@ All notable changes to A3S Box will be documented in this file.
   completion) before the exec heartbeat — fail-closed `BoxBootError` matching
   Windows `#407`/`#408`. Boot cleanup still collects the authenticated exit.
   Does **not** flip B2 or invent Live digests.
+- Windows managed observe/`promote_if_ready` no longer invents Ready/Running
+  from layout `exec.sock` path presence alone (`exec_endpoint_ready` requires
+  `guest-control.ready` + named-pipe heartbeat). Pool `wait_for_exec_available`
+  likewise fails closed instead of unconditional `Ok(())`. Does **not** flip
+  B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

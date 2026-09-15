@@ -389,6 +389,38 @@ async fn test_wait_for_exec_ready_rejects_provider_exit_without_guest_status() {
     assert!(vm.exec_client.is_none());
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn test_wait_for_exec_available_fails_closed_without_heartbeat() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-pool-no-exec".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    let layout = tmp
+        .path()
+        .join("boxes")
+        .join(&box_id)
+        .join("sockets")
+        .join("exec.sock");
+    std::fs::create_dir_all(layout.parent().unwrap()).unwrap();
+    vm.exec_socket_path = Some(layout);
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        vm.wait_for_exec_available(std::time::Duration::from_millis(400)),
+    )
+    .await
+    .unwrap()
+    .expect_err("layout path alone must not invent pool exec availability")
+    .to_string();
+
+    assert!(
+        error.contains("did not become ready") || error.contains("heartbeat"),
+        "{error}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_wait_for_exec_ready_fails_closed_when_guest_exit_persisted_before_heartbeat() {
