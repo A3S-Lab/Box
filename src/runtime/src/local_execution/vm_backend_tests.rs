@@ -356,9 +356,71 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     std::fs::write(&sentinel, b"retained").unwrap();
     let mut replacement = backend.new_manager(&record).unwrap();
+    // Cached shim zero without durable guest status must not invent Stopped(0).
     replacement.shim_exit_code = Some(0);
     *replacement.state.write().await = crate::BoxState::Ready;
     let manager = Arc::new(Mutex::new(replacement));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let error = backend
+        .inspect_registered(&record, Arc::clone(&manager))
+        .await
+        .expect_err("cached shim zero without durable guest exit must not invent Stopped");
+
+    assert!(
+        matches!(error, ExecutionManagerError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
+    assert!(
+        backend.managers.contains_key(&record.id),
+        "unauthenticated exit must retain the runtime for a later durable status"
+    );
+}
+
+#[tokio::test]
+async fn terminal_observation_refuses_cached_shim_zero_without_durable_guest_exit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let sentinel = record.box_dir.join("rootfs/no-invent-state.txt");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"retained").unwrap();
+    let mut manager = backend.new_manager(&record).unwrap();
+    manager.shim_exit_code = Some(0);
+    *manager.state.write().await = crate::BoxState::Ready;
+    let manager = Arc::new(Mutex::new(manager));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let error = backend
+        .inspect_registered(&record, Arc::clone(&manager))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ExecutionManagerError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert!(backend.managers.contains_key(&record.id));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
+}
+
+#[tokio::test]
+async fn terminal_observation_accepts_cached_shim_zero_with_durable_guest_exit() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let rootfs = record.box_dir.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
+    let mut manager = backend.new_manager(&record).unwrap();
+    manager.shim_exit_code = Some(0);
+    *manager.state.write().await = crate::BoxState::Ready;
+    let manager = Arc::new(Mutex::new(manager));
     backend
         .managers
         .insert(record.id.clone(), Arc::clone(&manager));
@@ -367,7 +429,6 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
 
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(observation.exit_code, Some(0));
-    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
     assert!(backend.managers.is_empty());
 }
 

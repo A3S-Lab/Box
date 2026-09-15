@@ -691,7 +691,9 @@ retain process or filesystem sessions after its owner dies.
   without durable status stays Absent; Windows `wait_for_exec_ready` refuses
   inventing exec-ready success on bare provider/`has_exited` without durable
   guest status (Unix fail-closed parity; authenticated WHPX completion still
-  surfaces as `BoxBootError`);
+  surfaces as `BoxBootError`); managed terminal observation
+  (`finish_registered_terminal`) refuses inventing `Stopped` from cached
+  shim/provider `0` without durable guest status (Unavailable + retain runtime);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

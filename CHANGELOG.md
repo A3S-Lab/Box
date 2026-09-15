@@ -136,6 +136,12 @@ All notable changes to A3S Box will be documented in this file.
   provider-only exit). Mirrors Unix fail-closed classification and the
   persisted-exit `BoxBootError` path so boot cannot proceed to Ready without
   an exec channel. Does **not** flip B2 or invent Live digests.
+- Managed terminal observation no longer invents `Stopped`/`exit_code=0` from a
+  cached shim/provider zero without durable guest status
+  (`finish_registered_terminal` authenticates via `resolve_workload_exit_code`
+  / Windows guest-result collect). Unauthenticated zero clears the cache and
+  returns `Unavailable` so a later durable status can complete. Does **not**
+  flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

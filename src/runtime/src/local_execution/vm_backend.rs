@@ -348,7 +348,24 @@ impl VmLocalExecutionBackend {
             }
             tokio::time::sleep(TERMINAL_EXIT_POLL_INTERVAL).await;
         }
-        let exit_code = exit_code.ok_or_else(|| {
+        // Cached shim/provider zero is not guest success. Authenticate against
+        // durable workload status before projecting Stopped (#404/#408 parity).
+        #[cfg(not(target_os = "windows"))]
+        let authenticated = crate::rootfs::resolve_workload_exit_code(&record.box_dir, exit_code);
+        #[cfg(target_os = "windows")]
+        let authenticated = authenticate_windows_managed_terminal_exit(
+            &record.box_dir,
+            &manager.log_config,
+            exit_code,
+        );
+        if authenticated.is_none() {
+            // Drop inventable provider-zero cache so a delayed durable status
+            // can still complete a later observation poll.
+            if manager.shim_exit_code == Some(0) {
+                manager.shim_exit_code = None;
+            }
+        }
+        let exit_code = authenticated.ok_or_else(|| {
             ExecutionManagerError::Unavailable(format!(
                 "runtime reported execution {} as terminal before its exact exit status became available",
                 record.id
@@ -1089,6 +1106,27 @@ fn managed_state(record: &BoxRecord) -> ExecutionManagerResult<ManagedExecutionS
 fn execution_id(record: &BoxRecord) -> ExecutionManagerResult<ExecutionId> {
     ExecutionId::new(record.id.clone())
         .map_err(|error| ExecutionManagerError::Internal(error.to_string()))
+}
+
+/// Authenticate a managed terminal exit on Windows before projecting Stopped.
+///
+/// Clean provider/shim zero without a durable guest exit file must not invent
+/// guest success — same honesty as `resolve_workload_exit_code` / destroy.
+#[cfg(target_os = "windows")]
+fn authenticate_windows_managed_terminal_exit(
+    box_dir: &Path,
+    log_config: &a3s_box_core::log::LogConfig,
+    exit_code: Option<i32>,
+) -> Option<i32> {
+    let Some(code) = exit_code else {
+        return None;
+    };
+    match crate::vm::collect_windows_guest_result(box_dir, log_config, code) {
+        Ok(authenticated) => Some(authenticated),
+        // Nonzero provider crash evidence is kept when the guest never wrote
+        // its exit file; clean zero is refused.
+        Err(_) => (code != 0).then_some(code),
+    }
 }
 
 fn runtime_error(
