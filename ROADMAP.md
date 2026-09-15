@@ -666,7 +666,10 @@ retain process or filesystem sessions after its owner dies.
   `RestartStopping` / `RestartStarting` via `reconcile(create operation)` on
   those surfaces and `wait` (inspect keeps Creating; no inspect NotFound
   retirement), and `wait` driving manager inspect for any managed record while
-  refusing to invent exit `0` for transitional durable statuses;
+  refusing to invent exit `0` for transitional durable statuses **or** for
+  terminal durable statuses whose `exit_code` is still absent after inspect
+  retire (same `wait_poll_action` gate as legacy; archive wait also refuses
+  inventing `0`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

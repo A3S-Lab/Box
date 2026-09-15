@@ -40,7 +40,7 @@ fn wait_reads_auto_removed_terminal_archive() {
         &cli,
         "550e8400-e29b-41d4-a716-446655440011",
         "successful-removed-job",
-        None,
+        Some(0),
     );
 
     let output = cli.ok(&[
@@ -57,6 +57,22 @@ fn wait_reads_auto_removed_terminal_archive() {
         "--no-heartbeat",
     ]);
     assert_eq!(by_id, "23\n");
+}
+
+#[test]
+fn wait_refuses_removed_archive_without_recorded_exit() {
+    let cli = CliTest::new();
+    write_removed_terminal_archive(
+        &cli,
+        "550e8400-e29b-41d4-a716-446655440012",
+        "unknown-exit-removed-job",
+        None,
+    );
+
+    cli.fails(
+        &["wait", "unknown-exit-removed-job", "--no-heartbeat"],
+        "box unknown-exit-removed-job was removed without a recorded exit code",
+    );
 }
 
 #[test]
