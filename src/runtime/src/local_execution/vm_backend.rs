@@ -5,7 +5,6 @@ mod sandbox;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
 use a3s_box_core::{
@@ -293,7 +292,7 @@ impl VmLocalExecutionBackend {
         if matches!(
             managed_state(record)?,
             ManagedExecutionState::Starting | ManagedExecutionState::RestartStarting
-        ) && !exec_endpoint_ready(manager.exec_socket_path()).await
+        ) && !exec_endpoint_ready(record.id.as_str(), manager.exec_socket_path()).await
         {
             return Ok(LocalExecutionObservation {
                 state: ExecutionState::Creating,
@@ -385,7 +384,7 @@ impl VmLocalExecutionBackend {
     async fn promote_if_ready(&self, record: &BoxRecord, manager: &mut VmManager) -> bool {
         let socket_dir = crate::vm::runtime_socket_dir(&self.home_dir, &record.id);
         let exec_socket = socket_dir.join("exec.sock");
-        if !exec_endpoint_ready(Some(&exec_socket)).await {
+        if !exec_endpoint_ready(record.id.as_str(), Some(&exec_socket)).await {
             return false;
         }
         manager.exec_socket_path = Some(exec_socket);
@@ -1148,7 +1147,7 @@ fn unsupported(record: &BoxRecord, operation: &str, backend: &str) -> ExecutionM
 }
 
 #[cfg(unix)]
-async fn exec_endpoint_ready(path: Option<&Path>) -> bool {
+async fn exec_endpoint_ready(_box_id: &str, path: Option<&Path>) -> bool {
     let Some(path) = path else {
         return false;
     };
@@ -1163,9 +1162,28 @@ async fn exec_endpoint_ready(path: Option<&Path>) -> bool {
         .is_some()
 }
 
+/// Windows readiness must authenticate the named-pipe exec channel — layout
+/// path presence alone must not invent Ready/Running (#407/#408/#411 parity).
 #[cfg(not(unix))]
-async fn exec_endpoint_ready(path: Option<&Path>) -> bool {
-    path.is_some()
+async fn exec_endpoint_ready(box_id: &str, path: Option<&Path>) -> bool {
+    let Some(layout_path) = path else {
+        return false;
+    };
+    let guest_control_ready =
+        layout_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
+    if !guest_control_ready.is_file() {
+        return false;
+    }
+    let pipe = std::path::PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(box_id));
+    let attempt = async {
+        let client = crate::ExecClient::connect(&pipe).await.ok()?;
+        client.heartbeat().await.ok().filter(|ready| *ready)
+    };
+    tokio::time::timeout(Duration::from_millis(500), attempt)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 #[cfg(test)]

@@ -710,3 +710,76 @@ fn visible_state_rejects_terminal_records() {
 
     assert!(visible_active_state(&record).is_err());
 }
+
+#[tokio::test]
+async fn starting_observation_stays_creating_without_exec_heartbeat() {
+    // Path presence alone must not invent Running — Unix and Windows both
+    // require an authenticated exec heartbeat (#407/#408/#411 parity).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Starting.as_status().to_string();
+    record.managed_execution.as_mut().unwrap().pending_operation =
+        Some(crate::ManagedExecutionOperation::Start);
+
+    let socket_dir = crate::vm::runtime_socket_dir(temporary.path(), &record.id);
+    let exec_socket = socket_dir.join("exec.sock");
+    std::fs::create_dir_all(&socket_dir).unwrap();
+
+    let mut manager = backend.new_manager(&record).unwrap();
+    manager.exec_socket_path = Some(exec_socket);
+    *manager.state.write().await = crate::BoxState::Ready;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    let manager = Arc::new(Mutex::new(manager));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(
+        observation.state,
+        ExecutionState::Creating,
+        "exec path without heartbeat must not invent Running"
+    );
+    assert!(observation.handle.is_none());
+    assert!(observation.exit_code.is_none());
+}
+
+#[tokio::test]
+async fn created_observation_stays_creating_without_exec_heartbeat() {
+    // promote_if_ready must not invent Ready from a constructed layout path.
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Created.as_status().to_string();
+
+    let manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Created;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    let manager = Arc::new(Mutex::new(manager));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(
+        observation.state,
+        ExecutionState::Creating,
+        "layout exec.sock path alone must not invent Ready/Running"
+    );
+    assert!(observation.handle.is_none());
+}

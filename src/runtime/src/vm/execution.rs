@@ -55,9 +55,58 @@ impl VmManager {
         }
     }
 
-    #[cfg(not(unix))]
-    pub async fn wait_for_exec_available(&mut self, _timeout: std::time::Duration) -> Result<()> {
-        Ok(())
+    /// Windows pool publish must authenticate the named-pipe exec channel —
+    /// never invent availability from a layout path or boot-complete alone.
+    #[cfg(windows)]
+    pub async fn wait_for_exec_available(&mut self, timeout: std::time::Duration) -> Result<()> {
+        let layout_path = self
+            .exec_socket_path
+            .clone()
+            .ok_or_else(|| BoxError::ExecError("Exec socket path is unavailable".to_string()))?;
+        let pipe =
+            std::path::PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&self.box_id));
+        let guest_control_ready =
+            layout_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if guest_control_ready.is_file() {
+                let client = crate::grpc::ExecClient::for_socket(&pipe);
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    client.heartbeat(),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => return Ok(()),
+                    Ok(Ok(false)) | Ok(Err(_)) | Err(_)
+                        if tokio::time::Instant::now() < deadline =>
+                    {
+                        tracing::debug!("Waiting for pooled WHPX VM exec readiness");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Ok(Ok(false)) => {
+                        return Err(BoxError::ExecError(format!(
+                            "Exec client not connected: heartbeat failed at {}",
+                            pipe.display()
+                        )));
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        return Err(BoxError::ExecError(format!(
+                            "Exec client not connected: heartbeat timed out at {}",
+                            pipe.display()
+                        )));
+                    }
+                }
+            } else if tokio::time::Instant::now() >= deadline {
+                return Err(BoxError::ExecError(format!(
+                    "Guest control channel did not become ready within {} ms",
+                    timeout.as_millis()
+                )));
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
     }
 
     /// Attach this manager to an already-running shim process.
