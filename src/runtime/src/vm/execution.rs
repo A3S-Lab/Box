@@ -219,13 +219,38 @@ impl VmManager {
     /// Returns `Some(code)` after `destroy()` has been called and the shim
     /// process exited naturally (not killed). Returns `None` if the VM has not
     /// yet stopped or the exit code could not be determined.
+    ///
+    /// Cached shim/provider zero without durable guest status is refused — same
+    /// honesty as `finish_registered_terminal` / destroy (#409 source parity).
     pub fn exit_code(&self) -> Option<i32> {
         self.shim_exit_code
+            .and_then(|code| self.authenticate_cached_exit(code))
     }
 
     #[cfg(not(target_os = "windows"))]
     fn persisted_exit_code(&self) -> Option<i32> {
         crate::rootfs::read_persisted_exit_code(&self.home_dir.join("boxes").join(&self.box_id))
+    }
+
+    /// Authenticate a cached shim/provider exit before projecting guest success.
+    ///
+    /// Clean zero without durable guest evidence must not invent Stopped/success
+    /// for pool deferred-main or any direct `exit_code()` / `try_wait_exit` reader.
+    fn authenticate_cached_exit(&self, code: i32) -> Option<i32> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        #[cfg(not(target_os = "windows"))]
+        {
+            crate::rootfs::resolve_workload_exit_code(&box_dir, Some(code))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            match collect_windows_guest_result(&box_dir, &self.log_config, code) {
+                Ok(authenticated) => Some(authenticated),
+                // Nonzero provider crash evidence is kept when the guest never
+                // wrote its exit file; clean zero is refused.
+                Err(_) => (code != 0).then_some(code),
+            }
+        }
     }
 
     /// Poll the owned VM process for natural exit without sending a signal.
@@ -235,7 +260,17 @@ impl VmManager {
     /// a Ctrl-C.
     pub async fn try_wait_exit(&mut self) -> Result<Option<i32>> {
         if let Some(code) = self.shim_exit_code {
-            return Ok(Some(code));
+            if let Some(authenticated) = self.authenticate_cached_exit(code) {
+                self.shim_exit_code = Some(authenticated);
+                return Ok(Some(authenticated));
+            }
+            // Drop inventable provider-zero cache so a later durable status can
+            // still complete via provider poll below.
+            if code == 0 {
+                self.shim_exit_code = None;
+            } else {
+                return Ok(Some(code));
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -290,9 +325,14 @@ impl VmManager {
     /// The guest can persist its workload status before the shim has relayed the
     /// final console bytes. That durable status alone must not publish provider
     /// completion or foreground cleanup can terminate the shim mid-drain.
+    ///
+    /// Inventable cached shim/provider zero alone is not provider completion.
     pub async fn has_exited(&self) -> bool {
-        if self.shim_exit_code.is_some() {
-            return true;
+        if let Some(code) = self.shim_exit_code {
+            if self.authenticate_cached_exit(code).is_some() {
+                return true;
+            }
+            // Fall through: inventable zero must not short-circuit completion.
         }
 
         let handler = self.handler.read().await;

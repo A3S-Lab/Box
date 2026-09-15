@@ -142,6 +142,12 @@ All notable changes to A3S Box will be documented in this file.
   / Windows guest-result collect). Unauthenticated zero clears the cache and
   returns `Unavailable` so a later durable status can complete. Does **not**
   flip B2 or invent Live digests.
+- `VmManager::{try_wait_exit,exit_code,has_exited}` no longer invent guest
+  success from a cached shim/provider zero without durable guest status
+  (authenticates the cache at source so pool deferred-main / start-during-
+  startup cannot bypass `#409`). Windows `cleanup_boot_failure` collect-Err
+  fallback likewise refuses inventing clean provider `0`. Does **not** flip
+  B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
