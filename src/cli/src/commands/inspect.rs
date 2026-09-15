@@ -58,7 +58,7 @@ struct DockerState {
     #[serde(rename = "Paused")]
     paused: bool,
     #[serde(rename = "ExitCode")]
-    exit_code: i32,
+    exit_code: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -79,7 +79,9 @@ fn inspect_json(record: &BoxRecord) -> Result<String, serde_json::Error> {
             // Docker: a paused container is still Running (Running=true, Paused=true).
             running: matches!(record.status.as_str(), "running" | "paused"),
             paused: record.status == "paused",
-            exit_code: record.exit_code.unwrap_or(0),
+            // Do not invent success (0) when durable exit is absent — e.g. after
+            // abandoned Starting/Killing retire (#385) leaves exit_code unset.
+            exit_code: record.exit_code,
         },
     };
     // `docker inspect` returns a top-level JSON array, even for one container.
@@ -118,11 +120,28 @@ mod tests {
             serde_json::from_str(&inspect_json(&running).unwrap()).unwrap();
         assert_eq!(parsed[0]["State"]["Running"], true);
         assert_eq!(parsed[0]["State"]["Paused"], false);
+        assert!(parsed[0]["State"]["ExitCode"].is_null());
 
         let paused = make_record("id", "box", "paused", Some(1));
         let parsed: serde_json::Value =
             serde_json::from_str(&inspect_json(&paused).unwrap()).unwrap();
         assert_eq!(parsed[0]["State"]["Running"], true);
         assert_eq!(parsed[0]["State"]["Paused"], true);
+    }
+
+    #[test]
+    fn test_inspect_does_not_invent_exit_code_when_absent() {
+        let stopped = make_record("id", "box", "stopped", None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&inspect_json(&stopped).unwrap()).unwrap();
+        assert!(
+            parsed[0]["State"]["ExitCode"].is_null(),
+            "inspect must not project ExitCode 0 when durable exit_code is None"
+        );
+
+        let failed = make_record("id", "box", "failed", None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&inspect_json(&failed).unwrap()).unwrap();
+        assert!(parsed[0]["State"]["ExitCode"].is_null());
     }
 }
