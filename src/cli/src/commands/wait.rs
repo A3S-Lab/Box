@@ -80,9 +80,27 @@ async fn wait_one(
                 let home = a3s_box_core::dirs_home();
                 managed_manager = Some(super::configured_local_execution_manager(&home).await?);
             }
-            let status = managed_manager
+            let manager = managed_manager
                 .as_ref()
-                .expect("managed execution manager initialized")
+                .expect("managed execution manager initialized");
+            // Abandoned Removing must resume finish_remove — inspect returns
+            // Conflict and would hard-fail wait forever.
+            if record.status == "removing" {
+                let execution_id = ExecutionId::new(record.id.clone())?;
+                let generation = record
+                    .managed_execution
+                    .as_ref()
+                    .map(|metadata| metadata.generation)
+                    .ok_or_else(|| {
+                        format!("box {} lost managed generation while waiting", record.id)
+                    })?;
+                let _ = manager.remove(&execution_id, generation).await?;
+                // Remove forgets the row; prefer archived exit when present.
+                let exit_code = archived_wait_exit_code(query)?.unwrap_or(0);
+                println!("{exit_code}");
+                return Ok(());
+            }
+            let status = manager
                 .inspect(&ExecutionId::new(record.id.clone())?)
                 .await?;
             match status.state {

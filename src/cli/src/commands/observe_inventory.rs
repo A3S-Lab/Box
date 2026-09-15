@@ -1,13 +1,19 @@
-//! Drive managed observation before CLI inventory/reclaim projections.
+//! Drive managed observation / remove-retry before CLI inventory projections.
 //!
 //! Manager `inspect` (#385) retires durable `Starting` / `Killing` to
 //! `Stopped` and durable `Pausing` / `Resuming` to `Failed` when the backend
 //! is `NotFound`. Operator surfaces that only read `boxes.json` never call
-//! that path, so abandoned claims stay transitional and skip prune. These
-//! helpers close that gap without inventing pool `ps` inventory or observing
-//! Running boxes on every list.
+//! that path, so abandoned claims stay transitional and skip prune.
+//!
+//! Durable managed `Removing` is a different class: inspect returns Conflict
+//! ("removal in progress"). Failed cleanup deliberately leaves `removing`;
+//! reconcile already resumes via `finish_remove`. These helpers drive the same
+//! remove-retry (`ExecutionManager::remove`) before inventory so forever-
+//! removing rows do not lie in `ps` or block honest reclaim. Creating stays
+//! out of scope (create race, not inspect/remove retirement). Do not invent
+//! pool `ps` inventory or observe Running boxes on every list.
 
-use a3s_box_core::{ExecutionId, ExecutionManager};
+use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
 
 use crate::state::{BoxRecord, StateFile};
 
@@ -17,14 +23,38 @@ use crate::state::{BoxRecord, StateFile};
 /// `Resuming` (→ Failed) are in scope: inspect NotFound retires them without
 /// inventing an exit. `RestartStarting` must keep projecting Creating until
 /// reconcile resumes it; Running/Paused stay untouched so `ps` does not
-/// hammer live backends. Creating / Removing stay out of scope (create race /
-/// remove-retry, not inspect retirement).
+/// hammer live backends. Creating stays out of scope (create race). Removing
+/// uses [`needs_managed_removal_resume`] instead of inspect.
 pub(crate) fn needs_managed_inventory_observation(record: &BoxRecord) -> bool {
     record.managed_execution.is_some()
         && matches!(
             record.status.as_str(),
             "starting" | "killing" | "pausing" | "resuming"
         )
+}
+
+/// Whether this record needs remove-retry before inventory honesty.
+///
+/// Durable managed `Removing` must resume `ExecutionManager::remove` (idempotent
+/// `begin_remove` + `finish_remove`), not inspect NotFound retirement.
+pub(crate) fn needs_managed_removal_resume(record: &BoxRecord) -> bool {
+    record.managed_execution.is_some() && record.status == "removing"
+}
+
+fn managed_generation(
+    record: &BoxRecord,
+) -> Result<ExecutionGeneration, Box<dyn std::error::Error>> {
+    record
+        .managed_execution
+        .as_ref()
+        .map(|metadata| metadata.generation)
+        .ok_or_else(|| {
+            format!(
+                "box {} lost managed generation during removal resume",
+                record.id
+            )
+            .into()
+        })
 }
 
 /// Call `manager.inspect` for each durable managed transitional claim in scope.
@@ -67,41 +97,90 @@ pub(crate) async fn observe_managed_inventory_claims_best_effort(
     Ok(())
 }
 
-/// Observe in-scope managed claims under the default home, then reload.
+/// Resume durable managed `Removing` via manager remove-retry.
+pub(crate) async fn resume_managed_removal_claims(
+    manager: &impl ExecutionManager,
+    candidates: impl IntoIterator<Item = &BoxRecord>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for record in candidates {
+        if !needs_managed_removal_resume(record) {
+            continue;
+        }
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        let generation = managed_generation(record)?;
+        manager.remove(&execution_id, generation).await?;
+    }
+    Ok(())
+}
+
+/// Soft-batch remove-retry for prune/ps.
+pub(crate) async fn resume_managed_removal_claims_best_effort(
+    manager: &impl ExecutionManager,
+    candidates: impl IntoIterator<Item = &BoxRecord>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for record in candidates {
+        if !needs_managed_removal_resume(record) {
+            continue;
+        }
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        let Ok(generation) = managed_generation(record) else {
+            tracing::warn!(
+                box_id = %record.id,
+                "Failed to read managed generation for abandoned Removing claim"
+            );
+            continue;
+        };
+        if let Err(error) = manager.remove(&execution_id, generation).await {
+            tracing::warn!(
+                box_id = %record.id,
+                status = %record.status,
+                error = %error,
+                "Failed to resume abandoned managed Removing before inventory"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Observe / remove-retry in-scope managed claims under the default home, then reload.
 pub(crate) async fn refresh_default_home_after_inventory_observation(
 ) -> Result<StateFile, Box<dyn std::error::Error>> {
     let home = a3s_box_core::dirs_home();
     let state = StateFile::load_default()?;
-    let needs_observation = state
-        .list(true)
-        .into_iter()
-        .any(needs_managed_inventory_observation);
-    if !needs_observation {
+    let needs_work = state.list(true).into_iter().any(|record| {
+        needs_managed_inventory_observation(record) || needs_managed_removal_resume(record)
+    });
+    if !needs_work {
         return Ok(state);
     }
 
     let manager = super::configured_local_execution_manager(&home).await?;
     observe_managed_inventory_claims_best_effort(&manager, state.list(true)).await?;
+    resume_managed_removal_claims_best_effort(&manager, state.list(true)).await?;
     Ok(StateFile::load_default()?)
 }
 
-/// Observe one in-scope managed claim; return the refreshed row.
+/// Observe / remove-retry one in-scope managed claim; `None` if remove finished.
 pub(crate) async fn refresh_managed_inventory_record(
     record: BoxRecord,
-) -> Result<BoxRecord, Box<dyn std::error::Error>> {
-    if !needs_managed_inventory_observation(&record) {
-        return Ok(record);
+) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {
+    let needs_observe = needs_managed_inventory_observation(&record);
+    let needs_remove = needs_managed_removal_resume(&record);
+    if !needs_observe && !needs_remove {
+        return Ok(Some(record));
     }
 
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
-    observe_managed_inventory_claims(&manager, std::slice::from_ref(&record)).await?;
+    if needs_observe {
+        observe_managed_inventory_claims(&manager, std::slice::from_ref(&record)).await?;
+    }
+    if needs_remove {
+        resume_managed_removal_claims(&manager, std::slice::from_ref(&record)).await?;
+    }
 
     let state = StateFile::load_default()?;
-    state
-        .find_by_id(&record.id)
-        .cloned()
-        .ok_or_else(|| format!("box {} disappeared during managed observation", record.id).into())
+    Ok(state.find_by_id(&record.id).cloned())
 }
 
 #[cfg(test)]
@@ -313,6 +392,17 @@ mod tests {
         );
         creating.managed_execution = running.managed_execution.clone();
         assert!(!needs_managed_inventory_observation(&creating));
+        assert!(!needs_managed_removal_resume(&creating));
+
+        let mut removing = make_record(
+            "77777777-7777-4777-8777-777777777777",
+            "box",
+            "removing",
+            None,
+        );
+        removing.managed_execution = running.managed_execution.clone();
+        assert!(!needs_managed_inventory_observation(&removing));
+        assert!(needs_managed_removal_resume(&removing));
     }
 
     #[tokio::test]
@@ -376,6 +466,44 @@ mod tests {
         assert!(
             stopped.exit_code.is_none(),
             "CLI observe path must not invent an exit code for abandoned Killing"
+        );
+    }
+
+    fn managed_removing_record(id: &str, boxes_dir: &std::path::Path) -> BoxRecord {
+        let mut record =
+            managed_claim(id, boxes_dir, "removing", ManagedExecutionOperation::Remove);
+        // finish_remove validates exec endpoint ownership; fixtures from
+        // make_record may carry a foreign layout — clear for absent cleanup.
+        record.exec_socket_path = std::path::PathBuf::new();
+        record
+    }
+
+    #[tokio::test]
+    async fn resume_removes_absent_managed_removing_without_inspect_retirement() {
+        let tmp = tempfile::tempdir().unwrap();
+        // finish_remove validates box_dir == {home}/boxes/{id}.
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join("boxes")).unwrap();
+        let state_path = home.join("boxes.json");
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let record = managed_removing_record(id, &home.join("boxes"));
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record.clone()).unwrap();
+        assert_eq!(
+            state.find_by_id(id).unwrap().status,
+            ManagedExecutionState::Removing.as_status()
+        );
+
+        let manager = LocalExecutionManager::new(&state_path, &home, Arc::new(AbsentBackend));
+        resume_managed_removal_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        assert!(
+            refreshed.find_by_id(id).is_none(),
+            "remove-retry must finish_remove an abandoned Removing claim"
         );
     }
 
@@ -473,12 +601,14 @@ mod tests {
     fn prune_still_requires_stopped_not_transitional() {
         // After observe retires Starting/Killing→Stopped, prune's existing
         // filter reclaim it. Pausing/Resuming retire to Failed (not prune
-        // targets). Do not widen prune to accept transitional or failed
+        // targets). Removing is finished via remove-retry (row gone), not by
+        // widening prune. Do not widen prune to accept transitional or failed
         // statuses as a shortcut around observation / rm.
         assert!(!matches!("starting", "stopped" | "dead" | "created"));
         assert!(!matches!("killing", "stopped" | "dead" | "created"));
         assert!(!matches!("pausing", "stopped" | "dead" | "created"));
         assert!(!matches!("resuming", "stopped" | "dead" | "created"));
+        assert!(!matches!("removing", "stopped" | "dead" | "created"));
         assert!(!matches!("failed", "stopped" | "dead" | "created"));
         assert!(!matches!(
             "restart_starting",

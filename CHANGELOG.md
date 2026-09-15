@@ -48,16 +48,20 @@ All notable changes to A3S Box will be documented in this file.
   no longer keeps a forever-`starting` row that prune skipped. Only managed
   transitional claims in scope are observed on those paths (`Starting` /
   `Killing` / `Pausing` / `Resuming` — not every Running box, not Creating).
-  `a3s-box wait` likewise routes **any** `managed_execution` record through
-  manager inspect (not only OCI-routed ones) and never invents exit `0` for
-  transitional durable statuses (`starting`/`creating`/restart claims, etc.)
-  on the legacy poll path. Inventory observe covers durable managed `Killing`
+  Durable managed `Removing` resumes `ExecutionManager::remove` (idempotent
+  finish_remove) on the same inventory surfaces and on `wait`, instead of
+  forever-`removing` rows that inspect Conflict hard-fails. `a3s-box wait`
+  likewise routes **any** `managed_execution` record through manager inspect
+  (not only OCI-routed ones) and never invents exit `0` for transitional
+  durable statuses (`starting`/`creating`/restart claims, etc.) on the legacy
+  poll path. Inventory observe covers durable managed `Killing`
   (NotFound → Stopped) and durable managed `Pausing` / `Resuming`
   (NotFound → Failed), each without inventing an exit, so forever-
   transitional rows do not skip prune / lie in `ps`. `RestartStarting` /
   `RestartStopping` keep projecting Creating until reconcile resumes them;
   inspect does **not** call `recover_start`. Does **not** flip B2, invent
-  Live digests, or invent pool `ps` inventory.
+  Live digests, invent pool `ps` inventory, or widen prune beyond
+  `stopped|dead|created`.
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
   in-memory only; after daemon SIGKILL, leftover MicroVMs were invisible to
