@@ -43,8 +43,9 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("Home directory: {}", home.display());
     print_capabilities(&capabilities);
 
-    // Box count
-    match StateFile::load_default() {
+    // Present-tense counts: retire/resume abandoned managed transitional claims
+    // before aggregating (same home-scoped observe path as `ps`).
+    match super::observe_inventory::refresh_default_home_after_inventory_observation().await {
         Ok(state) => {
             let counts = box_counts(&state);
             println!(

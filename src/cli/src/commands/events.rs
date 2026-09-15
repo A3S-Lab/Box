@@ -159,7 +159,8 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    let state = StateFile::load_default()?;
+    let state =
+        super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let mut prev = take_snapshot(&state);
 
     // Also record full records for actor info
@@ -181,7 +182,10 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        let state = StateFile::load_default()?;
+        // Re-observe abandoned managed claims each poll so forever-transitional
+        // rows can emit real status transitions (best-effort; no Running hammer).
+        let state =
+            super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
         let current = take_snapshot(&state);
 
         // Update records map
