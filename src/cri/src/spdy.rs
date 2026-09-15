@@ -286,6 +286,15 @@ fn exit_status_payload(exit_code: i32) -> Option<Vec<u8>> {
     Some(serde_json::to_vec(&status).unwrap_or_default())
 }
 
+/// Resolve the SPDY error-stream exit from an authenticated guest exit only.
+///
+/// Transport EOF / mid-stream error without `ExecEvent::Exit` / `PtyExit` must
+/// not invent success (`0`) — kubectl treats an empty error-stream close as
+/// exit 0. Match CRI supervisor fail-closed: synthetic `255`.
+fn resolve_spdy_exec_exit(authenticated: Option<i32>) -> i32 {
+    authenticated.unwrap_or(255)
+}
+
 /// Serve a CRI exec over SPDY. Handles non-TTY exec (with optional stdin);
 /// TTY exec falls back to the dedicated PTY bridge.
 pub async fn serve_exec(mut stream: TcpStream, session: &StreamingSession) -> Result<(), DynError> {
@@ -380,7 +389,9 @@ pub async fn serve_exec(mut stream: TcpStream, session: &StreamingSession) -> Re
     let writer_task = {
         let writer = writer.clone();
         async move {
-            let mut exit_code = 0;
+            // Only `ExecEvent::Exit` authenticates an exit code. Seeding `0`
+            // here invented kubectl success on transport drop / stream error.
+            let mut authenticated_exit: Option<i32> = None;
             loop {
                 match exec.next_event().await {
                     Ok(Some(ExecEvent::Chunk(chunk))) => {
@@ -397,8 +408,11 @@ pub async fn serve_exec(mut stream: TcpStream, session: &StreamingSession) -> Re
                         }
                     }
                     Ok(Some(ExecEvent::Exit(exit))) => {
-                        exit_code = exit.exit_code;
-                        tracing::debug!(exit_code, "spdy exec: guest command exited");
+                        authenticated_exit = Some(exit.exit_code);
+                        tracing::debug!(
+                            exit_code = exit.exit_code,
+                            "spdy exec: guest command exited"
+                        );
                         break;
                     }
                     // Flush-acks are only used by the log-rotation path; ignore.
@@ -407,6 +421,7 @@ pub async fn serve_exec(mut stream: TcpStream, session: &StreamingSession) -> Re
                 }
             }
 
+            let exit_code = resolve_spdy_exec_exit(authenticated_exit);
             tracing::debug!(exit_code, "spdy exec: writing exit status + FIN");
             let mut guard = writer.lock().await;
             if let Some(id) = error_id {
@@ -508,6 +523,10 @@ async fn serve_exec_tty(stream: TcpStream, session: &StreamingSession) -> Result
     let pty_to_client = {
         let writer = writer.clone();
         async move {
+            // Only `FRAME_PTY_EXIT` authenticates an exit. Empty error-stream
+            // close without one invents kubectl success (including when a
+            // non-zero PtyExit payload was previously ignored).
+            let mut authenticated_exit: Option<i32> = None;
             let mut header = [0u8; 5];
             while pty_read.read_exact(&mut header).await.is_ok() {
                 let frame_type = header[0];
@@ -529,12 +548,21 @@ async fn serve_exec_tty(stream: TcpStream, session: &StreamingSession) -> Result
                                 .await;
                         }
                     }
-                    t if t == pty::FRAME_PTY_EXIT => break,
+                    t if t == pty::FRAME_PTY_EXIT => {
+                        if let Ok(exit) = serde_json::from_slice::<pty::PtyExit>(&payload) {
+                            authenticated_exit = Some(exit.exit_code);
+                        }
+                        break;
+                    }
                     _ => {}
                 }
             }
+            let exit_code = resolve_spdy_exec_exit(authenticated_exit);
             let mut guard = writer.lock().await;
             if let Some(id) = error_id {
+                if let Some(body) = exit_status_payload(exit_code) {
+                    let _ = guard.write_all(&data_frame(id, false, &body)).await;
+                }
                 let _ = guard.write_all(&data_frame(id, true, &[])).await;
             }
             if let Some(id) = stdout_id {
@@ -877,6 +905,20 @@ mod tests {
         assert_eq!(value["details"]["causes"][0]["reason"], "ExitCode");
         assert_eq!(value["details"]["causes"][0]["message"], "137");
         assert!(value["message"].as_str().unwrap().contains("exit code 137"));
+    }
+
+    #[test]
+    fn resolve_spdy_exec_exit_keeps_authenticated_codes() {
+        assert_eq!(resolve_spdy_exec_exit(Some(0)), 0);
+        assert_eq!(resolve_spdy_exec_exit(Some(137)), 137);
+    }
+
+    #[test]
+    fn resolve_spdy_exec_exit_refuses_to_invent_success_when_absent() {
+        // Transport EOF / mid-stream error without ExecEvent::Exit / PtyExit
+        // must not project kubectl success (empty error-stream close = 0).
+        assert_eq!(resolve_spdy_exec_exit(None), 255);
+        assert!(exit_status_payload(resolve_spdy_exec_exit(None)).is_some());
     }
 
     #[tokio::test]

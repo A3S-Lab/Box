@@ -677,7 +677,9 @@ retain process or filesystem sessions after its owner dies.
   `Failed`/`dead` when exit is absent (operator `Stopped`+absent exit and
   authenticated exit `0` remain `Stopped`); Windows StateFile reconcile keeps
   only authenticated durable/persisted exit after guest-result collect
-  failure (no invent `0`/`1` when both absent);
+  failure (no invent `0`/`1` when both absent); CRI SPDY exec projects
+  kubectl error-stream status only from authenticated `ExecEvent::Exit` /
+  `PtyExit` (absent → synthetic `255`, never invent success `0`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
