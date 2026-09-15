@@ -104,6 +104,12 @@ All notable changes to A3S Box will be documented in this file.
   are absent. Aligns with Linux `resolve_workload_exit_code` and inspect
   ExitCode null honesty; authenticated durable/persisted exits are kept.
   Does **not** flip B2 or change WHPX guest-marker success paths.
+- CRI SPDY `exec` no longer invents kubectl success when the guest stream
+  ends without an authenticated exit: non-TTY seeds only from
+  `ExecEvent::Exit`, TTY from `PtyExit`, and absent evidence fail-closes to
+  synthetic `255` (supervisor parity) instead of empty error-stream close
+  (`0`). Authenticated exit `0` still silent-closes. Does **not** flip B2,
+  invent Live digests, or widen exec timeouts.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
