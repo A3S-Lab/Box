@@ -9,7 +9,6 @@ use super::{
     validate_compose_restart_policies, ComposeLogsArgs, ProjectServicesArgs, LABEL_PROJECT,
     LABEL_SERVICE,
 };
-use crate::state::StateFile;
 
 // ============================================================================
 // compose ps
@@ -21,7 +20,9 @@ pub(super) async fn execute_ps(
     config: &ComposeConfig,
     args: ProjectServicesArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
+    // Present-tense service rows: same home-scoped observe/resume as `a3s-box ps`.
+    let state =
+        super::super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let boxes = state
         .find_by_label(LABEL_PROJECT, project_name)
         .into_iter()
@@ -134,7 +135,10 @@ pub(super) async fn execute_logs(
     if !logs_args.services.is_empty() {
         super::operations::selected_service_names(config, &logs_args.services)?;
     }
-    let state = StateFile::load_default()?;
+    // Refresh before selecting project boxes so abandoned transitional claims
+    // converge (same path as compose wait / a3s-box ps).
+    let state =
+        super::super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let boxes = state.find_by_label(LABEL_PROJECT, project_name);
 
     if boxes.is_empty() {
