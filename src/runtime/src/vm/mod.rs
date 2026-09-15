@@ -598,7 +598,9 @@ impl VmManager {
                         self.shim_exit_code = None;
                     }
                 } else {
-                    self.shim_exit_code = provider_exit_code;
+                    // Live boot abort: clean provider/stop exit must not invent
+                    // guest success without durable/persisted evidence (#405 parity).
+                    self.shim_exit_code = provider_exit_code.filter(|code| *code != 0);
                 }
             }
             if exited_before_cleanup && self.shim_exit_code.is_none() {

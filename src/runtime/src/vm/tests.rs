@@ -304,6 +304,45 @@ impl VmHandler for DelayedCompletionHandler {
     }
 }
 
+/// Live boot failure: guest never completed; `stop` yields a clean provider exit.
+///
+/// Models WHPX/shim `_exit(0)` after Box aborts a still-running boot — provider
+/// zero must not invent guest success when durable status is absent.
+struct LiveBootStoppedProviderZeroHandler {
+    stopped: bool,
+}
+
+impl VmHandler for LiveBootStoppedProviderZeroHandler {
+    fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+        self.stopped = true;
+        Ok(())
+    }
+
+    fn metrics(&self) -> crate::vmm::VmMetrics {
+        crate::vmm::VmMetrics::default()
+    }
+
+    fn is_running(&self) -> bool {
+        !self.stopped
+    }
+
+    fn has_exited(&self) -> bool {
+        false
+    }
+
+    fn pid(&self) -> u32 {
+        42
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        self.stopped.then_some(0)
+    }
+
+    fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+        Ok(None)
+    }
+}
+
 /// A handler whose `stop` always fails — models a wedged VM that won't halt.
 struct FailingHandler;
 

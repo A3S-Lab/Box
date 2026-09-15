@@ -121,6 +121,11 @@ All notable changes to A3S Box will be documented in this file.
   Absent/PendingOrInvalid honesty as `resolve_workload_exit_code`). Durable
   markers and nonzero provider crash evidence still complete the wait. Does
   **not** flip B2 or invent Live digests.
+- Windows live boot-failure cleanup no longer invents guest success from a
+  clean provider/stop exit (`0`) when the guest never completed and durable
+  status is absent (else-branch parity with delayed poll / Linux resolve).
+  Nonzero provider crash evidence is still recorded. Does **not** flip B2 or
+  invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
