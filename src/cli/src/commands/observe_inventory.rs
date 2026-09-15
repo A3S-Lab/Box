@@ -1,4 +1,5 @@
-//! Drive managed observation / remove-retry before CLI inventory projections.
+//! Drive managed observation / remove-retry / restart-reconcile before CLI
+//! inventory projections.
 //!
 //! Manager `inspect` (#385) retires durable `Starting` / `Killing` to
 //! `Stopped` and durable `Pausing` / `Resuming` / `Snapshotting` /
@@ -11,11 +12,18 @@
 //! ("removal in progress"). Failed cleanup deliberately leaves `removing`;
 //! reconcile already resumes via `finish_remove`. These helpers drive the same
 //! remove-retry (`ExecutionManager::remove`) before inventory so forever-
-//! removing rows do not lie in `ps` or block honest reclaim. Creating stays
-//! out of scope (create race, not inspect/remove retirement). Do not invent
-//! pool `ps` inventory or observe Running boxes on every list.
+//! removing rows do not lie in `ps` or block honest reclaim.
+//!
+//! Durable managed `RestartStopping` / `RestartStarting` are another class:
+//! inspect must keep projecting Creating (no NotFound retirement). Resume the
+//! restart owner via `ExecutionManager::reconcile` on the **creation**
+//! operation identity (same lookup reconcile uses), not inspect and not an
+//! invented pool `ps` path. Creating stays out of scope (create race). Do not
+//! observe Running boxes on every list.
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionState, OperationId,
+};
 
 use crate::state::{BoxRecord, StateFile};
 
@@ -24,10 +32,10 @@ use crate::state::{BoxRecord, StateFile};
 /// Durable managed `Starting` / `Killing` (→ Stopped) and `Pausing` /
 /// `Resuming` / `Snapshotting` / `UpdatingResources` (→ Failed) are in scope:
 /// inspect NotFound retires them without inventing an exit or a published
-/// snapshot. `RestartStarting` must keep projecting Creating until reconcile
-/// resumes it; Running/Paused stay untouched so `ps` does not hammer live
-/// backends. Creating stays out of scope (create race). Removing uses
-/// [`needs_managed_removal_resume`] instead of inspect.
+/// snapshot. `RestartStarting` / `RestartStopping` use
+/// [`needs_managed_restart_resume`] instead of inspect. Running/Paused stay
+/// untouched so `ps` does not hammer live backends. Creating stays out of
+/// scope (create race). Removing uses [`needs_managed_removal_resume`].
 pub(crate) fn needs_managed_inventory_observation(record: &BoxRecord) -> bool {
     record.managed_execution.is_some()
         && matches!(
@@ -44,6 +52,19 @@ pub(crate) fn needs_managed_removal_resume(record: &BoxRecord) -> bool {
     record.managed_execution.is_some() && record.status == "removing"
 }
 
+/// Whether this record needs restart reconcile before inventory honesty.
+///
+/// Durable managed `RestartStopping` / `RestartStarting` must resume via
+/// `ExecutionManager::reconcile(create_operation_id)`, not inspect NotFound
+/// retirement (inspect keeps projecting Creating by design).
+pub(crate) fn needs_managed_restart_resume(record: &BoxRecord) -> bool {
+    record.managed_execution.is_some()
+        && matches!(
+            record.status.as_str(),
+            "restart_stopping" | "restart_starting"
+        )
+}
+
 fn managed_generation(
     record: &BoxRecord,
 ) -> Result<ExecutionGeneration, Box<dyn std::error::Error>> {
@@ -58,6 +79,41 @@ fn managed_generation(
             )
             .into()
         })
+}
+
+fn managed_create_operation_id(
+    record: &BoxRecord,
+) -> Result<OperationId, Box<dyn std::error::Error>> {
+    record
+        .managed_execution
+        .as_ref()
+        .map(|metadata| metadata.operation_id.clone())
+        .ok_or_else(|| {
+            format!(
+                "box {} lost managed creation operation during restart resume",
+                record.id
+            )
+            .into()
+        })
+}
+
+/// Resume one abandoned restart claim. Absent-backend start may publish Failed
+/// then return Err — treat that as converged when inspect no longer projects
+/// Creating for the restart claim.
+async fn resume_one_managed_restart(
+    manager: &impl ExecutionManager,
+    record: &BoxRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let operation_id = managed_create_operation_id(record)?;
+    let execution_id = ExecutionId::new(record.id.clone())?;
+    match manager.reconcile(&operation_id).await {
+        Ok(_) => Ok(()),
+        Err(error) => match manager.inspect(&execution_id).await {
+            Ok(status) if status.state == ExecutionState::Creating => Err(error.into()),
+            Ok(_) => Ok(()),
+            Err(_) => Err(error.into()),
+        },
+    }
 }
 
 /// Call `manager.inspect` for each durable managed transitional claim in scope.
@@ -145,13 +201,50 @@ pub(crate) async fn resume_managed_removal_claims_best_effort(
     Ok(())
 }
 
-/// Observe / remove-retry in-scope managed claims under the default home, then reload.
+/// Resume durable managed restart claims via manager reconcile (create op).
+pub(crate) async fn resume_managed_restart_claims(
+    manager: &impl ExecutionManager,
+    candidates: impl IntoIterator<Item = &BoxRecord>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for record in candidates {
+        if !needs_managed_restart_resume(record) {
+            continue;
+        }
+        resume_one_managed_restart(manager, record).await?;
+    }
+    Ok(())
+}
+
+/// Soft-batch restart reconcile for prune/ps.
+pub(crate) async fn resume_managed_restart_claims_best_effort(
+    manager: &impl ExecutionManager,
+    candidates: impl IntoIterator<Item = &BoxRecord>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for record in candidates {
+        if !needs_managed_restart_resume(record) {
+            continue;
+        }
+        if let Err(error) = resume_one_managed_restart(manager, record).await {
+            tracing::warn!(
+                box_id = %record.id,
+                status = %record.status,
+                error = %error,
+                "Failed to resume abandoned managed restart before inventory"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Observe / remove-retry / restart-reconcile under the default home, then reload.
 pub(crate) async fn refresh_default_home_after_inventory_observation(
 ) -> Result<StateFile, Box<dyn std::error::Error>> {
     let home = a3s_box_core::dirs_home();
     let state = StateFile::load_default()?;
     let needs_work = state.list(true).into_iter().any(|record| {
-        needs_managed_inventory_observation(record) || needs_managed_removal_resume(record)
+        needs_managed_inventory_observation(record)
+            || needs_managed_removal_resume(record)
+            || needs_managed_restart_resume(record)
     });
     if !needs_work {
         return Ok(state);
@@ -160,16 +253,18 @@ pub(crate) async fn refresh_default_home_after_inventory_observation(
     let manager = super::configured_local_execution_manager(&home).await?;
     observe_managed_inventory_claims_best_effort(&manager, state.list(true)).await?;
     resume_managed_removal_claims_best_effort(&manager, state.list(true)).await?;
+    resume_managed_restart_claims_best_effort(&manager, state.list(true)).await?;
     Ok(StateFile::load_default()?)
 }
 
-/// Observe / remove-retry one in-scope managed claim; `None` if remove finished.
+/// Observe / remove-retry / restart-reconcile one claim; `None` if remove finished.
 pub(crate) async fn refresh_managed_inventory_record(
     record: BoxRecord,
 ) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {
     let needs_observe = needs_managed_inventory_observation(&record);
     let needs_remove = needs_managed_removal_resume(&record);
-    if !needs_observe && !needs_remove {
+    let needs_restart = needs_managed_restart_resume(&record);
+    if !needs_observe && !needs_remove && !needs_restart {
         return Ok(Some(record));
     }
 
@@ -180,6 +275,9 @@ pub(crate) async fn refresh_managed_inventory_record(
     }
     if needs_remove {
         resume_managed_removal_claims(&manager, std::slice::from_ref(&record)).await?;
+    }
+    if needs_restart {
+        resume_managed_restart_claims(&manager, std::slice::from_ref(&record)).await?;
     }
 
     let state = StateFile::load_default()?;
@@ -444,6 +542,7 @@ mod tests {
         creating.managed_execution = running.managed_execution.clone();
         assert!(!needs_managed_inventory_observation(&creating));
         assert!(!needs_managed_removal_resume(&creating));
+        assert!(!needs_managed_restart_resume(&creating));
 
         let mut removing = make_record(
             "77777777-7777-4777-8777-777777777777",
@@ -454,6 +553,28 @@ mod tests {
         removing.managed_execution = running.managed_execution.clone();
         assert!(!needs_managed_inventory_observation(&removing));
         assert!(needs_managed_removal_resume(&removing));
+        assert!(!needs_managed_restart_resume(&removing));
+
+        let mut restart_starting = make_record(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "box",
+            "restart_starting",
+            None,
+        );
+        restart_starting.managed_execution = running.managed_execution.clone();
+        assert!(!needs_managed_inventory_observation(&restart_starting));
+        assert!(!needs_managed_removal_resume(&restart_starting));
+        assert!(needs_managed_restart_resume(&restart_starting));
+
+        let mut restart_stopping = make_record(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "box",
+            "restart_stopping",
+            None,
+        );
+        restart_stopping.managed_execution = running.managed_execution.clone();
+        assert!(!needs_managed_inventory_observation(&restart_stopping));
+        assert!(needs_managed_restart_resume(&restart_stopping));
     }
 
     #[tokio::test]
@@ -734,6 +855,130 @@ mod tests {
             "restart_starting",
             "stopped" | "dead" | "created"
         ));
+        assert!(!matches!(
+            "restart_stopping",
+            "stopped" | "dead" | "created"
+        ));
         assert!(matches!("stopped", "stopped" | "dead" | "created"));
+    }
+
+    fn managed_restart_claim(
+        id: &str,
+        box_dir: &std::path::Path,
+        status: &str,
+        generation: ExecutionGeneration,
+        source_state: ManagedExecutionState,
+    ) -> BoxRecord {
+        let mut record = managed_claim(
+            id,
+            box_dir,
+            status,
+            ManagedExecutionOperation::Restart {
+                operation_id: OperationId::new("operation-restart-abandoned").unwrap(),
+                source_generation: ExecutionGeneration::INITIAL,
+                source_state,
+                stop_timeout_secs: None,
+            },
+        );
+        if let Some(metadata) = record.managed_execution.as_mut() {
+            metadata.generation = generation;
+        }
+        record
+    }
+
+    #[tokio::test]
+    async fn restart_resume_retires_absent_restart_starting_without_inventing_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let record = managed_restart_claim(
+            id,
+            tmp.path(),
+            "restart_starting",
+            ExecutionGeneration::new(2).unwrap(),
+            ManagedExecutionState::Running,
+        );
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record).unwrap();
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        resume_managed_restart_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(
+            failed.exit_code.is_none(),
+            "restart reconcile must not invent an exit for absent RestartStarting"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_resume_advances_absent_restart_stopping_to_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let record = managed_restart_claim(
+            id,
+            tmp.path(),
+            "restart_stopping",
+            ExecutionGeneration::INITIAL,
+            ManagedExecutionState::Running,
+        );
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record).unwrap();
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        resume_managed_restart_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(failed.exit_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn observe_does_not_inspect_retire_restart_starting() {
+        // Anti-overfit: inventory observation must not treat RestartStarting
+        // like Starting (NotFound→Stopped). Resume uses reconcile instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let record = managed_restart_claim(
+            id,
+            tmp.path(),
+            "restart_starting",
+            ExecutionGeneration::new(2).unwrap(),
+            ManagedExecutionState::Running,
+        );
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record).unwrap();
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        observe_managed_inventory_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        assert_eq!(
+            refreshed.find_by_id(id).unwrap().status,
+            "restart_starting",
+            "observe must not inspect-retire RestartStarting"
+        );
     }
 }

@@ -659,9 +659,11 @@ retain process or filesystem sessions after its owner dies.
   published snapshot),
   and resume of durable managed `Removing` via remove-retry (`finish_remove`)
   on those surfaces and `wait` (not inspect NotFound retirement; prune filter
-  stays `stopped|dead|created`), and `wait` driving manager inspect for any
-  managed record while refusing to invent exit `0` for transitional durable
-  statuses;
+  stays `stopped|dead|created`), resume of durable managed
+  `RestartStopping` / `RestartStarting` via `reconcile(create operation)` on
+  those surfaces and `wait` (inspect keeps Creating; no inspect NotFound
+  retirement), and `wait` driving manager inspect for any managed record while
+  refusing to invent exit `0` for transitional durable statuses;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

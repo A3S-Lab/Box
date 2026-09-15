@@ -100,6 +100,21 @@ async fn wait_one(
                 println!("{exit_code}");
                 return Ok(());
             }
+            // Abandoned RestartStopping/RestartStarting: inspect keeps Creating
+            // forever — resume via reconcile(create operation), then re-poll.
+            if matches!(
+                record.status.as_str(),
+                "restart_stopping" | "restart_starting"
+            ) {
+                super::observe_inventory::resume_managed_restart_claims(
+                    manager,
+                    std::slice::from_ref(record),
+                )
+                .await?;
+                heartbeat.maybe_emit(query);
+                tokio::time::sleep(tokio::time::Duration::from_millis(WAIT_POLL_MILLIS)).await;
+                continue;
+            }
             let status = manager
                 .inspect(&ExecutionId::new(record.id.clone())?)
                 .await?;

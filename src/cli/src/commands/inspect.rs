@@ -22,10 +22,10 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
     // an image so `inspect <image>` works the same as `inspect <container>`.
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
-            // Drive manager observation / remove-retry before projecting JSON so
-            // abandoned managed transitional claims converge (#385/#389) and
-            // abandoned Removing resumes finish_remove instead of forever-
-            // transitional inventory.
+            // Drive manager observation / remove-retry / restart-reconcile
+            // before projecting JSON so abandoned managed transitional claims
+            // converge (#385/#389/#391) and abandoned Removing / Restart*
+            // resume their owners instead of forever-transitional inventory.
             match super::observe_inventory::refresh_managed_inventory_record(record.clone()).await?
             {
                 Some(record) => {
