@@ -14,6 +14,7 @@ use crate::state::policy::{is_record_pid_live, should_restart};
 /// marker). Never invent `0` or `1` when both are absent — same honesty as
 /// Linux [`a3s_box_runtime::rootfs::resolve_workload_exit_code`] and inspect
 /// ExitCode null projection.
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn resolve_windows_reconcile_exit(
     durable: Option<i32>,
     persisted: Option<i32>,
