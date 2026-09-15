@@ -138,13 +138,12 @@ impl VmManager {
         loop {
             // Return at once if the VM has already exited (zombie-aware: has_exited
             // treats a zombie shim as exited, unlike is_running's kill(pid,0)). A
-            // fast-exiting container never stalls here.
+            // fast-exiting container never stalls here — and must not invent
+            // exec-ready / Ready from guest-terminal evidence alone (Windows #407
+            // / #408 parity).
             #[cfg(unix)]
             if let Some(exit_code) = self.try_wait_exit().await? {
-                if crate::rootfs::read_persisted_exit_code(&box_dir).is_some() {
-                    tracing::debug!(exit_code, "Guest completed before exec server became ready");
-                    return Ok(());
-                }
+                tracing::debug!(exit_code, "Guest completed before exec server became ready");
                 return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
             }
             #[cfg(windows)]
@@ -173,7 +172,7 @@ impl VmManager {
                                 exit_code,
                                 "Guest completed before exec server became ready"
                             );
-                            return Ok(());
+                            return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
                         }
                         return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
                     }
@@ -187,6 +186,17 @@ impl VmManager {
                         }
                     }
                 }
+            }
+
+            // Durable guest exit can land while the shim is still draining (or
+            // before a handler is registered in unit tests). Classify as
+            // terminal startup failure — never invent Ready from exit evidence
+            // alone (Windows #407/#408 parity).
+            #[cfg(unix)]
+            if let Some(exit_code) = crate::rootfs::read_persisted_exit_code(&box_dir) {
+                self.shim_exit_code = Some(exit_code);
+                tracing::debug!(exit_code, "Guest completed before exec server became ready");
+                return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
             }
 
             // A very short WHPX workload can persist its exact status and close

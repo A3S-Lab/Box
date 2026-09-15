@@ -148,6 +148,11 @@ All notable changes to A3S Box will be documented in this file.
   startup cannot bypass `#409`). Windows `cleanup_boot_failure` collect-Err
   fallback likewise refuses inventing clean provider `0`. Does **not** flip
   B2 or invent Live digests.
+- Unix `wait_for_exec_ready` no longer invents Ready/`Ok(())` when a durable
+  guest exit is already persisted (or when `try_wait_exit`/`has_exited` sees
+  completion) before the exec heartbeat — fail-closed `BoxBootError` matching
+  Windows `#407`/`#408`. Boot cleanup still collects the authenticated exit.
+  Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

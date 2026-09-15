@@ -391,7 +391,9 @@ async fn test_wait_for_exec_ready_rejects_provider_exit_without_guest_status() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_wait_for_exec_ready_returns_when_guest_exit_code_persisted() {
+async fn test_wait_for_exec_ready_fails_closed_when_guest_exit_persisted_before_heartbeat() {
+    // Durable guest exit before exec heartbeat must not invent Ready / Ok(())
+    // — Windows #407/#408 fail-closed parity. Boot cleanup collects the exit.
     let tmp = tempfile::tempdir().unwrap();
     let box_id = "box-exec-finished".to_string();
     let mut vm =
@@ -407,14 +409,19 @@ async fn test_wait_for_exec_ready_returns_when_guest_exit_code_persisted() {
     std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
     std::fs::write(&exit_path, "17\n").unwrap();
 
-    tokio::time::timeout(
+    let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock")),
     )
     .await
     .unwrap()
-    .unwrap();
+    .expect_err("guest exit before exec ready must not invent Ready")
+    .to_string();
 
+    assert!(
+        error.contains("exited with code 17") || error.contains("before the guest exec server"),
+        "{error}"
+    );
     assert_eq!(vm.exit_code(), Some(17));
     assert!(vm.exec_client.is_none());
 }
