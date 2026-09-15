@@ -924,10 +924,9 @@ async fn wait_for_delayed_terminal_exit(
         match handler.try_wait_exit() {
             Ok(Some(provider_exit_code)) => {
                 #[cfg(not(target_os = "windows"))]
-                if let Some(exit_code) = crate::rootfs::resolve_workload_exit_code(
-                    box_dir,
-                    Some(provider_exit_code),
-                ) {
+                if let Some(exit_code) =
+                    crate::rootfs::resolve_workload_exit_code(box_dir, Some(provider_exit_code))
+                {
                     return Some(exit_code);
                 }
                 #[cfg(target_os = "windows")]
