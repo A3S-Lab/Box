@@ -257,12 +257,14 @@ fn test_foreground_exit_code_preserves_vm_code() {
 }
 
 #[test]
-fn test_foreground_workload_exit_code_falls_back_to_completed_start_record() {
+fn test_foreground_workload_exit_code_refuses_invented_provider_zero() {
     let temporary = tempfile::tempdir().unwrap();
 
+    // No terminal status / legacy marker: clean recorded start exit must not
+    // invent guest success (resolve_workload_exit_code Absent parity).
     assert_eq!(
         foreground_workload_exit_code(temporary.path(), Some(0)),
-        Some(0)
+        None
     );
 
     let exit_path = temporary.path().join("upper/.a3s_exit_code");
