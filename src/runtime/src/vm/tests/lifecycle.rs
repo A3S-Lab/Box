@@ -307,9 +307,15 @@ async fn test_cleanup_boot_failure_waits_for_delayed_terminal_status() {
     vm.home_dir = tmp.path().to_path_buf();
     vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
     let polls = Arc::new(AtomicUsize::new(0));
+    let durable_exit_path = tmp
+        .path()
+        .join("boxes")
+        .join(&box_id)
+        .join("rootfs/.a3s_exit_code");
     *vm.handler.write().await = Some(Box::new(DelayedCompletionHandler {
         polls: Arc::clone(&polls),
         available_after: 3,
+        durable_exit_path: Some(durable_exit_path),
     }));
 
     let marker = tmp
@@ -326,6 +332,37 @@ async fn test_cleanup_boot_failure_waits_for_delayed_terminal_status() {
     assert_eq!(polls.load(Ordering::SeqCst), 4);
     assert_eq!(std::fs::read(&marker).unwrap(), b"completed");
     assert!(vm.preserve_rootfs_on_boot_failure);
+}
+
+#[tokio::test]
+async fn test_cleanup_boot_failure_refuses_invented_provider_zero_without_durable_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-delayed-provider-zero-no-durable".to_string();
+    let config = BoxConfig {
+        persistent: true,
+        ..BoxConfig::default()
+    };
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+    let polls = Arc::new(AtomicUsize::new(0));
+    *vm.handler.write().await = Some(Box::new(DelayedCompletionHandler {
+        polls: Arc::clone(&polls),
+        available_after: 1,
+        durable_exit_path: None,
+    }));
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+
+    vm.cleanup_boot_failure().await;
+
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "clean provider exit must not invent guest success when durable status is absent"
+    );
+    assert!(!vm.preserve_rootfs_on_boot_failure);
 }
 
 #[tokio::test]
