@@ -22,13 +22,18 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
     // an image so `inspect <image>` works the same as `inspect <container>`.
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
-            // Drive manager observation before projecting JSON so abandoned
-            // managed Starting/Killing/Pausing/Resuming claims converge (#385)
-            // instead of forever-transitional inventory.
-            let record =
-                super::observe_inventory::refresh_managed_inventory_record(record.clone()).await?;
-            println!("{}", inspect_json(&record)?);
-            Ok(())
+            // Drive manager observation / remove-retry before projecting JSON so
+            // abandoned managed transitional claims converge (#385/#389) and
+            // abandoned Removing resumes finish_remove instead of forever-
+            // transitional inventory.
+            match super::observe_inventory::refresh_managed_inventory_record(record.clone()).await?
+            {
+                Some(record) => {
+                    println!("{}", inspect_json(&record)?);
+                    Ok(())
+                }
+                None => Err(format!("No such container: {}", args.r#box).into()),
+            }
         }
         Err(ResolveError::NotFound(_)) => {
             match image_inspect::try_image_inspect_json(&args.r#box).await? {

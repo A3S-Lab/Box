@@ -28,8 +28,9 @@ pub struct PsArgs {
 
 pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Present-tense inventory: retire abandoned managed Starting/Killing/
-    // Pausing/Resuming via manager inspect (#385) before listing, without
-    // observing every Running box.
+    // Pausing/Resuming via manager inspect, and resume abandoned Removing via
+    // remove-retry, before listing (#385/#389) — without observing every
+    // Running box.
     let state =
         super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let boxes = select_records(&state, args.all);

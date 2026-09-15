@@ -655,8 +655,11 @@ retain process or filesystem sessions after its owner dies.
   with CLI `inspect` / `ps` / `prune` / `system-prune` driving that observe
   before status projection or reclaim selection (managed Starting/Killing/
   Pausing/Resuming; Pausing/Resuming NotFound → Failed without invented exit),
-  and `wait` driving manager inspect for any managed record while refusing to
-  invent exit `0` for transitional durable statuses;
+  and resume of durable managed `Removing` via remove-retry (`finish_remove`)
+  on those surfaces and `wait` (not inspect NotFound retirement; prune filter
+  stays `stopped|dead|created`), and `wait` driving manager inspect for any
+  managed record while refusing to invent exit `0` for transitional durable
+  statuses;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

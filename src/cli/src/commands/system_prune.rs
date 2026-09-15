@@ -46,8 +46,9 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
     let mut pull_temp_dirs_removed: usize = 0;
     let mut space_freed: u64 = 0;
 
-    // Phase 1: Remove stopped/dead boxes. Observe managed Starting first so
-    // abandoned claims retired by manager inspect (#385) become prunable.
+    // Phase 1: Remove stopped/dead boxes. Observe transitional managed claims
+    // and resume Removing first so abandoned rows converge before prune
+    // selection (#385/#389).
     let mut state =
         super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let all_boxes = state.list(true);
