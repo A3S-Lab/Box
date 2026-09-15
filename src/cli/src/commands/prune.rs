@@ -22,8 +22,9 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    // Observe managed Starting under the lifecycle lock so #385 NotFound→Stopped
-    // retires are visible before prune selection (durable "starting" is skipped).
+    // Observe managed Starting/Killing/Pausing/Resuming under the lifecycle
+    // lock so #385 NotFound retirement is visible before prune selection
+    // (durable transitional claims are skipped by the existing filter).
     let mut state =
         super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
     let to_remove: Vec<crate::state::BoxRecord> = state

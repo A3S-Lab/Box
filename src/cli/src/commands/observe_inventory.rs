@@ -1,11 +1,11 @@
 //! Drive managed observation before CLI inventory/reclaim projections.
 //!
-//! Manager `inspect` (#385) retires durable `Starting` when the backend is
-//! `NotFound`, and the same NotFound path retires durable `Killing` to
-//! `Stopped`. Operator surfaces that only read `boxes.json` never call that
-//! path, so abandoned claims stay transitional and skip prune. These helpers
-//! close that gap without inventing pool `ps` inventory or observing Running
-//! boxes on every list.
+//! Manager `inspect` (#385) retires durable `Starting` / `Killing` to
+//! `Stopped` and durable `Pausing` / `Resuming` to `Failed` when the backend
+//! is `NotFound`. Operator surfaces that only read `boxes.json` never call
+//! that path, so abandoned claims stay transitional and skip prune. These
+//! helpers close that gap without inventing pool `ps` inventory or observing
+//! Running boxes on every list.
 
 use a3s_box_core::{ExecutionId, ExecutionManager};
 
@@ -13,15 +13,21 @@ use crate::state::{BoxRecord, StateFile};
 
 /// Whether this record needs manager observation for inventory honesty.
 ///
-/// Durable managed `Starting` and `Killing` are in scope: inspect NotFound
-/// retires both to Stopped without inventing an exit. `RestartStarting` must
-/// keep projecting Creating until reconcile resumes it; Running/Paused stay
-/// untouched so `ps` does not hammer live backends.
+/// Durable managed `Starting` / `Killing` (→ Stopped) and `Pausing` /
+/// `Resuming` (→ Failed) are in scope: inspect NotFound retires them without
+/// inventing an exit. `RestartStarting` must keep projecting Creating until
+/// reconcile resumes it; Running/Paused stay untouched so `ps` does not
+/// hammer live backends. Creating / Removing stay out of scope (create race /
+/// remove-retry, not inspect retirement).
 pub(crate) fn needs_managed_inventory_observation(record: &BoxRecord) -> bool {
-    record.managed_execution.is_some() && matches!(record.status.as_str(), "starting" | "killing")
+    record.managed_execution.is_some()
+        && matches!(
+            record.status.as_str(),
+            "starting" | "killing" | "pausing" | "resuming"
+        )
 }
 
-/// Call `manager.inspect` for each durable managed Starting/Killing claim.
+/// Call `manager.inspect` for each durable managed transitional claim in scope.
 ///
 /// Persist happens inside the manager store (same `boxes.json` as CLI
 /// [`StateFile`] when homes match). Callers must reload state afterward.
@@ -61,7 +67,7 @@ pub(crate) async fn observe_managed_inventory_claims_best_effort(
     Ok(())
 }
 
-/// Observe managed Starting/Killing claims under the default home, then reload.
+/// Observe in-scope managed claims under the default home, then reload.
 pub(crate) async fn refresh_default_home_after_inventory_observation(
 ) -> Result<StateFile, Box<dyn std::error::Error>> {
     let home = a3s_box_core::dirs_home();
@@ -79,7 +85,7 @@ pub(crate) async fn refresh_default_home_after_inventory_observation(
     Ok(StateFile::load_default()?)
 }
 
-/// Observe one record when it is managed Starting/Killing; return refreshed row.
+/// Observe one in-scope managed claim; return the refreshed row.
 pub(crate) async fn refresh_managed_inventory_record(
     record: BoxRecord,
 ) -> Result<BoxRecord, Box<dyn std::error::Error>> {
@@ -209,8 +215,35 @@ mod tests {
         )
     }
 
+    fn managed_pausing_record(id: &str, box_dir: &std::path::Path) -> BoxRecord {
+        managed_claim(
+            id,
+            box_dir,
+            "pausing",
+            ManagedExecutionOperation::Pause {
+                keep_memory: true,
+                operation_id: None,
+            },
+        )
+    }
+
+    fn managed_resuming_record(id: &str, box_dir: &std::path::Path) -> BoxRecord {
+        let mut record = managed_claim(
+            id,
+            box_dir,
+            "resuming",
+            ManagedExecutionOperation::Resume { operation_id: None },
+        );
+        // Warm-resume path observes the backend; cold resume finishes without
+        // inspect and would not exercise NotFound→Failed retirement.
+        if let Some(metadata) = record.managed_execution.as_mut() {
+            metadata.paused_with_memory = true;
+        }
+        record
+    }
+
     #[test]
-    fn needs_observation_for_managed_starting_and_killing_only() {
+    fn needs_observation_for_managed_start_kill_pause_resume_only() {
         let unmanaged = make_record("id", "box", "starting", None);
         assert!(!needs_managed_inventory_observation(&unmanaged));
 
@@ -261,7 +294,25 @@ mod tests {
             None,
         );
         pausing.managed_execution = running.managed_execution.clone();
-        assert!(!needs_managed_inventory_observation(&pausing));
+        assert!(needs_managed_inventory_observation(&pausing));
+
+        let mut resuming = make_record(
+            "55555555-5555-4555-8555-555555555555",
+            "box",
+            "resuming",
+            None,
+        );
+        resuming.managed_execution = running.managed_execution.clone();
+        assert!(needs_managed_inventory_observation(&resuming));
+
+        let mut creating = make_record(
+            "66666666-6666-4666-8666-666666666666",
+            "box",
+            "creating",
+            None,
+        );
+        creating.managed_execution = running.managed_execution.clone();
+        assert!(!needs_managed_inventory_observation(&creating));
     }
 
     #[tokio::test]
@@ -329,6 +380,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observe_retires_absent_managed_pausing_to_failed_without_inventing_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+        let record = managed_pausing_record(id, tmp.path());
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record.clone()).unwrap();
+        assert_eq!(
+            state.find_by_id(id).unwrap().status,
+            ManagedExecutionState::Pausing.as_status()
+        );
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        observe_managed_inventory_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(
+            failed.exit_code.is_none(),
+            "CLI observe path must not invent an exit code for abandoned Pausing"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_retires_absent_managed_resuming_to_failed_without_inventing_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+        let record = managed_resuming_record(id, tmp.path());
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record.clone()).unwrap();
+        assert_eq!(
+            state.find_by_id(id).unwrap().status,
+            ManagedExecutionState::Resuming.as_status()
+        );
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        observe_managed_inventory_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(
+            failed.exit_code.is_none(),
+            "CLI observe path must not invent an exit code for abandoned Resuming"
+        );
+    }
+
+    #[tokio::test]
     async fn observe_skips_running_managed_records() {
         let tmp = tempfile::tempdir().unwrap();
         let state_path = tmp.path().join("boxes.json");
@@ -357,10 +472,14 @@ mod tests {
     #[test]
     fn prune_still_requires_stopped_not_transitional() {
         // After observe retires Starting/Killing→Stopped, prune's existing
-        // filter reclaim it. Do not widen prune to accept transitional
-        // statuses as a shortcut around observation.
+        // filter reclaim it. Pausing/Resuming retire to Failed (not prune
+        // targets). Do not widen prune to accept transitional or failed
+        // statuses as a shortcut around observation / rm.
         assert!(!matches!("starting", "stopped" | "dead" | "created"));
         assert!(!matches!("killing", "stopped" | "dead" | "created"));
+        assert!(!matches!("pausing", "stopped" | "dead" | "created"));
+        assert!(!matches!("resuming", "stopped" | "dead" | "created"));
+        assert!(!matches!("failed", "stopped" | "dead" | "created"));
         assert!(!matches!(
             "restart_starting",
             "stopped" | "dead" | "created"
