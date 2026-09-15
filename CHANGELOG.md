@@ -99,6 +99,11 @@ All notable changes to A3S Box will be documented in this file.
   missing exit as clean stop). Authenticated exit `0` and operator
   `Stopped` without exit still project `Stopped`. Does **not** flip B2,
   invent Live digests, or widen prune/reclaim.
+- Windows StateFile reconcile no longer invents exit `1` (nor `0`) when
+  guest-result collection fails and both durable and persisted exit evidence
+  are absent. Aligns with Linux `resolve_workload_exit_code` and inspect
+  ExitCode null honesty; authenticated durable/persisted exits are kept.
+  Does **not** flip B2 or change WHPX guest-marker success paths.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
