@@ -33,6 +33,10 @@ pub struct AttachArgs {
 pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
+        Some(record) => record,
+        None => return Err(format!("No such container: {}", args.r#box).into()),
+    };
     let route = resolve_attach_route(&record, args.tty);
     if route.is_managed() {
         if record.status != "running" {
