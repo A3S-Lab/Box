@@ -23,7 +23,9 @@ pub(super) async fn wait_for_healthy(
             .into());
         }
 
-        let state = StateFile::load_default()?;
+        let state =
+            super::super::observe_inventory::refresh_default_home_after_inventory_observation()
+                .await?;
         let all_healthy = service_names.iter().all(|svc_name| {
             // Find the box for this service by label
             state
@@ -80,7 +82,9 @@ pub(super) async fn wait_for_completed(
             .into());
         }
 
-        let state = StateFile::load_default()?;
+        let state =
+            super::super::observe_inventory::refresh_default_home_after_inventory_observation()
+                .await?;
         let mut all_done = true;
         for svc_name in service_names {
             let records = state.find_by_label(LABEL_SERVICE, svc_name);

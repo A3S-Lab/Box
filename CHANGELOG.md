@@ -45,9 +45,13 @@ All notable changes to A3S Box will be documented in this file.
   observation is `NotFound` (AlreadyStopped-honest, no invented exit). CLI
   `inspect`, `ps`, `prune`, and `system-prune` now drive that observation
   before projecting status or selecting reclaim targets, so operator inventory
-  no longer keeps a forever-`starting` row that prune skipped. Only managed
-  transitional claims in scope are observed on those paths (`Starting` /
-  `Killing` / `Pausing` / `Resuming` / `Snapshotting` /
+  no longer keeps a forever-`starting` row that prune skipped. The same
+  home-scoped refresh also runs on read-only operator surfaces that project
+  or poll inventory (`info` box counts, `df` reclaim sizing, `events` initial
+  + each poll, and `compose wait` healthy/completed loops) so those paths do
+  not report stale forever-transitional rows while `ps` already cleaned them.
+  Only managed transitional claims in scope are observed on those paths
+  (`Starting` / `Killing` / `Pausing` / `Resuming` / `Snapshotting` /
   `UpdatingResources` — not every Running box, not Creating).
   Durable managed `Removing` resumes `ExecutionManager::remove` (idempotent
   finish_remove) on the same inventory surfaces and on `wait`, instead of

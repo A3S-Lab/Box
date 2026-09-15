@@ -5,7 +5,6 @@
 use clap::Args;
 
 use crate::output;
-use crate::state::StateFile;
 
 #[derive(Args)]
 pub struct DfArgs {
@@ -16,7 +15,10 @@ pub struct DfArgs {
 
 pub async fn execute(args: DfArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = super::open_image_store()?;
-    let state = StateFile::load_default()?;
+    // Present-tense reclaimables: drive inventory observe/resume before sizing
+    // boxes (same path as `ps` / `prune`).
+    let state =
+        super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
 
     // Image stats
     let images = store.list().await;

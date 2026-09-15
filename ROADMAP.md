@@ -656,7 +656,9 @@ retain process or filesystem sessions after its owner dies.
   before status projection or reclaim selection (managed Starting/Killing/
   Pausing/Resuming/Snapshotting/UpdatingResources; Pausing/Resuming/
   Snapshotting/UpdatingResources NotFound → Failed without invented exit or
-  published snapshot),
+  published snapshot), the same home-scoped refresh on `info` / `df` /
+  `events` / `compose wait` so read-only inventory projections stay
+  present-tense with `ps`,
   and resume of durable managed `Removing` via remove-retry (`finish_remove`)
   on those surfaces and `wait` (not inspect NotFound retirement; prune filter
   stays `stopped|dead|created`), resume of durable managed
