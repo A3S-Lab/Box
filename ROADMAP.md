@@ -673,6 +673,9 @@ retain process or filesystem sessions after its owner dies.
   loaded; interaction surfaces `exec` / `shell` / `cp` refresh one managed
   claim before require-running (inspect/top/port/attach parity); `inspect`
   projects `State.ExitCode` as null when durable exit is absent (no invent `0`);
+  Runtime Service `runtime_state` refuses inventing `Stopped` over durable
+  `Failed`/`dead` when exit is absent (operator `Stopped`+absent exit and
+  authenticated exit `0` remain `Stopped`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
