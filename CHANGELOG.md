@@ -90,6 +90,10 @@ All notable changes to A3S Box will be documented in this file.
   route selection — inspect / `top` / `port` / `attach` parity — so abandoned
   transitional claims are not treated as live sessions. Does **not** flip B2
   or invent exits.
+- `a3s-box inspect` no longer invents `State.ExitCode: 0` when durable
+  `exit_code` is absent (projects JSON `null` instead). Aligns with wait /
+  observe retire honesty after abandoned Starting/Killing. Does **not** flip
+  B2 or change Docker `Running`/`Paused` shape.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

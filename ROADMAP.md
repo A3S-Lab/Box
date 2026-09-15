@@ -671,7 +671,8 @@ retain process or filesystem sessions after its owner dies.
   retire (same `wait_poll_action` gate as legacy; archive wait also refuses
   inventing `0`); health workers fail closed when durable state cannot be
   loaded; interaction surfaces `exec` / `shell` / `cp` refresh one managed
-  claim before require-running (inspect/top/port/attach parity);
+  claim before require-running (inspect/top/port/attach parity); `inspect`
+  projects `State.ExitCode` as null when durable exit is absent (no invent `0`);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
