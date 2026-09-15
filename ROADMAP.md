@@ -658,8 +658,8 @@ retain process or filesystem sessions after its owner dies.
   Snapshotting/UpdatingResources NotFound → Failed without invented exit or
   published snapshot), the same home-scoped refresh on `info` / `df` /
   `events` / `compose wait` / `compose ps` / `compose logs` / `stats` /
-  `top` / `port` / `logs` / `attach` so read-only inventory projections stay
-  present-tense with `ps`,
+  `top` / `port` / `logs` / `attach` / `monitor` poll so read-only inventory
+  projections and restart decisions stay present-tense with `ps`,
   and resume of durable managed `Removing` via remove-retry (`finish_remove`)
   on those surfaces and `wait` (not inspect NotFound retirement; prune filter
   stays `stopped|dead|created`), resume of durable managed
@@ -669,7 +669,8 @@ retain process or filesystem sessions after its owner dies.
   refusing to invent exit `0` for transitional durable statuses **or** for
   terminal durable statuses whose `exit_code` is still absent after inspect
   retire (same `wait_poll_action` gate as legacy; archive wait also refuses
-  inventing `0`);
+  inventing `0`); health workers fail closed when durable state cannot be
+  loaded;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

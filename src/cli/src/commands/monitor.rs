@@ -255,10 +255,14 @@ async fn monitor_shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Single poll iteration: load state, find dead boxes, restart eligible ones.
-/// Also checks for unhealthy boxes that have a restart policy.
+/// Single poll iteration: observe managed inventory honesty, load state, find
+/// dead boxes, restart eligible ones. Also checks for unhealthy boxes that have
+/// a restart policy.
 async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
+    // Present-tense inventory before restart decisions — same home-scoped
+    // observe/resume path as `ps` / `system-prune` (no Running observe).
+    let state =
+        super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
 
     // Track active boxes for stability detection.
     for record in state.records() {

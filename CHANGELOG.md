@@ -79,6 +79,12 @@ All notable changes to A3S Box will be documented in this file.
   authoritative code is recorded (or `--timeout`). Archive-backed wait after
   remove / NotFound likewise refuses `unwrap_or(0)` when the archive has no
   exit. Does **not** invent exits in the manager, flip B2, or widen timeouts.
+- `a3s-box monitor` runs the same home-scoped inventory observe/resume refresh
+  at the start of each poll before restart/health decisions, so abandoned
+  managed transitional claims are present-tense with `ps`. Detached health
+  workers fail closed when durable state cannot be loaded (`health_worker_is_current`
+  returns false instead of treating unknown as still current). Does **not**
+  flip B2, invent exits, or observe every Running box.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
