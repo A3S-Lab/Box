@@ -1,9 +1,11 @@
 //! Drive managed observation / remove-retry before CLI inventory projections.
 //!
 //! Manager `inspect` (#385) retires durable `Starting` / `Killing` to
-//! `Stopped` and durable `Pausing` / `Resuming` to `Failed` when the backend
-//! is `NotFound`. Operator surfaces that only read `boxes.json` never call
-//! that path, so abandoned claims stay transitional and skip prune.
+//! `Stopped` and durable `Pausing` / `Resuming` / `Snapshotting` /
+//! `UpdatingResources` to `Failed` when the backend is `NotFound` (snapshot
+//! paths never invent a published filesystem snapshot). Operator surfaces that
+//! only read `boxes.json` never call that path, so abandoned claims stay
+//! transitional and skip prune.
 //!
 //! Durable managed `Removing` is a different class: inspect returns Conflict
 //! ("removal in progress"). Failed cleanup deliberately leaves `removing`;
@@ -20,16 +22,17 @@ use crate::state::{BoxRecord, StateFile};
 /// Whether this record needs manager observation for inventory honesty.
 ///
 /// Durable managed `Starting` / `Killing` (→ Stopped) and `Pausing` /
-/// `Resuming` (→ Failed) are in scope: inspect NotFound retires them without
-/// inventing an exit. `RestartStarting` must keep projecting Creating until
-/// reconcile resumes it; Running/Paused stay untouched so `ps` does not
-/// hammer live backends. Creating stays out of scope (create race). Removing
-/// uses [`needs_managed_removal_resume`] instead of inspect.
+/// `Resuming` / `Snapshotting` / `UpdatingResources` (→ Failed) are in scope:
+/// inspect NotFound retires them without inventing an exit or a published
+/// snapshot. `RestartStarting` must keep projecting Creating until reconcile
+/// resumes it; Running/Paused stay untouched so `ps` does not hammer live
+/// backends. Creating stays out of scope (create race). Removing uses
+/// [`needs_managed_removal_resume`] instead of inspect.
 pub(crate) fn needs_managed_inventory_observation(record: &BoxRecord) -> bool {
     record.managed_execution.is_some()
         && matches!(
             record.status.as_str(),
-            "starting" | "killing" | "pausing" | "resuming"
+            "starting" | "killing" | "pausing" | "resuming" | "snapshotting" | "updating_resources"
         )
 }
 
@@ -191,7 +194,8 @@ mod tests {
 
     use a3s_box_core::{
         BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation,
-        ExecutionManagerError, ExecutionManagerResult, KillOutcome, OperationId,
+        ExecutionManagerError, ExecutionManagerResult, ExecutionResourceUpdate,
+        ExecutionSnapshotId, KillOutcome, OperationId,
     };
     use a3s_box_runtime::{
         LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager,
@@ -321,6 +325,35 @@ mod tests {
         record
     }
 
+    fn managed_snapshotting_record(id: &str, box_dir: &std::path::Path) -> BoxRecord {
+        managed_claim(
+            id,
+            box_dir,
+            "snapshotting",
+            ManagedExecutionOperation::Snapshot {
+                snapshot_id: ExecutionSnapshotId::new("abandoned-snapshot").unwrap(),
+                source_state: ManagedExecutionState::Running,
+                operation_id: None,
+                freezer_applied: false,
+            },
+        )
+    }
+
+    fn managed_updating_resources_record(id: &str, box_dir: &std::path::Path) -> BoxRecord {
+        managed_claim(
+            id,
+            box_dir,
+            "updating_resources",
+            ManagedExecutionOperation::UpdateResources {
+                operation_id: OperationId::new("abandoned-update").unwrap(),
+                update: ExecutionResourceUpdate {
+                    pids_limit: Some(42),
+                    ..Default::default()
+                },
+            },
+        )
+    }
+
     #[test]
     fn needs_observation_for_managed_start_kill_pause_resume_only() {
         let unmanaged = make_record("id", "box", "starting", None);
@@ -383,6 +416,24 @@ mod tests {
         );
         resuming.managed_execution = running.managed_execution.clone();
         assert!(needs_managed_inventory_observation(&resuming));
+
+        let mut snapshotting = make_record(
+            "88888888-8888-4888-8888-888888888888",
+            "box",
+            "snapshotting",
+            None,
+        );
+        snapshotting.managed_execution = running.managed_execution.clone();
+        assert!(needs_managed_inventory_observation(&snapshotting));
+
+        let mut updating = make_record(
+            "99999999-9999-4999-8999-999999999999",
+            "box",
+            "updating_resources",
+            None,
+        );
+        updating.managed_execution = running.managed_execution.clone();
+        assert!(needs_managed_inventory_observation(&updating));
 
         let mut creating = make_record(
             "66666666-6666-4666-8666-666666666666",
@@ -572,6 +623,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observe_retires_absent_managed_snapshotting_to_failed_without_inventing_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "12121212-1212-4121-8121-121212121212";
+        let record = managed_snapshotting_record(id, tmp.path());
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record.clone()).unwrap();
+        assert_eq!(
+            state.find_by_id(id).unwrap().status,
+            ManagedExecutionState::Snapshotting.as_status()
+        );
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        observe_managed_inventory_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(
+            failed.exit_code.is_none(),
+            "CLI observe path must not invent an exit for abandoned Snapshotting"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_retires_absent_managed_updating_resources_to_failed_without_inventing_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("boxes.json");
+        let id = "13131313-1313-4131-8131-131313131313";
+        let record = managed_updating_resources_record(id, tmp.path());
+
+        let mut state = StateFile::load(&state_path).unwrap();
+        state.add(record.clone()).unwrap();
+        assert_eq!(
+            state.find_by_id(id).unwrap().status,
+            ManagedExecutionState::UpdatingResources.as_status()
+        );
+
+        let manager = LocalExecutionManager::new(&state_path, tmp.path(), Arc::new(AbsentBackend));
+        observe_managed_inventory_claims(&manager, state.list(true))
+            .await
+            .unwrap();
+
+        let refreshed = StateFile::load(&state_path).unwrap();
+        let failed = refreshed.find_by_id(id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert!(
+            failed.exit_code.is_none(),
+            "CLI observe path must not invent an exit for abandoned UpdatingResources"
+        );
+    }
+
+    #[tokio::test]
     async fn observe_skips_running_managed_records() {
         let tmp = tempfile::tempdir().unwrap();
         let state_path = tmp.path().join("boxes.json");
@@ -609,6 +724,11 @@ mod tests {
         assert!(!matches!("pausing", "stopped" | "dead" | "created"));
         assert!(!matches!("resuming", "stopped" | "dead" | "created"));
         assert!(!matches!("removing", "stopped" | "dead" | "created"));
+        assert!(!matches!("snapshotting", "stopped" | "dead" | "created"));
+        assert!(!matches!(
+            "updating_resources",
+            "stopped" | "dead" | "created"
+        ));
         assert!(!matches!("failed", "stopped" | "dead" | "created"));
         assert!(!matches!(
             "restart_starting",
