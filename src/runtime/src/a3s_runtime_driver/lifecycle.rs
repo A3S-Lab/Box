@@ -942,7 +942,15 @@ fn runtime_state(spec: &RuntimeUnitSpec, record: &BoxRecord) -> RuntimeResult<Ru
                 Ok(RuntimeUnitState::Succeeded)
             }
             RuntimeUnitClass::Task => Ok(RuntimeUnitState::Failed),
-            RuntimeUnitClass::Service if record.exit_code.unwrap_or_default() == 0 => {
+            // Clean Service stop: authenticated exit 0, or durable Stopped with
+            // no exit yet (operator stop / AlreadyStopped). Never invent Stopped
+            // over durable Failed when exit is absent.
+            RuntimeUnitClass::Service if record.exit_code == Some(0) => {
+                Ok(RuntimeUnitState::Stopped)
+            }
+            RuntimeUnitClass::Service
+                if state == ManagedExecutionState::Stopped && record.exit_code.is_none() =>
+            {
                 Ok(RuntimeUnitState::Stopped)
             }
             RuntimeUnitClass::Service => Ok(RuntimeUnitState::Failed),
@@ -1051,5 +1059,163 @@ fn not_found(spec: &RuntimeUnitSpec) -> RuntimeInspection {
         schema: RuntimeInspection::SCHEMA.into(),
         unit_id: spec.unit_id.clone(),
         last_generation: Some(spec.generation),
+    }
+}
+
+#[cfg(test)]
+mod runtime_state_honesty_tests {
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::PathBuf;
+
+    use a3s_box_core::{
+        BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, OperationId,
+    };
+    use a3s_runtime::contract::{RuntimeUnitClass, RuntimeUnitState};
+
+    use super::super::test_support::runtime_spec;
+    use super::runtime_state;
+    use crate::{BoxRecord, ManagedExecutionMetadata, ManagedExecutionState};
+
+    fn managed_terminal_record(status: &str, exit_code: Option<i32>) -> BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let box_dir = PathBuf::from("/tmp").join(id);
+        let metadata = ManagedExecutionMetadata::new(
+            OperationId::new("op-runtime-state").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "ext".into(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Sandbox,
+                    image: "alpine:latest".into(),
+                    ..Default::default()
+                },
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        BoxRecord {
+            id: id.into(),
+            short_id: BoxRecord::make_short_id(id),
+            name: "runtime-state".into(),
+            image: "alpine:latest".into(),
+            isolation: ExecutionIsolation::Sandbox,
+            managed_execution: Some(metadata),
+            status: status.into(),
+            pid: None,
+            pid_start_time: None,
+            cpus: 1,
+            memory_mb: 64,
+            volumes: vec![],
+            virtiofs_cache: None,
+            env: HashMap::new(),
+            cmd: vec![],
+            entrypoint: None,
+            box_dir: box_dir.clone(),
+            exec_socket_path: box_dir.join("exec.sock"),
+            console_log: box_dir.join("console.log"),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            auto_remove: false,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart_policy: "no".into(),
+            port_map: vec![],
+            labels: HashMap::new(),
+            stopped_by_user: false,
+            restart_count: 0,
+            max_restart_count: 0,
+            exit_code,
+            health_check: None,
+            healthcheck_disabled: false,
+            health_status: "none".into(),
+            health_retries: 0,
+            health_last_check: None,
+            network_mode: Default::default(),
+            network_name: None,
+            volume_names: vec![],
+            tmpfs: vec![],
+            anonymous_volumes: vec![],
+            resource_limits: Default::default(),
+            log_config: Default::default(),
+            add_host: vec![],
+            platform: None,
+            init: false,
+            read_only: false,
+            cap_add: vec![],
+            cap_drop: vec![],
+            security_opt: vec![],
+            privileged: false,
+            devices: vec![],
+            gpus: None,
+            shm_size: None,
+            stop_signal: None,
+            stop_timeout: None,
+            oom_kill_disable: false,
+            oom_score_adj: None,
+        }
+    }
+
+    #[test]
+    fn service_failed_without_exit_does_not_invent_stopped() {
+        let spec = runtime_spec("service-failed-no-exit", 1, RuntimeUnitClass::Service);
+        let record = managed_terminal_record("failed", None);
+        assert_eq!(
+            record.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert_eq!(
+            runtime_state(&spec, &record).unwrap(),
+            RuntimeUnitState::Failed,
+            "durable Failed + absent exit must not project Stopped via unwrap_or(0)"
+        );
+    }
+
+    #[test]
+    fn service_dead_without_exit_does_not_invent_stopped() {
+        let spec = runtime_spec("service-dead-no-exit", 1, RuntimeUnitClass::Service);
+        let record = managed_terminal_record("dead", None);
+        assert_eq!(
+            record.managed_state().unwrap(),
+            Some(ManagedExecutionState::Failed)
+        );
+        assert_eq!(
+            runtime_state(&spec, &record).unwrap(),
+            RuntimeUnitState::Failed,
+            "dead maps to Failed; absent exit must not invent clean Stopped"
+        );
+    }
+
+    #[test]
+    fn service_stopped_without_exit_stays_stopped() {
+        let spec = runtime_spec("service-stopped-no-exit", 1, RuntimeUnitClass::Service);
+        let record = managed_terminal_record("stopped", None);
+        assert_eq!(
+            runtime_state(&spec, &record).unwrap(),
+            RuntimeUnitState::Stopped,
+            "operator Stopped without exit must not be reclassified as Failed"
+        );
+    }
+
+    #[test]
+    fn service_failed_with_exit_zero_is_stopped() {
+        let spec = runtime_spec("service-failed-exit-zero", 1, RuntimeUnitClass::Service);
+        let record = managed_terminal_record("failed", Some(0));
+        assert_eq!(
+            runtime_state(&spec, &record).unwrap(),
+            RuntimeUnitState::Stopped
+        );
+    }
+
+    #[test]
+    fn service_failed_with_nonzero_exit_is_failed() {
+        let spec = runtime_spec("service-failed-exit-nonzero", 1, RuntimeUnitClass::Service);
+        let record = managed_terminal_record("failed", Some(1));
+        assert_eq!(
+            runtime_state(&spec, &record).unwrap(),
+            RuntimeUnitState::Failed
+        );
     }
 }

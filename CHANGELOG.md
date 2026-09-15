@@ -94,6 +94,11 @@ All notable changes to A3S Box will be documented in this file.
   `exit_code` is absent (projects JSON `null` instead). Aligns with wait /
   observe retire honesty after abandoned Starting/Killing. Does **not** flip
   B2 or change Docker `Running`/`Paused` shape.
+- Runtime Service observation no longer invents `Stopped` when durable state
+  is `Failed`/`dead` and `exit_code` is absent (`unwrap_or(0)` was treating
+  missing exit as clean stop). Authenticated exit `0` and operator
+  `Stopped` without exit still project `Stopped`. Does **not** flip B2,
+  invent Live digests, or widen prune/reclaim.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
