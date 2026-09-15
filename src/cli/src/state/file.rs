@@ -257,11 +257,8 @@ impl StateFile {
                                 "Failed to collect completed Windows guest result"
                             );
                         });
-                        record.exit_code = resolve_windows_reconcile_exit(
-                            record.exit_code,
-                            persisted,
-                            collected,
-                        );
+                        record.exit_code =
+                            resolve_windows_reconcile_exit(record.exit_code, persisted, collected);
                     } else if record.exit_code.is_none() {
                         record.exit_code = persisted;
                     }
