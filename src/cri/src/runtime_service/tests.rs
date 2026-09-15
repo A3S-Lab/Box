@@ -763,7 +763,30 @@ where
     let tmp = tempdir_for_unix_socket("a3s-cri-pty-test");
     let exec_socket_path = tmp.path().join("exec.sock");
     let pty_socket_path = tmp.path().join("pty.sock");
+    let exec_listener = bind_test_exec_listener(&exec_socket_path)?;
     let listener = bind_test_exec_listener(&pty_socket_path)?;
+
+    // Authenticated Ready for attach requires heartbeat on exec.sock (#413).
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = exec_listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
+                if let Ok(Some(frame)) = reader.read_frame().await {
+                    if frame.frame_type == a3s_transport::FrameType::Heartbeat {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        if let Ok(encoded) = heartbeat.encode() {
+                            let _ = writer.into_inner().write_all(&encoded).await;
+                        }
+                    }
+                }
+            });
+        }
+    });
 
     tokio::spawn(async move {
         let mut assert_request = Some(assert_request);
@@ -874,6 +897,12 @@ async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManage
     )
     .await
     .unwrap();
+    assert_eq!(
+        vm.state().await,
+        a3s_box_runtime::BoxState::Ready,
+        "attach_ready_test_vm requires an authenticated exec heartbeat at {}",
+        exec_socket_path.display()
+    );
     vm
 }
 
@@ -4483,12 +4512,21 @@ async fn test_port_forward_registers_session_for_recovered_ready_vm() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
 
-    let tmp = tempfile::tempdir().unwrap();
-    let exec_socket_path = tmp.path().join("exec.sock");
-    let vm = attach_ready_test_vm("sb-1", &exec_socket_path).await;
+    let Some(exec_server) =
+        spawn_counting_exec_server(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .await
+    else {
+        return;
+    };
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     assert_eq!(
         vm.port_forward_socket_path(),
-        Some(exec_socket_path.with_file_name("portfwd.sock").as_path())
+        Some(
+            exec_server
+                .socket_path
+                .with_file_name("portfwd.sock")
+                .as_path()
+        )
     );
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
