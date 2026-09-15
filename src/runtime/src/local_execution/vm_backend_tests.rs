@@ -78,6 +78,22 @@ struct DelayedExitStatusHandler {
     stop_calls: Arc<AtomicUsize>,
     available_after: usize,
     reports_running: bool,
+    /// When set, publish a legacy guest exit marker only once the delayed
+    /// provider exit becomes available — so cleanup waits for authenticated
+    /// guest status instead of inventing success from provider zero.
+    durable_exit_path: Option<std::path::PathBuf>,
+}
+
+impl DelayedExitStatusHandler {
+    fn publish_durable_exit_if_ready(&self) {
+        let Some(path) = self.durable_exit_path.as_ref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, "0\n");
+    }
 }
 
 impl VmHandler for DelayedExitStatusHandler {
@@ -108,7 +124,12 @@ impl VmHandler for DelayedExitStatusHandler {
 
     fn try_wait_exit(&mut self) -> a3s_box_core::Result<Option<i32>> {
         let poll = self.exit_polls.fetch_add(1, Ordering::SeqCst);
-        Ok((poll >= self.available_after).then_some(0))
+        if poll >= self.available_after {
+            self.publish_durable_exit_if_ready();
+            Ok(Some(0))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -357,8 +378,7 @@ async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_clea
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
     let rootfs = record.box_dir.join("rootfs");
     std::fs::create_dir_all(&rootfs).unwrap();
-    #[cfg(windows)]
-    std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
+    let durable_exit_path = rootfs.join(".a3s_exit_code");
     let exit_polls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
@@ -370,6 +390,7 @@ async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_clea
             stop_calls: Arc::clone(&stop_calls),
             available_after: 60,
             reports_running: false,
+            durable_exit_path: Some(durable_exit_path),
         }));
     }
     backend
@@ -401,6 +422,7 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
             stop_calls: Arc::clone(&stop_calls),
             available_after: usize::MAX,
             reports_running: false,
+            durable_exit_path: None,
         }));
     }
     backend
@@ -441,6 +463,7 @@ async fn disappearing_live_handle_waits_for_delayed_terminal_status() {
         stop_calls: Arc::clone(&stop_calls),
         available_after: 3,
         reports_running: true,
+        durable_exit_path: None,
     }));
     let manager = Arc::new(Mutex::new(runtime));
     backend

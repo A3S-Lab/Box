@@ -174,9 +174,10 @@ pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
 /// proof that the guest workload succeeded.
 ///
 /// Once the private terminal channel is staged, an empty or invalid status
-/// means the guest never published a result. A nonzero provider status remains
-/// useful crash evidence, but a provider zero is not substituted for missing
-/// guest state.
+/// means the guest never published a result. When the terminal file is absent
+/// entirely, only a legacy rootfs marker or a **nonzero** provider status is
+/// accepted — a provider zero is never substituted for missing guest state
+/// (same invent-success refusal as pending/invalid).
 pub fn resolve_workload_exit_code(box_dir: &Path, provider_exit_code: Option<i32>) -> Option<i32> {
     match read_guest_terminal_status(box_dir) {
         TerminalStatusRead::Complete(status) => return Some(status.exit_code),
@@ -208,7 +209,7 @@ pub fn resolve_workload_exit_code(box_dir: &Path, provider_exit_code: Option<i32
                 .ok()
                 .and_then(|contents| contents.trim().parse::<i32>().ok())
         })
-        .or(provider_exit_code)
+        .or_else(|| provider_exit_code.filter(|exit_code| *exit_code != 0))
 }
 
 /// A temporarily attached persistent rootfs.
@@ -652,6 +653,29 @@ mod tests {
         assert_eq!(read_persisted_exit_code(temp.path()), None);
         assert_eq!(resolve_workload_exit_code(temp.path(), Some(0)), None);
         assert_eq!(resolve_workload_exit_code(temp.path(), Some(9)), Some(9));
+    }
+
+    #[test]
+    fn absent_terminal_refuses_to_invent_success_from_provider_zero() {
+        // No terminal status file and no legacy marker: a clean shim/provider
+        // exit must not invent guest workload success (PendingOrInvalid parity).
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(read_persisted_exit_code(temp.path()), None);
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(0)), None);
+        assert_eq!(resolve_workload_exit_code(temp.path(), None), None);
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(9)), Some(9));
+    }
+
+    #[test]
+    fn absent_terminal_keeps_authenticated_legacy_rootfs_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("rootfs/.a3s_exit_code");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "0").unwrap();
+
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(0)), Some(0));
+        assert_eq!(resolve_workload_exit_code(temp.path(), Some(9)), Some(0));
     }
 
     #[test]

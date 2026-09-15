@@ -679,7 +679,10 @@ retain process or filesystem sessions after its owner dies.
   only authenticated durable/persisted exit after guest-result collect
   failure (no invent `0`/`1` when both absent); CRI SPDY exec projects
   kubectl error-stream status only from authenticated `ExecEvent::Exit` /
-  `PtyExit` (absent → synthetic `255`, never invent success `0`);
+  `PtyExit` (absent → synthetic `255`, never invent success `0`); Linux
+  `resolve_workload_exit_code` refuses provider/shim `0` when terminal
+  status is absent and no legacy rootfs marker exists (PendingOrInvalid
+  parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

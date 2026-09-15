@@ -110,6 +110,11 @@ All notable changes to A3S Box will be documented in this file.
   synthetic `255` (supervisor parity) instead of empty error-stream close
   (`0`). Authenticated exit `0` still silent-closes. Does **not** flip B2,
   invent Live digests, or widen exec timeouts.
+- Linux `resolve_workload_exit_code` no longer invents guest success from a
+  clean provider/shim exit (`0`) when the private terminal status is absent
+  and no legacy rootfs marker exists (PendingOrInvalid parity). Nonzero
+  provider crash evidence and authenticated markers/Complete status are kept.
+  Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
