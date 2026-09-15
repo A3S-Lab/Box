@@ -288,10 +288,20 @@ fn health_probe_timing(hc: &HealthCheck) -> (std::time::Duration, std::time::Dur
 
 #[cfg(not(windows))]
 fn health_worker_is_current(box_id: &str, expected_generation: Option<i64>) -> bool {
+    // Fail closed: if durable state cannot be loaded, do not keep probing as
+    // if this worker still owns the box (unknown is not "still current").
     let Ok(state) = StateFile::load_default() else {
-        return true;
+        return false;
     };
-    state.find_by_id(box_id).is_some_and(|record| {
+    health_worker_matches_record(state.find_by_id(box_id), expected_generation)
+}
+
+#[cfg(not(windows))]
+fn health_worker_matches_record(
+    record: Option<&crate::state::BoxRecord>,
+    expected_generation: Option<i64>,
+) -> bool {
+    record.is_some_and(|record| {
         record.status == "running"
             && expected_generation
                 .map(|generation| health_generation(record) == Some(generation))
@@ -539,6 +549,32 @@ mod tests {
                 "1234",
             ]
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_health_worker_matches_record_requires_running_generation() {
+        assert!(!health_worker_matches_record(None, Some(1)));
+
+        let stopped = crate::test_helpers::fixtures::make_record("id", "box", "stopped", Some(1));
+        assert!(!health_worker_matches_record(Some(&stopped), Some(1)));
+
+        let mut running =
+            crate::test_helpers::fixtures::make_record("id", "box", "running", Some(1));
+        running.started_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-06T00:13:02.508035123Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let generation = health_generation(&running).expect("started_at yields generation");
+        assert!(health_worker_matches_record(
+            Some(&running),
+            Some(generation)
+        ));
+        assert!(!health_worker_matches_record(
+            Some(&running),
+            Some(generation + 1)
+        ));
     }
 
     #[cfg(not(windows))]
