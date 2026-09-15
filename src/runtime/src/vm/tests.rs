@@ -251,6 +251,21 @@ impl VmHandler for CompletionCollectedByStopHandler {
 struct DelayedCompletionHandler {
     polls: Arc<AtomicUsize>,
     available_after: usize,
+    /// Publish authenticated guest exit only when the delayed provider status
+    /// becomes available — never invent success from provider zero alone.
+    durable_exit_path: Option<PathBuf>,
+}
+
+impl DelayedCompletionHandler {
+    fn publish_durable_exit_if_ready(&self) {
+        let Some(path) = self.durable_exit_path.as_ref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, "0\n");
+    }
 }
 
 impl VmHandler for DelayedCompletionHandler {
@@ -280,7 +295,12 @@ impl VmHandler for DelayedCompletionHandler {
 
     fn try_wait_exit(&mut self) -> Result<Option<i32>> {
         let poll = self.polls.fetch_add(1, Ordering::SeqCst);
-        Ok((poll >= self.available_after).then_some(0))
+        if poll >= self.available_after {
+            self.publish_durable_exit_if_ready();
+            Ok(Some(0))
+        } else {
+            Ok(None)
+        }
     }
 }
 

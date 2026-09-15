@@ -906,14 +906,34 @@ async fn wait_for_delayed_terminal_exit(
     let deadline = tokio::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
     let mut reported_wait_error = false;
     loop {
-        if let Some(exit_code) = handler.exit_code() {
-            return Some(exit_code);
-        }
+        // Prefer authenticated guest/persisted status over a clean provider
+        // shutdown — provider zero must not invent guest success (#404).
         if let Some(exit_code) = boot_failure_persisted_exit_code(box_dir) {
             return Some(exit_code);
         }
+        #[cfg(not(target_os = "windows"))]
+        if let Some(exit_code) =
+            crate::rootfs::resolve_workload_exit_code(box_dir, handler.exit_code())
+        {
+            return Some(exit_code);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(exit_code) = handler.exit_code().filter(|code| *code != 0) {
+            return Some(exit_code);
+        }
         match handler.try_wait_exit() {
-            Ok(Some(exit_code)) => return Some(exit_code),
+            Ok(Some(provider_exit_code)) => {
+                #[cfg(not(target_os = "windows"))]
+                if let Some(exit_code) =
+                    crate::rootfs::resolve_workload_exit_code(box_dir, Some(provider_exit_code))
+                {
+                    return Some(exit_code);
+                }
+                #[cfg(target_os = "windows")]
+                if provider_exit_code != 0 {
+                    return Some(provider_exit_code);
+                }
+            }
             Ok(None) => {}
             Err(error) => {
                 if !reported_wait_error {

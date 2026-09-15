@@ -115,6 +115,12 @@ All notable changes to A3S Box will be documented in this file.
   and no legacy rootfs marker exists (PendingOrInvalid parity). Nonzero
   provider crash evidence and authenticated markers/Complete status are kept.
   Does **not** flip B2 or invent Live digests.
+- Boot-failure delayed terminal poll no longer invents guest success from a
+  clean provider/shim exit (`0`) while waiting for exact status after cleanup
+  resolve filtered it out (`wait_for_delayed_terminal_exit` now uses the same
+  Absent/PendingOrInvalid honesty as `resolve_workload_exit_code`). Durable
+  markers and nonzero provider crash evidence still complete the wait. Does
+  **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

@@ -682,7 +682,9 @@ retain process or filesystem sessions after its owner dies.
   `PtyExit` (absent → synthetic `255`, never invent success `0`); Linux
   `resolve_workload_exit_code` refuses provider/shim `0` when terminal
   status is absent and no legacy rootfs marker exists (PendingOrInvalid
-  parity);
+  parity); boot-failure delayed terminal poll
+  (`wait_for_delayed_terminal_exit`) uses the same refusal so cleanup cannot
+  re-invent success after resolve filtered provider `0`;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
