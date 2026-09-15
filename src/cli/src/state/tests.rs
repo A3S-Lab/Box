@@ -619,6 +619,32 @@ fn test_reconcile_reads_exit_code_from_windows_rootfs() {
 }
 
 #[test]
+fn test_resolve_windows_reconcile_exit_does_not_invent_on_collect_failure() {
+    use crate::state::file::resolve_windows_reconcile_exit;
+
+    assert_eq!(
+        resolve_windows_reconcile_exit(None, None, Err(())),
+        None,
+        "missing durable+persisted must not invent 0 or 1 after collect failure"
+    );
+    assert_eq!(
+        resolve_windows_reconcile_exit(None, Some(9), Err(())),
+        Some(9),
+        "persisted guest marker survives collect failure"
+    );
+    assert_eq!(
+        resolve_windows_reconcile_exit(Some(0), None, Err(())),
+        Some(0),
+        "authenticated clean exit must not be rewritten to failure"
+    );
+    assert_eq!(
+        resolve_windows_reconcile_exit(None, None, Ok(23)),
+        Some(23),
+        "successful collection projects the guest/shim code"
+    );
+}
+
+#[test]
 fn test_reconcile_running_without_pid() {
     let tmp = TempDir::new().unwrap();
     let path = test_state_path(&tmp);

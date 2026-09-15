@@ -7,6 +7,24 @@ use a3s_box_runtime::BoxStateStore;
 use super::BoxRecord;
 use crate::state::policy::{is_record_pid_live, should_restart};
 
+/// Project Windows guest-result collection onto inventory `exit_code`.
+///
+/// On success, use the collected guest/shim code. On collection failure, keep
+/// only authenticated evidence (`durable` record exit or persisted guest
+/// marker). Never invent `0` or `1` when both are absent — same honesty as
+/// Linux [`a3s_box_runtime::rootfs::resolve_workload_exit_code`] and inspect
+/// ExitCode null projection.
+pub(crate) fn resolve_windows_reconcile_exit(
+    durable: Option<i32>,
+    persisted: Option<i32>,
+    collected: Result<i32, ()>,
+) -> Option<i32> {
+    match collected {
+        Ok(code) => Some(code),
+        Err(()) => durable.or(persisted),
+    }
+}
+
 /// Persistent state file backed by JSON.
 pub struct StateFile {
     store: BoxStateStore,
@@ -221,23 +239,29 @@ impl StateFile {
                 {
                     let persisted =
                         a3s_box_runtime::rootfs::read_persisted_exit_code(&record.box_dir);
+                    let authenticated = record.exit_code.or(persisted);
                     if record.box_dir.join("rootfs").is_dir() {
-                        let fallback = record.exit_code.or(persisted).unwrap_or(0);
-                        match a3s_box_runtime::vm::collect_windows_guest_result(
+                        // `collect_windows_guest_result` uses a nonzero shim hint
+                        // as crash evidence when the guest marker is missing; a
+                        // zero hint must not invent success (see collector).
+                        let shim_hint = authenticated.unwrap_or(0);
+                        let collected = a3s_box_runtime::vm::collect_windows_guest_result(
                             &record.box_dir,
                             &record.log_config,
-                            fallback,
-                        ) {
-                            Ok(code) => record.exit_code = Some(code),
-                            Err(error) => {
-                                tracing::warn!(
-                                    box_id = %record.id,
-                                    %error,
-                                    "Failed to collect completed Windows guest result"
-                                );
-                                record.exit_code = Some(if fallback == 0 { 1 } else { fallback });
-                            }
-                        }
+                            shim_hint,
+                        )
+                        .map_err(|error| {
+                            tracing::warn!(
+                                box_id = %record.id,
+                                %error,
+                                "Failed to collect completed Windows guest result"
+                            );
+                        });
+                        record.exit_code = resolve_windows_reconcile_exit(
+                            record.exit_code,
+                            persisted,
+                            collected,
+                        );
                     } else if record.exit_code.is_none() {
                         record.exit_code = persisted;
                     }

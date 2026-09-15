@@ -675,7 +675,9 @@ retain process or filesystem sessions after its owner dies.
   projects `State.ExitCode` as null when durable exit is absent (no invent `0`);
   Runtime Service `runtime_state` refuses inventing `Stopped` over durable
   `Failed`/`dead` when exit is absent (operator `Stopped`+absent exit and
-  authenticated exit `0` remain `Stopped`);
+  authenticated exit `0` remain `Stopped`); Windows StateFile reconcile keeps
+  only authenticated durable/persisted exit after guest-result collect
+  failure (no invent `0`/`1` when both absent);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
