@@ -697,7 +697,10 @@ retain process or filesystem sessions after its owner dies.
   `VmManager::{try_wait_exit,exit_code,has_exited}` authenticate cached
   shim/provider `0` at source (pool deferred-main / start-during-startup
   cannot bypass terminal observation); Windows `cleanup_boot_failure`
-  collect-Err fallback refuses inventing clean provider `0`;
+  collect-Err fallback refuses inventing clean provider `0`; Unix
+  `wait_for_exec_ready` refuses inventing Ready/`Ok(())` when durable guest
+  exit is already persisted before the exec heartbeat (Windows `#407`/`#408`
+  fail-closed parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
