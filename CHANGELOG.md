@@ -47,7 +47,8 @@ All notable changes to A3S Box will be documented in this file.
   before projecting status or selecting reclaim targets, so operator inventory
   no longer keeps a forever-`starting` row that prune skipped. Only managed
   transitional claims in scope are observed on those paths (`Starting` /
-  `Killing` / `Pausing` / `Resuming` — not every Running box, not Creating).
+  `Killing` / `Pausing` / `Resuming` / `Snapshotting` /
+  `UpdatingResources` — not every Running box, not Creating).
   Durable managed `Removing` resumes `ExecutionManager::remove` (idempotent
   finish_remove) on the same inventory surfaces and on `wait`, instead of
   forever-`removing` rows that inspect Conflict hard-fails. `a3s-box wait`
@@ -55,8 +56,9 @@ All notable changes to A3S Box will be documented in this file.
   (not only OCI-routed ones) and never invents exit `0` for transitional
   durable statuses (`starting`/`creating`/restart claims, etc.) on the legacy
   poll path. Inventory observe covers durable managed `Killing`
-  (NotFound → Stopped) and durable managed `Pausing` / `Resuming`
-  (NotFound → Failed), each without inventing an exit, so forever-
+  (NotFound → Stopped) and durable managed `Pausing` / `Resuming` /
+  `Snapshotting` / `UpdatingResources` (NotFound → Failed), each without
+  inventing an exit or a published filesystem snapshot, so forever-
   transitional rows do not skip prune / lie in `ps`. `RestartStarting` /
   `RestartStopping` keep projecting Creating until reconcile resumes them;
   inspect does **not** call `recover_start`. Does **not** flip B2, invent

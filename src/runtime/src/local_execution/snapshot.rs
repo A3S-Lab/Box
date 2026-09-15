@@ -129,10 +129,23 @@ impl LocalExecutionManager {
                 .await?
                 .ok_or(ExecutionManagerError::NotFound(execution_id));
         }
-        self.drive_snapshot(record).await?;
-        self.get(&execution_id)
-            .await?
-            .ok_or(ExecutionManagerError::NotFound(execution_id))
+        match self.drive_snapshot(record.clone()).await {
+            Ok(_) => self
+                .get(&execution_id)
+                .await?
+                .ok_or(ExecutionManagerError::NotFound(execution_id)),
+            Err(error) => {
+                // Sandbox NotFound retirement (and similar) may leave a terminal
+                // record while returning Err — still report the converged row.
+                let Some(current) = self.get(&execution_id).await? else {
+                    return Err(error);
+                };
+                if managed_state(&current)? == ManagedExecutionState::Snapshotting {
+                    return Err(error);
+                }
+                Ok(current)
+            }
+        }
     }
 
     async fn abort_non_sandbox_snapshotting_if_needed(
@@ -183,7 +196,24 @@ impl LocalExecutionManager {
         {
             return self.drive_cold_paused_snapshot(record, snapshot_id).await;
         }
-        let observation = self.backend.inspect(&record).await?;
+        let observation = match self.backend.inspect(&record).await {
+            Ok(observation) => observation,
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // Abandoned Snapshotting (no backend): retire without inventing
+                // a published filesystem snapshot. Same NotFound-honest class as
+                // Pausing/Resuming → Failed on inspect.
+                self.release_execution_resources(&record).await?;
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Snapshotting,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await?;
+                return Err(ExecutionManagerError::NotFound(execution_id));
+            }
+            Err(error) => return Err(error),
+        };
         observation.validate(&execution_id)?;
         let mut handle = required_handle(&observation, &execution_id)?;
 
