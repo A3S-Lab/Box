@@ -59,10 +59,12 @@ All notable changes to A3S Box will be documented in this file.
   (NotFound → Stopped) and durable managed `Pausing` / `Resuming` /
   `Snapshotting` / `UpdatingResources` (NotFound → Failed), each without
   inventing an exit or a published filesystem snapshot, so forever-
-  transitional rows do not skip prune / lie in `ps`. `RestartStarting` /
-  `RestartStopping` keep projecting Creating until reconcile resumes them;
-  inspect does **not** call `recover_start`. Does **not** flip B2, invent
-  Live digests, invent pool `ps` inventory, or widen prune beyond
+  transitional rows do not skip prune / lie in `ps`. Durable managed
+  `RestartStarting` / `RestartStopping` resume via
+  `ExecutionManager::reconcile` on the creation operation identity (same
+  inventory surfaces and `wait`); inspect still keeps projecting Creating and
+  does **not** NotFound-retire or call `recover_start`. Does **not** flip B2,
+  invent Live digests, invent pool `ps` inventory, or widen prune beyond
   `stopped|dead|created`.
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
