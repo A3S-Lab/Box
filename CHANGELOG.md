@@ -126,6 +126,11 @@ All notable changes to A3S Box will be documented in this file.
   status is absent (else-branch parity with delayed poll / Linux resolve).
   Nonzero provider crash evidence is still recorded. Does **not** flip B2 or
   invent Live digests.
+- Windows operator `destroy`/`stop` no longer invents guest success from a
+  clean provider exit (`0`) when durable guest status is absent; collection
+  goes through `collect_windows_guest_result` (false-success refusal) with
+  nonzero provider crash evidence kept. Does **not** flip B2 or invent Live
+  digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

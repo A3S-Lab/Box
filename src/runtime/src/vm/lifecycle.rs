@@ -322,7 +322,30 @@ impl VmManager {
             }
             #[cfg(windows)]
             {
-                self.shim_exit_code = handler.exit_code();
+                // Operator stop / destroy must not invent guest success from a
+                // clean provider exit when durable status is absent (#406 parity).
+                self.shim_exit_code = match handler.exit_code() {
+                    Some(provider_exit_code) => {
+                        match super::collect_windows_guest_result(
+                            &box_dir,
+                            &self.log_config,
+                            provider_exit_code,
+                        ) {
+                            Ok(exit_code) => Some(exit_code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    box_id = %self.box_id,
+                                    error = %error,
+                                    "Failed to collect Windows guest result during destroy"
+                                );
+                                super::windows_guest_persisted_exit_code(&box_dir).or_else(|| {
+                                    (provider_exit_code != 0).then_some(provider_exit_code)
+                                })
+                            }
+                        }
+                    }
+                    None => super::windows_guest_persisted_exit_code(&box_dir),
+                };
             }
 
             #[cfg(unix)]

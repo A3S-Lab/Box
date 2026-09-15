@@ -28,6 +28,34 @@ async fn test_destroy_runs_host_teardown_even_when_handler_stop_fails() {
     );
 }
 
+#[tokio::test]
+async fn test_destroy_refuses_invented_provider_zero_without_durable_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-destroy-provider-zero-no-durable".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    *vm.handler.write().await = Some(Box::new(LiveBootStoppedProviderZeroHandler {
+        stopped: false,
+    }));
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+    std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+
+    let result = vm.destroy_with_options(default_stop_signal(), 100).await;
+    assert!(
+        result.is_ok(),
+        "operator stop teardown must succeed: {result:?}"
+    );
+
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "operator stop must not invent guest success from clean provider exit 0"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn destroy_skips_guest_stop_when_workload_already_exited() {

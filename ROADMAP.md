@@ -686,7 +686,9 @@ retain process or filesystem sessions after its owner dies.
   (`wait_for_delayed_terminal_exit`) uses the same refusal so cleanup cannot
   re-invent success after resolve filtered provider `0`; Windows live
   boot-failure cleanup likewise refuses provider/stop `0` when the guest never
-  completed and durable status is absent;
+  completed and durable status is absent; Windows operator destroy/stop uses
+  `collect_windows_guest_result` instead of raw provider exit so clean `0`
+  without durable status stays Absent;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
