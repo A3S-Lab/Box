@@ -414,7 +414,10 @@ pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> 
     let mut runtime_client = None;
 
     loop {
-        let state = StateFile::load_default()?;
+        // Present-tense active set: retire/resume abandoned managed claims
+        // before selecting targets (same home-scoped path as `ps` / `events`).
+        let state =
+            super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
 
         // Determine which boxes to show
         let targets = select_targets(&state, args.r#box.as_deref())?;
