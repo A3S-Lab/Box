@@ -56,7 +56,6 @@ fn make_vm_manager_with_home(home_dir: &Path) -> VmManager {
         event_emitter: emitter,
         provider: None,
         handler: Arc::new(RwLock::new(None)),
-        #[cfg(unix)]
         exec_client: None,
         net_manager: None,
         home_dir: home_dir.to_path_buf(),

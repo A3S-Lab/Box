@@ -43,7 +43,6 @@ use tracing::Instrument;
 #[cfg(unix)]
 use libc;
 
-#[cfg(unix)]
 use crate::grpc::ExecClient;
 #[cfg(unix)]
 use crate::tee::TeeExtension;
@@ -349,8 +348,8 @@ pub struct VmManager {
     /// VM handler (runtime operations on running VM)
     pub(crate) handler: Arc<RwLock<Option<Box<dyn VmHandler>>>>,
 
-    /// Exec client for executing commands in the guest
-    #[cfg(unix)]
+    /// Exec client for executing commands in the guest (also the retained
+    /// auth proof for Ready on Unix and Windows).
     pub(crate) exec_client: Option<ExecClient>,
 
     /// Network backend manager for bridge networking (None if TSI mode).
@@ -445,7 +444,6 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
-            #[cfg(unix)]
             exec_client: None,
             net_manager: None,
             home_dir,
@@ -487,7 +485,6 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
-            #[cfg(unix)]
             exec_client: None,
             net_manager: None,
             home_dir,
@@ -755,7 +752,6 @@ impl VmManager {
             event_emitter,
             provider: Some(provider),
             handler: Arc::new(RwLock::new(None)),
-            #[cfg(unix)]
             exec_client: None,
             net_manager: None,
             home_dir,

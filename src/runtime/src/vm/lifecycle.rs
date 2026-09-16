@@ -773,22 +773,23 @@ impl VmManager {
 
     /// Re-prove guest exec after Ready was authenticated.
     ///
-    /// Prefer the retained client from promote/attach (Unix); otherwise
+    /// Prefer the retained client from boot/promote/attach; otherwise
     /// reconnect via the exec socket (Unix) or named-pipe +
     /// `guest-control.ready` (Windows). Missing proof means Ready cannot be
     /// sustained.
     async fn exec_endpoint_still_authenticated(&self) -> bool {
         const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+        if let Some(client) = self.exec_client.as_ref() {
+            if let Ok(Ok(true)) =
+                tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await
+            {
+                return true;
+            }
+        }
+
         #[cfg(unix)]
         {
-            if let Some(client) = self.exec_client.as_ref() {
-                match tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await {
-                    Ok(Ok(true)) => return true,
-                    Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {}
-                }
-            }
-
             let Some(path) = self.exec_socket_path.as_ref() else {
                 return false;
             };
