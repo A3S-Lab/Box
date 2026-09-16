@@ -288,12 +288,11 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `StopContainer` refuses inventing live stop / VM teardown / sandbox
   NotReady / network disconnect from durable Running alone — demote inventable
   Running first (#446 / #445/#434). Does **not** invent Live digests or flip B2.
-- CRI unit-test helpers attach a disposable `sleep` shim PID instead of
-  `std::process::id()` so Stop/Remove destroy cannot SIGTERM the cargo-test
-  binary; invent-refusal fixtures use a heartbeat-only keepalive exec server
-  (no multi-hour Data exit delay) and forget the stub `Child` so waitpid
-  reaping cannot hang Drop (#445 CI). Does **not** invent Live digests or
-  flip B2.
+- CRI unit-test helpers install an in-process instant-stop shim handler after
+  attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
+  on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only
+  keepalive exec server (no multi-hour Data exit delay) with per-connection
+  accept tasks (#445 CI). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

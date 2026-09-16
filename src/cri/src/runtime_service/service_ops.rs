@@ -609,25 +609,17 @@ impl BoxRuntimeService {
         if let Some(exec_socket_path) = &self.test_vm_exec_socket_path {
             let box_id = box_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let mut vm = VmManager::with_box_id(box_config, EventEmitter::new(256), box_id);
-            // Disposable shim PID — never attach the cargo-test process. Destroy
-            // sends SIGTERM to this PID; attaching std::process::id() self-kills
-            // the suite (#445 CI SIGTERM).
-            let stub = std::process::Command::new("sleep")
-                .arg("3600")
-                .spawn()
-                .map_err(|error| {
-                    Status::internal(format!("failed to spawn disposable VMM stub: {error}"))
-                })?;
-            let stub_pid = stub.id();
-            // Ownership transfers to the OS until destroy SIGTERMs stub_pid.
-            std::mem::forget(stub);
+            // Attach briefly to the cargo-test PID for ShimHandler::is_running,
+            // then swap in an instant-stop handler so destroy never SIGTERMs
+            // this process or waits on a host sleep stub (#445 CI).
             vm.attach_running_process(
-                stub_pid,
+                std::process::id(),
                 exec_socket_path.clone(),
                 Some(exec_socket_path.with_file_name("pty.sock")),
             )
             .await
             .map_err(box_error_to_status)?;
+            vm.install_instant_stop_test_handler().await;
             if let Err(status) = Self::require_authenticated_ready_for_sandbox(&vm).await {
                 let _ = vm.destroy().await;
                 return Err(status);

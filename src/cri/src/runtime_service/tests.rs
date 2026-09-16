@@ -478,43 +478,6 @@ async fn test_cri_one_container_pod_smoke_flow() {
 struct TestExecServer {
     _tmp: tempfile::TempDir,
     socket_path: PathBuf,
-    /// Disposable shim PID stand-in. Must not be the cargo-test PID: destroy
-    /// sends SIGTERM to the attached PID (#445 CI self-kill).
-    _vmm_stub: Option<DisposableVmmStub>,
-}
-
-/// Child process used as a fake VMM shim so destroy can SIGTERM safely.
-struct DisposableVmmStub {
-    pid: u32,
-}
-
-impl DisposableVmmStub {
-    fn spawn() -> Self {
-        let child = std::process::Command::new("sleep")
-            .arg("3600")
-            .spawn()
-            .expect("spawn disposable VMM stub for CRI tests");
-        let pid = child.id();
-        // Forget the Child handle: ShimHandler::stop may waitpid-reap this PID
-        // in attached mode, and a second Child::wait/try_wait can hang the suite.
-        std::mem::forget(child);
-        Self { pid }
-    }
-
-    fn pid(&self) -> u32 {
-        self.pid
-    }
-}
-
-impl Drop for DisposableVmmStub {
-    fn drop(&mut self) {
-        // Best-effort SIGKILL; never wait — destroy/waitpid may already have reaped.
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &self.pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
 }
 
 struct TestPtyServer {
@@ -625,11 +588,9 @@ where
                     break;
                 }
                 Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
-                    // Destroy may deliver signal-main over this socket. Do not ACK:
-                    // an ACK would make destroy wait out the provider grace window
-                    // for a host sleep stub that guest signal cannot kill. Closing
-                    // without ACK keeps fail-closed teardown on handler.stop.
-                    continue;
+                    // Destroy may deliver signal-main over this socket. Drop
+                    // without ACK so teardown fails closed to InstantStop /
+                    // handler.stop instead of waiting provider grace (#445 CI).
                 }
                 Some(frame) => {
                     panic!("unexpected frame type: {:?}", frame.frame_type);
@@ -641,7 +602,6 @@ where
     Some(TestExecServer {
         _tmp: tmp,
         socket_path,
-        _vmm_stub: None,
     })
 }
 
@@ -657,44 +617,48 @@ async fn spawn_keepalive_exec_server() -> Option<TestExecServer> {
 
     tokio::spawn(async move {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = tokio::io::split(stream);
-            let mut reader = a3s_transport::FrameReader::new(r);
-            let mut writer = a3s_transport::FrameWriter::new(w);
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            // Per-connection task: a wedged read must not block Accept for
+            // subsequent heartbeats / signal-main (#445 CI).
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
 
-            match reader.read_frame().await.unwrap() {
-                None => continue,
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
-                    let heartbeat = a3s_transport::Frame::heartbeat();
-                    let encoded = heartbeat.encode().unwrap();
-                    writer.into_inner().write_all(&encoded).await.unwrap();
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // Fail closed on signal-main -- drop without ACK.
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        // Never sleep: invent-refusal fixtures must not open a long
+                        // exec stream on the keepalive socket.
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code: 255,
+                            oom_killed: false,
+                        };
+                        let _ = writer
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
+                            .await;
+                    }
+                    Some(frame) => {
+                        panic!("unexpected keepalive frame type: {:?}", frame.frame_type);
+                    }
                 }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
-                    // Fail closed on signal-main — see spawn_exec_stream_server.
-                    continue;
-                }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
-                    // Never sleep: invent-refusal fixtures must not open a long
-                    // exec stream on the keepalive socket.
-                    let exit = a3s_box_core::exec::ExecExit {
-                        exit_code: 255,
-                        oom_killed: false,
-                    };
-                    let _ = writer
-                        .write_control(&serde_json::to_vec(&exit).unwrap())
-                        .await;
-                }
-                Some(frame) => {
-                    panic!("unexpected keepalive frame type: {:?}", frame.frame_type);
-                }
-            }
+            });
         }
     });
 
     Some(TestExecServer {
         _tmp: tmp,
         socket_path,
-        _vmm_stub: None,
     })
 }
 
@@ -784,7 +748,6 @@ async fn spawn_multi_exec_stream_server(
     Some(TestExecServer {
         _tmp: tmp,
         socket_path,
-        _vmm_stub: None,
     })
 }
 
@@ -854,7 +817,6 @@ async fn spawn_counting_exec_server(
     Some(TestExecServer {
         _tmp: tmp,
         socket_path,
-        _vmm_stub: None,
     })
 }
 
@@ -992,34 +954,33 @@ async fn spawn_cancelable_exec_stream_server() -> Option<TestExecServer> {
     Some(TestExecServer {
         _tmp: tmp,
         socket_path,
-        _vmm_stub: None,
     })
 }
 
-async fn attach_ready_test_vm(
-    box_id: &str,
-    exec_socket_path: &Path,
-) -> (VmManager, DisposableVmmStub) {
-    let stub = DisposableVmmStub::spawn();
+async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManager {
     let mut vm = VmManager::with_box_id(
         a3s_box_core::config::BoxConfig::default(),
         EventEmitter::new(16),
         box_id.to_string(),
     );
+    // Attach briefly to the cargo-test PID only to satisfy ShimHandler::is_running
+    // during attach; replace immediately so destroy never SIGTERMs this process
+    // (#445 CI).
     vm.attach_running_process(
-        stub.pid(),
+        std::process::id(),
         exec_socket_path.to_path_buf(),
         Some(exec_socket_path.with_file_name("pty.sock")),
     )
     .await
     .unwrap();
+    vm.install_instant_stop_test_handler().await;
     assert_eq!(
         vm.state().await,
         a3s_box_runtime::BoxState::Ready,
         "attach_ready_test_vm requires an authenticated exec heartbeat at {}",
         exec_socket_path.display()
     );
-    (vm, stub)
+    vm
 }
 
 /// Insert an authenticated Ready VmManager; keep the returned server alive.
@@ -1027,9 +988,8 @@ async fn insert_authenticated_sandbox_vm(
     svc: &BoxRuntimeService,
     sandbox_id: &str,
 ) -> Option<TestExecServer> {
-    let mut server = spawn_keepalive_exec_server().await?;
-    let (vm, stub) = attach_ready_test_vm(sandbox_id, &server.socket_path).await;
-    server._vmm_stub = Some(stub);
+    let server = spawn_keepalive_exec_server().await?;
+    let vm = attach_ready_test_vm(sandbox_id, &server.socket_path).await;
     svc.vm_managers
         .write()
         .await
@@ -2794,7 +2754,7 @@ async fn test_create_then_start_container_uses_image_defaults_and_rootfs() {
         return;
     };
 
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -2858,7 +2818,7 @@ async fn test_start_container_supports_tty_workload() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &pty_server.exec_socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &pty_server.exec_socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -2909,7 +2869,7 @@ async fn test_start_container_registers_non_tty_stdin_handle() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -3165,7 +3125,7 @@ async fn test_start_container_transitions_running_then_exited() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -3236,7 +3196,7 @@ async fn test_concurrent_start_container_spawns_workload_at_most_once() {
     let Some(exec_server) = spawn_counting_exec_server(exec_request_count.clone()).await else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     let svc_a = svc.clone();
@@ -3321,7 +3281,7 @@ async fn test_start_container_supervises_multiple_containers_in_same_sandbox() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -3406,7 +3366,7 @@ async fn test_stop_container_stops_workload_without_tearing_down_sandbox_vm() {
     let Some(exec_server) = spawn_cancelable_exec_stream_server().await else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -5124,7 +5084,7 @@ async fn test_attach_requires_active_workload_stream() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     let result = svc
@@ -5162,7 +5122,7 @@ async fn test_attach_stdin_once_consumes_workload_stdin_handle() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.start_container(Request::new(StartContainerRequest {
@@ -5318,7 +5278,7 @@ async fn test_port_forward_registers_session_for_recovered_ready_vm() {
     else {
         return;
     };
-    let (vm, _vmm_stub) = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
+    let vm = attach_ready_test_vm("sb-1", &exec_server.socket_path).await;
     assert_eq!(
         vm.port_forward_socket_path(),
         Some(
