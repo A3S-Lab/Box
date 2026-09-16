@@ -1967,17 +1967,60 @@ async fn test_status_verbose_info() {
     );
 }
 
-// ── UpdateRuntimeConfig ──────────────────────────────────────────
+// ?? UpdateRuntimeConfig ??????????????????????????????????????????
 
 #[tokio::test]
-async fn test_update_runtime_config() {
+async fn update_runtime_config_allows_empty_mutation() {
     let svc = make_test_service();
+    // Empty / no-op requests claim no side effect ? Ok is honest (#452).
+    svc.update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
+        runtime_config: None,
+    }))
+    .await
+    .expect("empty UpdateRuntimeConfig must stay Ok");
+
+    svc.update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
+        runtime_config: Some(RuntimeConfig {
+            network_config: None,
+        }),
+    }))
+    .await
+    .expect("runtime_config without network_config claims no mutation");
+
+    svc.update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
+        runtime_config: Some(RuntimeConfig {
+            network_config: Some(NetworkConfig {
+                pod_cidr: String::new(),
+            }),
+        }),
+    }))
+    .await
+    .expect("empty pod_cidr claims no network mutation");
+}
+
+#[tokio::test]
+async fn update_runtime_config_refuses_inventing_applied_pod_cidr() {
+    let svc = make_test_service();
+    // Ok must not invent "pod_cidr applied" when the microVM runtime never
+    // applies NetworkConfig (#452 / #451).
     let result = svc
         .update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
-            runtime_config: None,
+            runtime_config: Some(RuntimeConfig {
+                network_config: Some(NetworkConfig {
+                    pod_cidr: "10.244.0.0/16".to_string(),
+                }),
+            }),
         }))
         .await;
-    assert!(result.is_ok());
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert!(
+        err.message().contains("not supported") || err.message().contains("pod_cidr"),
+        "ignored pod_cidr must fail closed, not invent Ok: {}",
+        err.message()
+    );
 }
 
 // ── Pod Sandbox Status / List ────────────────────────────────────
