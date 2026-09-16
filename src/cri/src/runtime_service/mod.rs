@@ -1492,6 +1492,8 @@ impl RuntimeService for BoxRuntimeService {
             .get(&container_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+        // Durable Running alone must not invent "already running" (#441 / #438/#434).
+        let container = self.reconcile_reported_container(container).await;
 
         tracing::info!(
             container_id = %container_id,

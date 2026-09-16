@@ -2740,12 +2740,44 @@ async fn test_start_container_requires_prepared_rootfs_path() {
 }
 
 #[tokio::test]
+async fn test_start_container_refuses_inventing_already_running_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Running without sandbox VM health must demote, not invent
+    // "already running" (#441 / #438/#434).
+    let mut container = test_container("c-1", "sb-1");
+    container.state = ContainerState::Running;
+    container.started_at = 2_000_000_000;
+    svc.store.containers.add(container).await;
+
+    let result = svc
+        .start_container(Request::new(StartContainerRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("already exited"),
+        "stale Running must demote to Exited rather than invent already-running: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(demoted.state, ContainerState::Exited);
+    assert_eq!(demoted.exit_code, 255);
+}
+
+#[tokio::test]
 async fn test_start_container_rejects_already_running() {
     let svc = make_test_service();
     let mut container = test_container("c-1", "sb-1");
     container.state = ContainerState::Running;
     container.started_at = 2_000_000_000;
     svc.store.containers.add(container).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .start_container(Request::new(StartContainerRequest {
