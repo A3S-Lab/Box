@@ -288,6 +288,10 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `StopContainer` refuses inventing live stop / VM teardown / sandbox
   NotReady / network disconnect from durable Running alone — demote inventable
   Running first (#446 / #445/#434). Does **not** invent Live digests or flip B2.
+- CRI `ReopenContainerLog` refuses inventing rotation success from durable
+  Running alone — re-prove sandbox VM health, require an active supervisor
+  reopen handle, and fail closed on supervisor timeout instead of warn-only Ok
+  (#447 / #438/#434). Does **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only

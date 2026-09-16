@@ -4304,28 +4304,111 @@ async fn test_reopen_container_log_not_found() {
 }
 
 #[tokio::test]
-async fn test_reopen_container_log_empty_path() {
+async fn test_reopen_container_log_refuses_created_without_running() {
     let svc = make_test_service();
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
         .await;
 
-    // Should succeed even with empty log path (no-op)
+    // Created + empty log path must not invent rotation success (#447).
     let result = svc
         .reopen_container_log(Request::new(ReopenContainerLogRequest {
             container_id: "c-1".to_string(),
         }))
         .await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn test_reopen_container_log_refuses_running_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Running with no sandbox VM must not invent ReopenContainerLog
+    // success (#447 / #438/#434).
+    svc.store
+        .containers
+        .add(test_container("c-1", "sb-missing"))
+        .await;
+    svc.store
+        .containers
+        .mark_started("c-1", 2_000_000_000)
+        .await;
+
+    let result = svc
+        .reopen_container_log(Request::new(ReopenContainerLogRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(
+        demoted.state,
+        ContainerState::Exited,
+        "stale Running must be demoted in durable store"
+    );
+    assert_eq!(demoted.exit_code, 255);
+}
+
+#[tokio::test]
+async fn test_reopen_container_log_refuses_without_supervisor_handle() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
+    svc.store
+        .containers
+        .add(test_container("c-1", "sb-1"))
+        .await;
+    svc.store
+        .containers
+        .mark_started("c-1", 2_000_000_000)
+        .await;
+
+    // Healthy Running without a log_reopens supervisor must not invent Ok (#447).
+    let result = svc
+        .reopen_container_log(Request::new(ReopenContainerLogRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("active log reopen handle") || err.message().contains("log reopen"),
+        "unexpected message: {}",
+        err.message()
+    );
 }
 
 #[tokio::test]
 async fn test_reopen_container_log_signals_supervisor() {
     let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
+        .await;
+    svc.store
+        .containers
+        .mark_started("c-1", 2_000_000_000)
         .await;
 
     // Register a reopen handle as StartContainer does for a running container.

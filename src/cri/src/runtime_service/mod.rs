@@ -2948,12 +2948,12 @@ impl RuntimeService for BoxRuntimeService {
         let req = request.into_inner();
         let container_id = &req.container_id;
 
+        // Refuse inventing rotation success from durable Running alone —
+        // re-prove sandbox VM health before signalling the supervisor (#447 /
+        // #438/#434). Missing NotFound still wins via require_reported_*.
         let container = self
-            .store
-            .containers
-            .get(container_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+            .require_reported_container_running(container_id, "ReopenContainerLog")
+            .await?;
 
         tracing::info!(
             container_id = %container_id,
@@ -2968,28 +2968,32 @@ impl RuntimeService for BoxRuntimeService {
         // `CriLogWriter::reopen`). Returning synchronously guarantees output
         // written after this RPC lands in the rotated file rather than racing
         // the supervisor. Clone the notify handles out of the lock so we never
-        // hold it across the await.
+        // hold it across the await. Missing handle / timeout must fail closed —
+        // do not invent Ok when nobody reopened the log (#447).
         let handles = {
             let reopens = self.log_reopens.read().await;
             reopens
                 .get(container_id)
                 .map(|handle| (handle.request.clone(), handle.done.clone()))
         };
-        if let Some((request, done)) = handles {
-            // Register the done future BEFORE signalling so a fast supervisor
-            // cannot complete the reopen before we start waiting (notify_one
-            // also stores a permit, so there is no lost-wakeup either way).
-            let done = done.notified();
-            request.notify_one();
-            if tokio::time::timeout(std::time::Duration::from_secs(5), done)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    container_id = %container_id,
-                    "ReopenContainerLog timed out waiting for the supervisor to reopen the log"
-                );
-            }
+        let Some((request, done)) = handles else {
+            return Err(Status::failed_precondition(format!(
+                "ReopenContainerLog requires an active log reopen handle for container {container_id}"
+            )));
+        };
+
+        // Register the done future BEFORE signalling so a fast supervisor
+        // cannot complete the reopen before we start waiting (notify_one
+        // also stores a permit, so there is no lost-wakeup either way).
+        let done = done.notified();
+        request.notify_one();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), done)
+            .await
+            .is_err()
+        {
+            return Err(Status::failed_precondition(format!(
+                "ReopenContainerLog timed out waiting for the supervisor to reopen the log for container {container_id}"
+            )));
         }
 
         Ok(Response::new(ReopenContainerLogResponse {}))
