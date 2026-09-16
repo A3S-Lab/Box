@@ -146,9 +146,9 @@ fn auth_config_to_registry_auth(auth: &AuthConfig) -> Result<Option<RegistryAuth
         let pair = String::from_utf8(decoded).map_err(|_| {
             Status::invalid_argument("AuthConfig.auth is not valid UTF-8 user:pass")
         })?;
-        let (user, pass) = pair.split_once(':').ok_or_else(|| {
-            Status::invalid_argument("AuthConfig.auth must decode to user:pass")
-        })?;
+        let (user, pass) = pair
+            .split_once(':')
+            .ok_or_else(|| Status::invalid_argument("AuthConfig.auth must decode to user:pass"))?;
         return Ok(Some(RegistryAuth::basic(user, pass)));
     }
     if !auth.identity_token.is_empty() {
