@@ -288,7 +288,7 @@ pub(super) fn metric_descriptors() -> Vec<MetricDescriptor> {
     vec![
         MetricDescriptor {
             name: "a3s_box_pod_sandbox_ready".to_string(),
-            help: "Whether the CRI pod sandbox is Ready according to the runtime store."
+            help: "Whether the CRI pod sandbox is Ready after VM health re-proof (not durable store alone)."
                 .to_string(),
             kind: "gauge".to_string(),
             unit: "1".to_string(),

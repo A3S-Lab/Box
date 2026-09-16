@@ -747,7 +747,9 @@ retain process or filesystem sessions after its owner dies.
   #425/#430); CRI ContainerStatus/ListContainers refuse inventing Running from
   durable state without sandbox VM health (#434 / #432/#431); CRI Status verbose
   counts refuse inventing Ready/Running tallies without the same health
-  re-proof (#435 / #432/#434);
+  re-proof (#435 / #432/#434); CRI ListPodSandboxMetrics /
+  StreamPodSandboxMetrics refuse inventing Ready/Running gauges without the
+  same health re-proof (#436 / #435/#434);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

@@ -254,6 +254,10 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `Status` verbose counts refuse inventing Ready/Running tallies from durable
   store alone — re-prove via the same sandbox/container health reconcile before
   counting (#435 / #432/#434). Does **not** invent Live digests or flip B2.
+- CRI `ListPodSandboxMetrics` / `StreamPodSandboxMetrics` refuse inventing
+  Ready/Running gauges from durable store alone — same sandbox/container health
+  reconcile before emitting metrics (#436 / #435/#434). Does **not** invent Live
+  digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
