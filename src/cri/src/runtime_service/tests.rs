@@ -775,7 +775,7 @@ where
             tokio::spawn(async move {
                 let (r, w) = tokio::io::split(stream);
                 let mut reader = a3s_transport::FrameReader::new(r);
-                let mut writer = a3s_transport::FrameWriter::new(w);
+                let writer = a3s_transport::FrameWriter::new(w);
                 if let Ok(Some(frame)) = reader.read_frame().await {
                     if frame.frame_type == a3s_transport::FrameType::Heartbeat {
                         let heartbeat = a3s_transport::Frame::heartbeat();
