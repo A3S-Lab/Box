@@ -400,46 +400,73 @@ impl WarmPool {
 
     /// Acquire a ready VM from the pool.
     ///
-    /// If an idle VM is available, returns it immediately.
-    /// Otherwise, boots a new VM on demand (slower path).
+    /// Idle membership alone must not invent operable Ready — re-prove exec
+    /// health before handoff (#423 / #421). Stale idle VMs are destroyed and
+    /// the next candidate (or an on-demand boot) is tried.
     pub async fn acquire(&self) -> Result<VmManager> {
-        // Try to pop an idle VM
-        {
-            let mut idle = self.idle.lock().await;
-            if let Some(warm_vm) = idle.pop() {
-                let mut stats = self.stats.lock().await;
-                stats.total_acquired += 1;
-                stats.idle_count = idle.len();
-
-                // Record hit for autoscaler
-                if let Some(ref scaler) = self.scaler {
-                    scaler.lock().await.record_acquire(true);
+        loop {
+            let warm_vm = {
+                let mut idle = self.idle.lock().await;
+                let warm_vm = idle.pop();
+                if warm_vm.is_some() {
+                    Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
+                    let mut stats = self.stats.lock().await;
+                    stats.idle_count = idle.len();
                 }
+                warm_vm
+            };
 
-                if let Some(ref m) = self.metrics {
-                    m.warm_pool_hits.inc();
-                    m.warm_pool_size.set(idle.len() as i64);
+            let Some(warm_vm) = warm_vm else {
+                break;
+            };
+
+            // Publish authenticated once; idle TTL only ages by wall clock.
+            // Guest exec can die while shim PID / in-memory Ready remain —
+            // refuse inventing a lease from pool membership alone (#423).
+            match warm_vm.vm.health_check().await {
+                Ok(true) => {
+                    let mut stats = self.stats.lock().await;
+                    stats.total_acquired += 1;
+                    drop(stats);
+
+                    if let Some(ref scaler) = self.scaler {
+                        scaler.lock().await.record_acquire(true);
+                    }
+
+                    if let Some(ref m) = self.metrics {
+                        m.warm_pool_hits.inc();
+                    }
+
+                    self.event_emitter.emit(BoxEvent::with_string(
+                        "pool.vm.acquired",
+                        format!("Acquired VM {} from pool", warm_vm.vm.box_id()),
+                    ));
+
+                    tracing::debug!(
+                        box_id = %warm_vm.vm.box_id(),
+                        "Acquired authenticated VM from warm pool"
+                    );
+
+                    return Ok(warm_vm.vm);
                 }
-
-                self.event_emitter.emit(BoxEvent::with_string(
-                    "pool.vm.acquired",
-                    format!("Acquired VM {} from pool", warm_vm.vm.box_id()),
-                ));
-
-                tracing::debug!(
-                    box_id = %warm_vm.vm.box_id(),
-                    idle_remaining = idle.len(),
-                    "Acquired VM from warm pool"
-                );
-
-                return Ok(warm_vm.vm);
+                Ok(false) | Err(_) => {
+                    let box_id = warm_vm.vm.box_id().to_string();
+                    tracing::warn!(
+                        %box_id,
+                        "Idle pool VM failed exec re-auth; destroying instead of inventing Ready"
+                    );
+                    let mut vm = warm_vm.vm;
+                    let _ = Self::destroy_manager_or_reap(&mut vm, Some(2000)).await;
+                    let mut stats = self.stats.lock().await;
+                    stats.total_evicted += 1;
+                    continue;
+                }
             }
         }
 
-        // No idle VM available — boot one on demand (miss)
+        // No authenticated idle VM — boot one on demand (miss)
         tracing::info!("No idle VM in pool, booting on demand");
 
-        // Record miss for autoscaler
         if let Some(ref scaler) = self.scaler {
             scaler.lock().await.record_acquire(false);
         }
@@ -1544,6 +1571,85 @@ mod tests {
         drop((pool_permit, global_permit));
         assert_eq!(pool_limiter.available_permits(), 1);
         assert_eq!(global_limiter.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn warm_pool_acquire_refuses_ready_without_authenticated_heartbeat() {
+        use crate::vm::BoxState;
+        use crate::vmm::{VmHandler, VmMetrics};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysRunningHandler {
+            stop_calls: Arc<AtomicUsize>,
+        }
+
+        impl VmHandler for AlwaysRunningHandler {
+            fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::error::Result<()> {
+                self.stop_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn metrics(&self) -> VmMetrics {
+                VmMetrics::default()
+            }
+
+            fn is_running(&self) -> bool {
+                true
+            }
+
+            fn has_exited(&self) -> bool {
+                false
+            }
+
+            fn pid(&self) -> u32 {
+                42
+            }
+        }
+
+        let pool = WarmPool::start(
+            test_pool_config(0, 1),
+            BoxConfig::default(),
+            test_event_emitter(),
+        )
+        .await
+        .expect("empty pool starts without a hypervisor");
+
+        let vm = VmManager::new(BoxConfig::default(), test_event_emitter());
+        *vm.state.write().await = BoxState::Ready;
+        *vm.handler.write().await = Some(Box::new(AlwaysRunningHandler {
+            stop_calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        // No exec socket / client — health_check must fail closed (#419/#420).
+        let stale_id = vm.box_id().to_string();
+        pool.idle.lock().await.push(WarmVm {
+            vm,
+            created_at: Instant::now(),
+        });
+        assert_eq!(pool.idle_count().await, 1);
+
+        let result = pool.acquire().await;
+        match &result {
+            Ok(vm) => {
+                assert_ne!(
+                    vm.box_id(),
+                    stale_id,
+                    "idle membership must not invent operable Ready without exec heartbeat"
+                );
+            }
+            Err(_) => {
+                // Expected on hosts without a hypervisor: stale idle destroyed,
+                // on-demand boot miss fails closed.
+            }
+        }
+        assert_eq!(
+            pool.idle_count().await,
+            0,
+            "stale Ready idle VM must be destroyed, not left for the next lease"
+        );
+        assert!(
+            pool.stats().await.total_evicted >= 1,
+            "failed re-auth must count as eviction, not a pool hit"
+        );
     }
 
     #[test]
