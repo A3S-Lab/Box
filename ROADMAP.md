@@ -719,7 +719,9 @@ retain process or filesystem sessions after its owner dies.
   `promote_if_ready` retains the authenticated Unix `ExecClient` after
   heartbeat instead of dropping a one-shot probe (#418 / #413/#415 parity);
   Unix `health_check` for Ready/Busy/Compacting requires exec heartbeat
-  (retained or reconnect), not shim PID alone (#419 / #418);
+  (retained or reconnect), not shim PID alone (#419 / #418); Windows
+  `health_check` likewise requires retained-client or `guest-control.ready` +
+  named-pipe heartbeat (#420 / #419 parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
