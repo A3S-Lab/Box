@@ -484,7 +484,9 @@ struct TestExecServer {
 }
 
 /// Child process used as a fake VMM shim so destroy can SIGTERM safely.
-struct DisposableVmmStub(std::process::Child);
+struct DisposableVmmStub {
+    pid: u32,
+}
 
 impl DisposableVmmStub {
     fn spawn() -> Self {
@@ -492,20 +494,24 @@ impl DisposableVmmStub {
             .arg("3600")
             .spawn()
             .expect("spawn disposable VMM stub for CRI tests");
-        Self(child)
+        let pid = child.id();
+        // Forget the Child handle: ShimHandler::stop may waitpid-reap this PID
+        // in attached mode, and a second Child::wait/try_wait can hang the suite.
+        std::mem::forget(child);
+        Self { pid }
     }
 
     fn pid(&self) -> u32 {
-        self.0.id()
+        self.pid
     }
 }
 
 impl Drop for DisposableVmmStub {
     fn drop(&mut self) {
-        // Destroy's attached-mode stop may already have waitpid-reaped this PID.
-        // A blocking Child::wait() after that hangs the cargo-test process.
-        let _ = self.0.kill();
-        let _ = self.0.try_wait();
+        // Best-effort SIGKILL without waitpid — destroy may already have reaped.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &self.pid.to_string()])
+            .status();
     }
 }
 
