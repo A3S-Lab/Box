@@ -776,7 +776,9 @@ retain process or filesystem sessions after its owner dies.
   `UpdatePodSandboxResources` refuses inventing Ok when linux/annotations
   request unsupported pod-level mutation (#451 / #437); CRI
   `UpdateRuntimeConfig` refuses inventing Ok when NetworkConfig.pod_cidr is
-  non-empty (#452 / #451);
+  non-empty (#452 / #451); CRI PullImage honors AuthConfig.identity_token and
+  refuses inventing anonymous pull for unsupported registry_token / malformed
+  auth (#453 / #452);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
