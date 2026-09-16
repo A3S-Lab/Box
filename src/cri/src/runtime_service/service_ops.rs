@@ -612,7 +612,7 @@ impl BoxRuntimeService {
             // Disposable shim PID — never attach the cargo-test process. Destroy
             // sends SIGTERM to this PID; attaching std::process::id() self-kills
             // the suite (#445 CI SIGTERM).
-            let mut stub = std::process::Command::new("sleep")
+            let stub = std::process::Command::new("sleep")
                 .arg("3600")
                 .spawn()
                 .map_err(|error| {
