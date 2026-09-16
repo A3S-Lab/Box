@@ -533,5 +533,63 @@ async fn test_attach_running_process_infers_port_forward_socket_path() {
         vm.port_forward_socket_path(),
         Some(exec_socket_path.with_file_name("portfwd.sock").as_path())
     );
-    assert_eq!(vm.state().await, BoxState::Ready);
+    // Missing exec heartbeat must not invent Ready — leave Created for
+    // promote_if_ready / observe to authenticate later.
+    assert_eq!(vm.state().await, BoxState::Created);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {
+    let mut vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-attach-no-hb".to_string(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let exec_socket_path = tmp.path().join("exec.sock");
+
+    vm.attach_running_process(
+        std::process::id(),
+        exec_socket_path,
+        Some(tmp.path().join("pty.sock")),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        vm.exec_client().is_none(),
+        "attach without a live exec endpoint must not invent a client"
+    );
+    assert_eq!(
+        vm.state().await,
+        BoxState::Created,
+        "attach must not invent Ready without authenticated exec heartbeat"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {
+    let mut vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-attach-no-hb".to_string(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let exec_socket_path = tmp.path().join("exec.sock");
+
+    vm.attach_running_process(
+        std::process::id(),
+        exec_socket_path,
+        Some(tmp.path().join("pty.sock")),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        vm.state().await,
+        BoxState::Created,
+        "Windows attach must not invent Ready from shim PID + layout path alone"
+    );
 }

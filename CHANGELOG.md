@@ -158,6 +158,11 @@ All notable changes to A3S Box will be documented in this file.
   `guest-control.ready` + named-pipe heartbeat). Pool `wait_for_exec_available`
   likewise fails closed instead of unconditional `Ok(())`. Does **not** flip
   B2 or invent Live digests.
+- `VmManager::attach_running_process` no longer invents Ready from a live shim
+  PID (or layout path) alone — Ready requires an authenticated exec heartbeat
+  (Unix connect+heartbeat; Windows `guest-control.ready` + named-pipe
+  heartbeat). Otherwise leave `Created` for observe/`promote_if_ready`. Does
+  **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

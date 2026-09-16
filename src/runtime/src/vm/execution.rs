@@ -114,6 +114,10 @@ impl VmManager {
     /// This is useful for crash recovery or control-plane restart flows where
     /// the workload VM is still alive and only the host-side manager state
     /// needs to be reconstructed.
+    ///
+    /// Ready is projected only after an authenticated exec heartbeat. A live
+    /// shim PID (or layout path) alone must not invent Ready — leave Created
+    /// so observe/`promote_if_ready` can authenticate later.
     #[cfg(unix)]
     pub async fn attach_running_process(
         &mut self,
@@ -129,27 +133,38 @@ impl VmManager {
             )));
         }
 
-        self.exec_client = match ExecClient::connect(&exec_socket_path).await {
-            Ok(client) => Some(client),
+        let ready = match Self::connect_exec_client_for_request(&exec_socket_path).await {
+            Ok(client) => {
+                self.exec_client = Some(client);
+                true
+            }
             Err(error) => {
                 tracing::debug!(
                     box_id = %self.box_id,
                     socket_path = %exec_socket_path.display(),
                     error = %error,
-                    "Failed to reconnect exec client while attaching to running VM"
+                    "Failed to authenticate exec heartbeat while attaching to running VM"
                 );
-                None
+                self.exec_client = None;
+                false
             }
         };
         self.exec_socket_path = Some(exec_socket_path);
         self.pty_socket_path = pty_socket_path;
         self.port_forward_socket_path = Some(port_forward_socket_path);
         *self.handler.write().await = Some(Box::new(handler));
-        *self.state.write().await = BoxState::Ready;
+        *self.state.write().await = if ready {
+            BoxState::Ready
+        } else {
+            BoxState::Created
+        };
         Ok(())
     }
 
     /// Attach this manager to an already-running Windows shim process.
+    ///
+    /// Ready requires `guest-control.ready` + named-pipe heartbeat — never
+    /// invent from shim PID or layout path presence alone (#412 parity).
     #[cfg(windows)]
     pub async fn attach_running_process(
         &mut self,
@@ -164,11 +179,38 @@ impl VmManager {
             )));
         }
 
+        let guest_control_ready =
+            exec_socket_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
+        let pipe =
+            std::path::PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&self.box_id));
+        let ready = if guest_control_ready.is_file() {
+            let client = crate::grpc::ExecClient::for_socket(&pipe);
+            match tokio::time::timeout(std::time::Duration::from_millis(500), client.heartbeat())
+                .await
+            {
+                Ok(Ok(true)) => true,
+                Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        pipe = %pipe.display(),
+                        "Failed to authenticate exec heartbeat while attaching to running WHPX VM"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
         self.exec_socket_path = Some(exec_socket_path);
         self.pty_socket_path = pty_socket_path;
         self.port_forward_socket_path = None;
         *self.handler.write().await = Some(Box::new(handler));
-        *self.state.write().await = BoxState::Ready;
+        *self.state.write().await = if ready {
+            BoxState::Ready
+        } else {
+            BoxState::Created
+        };
         Ok(())
     }
 
