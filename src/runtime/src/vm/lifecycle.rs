@@ -781,8 +781,7 @@ impl VmManager {
         const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
         if let Some(client) = self.exec_client.as_ref() {
-            if let Ok(Ok(true)) =
-                tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await
+            if let Ok(Ok(true)) = tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await
             {
                 return true;
             }
