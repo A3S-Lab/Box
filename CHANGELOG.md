@@ -296,6 +296,10 @@ All notable changes to A3S Box will be documented in this file.
   containers that never started — record exit `0` for never-ran workloads while
   live Running that survives workload stop still gets teardown SIGKILL
   (#448 / #447/#444). Does **not** invent Live digests or flip B2.
+- CRI `load_state` (restart reconciliation) refuses inventing unknown-failure
+  exit `255` for Created never-started containers — record exit `0` while stale
+  Running without a live VM still fail-closes with `255` (#449 / #448). Does
+  **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only

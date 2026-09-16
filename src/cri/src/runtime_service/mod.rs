@@ -489,9 +489,11 @@ impl BoxRuntimeService {
         // has no backing VM. Without reconciliation, sandboxes stay
         // `SandboxReady` and containers stay `Running` forever, hiding the
         // restart from the kubelet. Mark orphaned sandboxes `NotReady` and
-        // downgrade their not-yet-exited containers to `Exited` (code 255) so the
-        // kubelet sees an accurate state and can recreate the pods. Mirrors the
-        // existing StopContainer/StopPodSandbox no-VM reconcile.
+        // downgrade their not-yet-exited containers to `Exited` so the kubelet
+        // sees an accurate state and can recreate the pods. Created
+        // never-started must not invent unknown-failure 255 (#449 / #448);
+        // stale Running still fail-closes with 255. Mirrors StopPodSandbox
+        // Created-vs-Running exit honesty.
         let live_sandboxes: std::collections::HashSet<String> = {
             let vm_managers = self.vm_managers.read().await;
             vm_managers.keys().cloned().collect()
@@ -525,12 +527,20 @@ impl BoxRuntimeService {
         for container in self.store.containers.list(None, None).await {
             if !live_sandboxes.contains(&container.sandbox_id)
                 && container.state != ContainerState::Exited
-                && self
-                    .store
-                    .mark_container_exited(&container.id, now_ns, 255)
-                    .await
             {
-                reconciled += 1;
+                // Created never-started must not invent exit 255 (#449 / #448).
+                let exit_code = if container.state == ContainerState::Created {
+                    0
+                } else {
+                    255
+                };
+                if self
+                    .store
+                    .mark_container_exited(&container.id, now_ns, exit_code)
+                    .await
+                {
+                    reconciled += 1;
+                }
             }
         }
         if reconciled > 0 {
