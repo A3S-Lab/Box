@@ -1422,6 +1422,64 @@ async fn pod_sandbox_stats_refuses_stale_running_without_vm_health() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pod_sandbox_stats_refuses_inventing_usage_from_pid_without_vm_health() {
+    let svc = make_test_service();
+    // Soft-Created VmManager still holds a live host PID (cargo-test). That PID
+    // alone must not invent pod CPU/RSS when exec health never authenticated
+    // (#450 / #419/#443).
+    svc.store.sandboxes.add(test_sandbox("sb-pid")).await;
+    let mut vm = VmManager::with_box_id(
+        a3s_box_core::config::BoxConfig::default(),
+        EventEmitter::new(16),
+        "sb-pid".to_string(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    vm.attach_running_process(
+        std::process::id(),
+        tmp.path().join("missing-exec.sock"),
+        Some(tmp.path().join("pty.sock")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vm.state().await,
+        a3s_box_runtime::BoxState::Created,
+        "fixture requires soft-Created (no inventable Ready)"
+    );
+    assert!(
+        vm.pid().await.is_some(),
+        "fixture requires a readable host PID that would invent usage pre-fix"
+    );
+    svc.vm_managers
+        .write()
+        .await
+        .insert("sb-pid".to_string(), vm);
+
+    let resp = svc
+        .pod_sandbox_stats(Request::new(PodSandboxStatsRequest {
+            pod_sandbox_id: "sb-pid".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let linux = resp.stats.unwrap().linux.unwrap();
+    let cpu = linux.cpu.as_ref().unwrap();
+    let memory = linux.memory.as_ref().unwrap();
+    assert_eq!(
+        cpu.usage_core_nano_seconds.as_ref().unwrap().value,
+        0,
+        "soft-Created PID must not invent pod CPU usage without VM health"
+    );
+    assert_eq!(
+        memory.working_set_bytes.as_ref().unwrap().value,
+        0,
+        "soft-Created PID must not invent pod RSS without VM health"
+    );
+}
+
 #[tokio::test]
 async fn list_pod_sandbox_stats_refuses_stale_running_without_vm_health() {
     let svc = make_test_service();

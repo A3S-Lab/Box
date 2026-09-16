@@ -398,16 +398,19 @@ pub struct BoxRuntimeService {
 impl BoxRuntimeService {
     /// Real CPU + memory usage of a sandbox's microVM, read from the host-side
     /// shim process (the shim *is* the pod in the microVM-per-pod model).
-    /// Returns zeros if the VM is not booted or its procfs is unreadable.
+    /// Returns zeros if the VM is not booted, inventable (no authenticated
+    /// health), or its procfs is unreadable. A shim PID alone must not invent
+    /// live CPU/RSS when Ready/exec health failed (#450 / #419/#443).
     async fn sandbox_vm_usage(&self, sandbox_id: &str) -> VmUsage {
-        let pid = {
-            let vm_managers = self.vm_managers.read().await;
-            match vm_managers.get(sandbox_id) {
-                Some(vm) => vm.pid().await,
-                None => None,
-            }
+        let vm_managers = self.vm_managers.read().await;
+        let Some(vm) = vm_managers.get(sandbox_id) else {
+            return VmUsage::default();
         };
-        match pid {
+        // PID alone must not invent usage for soft-Created / demoted managers.
+        if !matches!(vm.health_check().await, Ok(true)) {
+            return VmUsage::default();
+        }
+        match vm.pid().await {
             Some(pid) => read_vm_usage(pid),
             None => VmUsage::default(),
         }
