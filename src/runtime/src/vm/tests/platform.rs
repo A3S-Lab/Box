@@ -599,6 +599,33 @@ async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_promote_ready_if_exec_authenticated_refuses_without_heartbeat() {
+    let mut vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-sandbox-promote-no-hb".to_string(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    vm.exec_socket_path = Some(tmp.path().join("missing-exec.sock"));
+
+    let ready = vm.promote_ready_if_exec_authenticated().await;
+    assert!(
+        !ready,
+        "Sandbox recover promote must not invent Ready without exec heartbeat"
+    );
+    assert!(
+        vm.exec_client().is_none(),
+        "failed promote must not invent an exec client"
+    );
+    assert_eq!(
+        vm.state().await,
+        BoxState::Created,
+        "Sandbox recover must leave Created for observe/promote_if_ready"
+    );
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {

@@ -168,6 +168,11 @@ All notable changes to A3S Box will be documented in this file.
   when the heartbeat authenticated; otherwise leave `Created` (no `box.ready`)
   for observe/`promote_if_ready` (#414 / #413 parity). Does **not** flip B2
   or invent Live digests.
+- Linux Sandbox recover `attach_sandbox` no longer invents Ready from a live
+  OCI runtime record alone — Ready requires an authenticated exec heartbeat
+  (`promote_ready_if_exec_authenticated`); otherwise leave `Created` for
+  observe/`promote_if_ready` (#415 / #413/#414 parity). Does **not** flip B2
+  or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
