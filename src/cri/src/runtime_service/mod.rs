@@ -1749,6 +1749,9 @@ impl RuntimeService for BoxRuntimeService {
             .get(container_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+        // Durable Running alone must not invent live stop / VM teardown /
+        // sandbox NotReady (#446 / #445/#434). Demote inventable Running first.
+        let container = self.reconcile_reported_container(container).await;
 
         if container.state == ContainerState::Exited {
             return Ok(Response::new(StopContainerResponse {}));
@@ -1822,6 +1825,9 @@ impl RuntimeService for BoxRuntimeService {
         let Some(container) = self.store.containers.get(container_id).await else {
             return Ok(Response::new(RemoveContainerResponse {}));
         };
+        // Durable Running alone must not invent force-stop of a live container
+        // (#445 / #444/#434). Demote inventable Running first.
+        let container = self.reconcile_reported_container(container).await;
 
         // CRI RemoveContainer force-removes: a still-running container is
         // stopped first (timeout 0), then deleted — matching containerd/cri-o.

@@ -661,7 +661,7 @@ async fn test_health_check_refuses_ready_sustained_by_pid_without_exec_heartbeat
         }
     }
 
-    let mut vm = VmManager::with_box_id(
+    let vm = VmManager::with_box_id(
         BoxConfig::default(),
         EventEmitter::new(16),
         "box-health-pid-only".to_string(),
@@ -857,7 +857,7 @@ async fn microvm_resume_refuses_ready_without_post_cont_heartbeat() {
         .expect("spawn sleep for SIGCONT fixture");
     let pid = child.id();
 
-    let vm = VmManager::with_box_id(
+    let mut vm = VmManager::with_box_id(
         BoxConfig::default(),
         EventEmitter::new(16),
         "box-resume-no-hb".to_string(),

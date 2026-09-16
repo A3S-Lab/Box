@@ -781,8 +781,7 @@ impl VmManager {
         const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
         if let Some(client) = self.exec_client.as_ref() {
-            if let Ok(Ok(true)) =
-                tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await
+            if let Ok(Ok(true)) = tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await
             {
                 return true;
             }
@@ -972,5 +971,60 @@ impl VmManager {
         }
 
         Ok(result)
+    }
+
+    /// Replace the live shim handler with an in-process instant-stop stand-in.
+    ///
+    /// CRI invent-refusal fixtures attach briefly for an authenticated exec
+    /// heartbeat, then call this so destroy cannot SIGTERM the cargo-test
+    /// process or wait out provider grace on a host `sleep` stub (#445 CI).
+    pub async fn install_instant_stop_test_handler(&mut self) {
+        *self.handler.write().await = Some(Box::new(InstantStopTestHandler::alive()));
+    }
+}
+
+/// In-process shim stand-in for unit-test fixtures that need Ready + health.
+struct InstantStopTestHandler {
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl InstantStopTestHandler {
+    fn alive() -> Self {
+        Self {
+            running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
+impl crate::vmm::VmHandler for InstantStopTestHandler {
+    fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn metrics(&self) -> crate::vmm::VmMetrics {
+        crate::vmm::VmMetrics::default()
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn has_exited(&self) -> bool {
+        !self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn pid(&self) -> u32 {
+        // Synthetic; health uses is_running + exec heartbeat, not /proc.
+        42
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        (!self.running.load(std::sync::atomic::Ordering::SeqCst)).then_some(0)
+    }
+
+    fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+        Ok(self.exit_code())
     }
 }

@@ -609,6 +609,9 @@ impl BoxRuntimeService {
         if let Some(exec_socket_path) = &self.test_vm_exec_socket_path {
             let box_id = box_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let mut vm = VmManager::with_box_id(box_config, EventEmitter::new(256), box_id);
+            // Attach briefly to the cargo-test PID for ShimHandler::is_running,
+            // then swap in an instant-stop handler so destroy never SIGTERMs
+            // this process or waits on a host sleep stub (#445 CI).
             vm.attach_running_process(
                 std::process::id(),
                 exec_socket_path.clone(),
@@ -616,6 +619,7 @@ impl BoxRuntimeService {
             )
             .await
             .map_err(box_error_to_status)?;
+            vm.install_instant_stop_test_handler().await;
             if let Err(status) = Self::require_authenticated_ready_for_sandbox(&vm).await {
                 let _ = vm.destroy().await;
                 return Err(status);

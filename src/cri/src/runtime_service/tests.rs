@@ -448,8 +448,9 @@ async fn test_cri_one_container_pod_smoke_flow() {
     let log = tokio::fs::read_to_string(&log_path).await.unwrap();
     assert!(log.contains(" stdout F ready\n"));
 
-    // Avoid destroying the attached current test process; lifecycle state
-    // and network cleanup are still covered by the stop/remove calls.
+    // Destroy may SIGTERM the disposable VMM stub; network cleanup is still
+    // covered by the stop/remove calls below. Detach first so this smoke path
+    // does not require a live shim for StopPodSandbox.
     svc.vm_managers.write().await.remove(&sandbox_id);
 
     svc.stop_pod_sandbox(Request::new(StopPodSandboxRequest {
@@ -526,70 +527,137 @@ where
     let tmp = tempdir_for_unix_socket("a3s-cri-exec-test");
     let socket_path = tmp.path().join("exec.sock");
     let listener = bind_test_exec_listener(&socket_path)?;
+    // Shared once-callback: health re-proof may heartbeat while a Data stream
+    // is open, so Accept must stay concurrent (#445 CI / invent-refusal).
+    let assert_request = std::sync::Arc::new(tokio::sync::Mutex::new(Some(assert_request)));
 
     tokio::spawn(async move {
-        let mut assert_request = Some(assert_request);
-
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = tokio::io::split(stream);
-            let mut reader = a3s_transport::FrameReader::new(r);
-            let mut writer = a3s_transport::FrameWriter::new(w);
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let assert_request = assert_request.clone();
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
 
-            match reader.read_frame().await.unwrap() {
-                None => continue,
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
-                    let heartbeat = a3s_transport::Frame::heartbeat();
-                    let encoded = heartbeat.encode().unwrap();
-                    writer.into_inner().write_all(&encoded).await.unwrap();
-                }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
-                    let request: a3s_box_core::exec::ExecRequest =
-                        serde_json::from_slice(&frame.payload).unwrap();
-                    assert!(request.streaming);
-                    let Some(assert_request) = assert_request.take() else {
-                        panic!("exec stream server received more than one request");
-                    };
-                    assert_request(&request);
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        let request: a3s_box_core::exec::ExecRequest =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        assert!(request.streaming);
+                        let Some(assert_request) = assert_request.lock().await.take() else {
+                            panic!("exec stream server received more than one request");
+                        };
+                        assert_request(&request);
 
-                    if !stdout.is_empty() {
-                        let chunk = a3s_box_core::exec::ExecChunk {
-                            stream: a3s_box_core::exec::StreamType::Stdout,
-                            data: stdout.to_vec(),
+                        if !stdout.is_empty() {
+                            let chunk = a3s_box_core::exec::ExecChunk {
+                                stream: a3s_box_core::exec::StreamType::Stdout,
+                                data: stdout.to_vec(),
+                            };
+                            writer
+                                .write_data(&serde_json::to_vec(&chunk).unwrap())
+                                .await
+                                .unwrap();
+                        }
+
+                        if !stderr.is_empty() {
+                            let chunk = a3s_box_core::exec::ExecChunk {
+                                stream: a3s_box_core::exec::StreamType::Stderr,
+                                data: stderr.to_vec(),
+                            };
+                            writer
+                                .write_data(&serde_json::to_vec(&chunk).unwrap())
+                                .await
+                                .unwrap();
+                        }
+
+                        sleep(exit_delay).await;
+
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code,
+                            oom_killed: false,
                         };
                         writer
-                            .write_data(&serde_json::to_vec(&chunk).unwrap())
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
                             .await
                             .unwrap();
                     }
-
-                    if !stderr.is_empty() {
-                        let chunk = a3s_box_core::exec::ExecChunk {
-                            stream: a3s_box_core::exec::StreamType::Stderr,
-                            data: stderr.to_vec(),
-                        };
-                        writer
-                            .write_data(&serde_json::to_vec(&chunk).unwrap())
-                            .await
-                            .unwrap();
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // Destroy may deliver signal-main over this socket. Drop
+                        // without ACK so teardown fails closed to InstantStop /
+                        // handler.stop instead of waiting provider grace (#445 CI).
                     }
-
-                    sleep(exit_delay).await;
-
-                    let exit = a3s_box_core::exec::ExecExit {
-                        exit_code,
-                        oom_killed: false,
-                    };
-                    writer
-                        .write_control(&serde_json::to_vec(&exit).unwrap())
-                        .await
-                        .unwrap();
-                    break;
+                    Some(frame) => {
+                        panic!("unexpected frame type: {:?}", frame.frame_type);
+                    }
                 }
-                Some(frame) => {
-                    panic!("unexpected frame type: {:?}", frame.frame_type);
+            });
+        }
+    });
+
+    Some(TestExecServer {
+        _tmp: tmp,
+        socket_path,
+    })
+}
+
+/// Heartbeat-only guest control stand-in for invent-refusal fixtures.
+///
+/// Unlike [`spawn_exec_stream_server`], this never sleeps on Data (the keepalive
+/// helpers previously used a 3600s exit delay that could freeze CI if any RPC
+/// opened an exec stream against the fixture socket).
+async fn spawn_keepalive_exec_server() -> Option<TestExecServer> {
+    let tmp = tempdir_for_unix_socket("a3s-cri-keepalive-exec");
+    let socket_path = tmp.path().join("exec.sock");
+    let listener = bind_test_exec_listener(&socket_path)?;
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            // Per-connection task: a wedged read must not block Accept for
+            // subsequent heartbeats / signal-main (#445 CI).
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
+
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // Fail closed on signal-main -- drop without ACK.
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        // Never sleep: invent-refusal fixtures must not open a long
+                        // exec stream on the keepalive socket.
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code: 255,
+                            oom_killed: false,
+                        };
+                        let _ = writer
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
+                            .await;
+                    }
+                    Some(frame) => {
+                        panic!("unexpected keepalive frame type: {:?}", frame.frame_type);
+                    }
                 }
-            }
+            });
         }
     });
 
@@ -673,6 +741,9 @@ async fn spawn_multi_exec_stream_server(
                             .await
                             .unwrap();
                     }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
+                    }
                     Some(frame) => panic!("unexpected frame type: {:?}", frame.frame_type),
                 }
             });
@@ -738,6 +809,9 @@ async fn spawn_counting_exec_server(
                             .write_control(&serde_json::to_vec(&exit).unwrap())
                             .await
                             .unwrap();
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
                     }
                     Some(frame) => panic!("unexpected frame type: {:?}", frame.frame_type),
                 }
@@ -840,41 +914,49 @@ async fn spawn_cancelable_exec_stream_server() -> Option<TestExecServer> {
 
     tokio::spawn(async move {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = tokio::io::split(stream);
-            let mut reader = a3s_transport::FrameReader::new(r);
-            let mut writer = a3s_transport::FrameWriter::new(w);
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            // Concurrent Accept: StopContainer re-proofs health with a heartbeat
+            // while the workload Data stream waits for cancel (#445 CI).
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
 
-            match reader.read_frame().await.unwrap() {
-                None => continue,
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
-                    let heartbeat = a3s_transport::Frame::heartbeat();
-                    let encoded = heartbeat.encode().unwrap();
-                    writer.into_inner().write_all(&encoded).await.unwrap();
-                }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
-                    let request: a3s_box_core::exec::ExecRequest =
-                        serde_json::from_slice(&frame.payload).unwrap();
-                    assert!(request.streaming);
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        let request: a3s_box_core::exec::ExecRequest =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        assert!(request.streaming);
 
-                    let cancel = reader.read_frame().await.unwrap().unwrap();
-                    assert_eq!(cancel.frame_type, a3s_transport::FrameType::Control);
-                    assert_eq!(cancel.payload, b"cancel");
+                        let cancel = reader.read_frame().await.unwrap().unwrap();
+                        assert_eq!(cancel.frame_type, a3s_transport::FrameType::Control);
+                        assert_eq!(cancel.payload, b"cancel");
 
-                    let exit = a3s_box_core::exec::ExecExit {
-                        exit_code: 137,
-                        oom_killed: false,
-                    };
-                    writer
-                        .write_control(&serde_json::to_vec(&exit).unwrap())
-                        .await
-                        .unwrap();
-                    break;
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code: 137,
+                            oom_killed: false,
+                        };
+                        writer
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
+                    }
+                    Some(frame) => {
+                        panic!("unexpected frame type: {:?}", frame.frame_type);
+                    }
                 }
-                Some(frame) => {
-                    panic!("unexpected frame type: {:?}", frame.frame_type);
-                }
-            }
+            });
         }
     });
 
@@ -890,6 +972,9 @@ async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManage
         EventEmitter::new(16),
         box_id.to_string(),
     );
+    // Attach briefly to the cargo-test PID only to satisfy ShimHandler::is_running
+    // during attach; replace immediately so destroy never SIGTERMs this process
+    // (#445 CI).
     vm.attach_running_process(
         std::process::id(),
         exec_socket_path.to_path_buf(),
@@ -897,6 +982,7 @@ async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManage
     )
     .await
     .unwrap();
+    vm.install_instant_stop_test_handler().await;
     assert_eq!(
         vm.state().await,
         a3s_box_runtime::BoxState::Ready,
@@ -911,7 +997,7 @@ async fn insert_authenticated_sandbox_vm(
     svc: &BoxRuntimeService,
     sandbox_id: &str,
 ) -> Option<TestExecServer> {
-    let server = spawn_exec_stream_server(b"", b"", 0, Duration::from_secs(3600)).await?;
+    let server = spawn_keepalive_exec_server().await?;
     let vm = attach_ready_test_vm(sandbox_id, &server.socket_path).await;
     svc.vm_managers
         .write()
@@ -3249,6 +3335,9 @@ async fn test_start_container_supervises_multiple_containers_in_same_sandbox() {
 async fn test_stop_container() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -3257,12 +3346,6 @@ async fn test_stop_container() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
-    let vm = VmManager::with_box_id(
-        a3s_box_core::config::BoxConfig::default(),
-        EventEmitter::new(16),
-        "sb-1".to_string(),
-    );
-    svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.stop_container(Request::new(StopContainerRequest {
         container_id: "c-1".to_string(),
@@ -3452,12 +3535,44 @@ async fn test_stop_container_running_without_vm_reconciles_state() {
     .await
     .unwrap();
 
+    // Inventable Running demotes via reconcile (255); must not invent VM
+    // teardown exit 137 or sandbox NotReady (#446).
     let c = svc.store.containers.get("c-1").await.unwrap();
     assert_eq!(c.state, ContainerState::Exited);
-    assert_eq!(c.exit_code, 137);
+    assert_eq!(c.exit_code, 255);
 
     let sandbox = svc.store.sandboxes.get("sb-1").await.unwrap();
-    assert_eq!(sandbox.state, SandboxState::NotReady);
+    assert_eq!(sandbox.state, SandboxState::Ready);
+}
+
+#[tokio::test]
+async fn stop_container_refuses_inventing_vm_teardown_without_vm_health() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.stop_container(Request::new(StopContainerRequest {
+        container_id: "c-stale".to_string(),
+        timeout: 0,
+    }))
+    .await
+    .unwrap();
+
+    let c = svc.store.containers.get("c-stale").await.unwrap();
+    assert_eq!(c.state, ContainerState::Exited);
+    assert_eq!(c.exit_code, 255);
+    assert!(
+        svc.vm_managers.read().await.is_empty(),
+        "inventable Running must not invent sandbox VM teardown"
+    );
+    let sandbox = svc.store.sandboxes.get("sb-stale").await.unwrap();
+    assert_eq!(
+        sandbox.state,
+        SandboxState::Ready,
+        "inventable Running stop must not invent sandbox NotReady"
+    );
 }
 
 #[tokio::test]
@@ -3466,6 +3581,9 @@ async fn test_stop_container_running_disconnects_network_endpoint() {
     let mut sandbox = test_networked_sandbox("sb-1");
     add_test_network_endpoint(&svc, &mut sandbox);
     svc.store.sandboxes.add(sandbox).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -3487,6 +3605,33 @@ async fn test_stop_container_running_disconnects_network_endpoint() {
 
     let sandbox = svc.store.sandboxes.get("sb-1").await.unwrap();
     assert_eq!(sandbox.state, SandboxState::NotReady);
+}
+
+#[tokio::test]
+async fn stop_container_refuses_inventing_network_disconnect_without_vm_health() {
+    let svc = make_test_service();
+    let mut sandbox = test_networked_sandbox("sb-stale");
+    add_test_network_endpoint(&svc, &mut sandbox);
+    svc.store.sandboxes.add(sandbox).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.stop_container(Request::new(StopContainerRequest {
+        container_id: "c-stale".to_string(),
+        timeout: 0,
+    }))
+    .await
+    .unwrap();
+
+    let network = svc.network_store.get("cri-net").unwrap().unwrap();
+    assert_eq!(
+        network.endpoints.len(),
+        1,
+        "inventable Running must not invent network disconnect"
+    );
+    let sandbox = svc.store.sandboxes.get("sb-stale").await.unwrap();
+    assert_eq!(sandbox.state, SandboxState::Ready);
 }
 
 #[tokio::test]
@@ -3547,6 +3692,26 @@ async fn test_remove_container_force_stops_running_container() {
 
     assert!(result.is_ok());
     assert!(svc.store.containers.get("c-1").await.is_none());
+}
+
+#[tokio::test]
+async fn remove_container_refuses_inventing_force_stop_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Running without VM health must demote, not invent force-stop (#445).
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.remove_container(Request::new(RemoveContainerRequest {
+        container_id: "c-stale".to_string(),
+    }))
+    .await
+    .unwrap();
+
+    assert!(
+        svc.store.containers.get("c-stale").await.is_none(),
+        "stale Running must demote then remove without inventing live force-stop"
+    );
 }
 
 // ── Container Status ─────────────────────────────────────────────
@@ -5108,7 +5273,12 @@ async fn test_port_forward_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("VM is not ready")
+            || err.message().contains("requires a ready sandbox"),
+        "unauthenticated VM must not invent PortForward: {}",
+        err.message()
+    );
 }
 
 #[tokio::test]
@@ -5202,13 +5372,18 @@ async fn acquire_vm_refuses_ready_sandbox_without_exec_heartbeat() {
     // Layout path alone must not authenticate — attach leaves Created (#413),
     // and CRI must not invent Sandbox Ready from that soft state (#428).
     svc.test_vm_exec_socket_path = Some(tmp.path().join("missing-exec.sock"));
-    let err = svc
+    let result = svc
         .acquire_vm_with_box_id(
             a3s_box_core::config::BoxConfig::default(),
             "test-acquire-no-hb".to_string(),
         )
-        .await
-        .expect_err("acquire must fail closed without authenticated Ready");
+        .await;
+    // VmManager is not Debug; assert Err without expect_err.
+    assert!(
+        result.is_err(),
+        "acquire must fail closed without authenticated Ready"
+    );
+    let err = result.err().unwrap();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(
         err.message().contains("not Ready") || err.message().contains("heartbeat"),
