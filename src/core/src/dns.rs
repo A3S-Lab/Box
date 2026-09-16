@@ -8,6 +8,17 @@ use std::net::IpAddr;
 /// Default DNS servers (Google Public DNS).
 const DEFAULT_DNS: &[&str] = &["8.8.8.8", "8.8.4.4"];
 
+/// Host resolv.conf path normally consulted for inheritance.
+const HOST_RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// systemd-resolved upstream list (not the stub listener).
+///
+/// On hosts where `/etc/resolv.conf` points at the stub (`127.0.0.53`), this
+/// file still holds the real recursive nameservers. Prefer it when present so
+/// guests do not inherit a loopback address that is unreachable under TSI for
+/// glibc/c-ares connected UDP (see #455).
+const SYSTEMD_RESOLVED_UPSTREAM: &str = "/run/systemd/resolve/resolv.conf";
+
 /// A static host-to-IP mapping for `/etc/hosts`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostEntry {
@@ -20,8 +31,9 @@ pub struct HostEntry {
 /// Generate resolv.conf content for the guest rootfs.
 ///
 /// Resolution order:
-/// 1. If `custom_dns` is non-empty, use those servers
-/// 2. Otherwise, try to read the host's /etc/resolv.conf
+/// 1. If `custom_dns` is non-empty, use those servers (explicit `--dns`)
+/// 2. Otherwise, inherit usable host nameservers (loopback filtered; prefer
+///    systemd-resolved upstream when the stub is detected)
 /// 3. Fall back to Google Public DNS (8.8.8.8, 8.8.4.4)
 pub fn generate_resolv_conf(custom_dns: &[String]) -> String {
     if !custom_dns.is_empty() {
@@ -72,24 +84,94 @@ pub fn render_resolv_conf(servers: &[String], searches: &[String], options: &[St
     out
 }
 
-/// Try to read the host's /etc/resolv.conf.
+/// Try to read usable host DNS for guest inheritance.
 ///
-/// Returns None if the file doesn't exist, is unreadable, or contains
-/// no nameserver entries (e.g., only comments).
+/// Returns None if no non-loopback nameserver can be found (caller falls back
+/// to built-in defaults). Mirrors Docker's `FilterResolvDNS` posture: never
+/// copy `127.0.0.0/8` / `::1` into the guest.
 fn read_host_resolv_conf() -> Option<String> {
-    let content = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    let primary = std::fs::read_to_string(HOST_RESOLV_CONF).ok();
+    let upstream = if primary
+        .as_deref()
+        .is_some_and(resolv_content_has_loopback_nameserver)
+    {
+        std::fs::read_to_string(SYSTEMD_RESOLVED_UPSTREAM).ok()
+    } else {
+        None
+    };
 
-    // Filter to only nameserver lines (skip comments, search, domain, etc.)
-    let nameservers: Vec<&str> = content
-        .lines()
-        .filter(|line| line.trim_start().starts_with("nameserver"))
-        .collect();
+    select_host_nameserver_lines(primary.as_deref(), upstream.as_deref())
+}
 
-    if nameservers.is_empty() {
-        return None;
+/// Pure selection used by [`read_host_resolv_conf`] (and unit tests).
+///
+/// When the primary file contains a loopback nameserver and an upstream file
+/// yields at least one non-loopback nameserver, prefer the upstream. Otherwise
+/// filter the primary. Empty after filtering → `None`.
+fn select_host_nameserver_lines(
+    primary_content: Option<&str>,
+    upstream_content: Option<&str>,
+) -> Option<String> {
+    let primary = primary_content?;
+
+    if resolv_content_has_loopback_nameserver(primary) {
+        if let Some(upstream) = upstream_content {
+            let filtered = filter_resolv_nameserver_lines(upstream);
+            if !filtered.is_empty() {
+                return Some(filtered.join("\n") + "\n");
+            }
+        }
     }
 
-    Some(nameservers.join("\n") + "\n")
+    let filtered = filter_resolv_nameserver_lines(primary);
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered.join("\n") + "\n")
+    }
+}
+
+/// Drop loopback nameservers from resolv.conf content; keep only `nameserver` lines.
+fn filter_resolv_nameserver_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let addr = nameserver_address(line)?;
+            if is_loopback_nameserver(addr) {
+                None
+            } else {
+                Some(format!("nameserver {addr}"))
+            }
+        })
+        .collect()
+}
+
+fn resolv_content_has_loopback_nameserver(content: &str) -> bool {
+    content
+        .lines()
+        .filter_map(nameserver_address)
+        .any(is_loopback_nameserver)
+}
+
+fn nameserver_address(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    // resolv.conf is case-sensitive for the keyword in practice; match Docker/glibc.
+    let rest = trimmed.strip_prefix("nameserver")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    rest.split_whitespace().next()
+}
+
+fn is_loopback_nameserver(addr: &str) -> bool {
+    match addr.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+        // Unparseable tokens are not treated as loopback; they also will not
+        // be useful in-guest, but filtering them here would change inheritance
+        // beyond the #455 contract (drop 127/8 and ::1 only).
+        Err(_) => false,
+    }
 }
 
 /// Generate /etc/hosts content for DNS service discovery.
@@ -228,12 +310,98 @@ mod tests {
         let result = generate_resolv_conf(&[]);
         // Should contain at least one nameserver line
         assert!(result.contains("nameserver"));
+        // Guest inheritance must never surface the systemd-resolved stub.
+        assert!(
+            !result.contains("127.0.0.53"),
+            "inherited resolv.conf must not keep loopback stub: {result}"
+        );
+        for line in result.lines() {
+            if let Some(addr) = nameserver_address(line) {
+                assert!(
+                    !is_loopback_nameserver(addr),
+                    "loopback nameserver leaked into guest resolv.conf: {result}"
+                );
+            }
+        }
     }
 
     #[test]
     fn test_single_dns() {
         let result = generate_resolv_conf(&["9.9.9.9".to_string()]);
         assert_eq!(result, "nameserver 9.9.9.9\n");
+    }
+
+    #[test]
+    fn filter_drops_ipv4_and_ipv6_loopback_nameservers() {
+        let content = "\
+# stub
+nameserver 127.0.0.53
+nameserver 127.0.0.1
+nameserver ::1
+nameserver 1.1.1.1
+search example.com
+";
+        assert_eq!(
+            filter_resolv_nameserver_lines(content),
+            vec!["nameserver 1.1.1.1".to_string()]
+        );
+    }
+
+    #[test]
+    fn stub_primary_prefers_systemd_upstream_nameservers() {
+        let primary = "nameserver 127.0.0.53\noptions edns0\n";
+        let upstream = "nameserver 10.1.7.5\nnameserver 10.1.7.6\n";
+        assert_eq!(
+            select_host_nameserver_lines(Some(primary), Some(upstream)).as_deref(),
+            Some("nameserver 10.1.7.5\nnameserver 10.1.7.6\n")
+        );
+    }
+
+    #[test]
+    fn stub_primary_without_upstream_falls_through_to_none() {
+        let primary = "nameserver 127.0.0.53\n";
+        assert_eq!(select_host_nameserver_lines(Some(primary), None), None);
+        assert_eq!(
+            select_host_nameserver_lines(Some(primary), Some("# empty upstream\n")),
+            None
+        );
+    }
+
+    #[test]
+    fn non_stub_primary_keeps_public_nameservers() {
+        let primary = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
+        assert_eq!(
+            select_host_nameserver_lines(Some(primary), Some("nameserver 10.0.0.1\n")).as_deref(),
+            Some("nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+        );
+    }
+
+    #[test]
+    fn mixed_primary_without_usable_upstream_keeps_non_loopback() {
+        let primary = "nameserver 127.0.0.53\nnameserver 9.9.9.9\n";
+        assert_eq!(
+            select_host_nameserver_lines(Some(primary), None).as_deref(),
+            Some("nameserver 9.9.9.9\n")
+        );
+    }
+
+    #[test]
+    fn loopback_detection_covers_entire_127_slash_8() {
+        assert!(is_loopback_nameserver("127.0.0.53"));
+        assert!(is_loopback_nameserver("127.1.2.3"));
+        assert!(is_loopback_nameserver("::1"));
+        assert!(!is_loopback_nameserver("10.1.7.5"));
+        assert!(!is_loopback_nameserver("8.8.8.8"));
+    }
+
+    #[test]
+    fn path_constants_match_linux_layout() {
+        // Guard against accidental drift of the documented paths.
+        assert_eq!(HOST_RESOLV_CONF, "/etc/resolv.conf");
+        assert_eq!(
+            SYSTEMD_RESOLVED_UPSTREAM,
+            "/run/systemd/resolve/resolv.conf"
+        );
     }
 
     // --- generate_hosts_file tests ---
