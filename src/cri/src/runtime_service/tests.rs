@@ -5281,13 +5281,18 @@ async fn acquire_vm_refuses_ready_sandbox_without_exec_heartbeat() {
     // Layout path alone must not authenticate — attach leaves Created (#413),
     // and CRI must not invent Sandbox Ready from that soft state (#428).
     svc.test_vm_exec_socket_path = Some(tmp.path().join("missing-exec.sock"));
-    let err = svc
+    let result = svc
         .acquire_vm_with_box_id(
             a3s_box_core::config::BoxConfig::default(),
             "test-acquire-no-hb".to_string(),
         )
-        .await
-        .expect_err("acquire must fail closed without authenticated Ready");
+        .await;
+    // VmManager is not Debug; assert Err without expect_err.
+    assert!(
+        result.is_err(),
+        "acquire must fail closed without authenticated Ready"
+    );
+    let err = result.err().unwrap();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(
         err.message().contains("not Ready") || err.message().contains("heartbeat"),
