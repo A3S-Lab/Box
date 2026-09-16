@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `snapshot rm` exits non-zero for missing targets and requires at least one
+  argument; `rm`/`inspect` resolve ID, unique name, or unique ID prefix the
+  same way as `restore` (#456). Does **not** change prune or create semantics.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
