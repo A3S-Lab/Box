@@ -732,7 +732,9 @@ retain process or filesystem sessions after its owner dies.
   (#424 / #421/#422); Windows `set_boot_completion_state` refuses inventing
   Ready without a retained authenticated `ExecClient` (cold wait / pool
   available / attach retain the heartbeat client; call-order alone is not
-  proof) (#425 / #414);
+  proof) (#425 / #414); Scale inventory refuses inventing
+  `InstancePhase::Ready` from inspect `Running` alone while durable managed
+  status is transitional — Ready needs durable `Running` (#427 / #417);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
