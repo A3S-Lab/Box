@@ -29,7 +29,7 @@ use crate::sandbox::{
     SandboxResources, SandboxRuntimeProcess, SandboxTmpfs,
 };
 
-use super::{BoxState, VmManager};
+use super::VmManager;
 
 /// Product-owned bundle ready to be loaded through the public A3S OCI SDK.
 #[derive(Debug, Clone)]
@@ -312,7 +312,9 @@ impl VmManager {
                 // period would merely recheck process liveness for a fixed 250 ms;
                 // the heartbeat path below already checks liveness on every
                 // attempt and returns immediately for a naturally exited one-shot.
-                #[cfg(unix)]
+                //
+                // Unix and Windows both require authenticated exec — do not invent
+                // Ready from controller.start Ok alone (#430 / #425/#414).
                 self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 Ok(())
             }
@@ -332,7 +334,15 @@ impl VmManager {
         // Port publishing is intentionally rejected for Sandbox. Keep no stale
         // VM port-forward path in the public manager state.
         self.port_forward_socket_path = None;
-        *self.state.write().await = BoxState::Ready;
+        // wait_for_exec_ready retains an authenticated client; publish Ready only
+        // from that proof. Soft Created must not invent Sandbox Ready (#430).
+        if !self.set_boot_completion_state().await {
+            self.cleanup_boot_failure().await;
+            return Err(BoxError::BoxBootError {
+                message: "Sandbox exec authenticated but Ready was not published".to_string(),
+                hint: None,
+            });
+        }
 
         if let Some(ref prom) = self.prom {
             prom.vm_boot_duration
@@ -1502,5 +1512,30 @@ mod tests {
         assert!(managed.contains(&workspace));
         assert!(managed.contains(&named_source));
         assert!(!managed.contains(&external_source));
+    }
+
+    #[tokio::test]
+    async fn sandbox_boot_completion_refuses_ready_without_exec_client() {
+        use crate::vm::BoxState;
+
+        let home = tempfile::tempdir().unwrap();
+        let mut manager = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(16),
+            "sandbox-no-hb-ready".to_string(),
+        );
+        manager.home_dir = home.path().to_path_buf();
+        // Post-controller.start layout alone must not invent Sandbox Ready
+        // (#430 / MicroVM set_boot_completion_state parity).
+        manager.exec_socket_path = Some(home.path().join("exec.sock"));
+        assert!(
+            !manager.set_boot_completion_state().await,
+            "missing authenticated exec client must not invent Sandbox Ready"
+        );
+        assert_eq!(
+            manager.state().await,
+            BoxState::Created,
+            "failed Sandbox Ready gate must leave Created"
+        );
     }
 }
