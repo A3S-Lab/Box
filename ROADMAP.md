@@ -740,7 +740,9 @@ retain process or filesystem sessions after its owner dies.
   idle Ready without exec re-auth (#429 / #423); Sandbox boot refuses inventing
   Ready without cross-platform exec wait + boot-completion proof (#430 /
   #425/#414); CRI PodSandboxStatus refuses inventing Ready from durable state
-  without VM health re-proof (#431 / #428/#423);
+  without VM health re-proof (#431 / #428/#423); CRI ListPodSandbox /
+  StreamPodSandboxes refuse inventing Ready from durable state without the
+  same health re-proof (#432 / #431);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

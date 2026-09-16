@@ -240,6 +240,9 @@ All notable changes to A3S Box will be documented in this file.
   alone — re-proves VM exec health and demotes to NotReady when the manager is
   missing or unhealthy (#431 / #428/#423). Does **not** invent Live digests or
   flip B2.
+- CRI `ListPodSandbox` / `StreamPodSandboxes` refuse inventing SandboxReady from
+  durable Ready alone — same VM health re-proof and durable demote as Status
+  (#432 / #431). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

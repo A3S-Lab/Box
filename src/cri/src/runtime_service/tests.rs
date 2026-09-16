@@ -1734,6 +1734,44 @@ async fn test_list_pod_sandbox_filter_by_id() {
     assert_eq!(resp.items[0].id, "sb-1");
 }
 
+#[tokio::test]
+async fn list_pod_sandbox_refuses_stale_ready_without_vm_health() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-stale-list")).await;
+    assert_eq!(
+        svc.store
+            .sandboxes
+            .get("sb-stale-list")
+            .await
+            .unwrap()
+            .state,
+        SandboxState::Ready
+    );
+
+    let resp = svc
+        .list_pod_sandbox(Request::new(ListPodSandboxRequest { filter: None }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.items.len(), 1);
+    assert_eq!(
+        resp.items[0].state(),
+        PodSandboxState::SandboxNotready,
+        "durable Ready without VM health must not invent SandboxReady on list"
+    );
+    assert_eq!(
+        svc.store
+            .sandboxes
+            .get("sb-stale-list")
+            .await
+            .unwrap()
+            .state,
+        SandboxState::NotReady,
+        "stale Ready must be demoted in durable store"
+    );
+}
+
 // ── Container CRUD ───────────────────────────────────────────────
 
 #[tokio::test]

@@ -953,23 +953,9 @@ impl RuntimeService for BoxRuntimeService {
 
         // Durable Ready alone must not invent SandboxReady — re-prove the VM
         // exec heartbeat (or demote when the manager is gone) (#431 / #428/#423).
-        let mut reported_state = sandbox.state;
-        if sandbox.state == SandboxState::Ready {
-            let healthy = {
-                let managers = self.vm_managers.read().await;
-                match managers.get(sandbox_id) {
-                    Some(vm) => matches!(vm.health_check().await, Ok(true)),
-                    None => false,
-                }
-            };
-            if !healthy {
-                let _ = self
-                    .store
-                    .update_sandbox_state(sandbox_id, SandboxState::NotReady)
-                    .await;
-                reported_state = SandboxState::NotReady;
-            }
-        }
+        let reported_state = self
+            .reconcile_reported_sandbox_state(sandbox_id, sandbox.state)
+            .await;
 
         let state = match reported_state {
             SandboxState::Ready => PodSandboxState::SandboxReady,
@@ -1043,7 +1029,13 @@ impl RuntimeService for BoxRuntimeService {
             .map(|f| &f.label_selector)
             .filter(|m| !m.is_empty());
 
-        let sandboxes = self.store.sandboxes.list(label_filter).await;
+        let mut sandboxes = self.store.sandboxes.list(label_filter).await;
+        // List must not invent SandboxReady from durable Ready alone (#432 / #431).
+        for sandbox in &mut sandboxes {
+            sandbox.state = self
+                .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+                .await;
+        }
 
         let items: Vec<crate::cri_api::PodSandbox> = sandboxes
             .into_iter()
@@ -1081,7 +1073,13 @@ impl RuntimeService for BoxRuntimeService {
             .map(|f| &f.label_selector)
             .filter(|m| !m.is_empty());
 
-        let sandboxes = self.store.sandboxes.list(label_filter).await;
+        let mut sandboxes = self.store.sandboxes.list(label_filter).await;
+        // Stream list must not invent SandboxReady from durable Ready alone (#432).
+        for sandbox in &mut sandboxes {
+            sandbox.state = self
+                .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+                .await;
+        }
         let pod_sandboxes = sandboxes
             .into_iter()
             .filter(|sb| {

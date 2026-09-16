@@ -424,6 +424,36 @@ impl BoxRuntimeService {
         self.acquire_vm_inner(box_config, Some(box_id)).await
     }
 
+    /// Re-prove durable Ready against live VM health; demote when inventable.
+    ///
+    /// Status (#431) and List (#432) must not invent SandboxReady from store
+    /// membership alone.
+    pub(super) async fn reconcile_reported_sandbox_state(
+        &self,
+        sandbox_id: &str,
+        durable: SandboxState,
+    ) -> SandboxState {
+        if durable != SandboxState::Ready {
+            return durable;
+        }
+        let healthy = {
+            let managers = self.vm_managers.read().await;
+            match managers.get(sandbox_id) {
+                Some(vm) => matches!(vm.health_check().await, Ok(true)),
+                None => false,
+            }
+        };
+        if healthy {
+            SandboxState::Ready
+        } else {
+            let _ = self
+                .store
+                .update_sandbox_state(sandbox_id, SandboxState::NotReady)
+                .await;
+            SandboxState::NotReady
+        }
+    }
+
     /// Fail closed unless the VM can run guest exec (Ready/Busy/Compacting).
     ///
     /// Soft-Created boots (#414) and attach-without-heartbeat (#413) must not
