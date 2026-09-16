@@ -1211,6 +1211,34 @@ async fn test_container_stats_reports_rootfs_writable_layer_usage() {
 }
 
 #[tokio::test]
+async fn list_container_stats_refuses_stale_running_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Running without sandbox VM health must not invent list stats (#442).
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    let mut exited = test_container("c-exited", "sb-stale");
+    exited.state = ContainerState::Exited;
+    svc.store.containers.add(running).await;
+    svc.store.containers.add(exited).await;
+
+    let resp = svc
+        .list_container_stats(Request::new(ListContainerStatsRequest { filter: None }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(
+        resp.stats.is_empty(),
+        "list must not invent Running stats without VM health"
+    );
+    assert_eq!(
+        svc.store.containers.get("c-stale").await.unwrap().state,
+        ContainerState::Exited,
+        "stale Running must be demoted in durable store"
+    );
+}
+
+#[tokio::test]
 async fn test_list_container_stats_only_reports_running_containers() {
     let svc = make_test_service();
     let mut running = test_container("c-running", "sb-1");
@@ -1219,6 +1247,9 @@ async fn test_list_container_stats_only_reports_running_containers() {
     exited.state = ContainerState::Exited;
     svc.store.containers.add(running).await;
     svc.store.containers.add(exited).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let resp = svc
         .list_container_stats(Request::new(ListContainerStatsRequest { filter: None }))
