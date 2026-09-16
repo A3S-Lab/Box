@@ -424,6 +424,21 @@ impl BoxRuntimeService {
         self.acquire_vm_inner(box_config, Some(box_id)).await
     }
 
+    /// Fail closed unless the VM can run guest exec (Ready/Busy/Compacting).
+    ///
+    /// Soft-Created boots (#414) and attach-without-heartbeat (#413) must not
+    /// become CRI `SandboxState::Ready` (#428).
+    async fn require_authenticated_ready_for_sandbox(vm: &VmManager) -> Result<(), Status> {
+        match vm.state().await {
+            a3s_box_runtime::BoxState::Ready
+            | a3s_box_runtime::BoxState::Busy
+            | a3s_box_runtime::BoxState::Compacting => Ok(()),
+            other => Err(Status::failed_precondition(format!(
+                "sandbox VM is not Ready after acquire (state={other:?}); exec heartbeat did not authenticate"
+            ))),
+        }
+    }
+
     pub(super) async fn acquire_vm_inner(
         &self,
         box_config: a3s_box_core::config::BoxConfig,
@@ -442,8 +457,21 @@ impl BoxRuntimeService {
             } else {
                 let pool = pool.read().await;
                 match pool.acquire().await {
-                    Ok(vm) => {
+                    Ok(mut vm) => {
                         tracing::debug!(box_id = %vm.box_id(), "Acquired VM from warm pool");
+                        if let Err(status) =
+                            Self::require_authenticated_ready_for_sandbox(&vm).await
+                        {
+                            let box_id = vm.box_id().to_string();
+                            if let Err(error) = vm.destroy().await {
+                                tracing::warn!(
+                                    %box_id,
+                                    %error,
+                                    "Failed to destroy warm-pool VM after Ready gate refusal"
+                                );
+                            }
+                            return Err(status);
+                        }
                         return Ok(vm);
                     }
                     Err(e) => {
@@ -470,6 +498,10 @@ impl BoxRuntimeService {
             )
             .await
             .map_err(box_error_to_status)?;
+            if let Err(status) = Self::require_authenticated_ready_for_sandbox(&vm).await {
+                let _ = vm.destroy().await;
+                return Err(status);
+            }
             return Ok(vm);
         }
 
@@ -479,6 +511,19 @@ impl BoxRuntimeService {
             None => VmManager::new(box_config, event_emitter),
         };
         vm.boot().await.map_err(box_error_to_status)?;
+        if let Err(status) = Self::require_authenticated_ready_for_sandbox(&vm).await {
+            let box_id = vm.box_id().to_string();
+            if let Err(error) = vm.destroy().await {
+                tracing::warn!(
+                    %box_id,
+                    %error,
+                    "Failed to destroy soft-Created sandbox VM after Ready gate refusal"
+                );
+                #[cfg(target_os = "linux")]
+                a3s_box_runtime::vm::reap::reap_orphaned_box(&box_id);
+            }
+            return Err(status);
+        }
         Ok(vm)
     }
 

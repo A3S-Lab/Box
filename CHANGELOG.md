@@ -224,6 +224,10 @@ All notable changes to A3S Box will be documented in this file.
   transitional (`Pausing`/`Killing`/`Starting`/…). Ready requires durable
   `Running` plus Running observe (#427 / #417). Does **not** flip B2 or invent
   Live digests.
+- CRI sandbox acquire refuses inventing Ready when the VM is still soft
+  `Created` after boot/attach (no authenticated exec heartbeat). RunPodSandbox
+  fails closed instead of storing `SandboxState::Ready` for a non-Ready VM
+  (#428 / #414/#413). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
