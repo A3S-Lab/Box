@@ -1578,10 +1578,41 @@ async fn test_pod_sandbox_status_found() {
 
     let status = resp.status.unwrap();
     assert_eq!(status.id, "sb-1");
-    assert_eq!(status.state(), PodSandboxState::SandboxReady);
+    // Stored Ready without a live authenticated VM must demote (#431).
+    assert_eq!(status.state(), PodSandboxState::SandboxNotready);
     let meta = status.metadata.unwrap();
     assert_eq!(meta.name, "pod-sb-1");
     assert_eq!(meta.namespace, "default");
+}
+
+#[tokio::test]
+async fn pod_sandbox_status_refuses_stale_ready_without_vm_health() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    assert_eq!(
+        svc.store.sandboxes.get("sb-stale").await.unwrap().state,
+        SandboxState::Ready
+    );
+
+    let resp = svc
+        .pod_sandbox_status(Request::new(PodSandboxStatusRequest {
+            pod_sandbox_id: "sb-stale".to_string(),
+            verbose: false,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        resp.status.unwrap().state(),
+        PodSandboxState::SandboxNotready,
+        "durable Ready without VM health must not invent SandboxReady"
+    );
+    assert_eq!(
+        svc.store.sandboxes.get("sb-stale").await.unwrap().state,
+        SandboxState::NotReady,
+        "stale Ready must be demoted in durable store"
+    );
 }
 
 #[tokio::test]

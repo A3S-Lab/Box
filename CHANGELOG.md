@@ -236,6 +236,10 @@ All notable changes to A3S Box will be documented in this file.
   always waits for authenticated exec (Unix and Windows) and publishes Ready
   only via `set_boot_completion_state` (#430 / #425/#414). Does **not** invent
   Live digests or flip B2.
+- CRI `PodSandboxStatus` refuses inventing SandboxReady from durable Ready
+  alone — re-proves VM exec health and demotes to NotReady when the manager is
+  missing or unhealthy (#431 / #428/#423). Does **not** invent Live digests or
+  flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

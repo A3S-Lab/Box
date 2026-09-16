@@ -951,7 +951,27 @@ impl RuntimeService for BoxRuntimeService {
             .await
             .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
 
-        let state = match sandbox.state {
+        // Durable Ready alone must not invent SandboxReady — re-prove the VM
+        // exec heartbeat (or demote when the manager is gone) (#431 / #428/#423).
+        let mut reported_state = sandbox.state;
+        if sandbox.state == SandboxState::Ready {
+            let healthy = {
+                let managers = self.vm_managers.read().await;
+                match managers.get(sandbox_id) {
+                    Some(vm) => matches!(vm.health_check().await, Ok(true)),
+                    None => false,
+                }
+            };
+            if !healthy {
+                let _ = self
+                    .store
+                    .update_sandbox_state(sandbox_id, SandboxState::NotReady)
+                    .await;
+                reported_state = SandboxState::NotReady;
+            }
+        }
+
+        let state = match reported_state {
             SandboxState::Ready => PodSandboxState::SandboxReady,
             SandboxState::NotReady | SandboxState::Removed => PodSandboxState::SandboxNotready,
         };
@@ -967,7 +987,7 @@ impl RuntimeService for BoxRuntimeService {
             HashMap::from([
                 (
                     "sandbox_state".to_string(),
-                    sandbox_state_label(sandbox.state).to_string(),
+                    sandbox_state_label(reported_state).to_string(),
                 ),
                 ("vm_present".to_string(), vm_present.to_string()),
                 ("container_count".to_string(), container_count.to_string()),
