@@ -300,6 +300,9 @@ All notable changes to A3S Box will be documented in this file.
   exit `255` for Created never-started containers — record exit `0` while stale
   Running without a live VM still fail-closes with `255` (#449 / #448). Does
   **not** invent Live digests or flip B2.
+- CRI `sandbox_vm_usage` / `PodSandboxStats` refuse inventing CPU/RSS from a
+  shim PID alone when VM health is inventable (soft-Created / failed exec
+  heartbeat) (#450 / #419/#443). Does **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only

@@ -770,7 +770,9 @@ retain process or filesystem sessions after its owner dies.
   handle, and a completed reopen ack (#447 / #438/#434); CRI StopPodSandbox
   refuses inventing SIGKILL exit 137 for Created never-started containers
   (#448 / #447/#444); CRI `load_state` restart reconciliation refuses inventing
-  exit 255 for Created never-started containers (#449 / #448);
+  exit 255 for Created never-started containers (#449 / #448); CRI
+  `sandbox_vm_usage` / PodSandboxStats refuse inventing CPU/RSS from a shim PID
+  alone when VM health is inventable (#450 / #419/#443);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
