@@ -712,7 +712,10 @@ retain process or filesystem sessions after its owner dies.
   alone (authenticated exec heartbeat, else `Created`, #415); managed MicroVM
   `start` refuses inventing a start handle / durable Running when boot left
   `Created` without authenticated Ready (#416 / #414 seam); pool warm publish
-  aligns Ready after `wait_for_exec_available`;
+  aligns Ready after `wait_for_exec_available`; managed observe refuses
+  inventing `Running` from durable `Pausing` + backend `Creating`, and
+  inventing `Paused` from durable `Resuming` + backend `Creating` (project
+  `Creating` until pause/resume evidence authenticates);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
