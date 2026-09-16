@@ -306,7 +306,8 @@ impl VmManager {
                 // 5b. Become ready. A snapshot-restore boot resumes an already-booted
                 // guest whose exec server won't re-signal readiness, so the cold-boot
                 // wait would stall registration on its safety cap — do one best-effort
-                // probe instead. A normal boot waits for the Heartbeat health check.
+                // probe instead of inventing Ready. A failed probe leaves Created via
+                // set_boot_completion_state (#414). A normal boot waits for Heartbeat.
                 #[cfg(unix)]
                 if is_restore_mode(&self.config) {
                     self.probe_exec_ready_once(&layout.exec_socket_path).await;
@@ -379,21 +380,29 @@ impl VmManager {
             )));
         }
 
-        // 6. Update state to Ready
-        *self.state.write().await = BoxState::Ready;
+        // 6. Ready only with authenticated exec — restore soft-probe must not
+        // invent Ready when the one-shot heartbeat failed (#414 / #413 parity).
+        let ready = self.set_boot_completion_state().await;
+        if ready {
+            // Record Prometheus metrics
+            if let Some(ref prom) = self.prom {
+                let boot_duration = boot_start.elapsed().as_secs_f64();
+                prom.vm_boot_duration.observe(boot_duration);
+                prom.vm_created_total.inc();
+                prom.vm_count.with_label_values(&["ready"]).inc();
+            }
 
-        // Record Prometheus metrics
-        if let Some(ref prom) = self.prom {
-            let boot_duration = boot_start.elapsed().as_secs_f64();
-            prom.vm_boot_duration.observe(boot_duration);
-            prom.vm_created_total.inc();
-            prom.vm_count.with_label_values(&["ready"]).inc();
+            // Emit ready event
+            self.event_emitter.emit(BoxEvent::empty("box.ready"));
+
+            tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
+        } else {
+            tracing::info!(
+                parent: &boot_span,
+                box_id = %self.box_id,
+                "VM process started; leaving Created until exec heartbeat authenticates"
+            );
         }
-
-        // Emit ready event
-        self.event_emitter.emit(BoxEvent::empty("box.ready"));
-
-        tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
 
         Ok(())
     }

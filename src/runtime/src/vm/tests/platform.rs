@@ -509,6 +509,37 @@ async fn test_probe_exec_ready_once_ignores_missing_socket() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_restore_boot_completion_refuses_ready_without_exec_heartbeat() {
+    let mut vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-restore-no-hb".to_string(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Mirror restore soft-proceed: one best-effort probe, then the boot
+    // completion gate — never invent Ready when heartbeat did not authenticate.
+    vm.probe_exec_ready_once(&tmp.path().join("missing-exec.sock"))
+        .await;
+    assert!(
+        vm.exec_client().is_none(),
+        "failed restore probe must not invent an exec client"
+    );
+
+    let ready = vm.set_boot_completion_state().await;
+    assert!(
+        !ready,
+        "restore boot completion must not authorize Ready without heartbeat"
+    );
+    assert_eq!(
+        vm.state().await,
+        BoxState::Created,
+        "restore soft-proceed must leave Created for observe/promote_if_ready"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_attach_running_process_infers_port_forward_socket_path() {
     let mut vm = VmManager::with_box_id(
         BoxConfig::default(),
