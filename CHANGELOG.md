@@ -178,6 +178,11 @@ All notable changes to A3S Box will be documented in this file.
   (`require_authenticated_ready_for_start` / `promote_if_ready`). Pool warm
   publish likewise aligns `BoxState::Ready` after `wait_for_exec_available`
   (#416 / #414 seam). Does **not** flip B2 or invent Live digests.
+- Managed observe no longer invents `Running` while durable `Pausing` sees
+  backend `Creating`, or invents `Paused` while durable `Resuming` sees
+  backend `Creating` — project `Creating` until pause/resume evidence is
+  authenticated (`Starting`/`Killing` Creating parity). Does **not** flip B2
+  or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

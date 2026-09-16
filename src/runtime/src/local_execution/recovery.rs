@@ -161,9 +161,13 @@ impl LocalExecutionManager {
                     .await?;
                 Ok((record, ExecutionState::Paused))
             }
-            (ManagedExecutionState::Pausing, ExecutionState::Running)
-            | (ManagedExecutionState::Pausing, ExecutionState::Creating) => {
+            (ManagedExecutionState::Pausing, ExecutionState::Running) => {
                 Ok((record, ExecutionState::Running))
+            }
+            (ManagedExecutionState::Pausing, ExecutionState::Creating) => {
+                // Backend Creating is not an authenticated Running surface.
+                // Do not invent Running while pause is still in flight.
+                Ok((record, ExecutionState::Creating))
             }
             (ManagedExecutionState::Resuming, ExecutionState::Running) => {
                 let record = self
@@ -176,9 +180,13 @@ impl LocalExecutionManager {
                     .await?;
                 Ok((record, ExecutionState::Running))
             }
-            (ManagedExecutionState::Resuming, ExecutionState::Paused)
-            | (ManagedExecutionState::Resuming, ExecutionState::Creating) => {
+            (ManagedExecutionState::Resuming, ExecutionState::Paused) => {
                 Ok((record, ExecutionState::Paused))
+            }
+            (ManagedExecutionState::Resuming, ExecutionState::Creating) => {
+                // Backend Creating is not an authenticated Paused surface.
+                // Do not invent Paused while resume is still in flight.
+                Ok((record, ExecutionState::Creating))
             }
             (ManagedExecutionState::Killing, ExecutionState::Running) => {
                 Ok((record, ExecutionState::Running))

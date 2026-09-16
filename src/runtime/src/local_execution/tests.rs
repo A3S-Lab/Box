@@ -1392,6 +1392,95 @@ async fn vanished_runtime_during_warm_resume_publishes_failed_not_resuming() {
 }
 
 #[tokio::test]
+async fn observe_pausing_creating_projects_creating_not_running() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-pausing-creating-create");
+    let mut create = request("observe-pausing-creating");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+            RuntimeUpdate::PauseClaim {
+                keep_memory: true,
+                operation_id: operation("observe-pausing-creating-claim"),
+            },
+        )
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(running.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Creating;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Creating,
+        "in-flight Pausing + Creating must not invent Running"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Pausing),
+        "must remain Pausing until pause completes or fails honestly"
+    );
+}
+
+#[tokio::test]
+async fn observe_resuming_creating_projects_creating_not_paused() {
+    let (_directory, manager, backend) = harness();
+    let create_operation = operation("observe-resuming-creating-create");
+    let mut create = request("observe-resuming-creating");
+    create.config.isolation = ExecutionIsolation::Microvm;
+    let running = manager
+        .create_and_start(create, &create_operation)
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &paused.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Resuming,
+            RuntimeUpdate::ResumeClaim(operation("observe-resuming-creating-claim")),
+        )
+        .await
+        .unwrap();
+    {
+        let mut executions = backend.executions.lock().unwrap();
+        let execution = executions.get_mut(paused.execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Creating;
+        execution.exit_code = None;
+    }
+
+    let status = manager.inspect(&paused.execution_id).await.unwrap();
+    assert_eq!(
+        status.state,
+        ExecutionState::Creating,
+        "in-flight Resuming + Creating must not invent Paused"
+    );
+    let record = persisted(&manager, &paused.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Resuming),
+        "must remain Resuming until resume completes or fails honestly"
+    );
+}
+
+#[tokio::test]
 async fn observe_pausing_stopped_without_exit_publishes_failed_not_clean_stopped() {
     let (_directory, manager, backend) = harness();
     let create_operation = operation("observe-pausing-stopped-create");
