@@ -340,6 +340,9 @@ impl PasstManager {
         let _ = std::fs::remove_file(&self.socket_path);
         let _ = std::fs::remove_file(&self.pcap_path);
         let _ = std::fs::remove_file(&self.pid_file);
+        if let Some(parent) = self.socket_path.parent() {
+            let _ = std::fs::remove_file(passt_backend_lost_marker(parent));
+        }
         if let Some(stderr_path) = self.stderr_path() {
             let _ = std::fs::remove_file(stderr_path);
         }
@@ -404,6 +407,36 @@ impl Drop for PasstManager {
     }
 }
 
+/// True when a bridge-mode box's passt backend is gone (#454).
+///
+/// Resolves the box runtime socket directory under `home` and checks the
+/// shim's `passt.backend_lost` marker and/or the durable `passt.pid` file.
+pub fn passt_backend_lost_for_box(home: &Path, box_id: &str) -> bool {
+    let socket_dir = crate::vm::runtime_socket_dir(home, box_id);
+    // Only diagnose boxes that actually launched passt (pid file or marker).
+    let marker = passt_backend_lost_marker(&socket_dir);
+    let pid_file = socket_dir.join("passt.pid");
+    if !marker.exists() && !pid_file.exists() {
+        return false;
+    }
+    passt_backend_lost(&socket_dir)
+}
+
+fn passt_pid_file_alive(socket_dir: &Path) -> bool {
+    let pid_file = socket_dir.join("passt.pid");
+    let Ok(contents) = std::fs::read_to_string(&pid_file) else {
+        // No pid file: either never started, already torn down, or TSI-only.
+        // Callers that invoke this for bridge boxes treat "no pid" after start
+        // as lost only when a marker exists; without a pid file we report
+        // "not lost" so non-bridge / pre-spawn paths stay quiet.
+        return true;
+    };
+    let Ok(pid) = contents.trim().parse::<i32>() else {
+        return false;
+    };
+    pid > 1 && pid_is_passt(pid)
+}
+
 /// Terminate a passt daemon by its PID file and remove its socket/PID files.
 ///
 /// passt outlives the `PasstManager` that launched it (so detached boxes keep
@@ -429,6 +462,7 @@ pub fn terminate_passt(socket_dir: &Path) {
     let _ = std::fs::remove_file(&pid_file);
     let _ = std::fs::remove_file(socket_dir.join("passt.sock"));
     let _ = std::fs::remove_file(socket_dir.join("passt.pcap"));
+    let _ = std::fs::remove_file(passt_backend_lost_marker(socket_dir));
 }
 
 /// Best-effort check that `pid` is actually a passt process, to avoid SIGTERM-ing
@@ -685,17 +719,34 @@ mod tests {
         let socket_path = dir.path().join("passt.sock");
         let pid_path = dir.path().join("passt.pid");
         let pcap_path = dir.path().join("passt.pcap");
+        let marker = passt_backend_lost_marker(dir.path());
 
         // A non-existent PID so the SIGTERM is a harmless no-op (ESRCH).
         std::fs::write(&socket_path, "fake").unwrap();
         std::fs::write(&pid_path, "2147483647").unwrap();
         std::fs::write(&pcap_path, "fake pcap").unwrap();
+        std::fs::write(&marker, "passt\n").unwrap();
 
         terminate_passt(dir.path());
 
         assert!(!socket_path.exists());
         assert!(!pid_path.exists());
         assert!(!pcap_path.exists());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn passt_backend_lost_detects_marker_and_dead_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!passt_backend_lost(dir.path()));
+
+        let marker = passt_backend_lost_marker(dir.path());
+        std::fs::write(&marker, "passt\n").unwrap();
+        assert!(passt_backend_lost(dir.path()));
+        let _ = std::fs::remove_file(&marker);
+
+        std::fs::write(dir.path().join("passt.pid"), "1").unwrap();
+        assert!(passt_backend_lost(dir.path()));
     }
 
     #[test]

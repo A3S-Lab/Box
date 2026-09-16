@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Bridge networking no longer drops the peer Ethernet switch when passt exits
+  (#454). The shim keeps peer-only forwarding, writes `passt.backend_lost`, and
+  `inspect` / inventory observation mark the box `health_status=unhealthy` so
+  `events` can emit `unhealthy`. Host egress via passt remains unavailable until
+  restart; peer traffic no longer dies solely because the BridgePort was
+  dropped. Does **not** auto-respawn passt or invent Live digests.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun

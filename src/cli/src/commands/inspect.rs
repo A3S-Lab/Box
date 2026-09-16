@@ -29,6 +29,12 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
             match super::observe_inventory::refresh_managed_inventory_record(record.clone()).await?
             {
                 Some(record) => {
+                    let home = a3s_box_core::dirs_home();
+                    let _ = super::observe_inventory::observe_bridge_passt_backend_loss(&home);
+                    let record = StateFile::load_default()?
+                        .find_by_id(&record.id)
+                        .cloned()
+                        .unwrap_or(record);
                     println!("{}", inspect_json(&record)?);
                     Ok(())
                 }
