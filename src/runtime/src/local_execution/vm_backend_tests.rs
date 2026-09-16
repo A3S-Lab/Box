@@ -715,6 +715,8 @@ fn visible_state_rejects_terminal_records() {
 async fn starting_observation_stays_creating_without_exec_heartbeat() {
     // Path presence alone must not invent Running — Unix and Windows both
     // require an authenticated exec heartbeat (#407/#408/#411 parity).
+    // Use Created (not invented Ready) so health_check does not first fail-closed
+    // on missing exec proof; promote + Starting gates own the Creating projection.
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
@@ -728,7 +730,7 @@ async fn starting_observation_stays_creating_without_exec_heartbeat() {
 
     let mut manager = backend.new_manager(&record).unwrap();
     manager.exec_socket_path = Some(exec_socket);
-    *manager.state.write().await = crate::BoxState::Ready;
+    *manager.state.write().await = crate::BoxState::Created;
     *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
         exit_polls: Arc::new(AtomicUsize::new(0)),
         stop_calls: Arc::new(AtomicUsize::new(0)),

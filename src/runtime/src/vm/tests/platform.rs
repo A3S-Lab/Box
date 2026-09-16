@@ -626,6 +626,60 @@ async fn test_promote_ready_if_exec_authenticated_refuses_without_heartbeat() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_health_check_refuses_ready_sustained_by_pid_without_exec_heartbeat() {
+    struct LivePidHandler;
+
+    impl crate::vmm::VmHandler for LivePidHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+
+        fn has_exited(&self) -> bool {
+            false
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            None
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            Ok(None)
+        }
+    }
+
+    let mut vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-health-pid-only".to_string(),
+    );
+    *vm.state.write().await = BoxState::Ready;
+    *vm.handler.write().await = Some(Box::new(LivePidHandler));
+    // No exec_client and no exec_socket_path — PID alone must not sustain Ready.
+
+    let healthy = vm
+        .health_check()
+        .await
+        .expect("health_check should not error");
+    assert!(
+        !healthy,
+        "Ready + live PID without exec heartbeat must not invent healthy/Running"
+    );
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {

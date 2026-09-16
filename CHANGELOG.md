@@ -189,6 +189,10 @@ All notable changes to A3S Box will be documented in this file.
   (#418 / #413/#415 parity). Windows still requires the named-pipe heartbeat
   before Ready (`ExecClient` is Unix-only). Does **not** flip B2 or invent
   Live digests.
+- Unix `VmManager::health_check` for Ready/Busy/Compacting no longer sustains
+  healthy from shim PID alone — require a retained or reconnected exec
+  heartbeat (#419 / #418). Does **not** flip B2, invent Live digests, or
+  widen heartbeat timeouts.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

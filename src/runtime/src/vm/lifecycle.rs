@@ -722,20 +722,59 @@ impl VmManager {
     }
 
     /// Check if VM is healthy.
+    ///
+    /// Ready/Busy/Compacting require a live handler **and** an authenticated
+    /// guest exec heartbeat on Unix. PID alone must not sustain Running after
+    /// a one-shot Ready promote (#419 / #418).
     pub async fn health_check(&self) -> Result<bool> {
         let state = self.state.read().await;
 
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {
-                // Check if handler reports VM is running
-                if let Some(ref handler) = *self.handler.read().await {
-                    Ok(handler.is_running())
+                let running = if let Some(ref handler) = *self.handler.read().await {
+                    handler.is_running()
                 } else {
-                    Ok(false)
+                    false
+                };
+                if !running {
+                    return Ok(false);
+                }
+                drop(state);
+
+                #[cfg(unix)]
+                {
+                    Ok(self.exec_endpoint_still_authenticated().await)
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows VmManager does not retain ExecClient; keep process
+                    // liveness (named-pipe re-auth remains on promote/attach).
+                    Ok(true)
                 }
             }
             _ => Ok(false),
         }
+    }
+
+    /// Re-prove guest exec after Ready was authenticated.
+    ///
+    /// Prefer the retained client from promote/attach; otherwise reconnect via
+    /// the exec socket path. Missing both means Ready cannot be sustained.
+    #[cfg(unix)]
+    async fn exec_endpoint_still_authenticated(&self) -> bool {
+        const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+        if let Some(client) = self.exec_client.as_ref() {
+            match tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await {
+                Ok(Ok(true)) => return true,
+                Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {}
+            }
+        }
+
+        let Some(path) = self.exec_socket_path.as_ref() else {
+            return false;
+        };
+        Self::connect_exec_client_for_request(path).await.is_ok()
     }
 
     /// Get VM metrics.
