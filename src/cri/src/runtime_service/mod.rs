@@ -2628,18 +2628,24 @@ impl RuntimeService for BoxRuntimeService {
             .get(&container_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+        // Durable Running alone must not invent live resource usage (#442 / #434).
+        let container = self.reconcile_reported_container(container).await;
 
         // Only a running container consumes VM resources; a Created/Exited one
         // reports zero rather than a share of the pod VM's usage.
         let usage = if container.state == ContainerState::Running {
-            let running = self
+            let siblings = self
                 .store
                 .containers
                 .list(Some(&container.sandbox_id), None)
-                .await
-                .into_iter()
-                .filter(|c| c.state == ContainerState::Running)
-                .count();
+                .await;
+            let mut running = 0usize;
+            for sibling in siblings {
+                let sibling = self.reconcile_reported_container(sibling).await;
+                if sibling.state == ContainerState::Running {
+                    running += 1;
+                }
+            }
             self.sandbox_vm_usage(&container.sandbox_id)
                 .await
                 .per_container(running)
@@ -2667,25 +2673,25 @@ impl RuntimeService for BoxRuntimeService {
             .map(|filter| &filter.label_selector)
             .filter(|labels| !labels.is_empty());
 
-        let containers = self
+        let listed = self
             .store
             .containers
             .list(sandbox_filter, label_filter)
             .await;
-        let containers: Vec<Container> = containers
-            .into_iter()
-            .filter(|container| {
-                if container.state != ContainerState::Running {
-                    return false;
+        let mut containers = Vec::with_capacity(listed.len());
+        for container in listed {
+            // Durable Running alone must not invent list membership (#442 / #434).
+            let container = self.reconcile_reported_container(container).await;
+            if container.state != ContainerState::Running {
+                continue;
+            }
+            if let Some(ref filter) = req.filter {
+                if !filter.id.is_empty() && container.id != filter.id {
+                    continue;
                 }
-                if let Some(ref filter) = req.filter {
-                    if !filter.id.is_empty() && container.id != filter.id {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
+            }
+            containers.push(container);
+        }
         // Resolve each pod's VM usage once, split across its running containers.
         let mut usage_by_sandbox: std::collections::HashMap<String, VmUsage> =
             std::collections::HashMap::new();
