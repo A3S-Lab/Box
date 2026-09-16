@@ -799,23 +799,39 @@ impl RuntimeService for BoxRuntimeService {
             .await
             .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
 
-        if sandbox.state != SandboxState::Ready {
+        // Durable Ready alone must not invent a live sandbox that still needs
+        // workload stop (#444 / #431). Re-prove VM health first.
+        let prior_state = sandbox.state;
+        let sandbox_state = self
+            .reconcile_reported_sandbox_state(sandbox_id, sandbox.state)
+            .await;
+        let listed = self.store.containers.list(Some(sandbox_id), None).await;
+        let mut running = Vec::new();
+        for container in listed {
+            // Durable Running alone must not invent stop targets (#444 / #434).
+            let container = self.reconcile_reported_container(container).await;
+            if container.state == ContainerState::Running {
+                running.push(container);
+            }
+        }
+        if sandbox_state != SandboxState::Ready {
+            if prior_state == SandboxState::Ready {
+                // Inventable Ready demoted — finish host cleanup without inventing
+                // live workload stop (#444).
+                let destroy_result = self.destroy_sandbox_vm(sandbox_id, None).await;
+                self.disconnect_sandbox_network(&sandbox).await;
+                destroy_result?;
+            }
             return Ok(Response::new(StopPodSandboxResponse {}));
         }
 
-        // Stop all containers in this sandbox. Prefer workload-level stop
+        // Stop authenticated Running containers. Prefer workload-level stop
         // controls so supervised containers can publish their real exit status
         // before the sandbox VM is torn down.
-        let containers = self.store.containers.list(Some(sandbox_id), None).await;
-        let stop_results = join_all(
-            containers
-                .iter()
-                .filter(|container| container.state == ContainerState::Running)
-                .map(|container| async move {
-                    let stopped = self.stop_container_workload(container, 0).await?;
-                    Ok::<_, Status>((container, stopped))
-                }),
-        )
+        let stop_results = join_all(running.iter().map(|container| async move {
+            let stopped = self.stop_container_workload(container, 0).await?;
+            Ok::<_, Status>((container, stopped))
+        }))
         .await;
 
         for result in stop_results {
@@ -889,7 +905,12 @@ impl RuntimeService for BoxRuntimeService {
             return Ok(Response::new(RemovePodSandboxResponse {}));
         };
 
-        if sandbox.state == SandboxState::Ready {
+        // Durable Ready alone must not invent a live sandbox that blocks remove
+        // (#444 / #431/#437). Re-prove VM health; demote inventable Ready first.
+        let sandbox_state = self
+            .reconcile_reported_sandbox_state(sandbox_id, sandbox.state)
+            .await;
+        if sandbox_state == SandboxState::Ready {
             return Err(Status::failed_precondition(format!(
                 "RemovePodSandbox requires a stopped sandbox; sandbox {} is Ready",
                 sandbox_id
@@ -1455,16 +1476,14 @@ impl RuntimeService for BoxRuntimeService {
         // Without this re-check we would register an orphan container whose
         // sandbox is gone — and whose rootfs we just recreated under a
         // now-deleted sandbox tree — that nothing ever reaps.
-        match self.store.sandboxes.get(&container.sandbox_id).await {
-            Some(sb) if sb.state == SandboxState::Ready => {}
-            _ => {
-                self.cleanup_container_rootfs_path(&container.rootfs_path)
-                    .await;
-                return Err(Status::failed_precondition(format!(
-                    "Sandbox {} is no longer ready; aborting CreateContainer",
-                    container.sandbox_id
-                )));
-            }
+        // Durable Ready alone must not invent a still-live sandbox (#444 / #437).
+        if let Err(status) = self
+            .require_reported_sandbox_ready(&container.sandbox_id, "CreateContainer")
+            .await
+        {
+            self.cleanup_container_rootfs_path(&container.rootfs_path)
+                .await;
+            return Err(status);
         }
 
         self.store.add_container(container.clone()).await;

@@ -759,7 +759,9 @@ retain process or filesystem sessions after its owner dies.
   ListContainerStats refuse inventing Running usage without the same
   container health re-proof (#442 / #434/#436); CRI PodSandboxStats /
   ListPodSandboxStats refuse inventing Ready/Running pod usage without the
-  same health re-proof (#443 / #442/#436);
+  same health re-proof (#443 / #442/#436); CRI RemovePodSandbox /
+  StopPodSandbox / CreateContainer late Ready re-check refuse inventing live
+  Ready/Running without the same health re-proof (#444 / #443/#437/#434);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
