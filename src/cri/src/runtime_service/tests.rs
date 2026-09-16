@@ -3901,6 +3901,11 @@ async fn test_update_container_resources_linux_rejected() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
+    // Authenticated VM so Running survives reconcile and unsupported-field
+    // Unimplemented is reached (#440 / #438).
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .update_container_resources(Request::new(UpdateContainerResourcesRequest {
