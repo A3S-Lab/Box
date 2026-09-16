@@ -243,6 +243,10 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `ListPodSandbox` / `StreamPodSandboxes` refuse inventing SandboxReady from
   durable Ready alone — same VM health re-proof and durable demote as Status
   (#432 / #431). Does **not** invent Live digests or flip B2.
+- Rootfs-maintenance boot refuses inventing Ready from wait Ok / call-order —
+  publishes Ready only via `set_boot_completion_state` and fail-closes when the
+  authenticated exec client was not retained (#433 / #425/#430). Does **not**
+  invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

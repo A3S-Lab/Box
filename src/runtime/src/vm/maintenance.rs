@@ -187,7 +187,15 @@ impl VmManager {
         self.exec_socket_path = Some(exec_socket);
         self.pty_socket_path = None;
         self.port_forward_socket_path = None;
-        *self.state.write().await = BoxState::Ready;
+        // Ready only via retained authenticated exec client — never invent from
+        // wait Ok / call-order alone (#433 / #425/#430).
+        if !self.set_boot_completion_state().await {
+            self.cleanup_boot_failure().await;
+            return Err(BoxError::StateError(
+                "Rootfs maintenance guest did not retain authenticated exec; refusing Ready"
+                    .to_string(),
+            ));
+        }
         tracing::info!(box_id = %self.box_id, "Rootfs maintenance VM ready");
         Ok(())
     }
@@ -335,6 +343,35 @@ fn maintenance_diagnostics(maintenance_dir: &Path) -> String {
         ));
     }
     sections.join("\n")
+}
+
+#[cfg(test)]
+mod invent_refusal_tests {
+    use super::*;
+    use a3s_box_core::{BoxConfig, EventEmitter};
+
+    /// Maintenance Ready publish must use the same authenticated-client gate as
+    /// cold boot / Sandbox (#433). Path presence alone must leave Created.
+    #[tokio::test]
+    async fn maintenance_ready_publish_refuses_without_exec_client() {
+        let home = tempfile::tempdir().unwrap();
+        let mut manager = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(16),
+            "maintenance-no-hb-ready".to_string(),
+        );
+        manager.home_dir = home.path().to_path_buf();
+        manager.exec_socket_path = Some(home.path().join("rootfs-maintenance/exec.sock"));
+        assert!(
+            !manager.set_boot_completion_state().await,
+            "missing authenticated exec client must not invent maintenance Ready"
+        );
+        assert_eq!(
+            manager.state().await,
+            BoxState::Created,
+            "failed maintenance Ready gate must leave Created"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
