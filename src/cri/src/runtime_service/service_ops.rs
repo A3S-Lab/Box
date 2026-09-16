@@ -524,8 +524,9 @@ impl BoxRuntimeService {
 
     /// Load a container and refuse inventing Running for mutation gates.
     ///
-    /// ExecSync / Exec / Attach / UpdateContainerResources must not accept
-    /// durable Running without sandbox VM health re-proof (#438 / #434/#437).
+    /// ExecSync / Exec / Attach / UpdateContainerResources /
+    /// ReopenContainerLog must not accept durable Running without sandbox VM
+    /// health re-proof (#438 / #447 / #434/#437).
     pub(super) async fn require_reported_container_running(
         &self,
         container_id: &str,
