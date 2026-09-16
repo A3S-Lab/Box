@@ -4556,6 +4556,11 @@ async fn test_attach_stdin_requires_container_stdin_enabled() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
+    // Authenticated VM so Running survives reconcile and stdin gate is reached
+    // (#439 / #438).
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .attach(Request::new(AttachRequest {
@@ -4584,6 +4589,11 @@ async fn test_attach_rejects_tty_mismatch() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
+    // Authenticated VM so Running survives reconcile and TTY gate is reached
+    // (#439 / #438).
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .attach(Request::new(AttachRequest {
