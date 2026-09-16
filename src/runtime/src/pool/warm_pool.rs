@@ -840,7 +840,17 @@ impl WarmPool {
                         let restored = async {
                             vm.boot().await?;
                             vm.wait_for_exec_available(std::time::Duration::from_secs(120))
-                                .await
+                                .await?;
+                            // Align BoxState::Ready after authenticated heartbeat —
+                            // #414 may leave Created after restore soft-probe (#416).
+                            if !vm.set_boot_completion_state().await {
+                                return Err(BoxError::BoxBootError {
+                                    message: "restored pool VM exec authenticated but Ready was not published"
+                                        .to_string(),
+                                    hint: None,
+                                });
+                            }
+                            Ok(())
                         }
                         .await;
                         match restored {
@@ -867,6 +877,14 @@ impl WarmPool {
             vm.boot().await?;
             vm.wait_for_exec_available(std::time::Duration::from_secs(120))
                 .await?;
+            // Cold boot already sets Ready via wait_for_exec_ready; re-assert after
+            // wait_for_exec_available so pool idle publish never retains Created (#416).
+            if !vm.set_boot_completion_state().await {
+                return Err(BoxError::BoxBootError {
+                    message: "pool VM exec authenticated but Ready was not published".to_string(),
+                    hint: None,
+                });
+            }
             Ok(vm)
         })
     }

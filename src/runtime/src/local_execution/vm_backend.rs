@@ -394,6 +394,38 @@ impl VmLocalExecutionBackend {
         true
     }
 
+    /// After `boot()` Ok, require authenticated Ready before returning a start
+    /// handle that callers durable-promote to Running.
+    ///
+    /// `#414` may leave `Created` when the restore soft-probe fails while still
+    /// returning `Ok(())` from boot. PID + layout socket alone must not invent
+    /// Running (#416). Keep the in-process owner so inspect can promote later.
+    async fn require_authenticated_ready_for_start(
+        &self,
+        record: &BoxRecord,
+        manager: &mut VmManager,
+    ) -> ExecutionManagerResult<()> {
+        let state = manager.state().await;
+        if matches!(
+            state,
+            crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+        ) {
+            return Ok(());
+        }
+        if self.promote_if_ready(record, manager).await {
+            return Ok(());
+        }
+        tracing::debug!(
+            execution_id = %record.id,
+            ?state,
+            "boot completed without authenticated exec Ready; refusing start handle"
+        );
+        Err(ExecutionManagerError::Unavailable(format!(
+            "execution {} started but guest exec is not ready yet",
+            record.id
+        )))
+    }
+
     async fn recover_microvm(&self, record: &BoxRecord) -> ExecutionManagerResult<SharedVm> {
         self.metadata(record)?;
         let execution_id = execution_id(record)?;
@@ -803,6 +835,16 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 "execution {} completed during startup (exit_code={exit_code:?})",
                 record.id
             )));
+        }
+        // #414 may leave Created after restore soft-probe failure. Do not invent
+        // a start handle (and thus durable Running) from PID + socket alone (#416).
+        if let Err(error) = self
+            .require_authenticated_ready_for_start(record, &mut guard)
+            .await
+        {
+            // Keep the in-process owner so inspect/promote_if_ready can authenticate.
+            drop(guard);
+            return Err(error);
         }
         self.handle_from_manager(record, &guard).await
     }

@@ -783,3 +783,40 @@ async fn created_observation_stays_creating_without_exec_heartbeat() {
     );
     assert!(observation.handle.is_none());
 }
+
+#[tokio::test]
+async fn start_refuses_handle_when_boot_left_created_without_exec_heartbeat() {
+    // #414 soft-proceed can leave Created after boot Ok; start must not invent
+    // a handle that claim_and_start durable-promotes to Running (#416).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Starting.as_status().to_string();
+
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Created;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    // Layout path alone — no live exec endpoint — must fail the Ready gate.
+    manager.exec_socket_path =
+        Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
+
+    let error = backend
+        .require_authenticated_ready_for_start(&record, &mut manager)
+        .await
+        .expect_err("Created without heartbeat must not authorize a start handle");
+    assert!(
+        matches!(error, ExecutionManagerError::Unavailable(_)),
+        "expected Unavailable so Starting can retry/observe, got {error:?}"
+    );
+    assert_eq!(
+        manager.state().await,
+        crate::BoxState::Created,
+        "failed Ready gate must leave Created for inspect/promote_if_ready"
+    );
+}
