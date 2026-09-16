@@ -724,6 +724,9 @@ retain process or filesystem sessions after its owner dies.
   named-pipe heartbeat (#420 / #419 parity); managed MicroVM start re-proves
   exec health when in-memory Ready/Busy/Compacting is already set — stale
   Ready without heartbeat must not invent a start handle (#421 / #419/#420);
+  `handle_from_manager` requires Ready/Busy/Compacting (Sandbox paused keeps
+  durable `Paused` without inventing a handle; pause/resume fails closed)
+  (#422 / #415/#416);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

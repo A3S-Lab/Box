@@ -907,3 +907,34 @@ async fn start_refuses_handle_when_ready_lacks_exec_heartbeat() {
         "failed Ready re-proof must not retain an unauthenticated exec client"
     );
 }
+
+#[tokio::test]
+async fn handle_from_manager_refuses_created_without_authenticated_ready() {
+    // PID + layout path alone must not invent an operable handle while the
+    // manager is still Created (#422 / #415/#416).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Running.as_status().to_string();
+
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Created;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    manager.exec_socket_path =
+        Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
+
+    let error = backend
+        .handle_from_manager(&record, &manager)
+        .await
+        .expect_err("Created must not invent a LocalExecutionHandle");
+    assert!(
+        matches!(error, ExecutionManagerError::Unavailable(_)),
+        "expected Unavailable (not inventable NotFound), got {error:?}"
+    );
+}

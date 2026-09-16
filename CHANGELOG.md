@@ -201,6 +201,11 @@ All notable changes to A3S Box will be documented in this file.
   health when in-memory state is already Ready/Busy/Compacting — stale Ready
   without heartbeat must not invent a start handle / durable Running
   (#421 / #419/#420). Does **not** flip B2 or invent Live digests.
+- `handle_from_manager` refuses inventing a `LocalExecutionHandle` unless
+  VmManager state is Ready/Busy/Compacting; Sandbox paused inspect returns
+  durable `Paused` without a handle when exec did not authenticate, and
+  Sandbox pause/resume fails closed instead of inventing a handle
+  (#422 / #415/#416). Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
