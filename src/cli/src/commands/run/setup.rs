@@ -75,18 +75,25 @@ pub(super) async fn setup_and_boot(
     };
     let network_mode = common::resolve_network(args.common.network.as_deref());
 
-    // Default (TSI) networking proxies guest sockets to the host, so a container
-    // cannot reach its own services over the guest loopback. A health check that
-    // probes localhost would always fail — point the user at bridge networking.
-    if matches!(network_mode, a3s_box_core::NetworkMode::Tsi) {
+    // With `-p` under default TSI, published guest listeners live on the host
+    // only: in-guest `127.0.0.1:<guest_port>` is Connection refused (#448).
+    // Without `-p`, unpublished listens stay in-guest (#378). Warn when publish
+    // is requested, and correct the older health-check warning that claimed
+    // loopback never works under TSI.
+    if matches!(network_mode, a3s_box_core::NetworkMode::Tsi) && !port_map.is_empty() {
+        eprintln!(
+            "warning: under default (TSI) networking, `-p` publishes the listener on the host \
+             and removes the guest-side listen, so processes inside the box cannot reach \
+             `127.0.0.1:<guest_port>` (use the host port via the publish path, or attach a \
+             bridge network: `a3s-box network create mynet` then `--network mynet`)."
+        );
         if let Some(cmd) = &args.common.health_cmd {
             let lc = cmd.to_lowercase();
             if lc.contains("localhost") || lc.contains("127.0.0.1") {
                 eprintln!(
-                    "warning: the health check probes localhost, but default (TSI) networking \
-                     cannot reach a container's own services over loopback, so the check will fail. \
-                     For a working localhost, create and attach a bridge network: \
-                     `a3s-box network create mynet` then run with `--network mynet`."
+                    "warning: the health check probes localhost on a published TSI port; \
+                     in-guest loopback to the guest port will fail. Prefer a bridge network \
+                     or probe the service without relying on guest `127.0.0.1:<guest_port>`."
                 );
             }
         }

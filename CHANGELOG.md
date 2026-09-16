@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Document and warn that TSI `-p` publish removes the in-guest listener so
+  `127.0.0.1:<guest_port>` fails inside the box (#448). `run` prints the
+  limitation when publish is requested under default networking, and the
+  health-check localhost warning only fires in that published-TSI case
+  (unpublished TSI listens stay in-guest per #378). Full Docker-equivalent
+  dual listen remains a libkrun follow-up.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun

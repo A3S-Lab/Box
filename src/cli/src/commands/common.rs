@@ -94,7 +94,10 @@ pub struct CommonBoxArgs {
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 
-    /// Publish a TCP port (host_port:guest_port[/tcp]), can be repeated
+    /// Publish a TCP port (host_port:guest_port[/tcp]), can be repeated.
+    /// Under default TSI networking this moves the listener to the host: the
+    /// guest loses `127.0.0.1:<guest_port>` (use bridge networking for Docker-
+    /// like in-guest localhost, see #448).
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
 
