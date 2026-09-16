@@ -727,7 +727,9 @@ retain process or filesystem sessions after its owner dies.
   `handle_from_manager` requires Ready/Busy/Compacting (Sandbox paused keeps
   durable `Paused` without inventing a handle; pause/resume fails closed)
   (#422 / #415/#416); WarmPool `acquire` re-proves exec health before idle
-  handoff (stale Ready destroyed, not leased) (#423 / #421);
+  handoff (stale Ready destroyed, not leased) (#423 / #421); MicroVM `pause`
+  demotes to `Paused` after SIGSTOP and `resume` re-proves exec before Ready
+  (#424 / #421/#422);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

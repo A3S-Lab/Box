@@ -210,6 +210,10 @@ All notable changes to A3S Box will be documented in this file.
   stale Ready without heartbeat is destroyed and replaced (miss/boot) instead
   of inventing an operable lease from pool membership alone
   (#423 / #421). Does **not** invent pool `ps`, flip B2, or widen idle TTL.
+- MicroVM `pause` demotes to `BoxState::Paused` after SIGSTOP (Ready must not
+  invent operable exec while frozen); `resume` re-proves guest exec before
+  restoring Ready — SIGCONT alone must not invent Ready
+  (#424 / #421/#422). Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

@@ -626,12 +626,17 @@ impl VmManager {
 
     /// Pause the VM by sending SIGSTOP to the shim process.
     ///
-    /// The VM must be in Ready, Busy, or Compacting state.
+    /// The VM must be in Ready, Busy, or Compacting state. After a successful
+    /// SIGSTOP the manager demotes to [`BoxState::Paused`] — Ready must not
+    /// invent operable guest exec while the shim is frozen (#424).
     #[cfg(unix)]
     pub async fn pause(&self) -> Result<()> {
         let state = self.state.read().await;
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Paused => {
+                return Err(BoxError::StateError("VM is already paused".to_string()));
+            }
             BoxState::Created => {
                 return Err(BoxError::StateError("VM not yet booted".to_string()));
             }
@@ -662,6 +667,7 @@ impl VmManager {
                     pid, err
                 )));
             }
+            *self.state.write().await = BoxState::Paused;
             tracing::info!(box_id = %self.box_id, pid, "VM paused");
             Ok(())
         } else {
@@ -673,7 +679,9 @@ impl VmManager {
 
     /// Resume the VM by sending SIGCONT to the shim process.
     ///
-    /// Can be called on a paused VM to resume execution.
+    /// Only a [`BoxState::Paused`] manager may resume. After SIGCONT, guest
+    /// exec must re-authenticate before Ready is restored — SIGCONT alone
+    /// must not invent operable Ready (#424 / #421).
     #[cfg(unix)]
     pub async fn resume(&self) -> Result<()> {
         if self
@@ -686,6 +694,14 @@ impl VmManager {
                 "Resume is not supported by the Sandbox backend yet".to_string(),
             ));
         }
+        {
+            let state = self.state.read().await;
+            if *state != BoxState::Paused {
+                return Err(BoxError::StateError(format!(
+                    "VM resume requires Paused state (state={state:?})"
+                )));
+            }
+        }
         if let Some(pid) = self.pid().await {
             // Safety: sending SIGCONT to resume the process
             let ret = unsafe { libc::kill(pid as i32, libc::SIGCONT) };
@@ -696,6 +712,14 @@ impl VmManager {
                     pid, err
                 )));
             }
+            // Stay Paused until exec heartbeat proves operable again.
+            if !self.exec_endpoint_still_authenticated().await {
+                return Err(BoxError::StateError(
+                    "VM resumed host process but guest exec did not re-authenticate; leaving Paused"
+                        .to_string(),
+                ));
+            }
+            *self.state.write().await = BoxState::Ready;
             tracing::info!(box_id = %self.box_id, pid, "VM resumed");
             Ok(())
         } else {

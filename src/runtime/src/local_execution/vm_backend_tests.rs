@@ -938,3 +938,78 @@ async fn handle_from_manager_refuses_created_without_authenticated_ready() {
         "expected Unavailable (not inventable NotFound), got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn health_check_refuses_paused_without_inventing_ready() {
+    // SIGSTOP demotes to Paused; PID alone must not sustain Ready health (#424).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Paused;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    manager.exec_socket_path =
+        Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
+
+    assert_eq!(
+        manager.health_check().await.expect("health probe"),
+        false,
+        "Paused must not invent healthy Ready"
+    );
+}
+
+#[tokio::test]
+async fn handle_from_manager_allows_paused_for_pause_lease_bookkeeping() {
+    // finish_pause retains a lease handle while frozen; that must not require
+    // inventing Ready (#424 / #422).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Paused.as_status().to_string();
+    record.pid = Some(std::process::id());
+    record.pid_start_time = crate::process::pid_start_time(std::process::id());
+
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Paused;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    // Override handler pid to current process so identity checks pass.
+    struct CurrentProcessHandler;
+    impl crate::vmm::VmHandler for CurrentProcessHandler {
+        fn stop(&mut self, _: i32, _: u64) -> a3s_box_core::error::Result<()> {
+            Ok(())
+        }
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+        fn is_running(&self) -> bool {
+            true
+        }
+        fn has_exited(&self) -> bool {
+            false
+        }
+        fn pid(&self) -> u32 {
+            std::process::id()
+        }
+    }
+    *manager.handler.write().await = Some(Box::new(CurrentProcessHandler));
+    manager.exec_socket_path =
+        Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
+
+    let handle = backend
+        .handle_from_manager(&record, &manager)
+        .await
+        .expect("Paused may retain a pause lease handle");
+    assert_eq!(handle.pid, Some(std::process::id()));
+}
