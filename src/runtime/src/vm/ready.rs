@@ -235,10 +235,10 @@ impl VmManager {
                     tokio::time::timeout(ATTEMPT_TIMEOUT, client.heartbeat()).await
                 {
                     tracing::debug!("Exec server heartbeat passed");
-                    #[cfg(unix)]
-                    {
-                        self.exec_client = Some(client);
-                    }
+                    // Retain proof on Unix and Windows so boot completion /
+                    // pool publish cannot invent Ready from call-order alone
+                    // (#425 / #414 parity).
+                    self.exec_client = Some(client);
                     return Ok(());
                 }
             }
@@ -297,16 +297,13 @@ impl VmManager {
 
     /// Publish Ready only when the exec channel is authenticated.
     ///
-    /// Unix: `exec_client` must already hold a successful heartbeat (cold
-    /// [`wait_for_exec_ready`] or restore [`probe_exec_ready_once`]). Otherwise
-    /// leave `Created` — never invent Ready from a live shim alone (#414).
-    /// Windows: cold `wait_for_exec_ready` already fail-closed, so Ready is
-    /// authorized when that wait returned `Ok(())`.
+    /// `exec_client` must already hold a successful heartbeat (cold
+    /// [`wait_for_exec_ready`], restore [`probe_exec_ready_once`], Windows
+    /// attach/`wait_for_exec_available`). Otherwise leave `Created` — never
+    /// invent Ready from a live shim or "wait returned Ok" call-order alone
+    /// (#414 / #425).
     pub(crate) async fn set_boot_completion_state(&self) -> bool {
-        #[cfg(unix)]
         let ready = self.exec_client.is_some();
-        #[cfg(windows)]
-        let ready = true;
         *self.state.write().await = if ready {
             BoxState::Ready
         } else {
@@ -365,19 +362,10 @@ mod tests {
             "box-boot-completion".to_string(),
         );
         let ready = vm.set_boot_completion_state().await;
-        #[cfg(unix)]
-        {
-            assert!(
-                !ready,
-                "Unix boot completion must not invent Ready without exec heartbeat"
-            );
-            assert_eq!(vm.state().await, BoxState::Created);
-        }
-        #[cfg(windows)]
-        {
-            // Windows boot only reaches this helper after wait_for_exec_ready Ok.
-            assert!(ready);
-            assert_eq!(vm.state().await, BoxState::Ready);
-        }
+        assert!(
+            !ready,
+            "boot completion must not invent Ready without retained exec heartbeat (#425 / #414)"
+        );
+        assert_eq!(vm.state().await, BoxState::Created);
     }
 }

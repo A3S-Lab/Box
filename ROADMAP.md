@@ -729,7 +729,10 @@ retain process or filesystem sessions after its owner dies.
   (#422 / #415/#416); WarmPool `acquire` re-proves exec health before idle
   handoff (stale Ready destroyed, not leased) (#423 / #421); MicroVM `pause`
   demotes to `Paused` after SIGSTOP and `resume` re-proves exec before Ready
-  (#424 / #421/#422);
+  (#424 / #421/#422); Windows `set_boot_completion_state` refuses inventing
+  Ready without a retained authenticated `ExecClient` (cold wait / pool
+  available / attach retain the heartbeat client; call-order alone is not
+  proof) (#425 / #414);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

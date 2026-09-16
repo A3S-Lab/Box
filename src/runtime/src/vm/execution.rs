@@ -3,8 +3,7 @@
 use super::*;
 
 impl VmManager {
-    /// Get the exec client, if connected.
-    #[cfg(unix)]
+    /// Get the exec client, if connected (retained auth proof).
     pub fn exec_client(&self) -> Option<&ExecClient> {
         self.exec_client.as_ref()
     }
@@ -77,7 +76,12 @@ impl VmManager {
                 )
                 .await
                 {
-                    Ok(Ok(true)) => return Ok(()),
+                    Ok(Ok(true)) => {
+                        // Retain proof so set_boot_completion_state cannot invent
+                        // Ready from pool wait Ok alone (#425 / #414).
+                        self.exec_client = Some(client);
+                        return Ok(());
+                    }
                     Ok(Ok(false)) | Ok(Err(_)) | Err(_)
                         if tokio::time::Instant::now() < deadline =>
                     {
@@ -219,17 +223,22 @@ impl VmManager {
             match tokio::time::timeout(std::time::Duration::from_millis(500), client.heartbeat())
                 .await
             {
-                Ok(Ok(true)) => true,
+                Ok(Ok(true)) => {
+                    self.exec_client = Some(client);
+                    true
+                }
                 Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
                     tracing::debug!(
                         box_id = %self.box_id,
                         pipe = %pipe.display(),
                         "Failed to authenticate exec heartbeat while attaching to running WHPX VM"
                     );
+                    self.exec_client = None;
                     false
                 }
             }
         } else {
+            self.exec_client = None;
             false
         };
 

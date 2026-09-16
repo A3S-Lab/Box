@@ -214,6 +214,11 @@ All notable changes to A3S Box will be documented in this file.
   invent operable exec while frozen); `resume` re-proves guest exec before
   restoring Ready — SIGCONT alone must not invent Ready
   (#424 / #421/#422). Does **not** flip B2 or invent Live digests.
+- Windows `set_boot_completion_state` refuses inventing Ready without a
+  retained authenticated `ExecClient` (same gate as Unix #414). Cold
+  `wait_for_exec_ready`, pool `wait_for_exec_available`, and attach now keep
+  the heartbeat client on Windows so call-order alone cannot stamp Ready
+  (#425 / #414). Does **not** invent pool `ps`, flip B2, or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
