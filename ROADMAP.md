@@ -707,7 +707,9 @@ retain process or filesystem sessions after its owner dies.
   `attach_running_process` refuses inventing Ready from shim PID / layout
   path alone (authenticated exec heartbeat, else `Created`); Unix snapshot-
   restore boot refuses inventing Ready after a failed one-shot exec probe
-  (leave `Created`, no `box.ready`, #414 / #413 parity);
+  (leave `Created`, no `box.ready`, #414 / #413 parity); Linux Sandbox
+  recover `attach_sandbox` refuses inventing Ready from OCI runtime record
+  alone (authenticated exec heartbeat, else `Created`, #415);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

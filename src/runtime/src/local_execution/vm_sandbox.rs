@@ -242,11 +242,14 @@ impl VmLocalExecutionBackend {
             .map_err(|error| runtime_error("recover", record, error))?,
         );
         *manager.handler.write().await = Some(handler);
+        // Transitional create/restart claims stay Created until start finishes.
+        // Recovered Running/Ready claims require an authenticated exec heartbeat
+        // — never invent Ready from OCI runtime record alone (#415 / #413 parity).
         if !matches!(
             managed_state(record)?,
             ManagedExecutionState::Starting | ManagedExecutionState::RestartStarting
         ) {
-            *manager.state.write().await = crate::BoxState::Ready;
+            manager.promote_ready_if_exec_authenticated().await;
         }
 
         let recovered = Arc::new(Mutex::new(manager));

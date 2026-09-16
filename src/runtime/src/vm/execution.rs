@@ -10,7 +10,7 @@ impl VmManager {
     }
 
     #[cfg(unix)]
-    async fn connect_exec_client_for_request(socket_path: &Path) -> Result<ExecClient> {
+    pub(crate) async fn connect_exec_client_for_request(socket_path: &Path) -> Result<ExecClient> {
         const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
         let client = ExecClient::connect(socket_path).await?;
@@ -159,6 +159,37 @@ impl VmManager {
             BoxState::Created
         };
         Ok(())
+    }
+
+    /// Promote Ready only after an authenticated exec heartbeat.
+    ///
+    /// Used by Sandbox recover attach so a live OCI runtime record alone cannot
+    /// invent Ready (#415 / #413/#414 parity). Missing or unresponsive exec
+    /// leaves `Created` for observe/`promote_if_ready`.
+    #[cfg(unix)]
+    pub(crate) async fn promote_ready_if_exec_authenticated(&mut self) -> bool {
+        let Some(socket_path) = self.exec_socket_path.clone() else {
+            *self.state.write().await = BoxState::Created;
+            return false;
+        };
+        match Self::connect_exec_client_for_request(&socket_path).await {
+            Ok(client) => {
+                self.exec_client = Some(client);
+                *self.state.write().await = BoxState::Ready;
+                true
+            }
+            Err(error) => {
+                tracing::debug!(
+                    box_id = %self.box_id,
+                    socket_path = %socket_path.display(),
+                    error = %error,
+                    "Failed to authenticate exec heartbeat while promoting Ready"
+                );
+                self.exec_client = None;
+                *self.state.write().await = BoxState::Created;
+                false
+            }
+        }
     }
 
     /// Attach this manager to an already-running Windows shim process.
