@@ -51,8 +51,22 @@ impl VmLocalExecutionBackend {
                     )));
                 }
                 let manager = self.attach_sandbox(record, state).await?;
-                let manager = manager.lock().await;
-                let handle = self.handle_from_manager(record, &manager).await?;
+                let guard = manager.lock().await;
+                // Durable pause is authentic; a handle still requires Ready.
+                // Do not invent an operable handle from OCI record + PID alone
+                // when exec heartbeat did not authenticate (#422 / #415).
+                let state = guard.state().await;
+                if !matches!(
+                    state,
+                    crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+                ) {
+                    return Ok(LocalExecutionObservation {
+                        state: ExecutionState::Paused,
+                        handle: None,
+                        exit_code: None,
+                    });
+                }
+                let handle = self.handle_from_manager(record, &guard).await?;
                 Ok(LocalExecutionObservation {
                     state: ExecutionState::Paused,
                     handle: Some(handle),
@@ -182,6 +196,19 @@ impl VmLocalExecutionBackend {
         }
         let manager = self.attach_sandbox(record, inspection).await?;
         let manager = manager.lock().await;
+        // Pause/resume mutation succeeded in the OCI runtime, but a returned
+        // handle still requires authenticated Ready — do not invent one from
+        // PID + layout alone when exec heartbeat failed (#422 / #415).
+        let state = manager.state().await;
+        if !matches!(
+            state,
+            crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+        ) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "Sandbox {operation} for {} completed without authenticated guest exec Ready",
+                record.id
+            )));
+        }
         self.handle_from_manager(record, &manager).await
     }
 

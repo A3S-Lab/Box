@@ -196,6 +196,19 @@ impl VmLocalExecutionBackend {
         record: &BoxRecord,
         manager: &VmManager,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        // A start/pause/inspect handle implies operable guest exec. Created /
+        // Failed / Stopped managers must not invent a handle from PID + layout
+        // path alone (#422 / #415/#416 parity).
+        let state = manager.state().await;
+        if !matches!(
+            state,
+            crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+        ) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "execution {} has no authenticated Ready runtime for a handle (state={state:?})",
+                record.id
+            )));
+        }
         let execution_id = execution_id(record)?;
         let pid = manager.pid().await.ok_or_else(|| {
             ExecutionManagerError::Internal(format!(
