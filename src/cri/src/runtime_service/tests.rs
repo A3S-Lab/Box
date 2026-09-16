@@ -3249,6 +3249,9 @@ async fn test_start_container_supervises_multiple_containers_in_same_sandbox() {
 async fn test_stop_container() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -3257,12 +3260,6 @@ async fn test_stop_container() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
-    let vm = VmManager::with_box_id(
-        a3s_box_core::config::BoxConfig::default(),
-        EventEmitter::new(16),
-        "sb-1".to_string(),
-    );
-    svc.vm_managers.write().await.insert("sb-1".to_string(), vm);
 
     svc.stop_container(Request::new(StopContainerRequest {
         container_id: "c-1".to_string(),
@@ -3452,12 +3449,44 @@ async fn test_stop_container_running_without_vm_reconciles_state() {
     .await
     .unwrap();
 
+    // Inventable Running demotes via reconcile (255); must not invent VM
+    // teardown exit 137 or sandbox NotReady (#446).
     let c = svc.store.containers.get("c-1").await.unwrap();
     assert_eq!(c.state, ContainerState::Exited);
-    assert_eq!(c.exit_code, 137);
+    assert_eq!(c.exit_code, 255);
 
     let sandbox = svc.store.sandboxes.get("sb-1").await.unwrap();
-    assert_eq!(sandbox.state, SandboxState::NotReady);
+    assert_eq!(sandbox.state, SandboxState::Ready);
+}
+
+#[tokio::test]
+async fn stop_container_refuses_inventing_vm_teardown_without_vm_health() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.stop_container(Request::new(StopContainerRequest {
+        container_id: "c-stale".to_string(),
+        timeout: 0,
+    }))
+    .await
+    .unwrap();
+
+    let c = svc.store.containers.get("c-stale").await.unwrap();
+    assert_eq!(c.state, ContainerState::Exited);
+    assert_eq!(c.exit_code, 255);
+    assert!(
+        svc.vm_managers.read().await.is_empty(),
+        "inventable Running must not invent sandbox VM teardown"
+    );
+    let sandbox = svc.store.sandboxes.get("sb-stale").await.unwrap();
+    assert_eq!(
+        sandbox.state,
+        SandboxState::Ready,
+        "inventable Running stop must not invent sandbox NotReady"
+    );
 }
 
 #[tokio::test]
@@ -3466,6 +3495,9 @@ async fn test_stop_container_running_disconnects_network_endpoint() {
     let mut sandbox = test_networked_sandbox("sb-1");
     add_test_network_endpoint(&svc, &mut sandbox);
     svc.store.sandboxes.add(sandbox).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -3487,6 +3519,33 @@ async fn test_stop_container_running_disconnects_network_endpoint() {
 
     let sandbox = svc.store.sandboxes.get("sb-1").await.unwrap();
     assert_eq!(sandbox.state, SandboxState::NotReady);
+}
+
+#[tokio::test]
+async fn stop_container_refuses_inventing_network_disconnect_without_vm_health() {
+    let svc = make_test_service();
+    let mut sandbox = test_networked_sandbox("sb-stale");
+    add_test_network_endpoint(&svc, &mut sandbox);
+    svc.store.sandboxes.add(sandbox).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.stop_container(Request::new(StopContainerRequest {
+        container_id: "c-stale".to_string(),
+        timeout: 0,
+    }))
+    .await
+    .unwrap();
+
+    let network = svc.network_store.get("cri-net").unwrap().unwrap();
+    assert_eq!(
+        network.endpoints.len(),
+        1,
+        "inventable Running must not invent network disconnect"
+    );
+    let sandbox = svc.store.sandboxes.get("sb-stale").await.unwrap();
+    assert_eq!(sandbox.state, SandboxState::Ready);
 }
 
 #[tokio::test]

@@ -1749,6 +1749,9 @@ impl RuntimeService for BoxRuntimeService {
             .get(container_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+        // Durable Running alone must not invent live stop / VM teardown /
+        // sandbox NotReady (#446 / #445/#434). Demote inventable Running first.
+        let container = self.reconcile_reported_container(container).await;
 
         if container.state == ContainerState::Exited {
             return Ok(Response::new(StopContainerResponse {}));

@@ -285,6 +285,9 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `RemoveContainer` refuses inventing force-stop of durable Running without
   sandbox VM health re-proof — demote inventable Running before delete (#445 /
   #444/#434). Does **not** invent Live digests or flip B2.
+- CRI `StopContainer` refuses inventing live stop / VM teardown / sandbox
+  NotReady / network disconnect from durable Running alone — demote inventable
+  Running first (#446 / #445/#434). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
