@@ -183,6 +183,12 @@ All notable changes to A3S Box will be documented in this file.
   backend `Creating` — project `Creating` until pause/resume evidence is
   authenticated (`Starting`/`Killing` Creating parity). Does **not** flip B2
   or invent Live digests.
+- Managed MicroVM `promote_if_ready` retains the authenticated `ExecClient`
+  after heartbeat (Unix `promote_ready_if_exec_authenticated`) instead of
+  dropping a one-shot probe and leaving Ready with only PID for later health
+  (#418 / #413/#415 parity). Windows still requires the named-pipe heartbeat
+  before Ready (`ExecClient` is Unix-only). Does **not** flip B2 or invent
+  Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
