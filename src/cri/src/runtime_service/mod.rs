@@ -2082,8 +2082,18 @@ impl RuntimeService for BoxRuntimeService {
             },
         ];
         let info = if req.verbose {
-            let sandboxes = self.store.sandboxes.list(None).await;
-            let containers = self.store.containers.list(None, None).await;
+            // Status verbose counts must not invent Ready/Running from durable
+            // store alone (#435 / #432/#434).
+            let mut sandboxes = self.store.sandboxes.list(None).await;
+            for sandbox in &mut sandboxes {
+                sandbox.state = self
+                    .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+                    .await;
+            }
+            let mut containers = Vec::new();
+            for container in self.store.containers.list(None, None).await {
+                containers.push(self.reconcile_reported_container(container).await);
+            }
             let vm_manager_count = self.vm_managers.read().await.len();
 
             let ready_sandboxes = sandboxes
