@@ -193,6 +193,10 @@ All notable changes to A3S Box will be documented in this file.
   healthy from shim PID alone — require a retained or reconnected exec
   heartbeat (#419 / #418). Does **not** flip B2, invent Live digests, or
   widen heartbeat timeouts.
+- Windows `VmManager::health_check` for Ready/Busy/Compacting no longer
+  sustains healthy from shim PID alone — require retained-client or
+  `guest-control.ready` + named-pipe heartbeat (#420 / #419 parity). Does
+  **not** flip B2, invent Live digests, or widen heartbeat timeouts.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

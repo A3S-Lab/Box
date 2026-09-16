@@ -724,8 +724,8 @@ impl VmManager {
     /// Check if VM is healthy.
     ///
     /// Ready/Busy/Compacting require a live handler **and** an authenticated
-    /// guest exec heartbeat on Unix. PID alone must not sustain Running after
-    /// a one-shot Ready promote (#419 / #418).
+    /// guest exec heartbeat. PID alone must not sustain Running after a
+    /// one-shot Ready promote (#419 / #418; Windows named-pipe parity #420).
     pub async fn health_check(&self) -> Result<bool> {
         let state = self.state.read().await;
 
@@ -741,16 +741,7 @@ impl VmManager {
                 }
                 drop(state);
 
-                #[cfg(unix)]
-                {
-                    Ok(self.exec_endpoint_still_authenticated().await)
-                }
-                #[cfg(not(unix))]
-                {
-                    // Windows VmManager does not retain ExecClient; keep process
-                    // liveness (named-pipe re-auth remains on promote/attach).
-                    Ok(true)
-                }
+                Ok(self.exec_endpoint_still_authenticated().await)
             }
             _ => Ok(false),
         }
@@ -758,23 +749,52 @@ impl VmManager {
 
     /// Re-prove guest exec after Ready was authenticated.
     ///
-    /// Prefer the retained client from promote/attach; otherwise reconnect via
-    /// the exec socket path. Missing both means Ready cannot be sustained.
-    #[cfg(unix)]
+    /// Prefer the retained client from promote/attach (Unix); otherwise
+    /// reconnect via the exec socket (Unix) or named-pipe +
+    /// `guest-control.ready` (Windows). Missing proof means Ready cannot be
+    /// sustained.
     async fn exec_endpoint_still_authenticated(&self) -> bool {
         const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-        if let Some(client) = self.exec_client.as_ref() {
-            match tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await {
-                Ok(Ok(true)) => return true,
-                Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {}
+        #[cfg(unix)]
+        {
+            if let Some(client) = self.exec_client.as_ref() {
+                match tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await {
+                    Ok(Ok(true)) => return true,
+                    Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {}
+                }
             }
+
+            let Some(path) = self.exec_socket_path.as_ref() else {
+                return false;
+            };
+            return Self::connect_exec_client_for_request(path).await.is_ok();
         }
 
-        let Some(path) = self.exec_socket_path.as_ref() else {
-            return false;
-        };
-        Self::connect_exec_client_for_request(path).await.is_ok()
+        #[cfg(windows)]
+        {
+            let Some(layout_path) = self.exec_socket_path.as_ref() else {
+                return false;
+            };
+            let guest_control_ready =
+                layout_path.with_file_name(a3s_box_core::exec::WINDOWS_GUEST_CONTROL_READY_FILE);
+            if !guest_control_ready.is_file() {
+                return false;
+            }
+            let pipe =
+                std::path::PathBuf::from(a3s_box_core::exec::windows_exec_pipe_path(&self.box_id));
+            let client = crate::grpc::ExecClient::for_socket(&pipe);
+            return matches!(
+                tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat()).await,
+                Ok(Ok(true))
+            );
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = HEARTBEAT_TIMEOUT;
+            false
+        }
     }
 
     /// Get VM metrics.

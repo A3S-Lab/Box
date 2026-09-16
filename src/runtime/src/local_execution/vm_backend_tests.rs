@@ -507,9 +507,14 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
 
 #[tokio::test]
 async fn disappearing_live_handle_waits_for_delayed_terminal_status() {
+    // Ready + live PID without authenticated exec heartbeat must not invent
+    // healthy Running (#419/#420). health_check fails closed and observation
+    // takes the terminal path, waiting for delayed provider exit + durable
+    // guest status rather than projecting Running from PID alone.
+    // MicroVM (not Sandbox) so Windows hosts can exercise the same contract.
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
-    let mut record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
     let rootfs = record.box_dir.join("rootfs");
     std::fs::create_dir_all(&rootfs).unwrap();
     std::fs::write(rootfs.join(".a3s_exit_code"), "0\n").unwrap();
