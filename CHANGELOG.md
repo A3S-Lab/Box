@@ -228,6 +228,10 @@ All notable changes to A3S Box will be documented in this file.
   `Created` after boot/attach (no authenticated exec heartbeat). RunPodSandbox
   fails closed instead of storing `SandboxState::Ready` for a non-Ready VM
   (#428 / #414/#413). Does **not** invent Live digests or flip B2.
+- WarmPool `release` refuses inventing idle membership from in-memory Ready
+  alone — re-proves exec health and destroys on failure instead of pushing a
+  stale VM for the next lease (#429 / #423). Does **not** invent Live digests
+  or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
