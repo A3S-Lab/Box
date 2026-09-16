@@ -726,7 +726,8 @@ retain process or filesystem sessions after its owner dies.
   Ready without heartbeat must not invent a start handle (#421 / #419/#420);
   `handle_from_manager` requires Ready/Busy/Compacting (Sandbox paused keeps
   durable `Paused` without inventing a handle; pause/resume fails closed)
-  (#422 / #415/#416);
+  (#422 / #415/#416); WarmPool `acquire` re-proves exec health before idle
+  handoff (stale Ready destroyed, not leased) (#423 / #421);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

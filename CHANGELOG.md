@@ -206,6 +206,10 @@ All notable changes to A3S Box will be documented in this file.
   durable `Paused` without a handle when exec did not authenticate, and
   Sandbox pause/resume fails closed instead of inventing a handle
   (#422 / #415/#416). Does **not** flip B2 or invent Live digests.
+- WarmPool `acquire` re-proves exec health before handing out an idle VM —
+  stale Ready without heartbeat is destroyed and replaced (miss/boot) instead
+  of inventing an operable lease from pool membership alone
+  (#423 / #421). Does **not** invent pool `ps`, flip B2, or widen idle TTL.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
