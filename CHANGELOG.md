@@ -232,6 +232,10 @@ All notable changes to A3S Box will be documented in this file.
   alone — re-proves exec health and destroys on failure instead of pushing a
   stale VM for the next lease (#429 / #423). Does **not** invent Live digests
   or flip B2.
+- Sandbox boot refuses inventing Ready from controller.start Ok alone —
+  always waits for authenticated exec (Unix and Windows) and publishes Ready
+  only via `set_boot_completion_state` (#430 / #425/#414). Does **not** invent
+  Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
