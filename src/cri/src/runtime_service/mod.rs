@@ -48,7 +48,7 @@ use convert::ANN_ADDITIONAL_POD_IPS;
 use convert::{
     container_event_response, container_exit_reason, container_mount_to_cri, container_state_label,
     container_state_to_cri, container_summary, container_user_from_linux_config,
-    ensure_container_image_available, ensure_container_running, ensure_vm_ready, merge_env,
+    ensure_container_image_available, ensure_vm_ready, merge_env,
     resolve_command_and_args, resolve_container_mounts, resource_update_from_cri,
     sandbox_state_label, sandbox_summary, sanitize_path_component, stop_container_timeout_ms,
     stop_container_wait_duration, ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
@@ -2310,14 +2310,9 @@ impl RuntimeService for BoxRuntimeService {
             ));
         }
 
-        // Look up the container to find its sandbox
         let container = self
-            .store
-            .containers
-            .get(container_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
-        ensure_container_running(&container, "ExecSync")?;
+            .require_reported_container_running(container_id, "ExecSync")
+            .await?;
         ensure_container_image_available(&container).await?;
 
         // Get the VmManager for this sandbox
@@ -2398,14 +2393,9 @@ impl RuntimeService for BoxRuntimeService {
             ));
         }
 
-        // Look up the container to find its sandbox
         let container = self
-            .store
-            .containers
-            .get(container_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
-        ensure_container_running(&container, "Exec")?;
+            .require_reported_container_running(container_id, "Exec")
+            .await?;
         ensure_container_image_available(&container).await?;
 
         // Get the VmManager for this sandbox
@@ -2471,12 +2461,8 @@ impl RuntimeService for BoxRuntimeService {
             ));
         }
         let container = self
-            .store
-            .containers
-            .get(container_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
-        ensure_container_running(&container, "Attach")?;
+            .require_reported_container_running(container_id, "Attach")
+            .await?;
         if req.tty != container.tty {
             return Err(Status::failed_precondition(format!(
                 "Attach TTY flag must match container {} TTY configuration",
@@ -2828,22 +2814,27 @@ impl RuntimeService for BoxRuntimeService {
         let req = request.into_inner();
         let container_id = &req.container_id;
 
-        // Verify container exists
-        let container = self
-            .store
-            .containers
-            .get(container_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
-
         let Some(ref linux) = req.linux else {
+            // No-op path: container must exist, but inventable Running is
+            // irrelevant when no linux resources are requested.
+            let _ = self
+                .store
+                .containers
+                .get(container_id)
+                .await
+                .ok_or_else(|| {
+                    Status::not_found(format!("Container not found: {}", container_id))
+                })?;
             tracing::info!(
                 container_id = %container_id,
                 "CRI UpdateContainerResources (no linux resources specified)"
             );
             return Ok(Response::new(UpdateContainerResourcesResponse {}));
         };
-        ensure_container_running(&container, "UpdateContainerResources")?;
+
+        let container = self
+            .require_reported_container_running(container_id, "UpdateContainerResources")
+            .await?;
 
         // Convert and validate before looking up a VM or sending any guest
         // mutation. Unsupported CRI fields must fail closed rather than being
