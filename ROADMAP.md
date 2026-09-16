@@ -736,7 +736,8 @@ retain process or filesystem sessions after its owner dies.
   `InstancePhase::Ready` from inspect `Running` alone while durable managed
   status is transitional — Ready needs durable `Running` (#427 / #417);
   CRI sandbox acquire refuses inventing Ready for a soft-Created VM without
-  authenticated exec (#428 / #414/#413);
+  authenticated exec (#428 / #414/#413); WarmPool `release` refuses inventing
+  idle Ready without exec re-auth (#429 / #423);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

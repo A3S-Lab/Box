@@ -485,8 +485,30 @@ impl WarmPool {
 
     /// Release a VM back to the pool.
     ///
+    /// Idle membership must not invent operable Ready later — re-prove exec
+    /// health before push (#429 / #423). Unauthenticated VMs are destroyed
+    /// instead of polluting the idle set.
+    ///
     /// If the pool is at capacity, the VM is destroyed instead.
     pub async fn release(&self, vm: VmManager) -> Result<()> {
+        // Fail closed before taking the idle lock: health_check is async and
+        // must not hold idle while dialing exec.
+        match vm.health_check().await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                let box_id = vm.box_id().to_string();
+                tracing::warn!(
+                    %box_id,
+                    "Released VM failed exec re-auth; destroying instead of inventing idle Ready"
+                );
+                let mut vm = vm;
+                Self::destroy_manager_or_reap(&mut vm, Some(2000)).await?;
+                let mut stats = self.stats.lock().await;
+                stats.total_evicted += 1;
+                return Ok(());
+            }
+        }
+
         let mut idle = self.idle.lock().await;
 
         // Don't return a VM to a pool that is shutting down: drain_idle has (or
@@ -1649,6 +1671,73 @@ mod tests {
         assert!(
             pool.stats().await.total_evicted >= 1,
             "failed re-auth must count as eviction, not a pool hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_pool_release_refuses_idle_without_authenticated_heartbeat() {
+        use crate::vm::BoxState;
+        use crate::vmm::{VmHandler, VmMetrics};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysRunningHandler {
+            stop_calls: Arc<AtomicUsize>,
+        }
+
+        impl VmHandler for AlwaysRunningHandler {
+            fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::error::Result<()> {
+                self.stop_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn metrics(&self) -> VmMetrics {
+                VmMetrics::default()
+            }
+
+            fn is_running(&self) -> bool {
+                true
+            }
+
+            fn has_exited(&self) -> bool {
+                false
+            }
+
+            fn pid(&self) -> u32 {
+                42
+            }
+        }
+
+        let pool = WarmPool::start(
+            test_pool_config(0, 1),
+            BoxConfig::default(),
+            test_event_emitter(),
+        )
+        .await
+        .expect("empty pool starts without a hypervisor");
+
+        let vm = VmManager::new(BoxConfig::default(), test_event_emitter());
+        *vm.state.write().await = BoxState::Ready;
+        *vm.handler.write().await = Some(Box::new(AlwaysRunningHandler {
+            stop_calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        // In-memory Ready + running handler without exec heartbeat must not
+        // invent idle membership (#429 / #423/#419).
+        pool.release(vm)
+            .await
+            .expect("unauthenticated release destroys and returns Ok");
+        assert_eq!(
+            pool.idle_count().await,
+            0,
+            "release must destroy, not idle, without authenticated exec heartbeat"
+        );
+        assert_eq!(
+            pool.stats().await.total_released,
+            0,
+            "failed re-auth must not count as a pool release"
+        );
+        assert!(
+            pool.stats().await.total_evicted >= 1,
+            "failed release re-auth must count as eviction"
         );
     }
 
