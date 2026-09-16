@@ -957,9 +957,8 @@ async fn health_check_refuses_paused_without_inventing_ready() {
     manager.exec_socket_path =
         Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
 
-    assert_eq!(
-        manager.health_check().await.expect("health probe"),
-        false,
+    assert!(
+        !manager.health_check().await.expect("health probe"),
         "Paused must not invent healthy Ready"
     );
 }
