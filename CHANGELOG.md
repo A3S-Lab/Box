@@ -266,6 +266,10 @@ All notable changes to A3S Box will be documented in this file.
   inventing Running for mutation gates from durable store alone — re-prove
   sandbox VM health and demote to Exited(255) before accepting (#438 /
   #434/#437). Does **not** invent Live digests or flip B2.
+- CRI `StartContainer` refuses inventing "already running" from durable
+  Running alone — re-prove sandbox VM health and demote to Exited(255) before
+  the start-state gate (#441 / #438/#434). Does **not** invent Live digests
+  or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

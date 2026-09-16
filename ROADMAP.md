@@ -753,7 +753,9 @@ retain process or filesystem sessions after its owner dies.
   UpdatePodSandboxResources refuse inventing Ready for mutation gates without
   the same health re-proof (#437 / #436/#431); CRI ExecSync / Exec / Attach /
   UpdateContainerResources refuse inventing Running for mutation gates without
-  the same container health re-proof (#438 / #434/#437);
+  the same container health re-proof (#438 / #434/#437); CRI StartContainer
+  refuses inventing "already running" from durable Running without the same
+  container health re-proof (#441 / #438/#434);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
