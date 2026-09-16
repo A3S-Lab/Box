@@ -502,8 +502,10 @@ impl DisposableVmmStub {
 
 impl Drop for DisposableVmmStub {
     fn drop(&mut self) {
+        // Destroy's attached-mode stop may already have waitpid-reaped this PID.
+        // A blocking Child::wait() after that hangs the cargo-test process.
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.0.try_wait();
     }
 }
 
