@@ -219,6 +219,11 @@ All notable changes to A3S Box will be documented in this file.
   `wait_for_exec_ready`, pool `wait_for_exec_available`, and attach now keep
   the heartbeat client on Windows so call-order alone cannot stamp Ready
   (#425 / #414). Does **not** invent pool `ps`, flip B2, or invent Live digests.
+- Scale inventory refuses inventing `InstancePhase::Ready` from inspect
+  `ExecutionState::Running` alone while durable managed status is still
+  transitional (`Pausing`/`Killing`/`Starting`/…). Ready requires durable
+  `Running` plus Running observe (#427 / #417). Does **not** flip B2 or invent
+  Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

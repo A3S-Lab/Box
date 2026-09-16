@@ -31,6 +31,34 @@ enum InstancePhase {
     Removing,
 }
 
+/// Map durable managed state + present-tense inspect into a scale phase.
+///
+/// Inspect can report [`ExecutionState::Running`] while durable status is still
+/// transitional (`Pausing`, `Killing`, `Starting`, …). Scale Ready must not be
+/// invented from Running-alone — only durable `Running` plus Running observe
+/// counts as ready (#427 / #417 observe honesty).
+fn scale_instance_phase(
+    internal: ManagedExecutionState,
+    observed: ExecutionState,
+) -> InstancePhase {
+    if internal == ManagedExecutionState::Removing {
+        return InstancePhase::Removing;
+    }
+    if internal.is_terminal() {
+        return InstancePhase::Terminal;
+    }
+    match observed {
+        ExecutionState::Running if internal == ManagedExecutionState::Running => {
+            InstancePhase::Ready
+        }
+        ExecutionState::Stopped | ExecutionState::Failed => InstancePhase::Terminal,
+        ExecutionState::Created
+        | ExecutionState::Creating
+        | ExecutionState::Paused
+        | ExecutionState::Running => InstancePhase::Active,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScaleExecution {
     execution_id: ExecutionId,
@@ -460,23 +488,15 @@ impl ScaleExecutionLifecycle for LocalScaleExecutionLifecycle {
             let execution_id = ExecutionId::new(record.id.clone()).map_err(lifecycle_error)?;
             let internal = ManagedExecutionState::from_status(&record.status)
                 .map_err(|error| ScaleReconcileError::Lifecycle(error.to_string()))?;
-            let phase = if internal == ManagedExecutionState::Removing {
-                InstancePhase::Removing
-            } else if internal.is_terminal() {
-                InstancePhase::Terminal
+            let phase = if internal == ManagedExecutionState::Removing || internal.is_terminal() {
+                scale_instance_phase(internal, ExecutionState::Stopped)
             } else {
                 let status = self
                     .manager
                     .inspect(&execution_id)
                     .await
                     .map_err(lifecycle_error)?;
-                match status.state {
-                    ExecutionState::Running => InstancePhase::Ready,
-                    ExecutionState::Stopped | ExecutionState::Failed => InstancePhase::Terminal,
-                    ExecutionState::Created | ExecutionState::Creating | ExecutionState::Paused => {
-                        InstancePhase::Active
-                    }
-                }
+                scale_instance_phase(internal, status.state)
             };
             inventory.push(ScaleExecution {
                 execution_id,
@@ -698,6 +718,38 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn local_scale_inventory_refuses_ready_while_pausing_reports_running() {
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Pausing, ExecutionState::Running),
+            InstancePhase::Active,
+            "Pausing + Running inspect must not invent scale Ready"
+        );
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Killing, ExecutionState::Running),
+            InstancePhase::Active,
+            "Killing + Running inspect must not invent scale Ready"
+        );
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Starting, ExecutionState::Running),
+            InstancePhase::Active,
+            "Starting + Running inspect must keep Active until durable Running"
+        );
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Running, ExecutionState::Running),
+            InstancePhase::Ready,
+            "durable Running + Running observe authorizes scale Ready"
+        );
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Removing, ExecutionState::Running),
+            InstancePhase::Removing
+        );
+        assert_eq!(
+            scale_instance_phase(ManagedExecutionState::Stopped, ExecutionState::Running),
+            InstancePhase::Terminal
+        );
+    }
 
     const CATALOG: &str = r#"service "api" { image = "api:v1" }"#;
     const ENDPOINT_CATALOG: &str = r#"service "api" { image = "api:v1"; ports = ["0:8080"] }"#;
