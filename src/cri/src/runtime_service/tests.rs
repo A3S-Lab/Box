@@ -245,6 +245,58 @@ async fn test_load_state_reclaims_stale_network_endpoint() {
 }
 
 #[tokio::test]
+async fn test_load_state_refuses_inventing_exit_255_for_created() {
+    // CRI restart has no live VM managers. Created never-started must not
+    // invent unknown-failure exit 255 ? exit 0 means the workload never ran
+    // (#449 / #448). Stale Running still gets fail-closed 255.
+    let state_dir = tempfile::tempdir().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    let state_store = Arc::new(JsonStateStore::new(&state_path));
+
+    let sandbox = test_sandbox("sb-restart");
+    let created = test_container("c-created", "sb-restart");
+    let mut running = test_container("c-running", "sb-restart");
+    running.state = ContainerState::Running;
+    running.started_at = 2_000_000_000;
+
+    state_store
+        .save(&crate::state::PersistedState {
+            sandboxes: vec![sandbox],
+            containers: vec![created, running],
+        })
+        .unwrap();
+
+    let mut service = make_test_service();
+    service.store = Arc::new(PersistentCriStore::new(state_store));
+    service.load_state().await;
+
+    assert_eq!(
+        service
+            .store
+            .sandboxes
+            .get("sb-restart")
+            .await
+            .unwrap()
+            .state,
+        SandboxState::NotReady
+    );
+
+    let created = service.store.containers.get("c-created").await.unwrap();
+    assert_eq!(created.state, ContainerState::Exited);
+    assert_eq!(
+        created.exit_code, 0,
+        "Created never-started must not invent exit 255 on CRI restart load_state"
+    );
+
+    let running = service.store.containers.get("c-running").await.unwrap();
+    assert_eq!(running.state, ContainerState::Exited);
+    assert_eq!(
+        running.exit_code, 255,
+        "stale Running without live VM still fail-closes with unknown exit 255"
+    );
+}
+
+#[tokio::test]
 async fn test_run_pod_sandbox_cleans_network_endpoint_on_pod_ip_mismatch() {
     let svc = make_test_service();
     svc.network_store
