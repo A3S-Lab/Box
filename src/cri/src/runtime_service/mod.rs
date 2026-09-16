@@ -48,10 +48,10 @@ use convert::ANN_ADDITIONAL_POD_IPS;
 use convert::{
     container_event_response, container_exit_reason, container_mount_to_cri, container_state_label,
     container_state_to_cri, container_summary, container_user_from_linux_config,
-    ensure_container_image_available, ensure_vm_ready, merge_env,
-    resolve_command_and_args, resolve_container_mounts, resource_update_from_cri,
-    sandbox_state_label, sandbox_summary, sanitize_path_component, stop_container_timeout_ms,
-    stop_container_wait_duration, ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
+    ensure_container_image_available, ensure_vm_ready, merge_env, resolve_command_and_args,
+    resolve_container_mounts, resource_update_from_cri, sandbox_state_label, sandbox_summary,
+    sanitize_path_component, stop_container_timeout_ms, stop_container_wait_duration,
+    ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
 };
 #[cfg(test)]
 use log_writer::CriLogWriter;
@@ -2753,13 +2753,20 @@ impl RuntimeService for BoxRuntimeService {
         request: Request<PodSandboxStatsRequest>,
     ) -> Result<Response<PodSandboxStatsResponse>, Status> {
         let sandbox_id = request.into_inner().pod_sandbox_id;
-        let sandbox = self
+        let mut sandbox = self
             .store
             .sandboxes
             .get(&sandbox_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
-        let containers = self.store.containers.list(Some(&sandbox_id), None).await;
+        // Durable Ready/Running alone must not invent live pod usage (#443 / #442/#436).
+        sandbox.state = self
+            .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+            .await;
+        let mut containers = Vec::new();
+        for container in self.store.containers.list(Some(&sandbox_id), None).await {
+            containers.push(self.reconcile_reported_container(container).await);
+        }
         let vm_usage = self.sandbox_vm_usage(&sandbox_id).await;
 
         Ok(Response::new(PodSandboxStatsResponse {
@@ -2780,14 +2787,21 @@ impl RuntimeService for BoxRuntimeService {
         let sandboxes = self.store.sandboxes.list(label_filter).await;
 
         let mut stats = Vec::new();
-        for sandbox in sandboxes {
+        for mut sandbox in sandboxes {
             if let Some(ref filter) = req.filter {
                 if !filter.id.is_empty() && sandbox.id != filter.id {
                     continue;
                 }
             }
 
-            let containers = self.store.containers.list(Some(&sandbox.id), None).await;
+            // Durable Ready/Running alone must not invent list pod usage (#443 / #442/#436).
+            sandbox.state = self
+                .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+                .await;
+            let mut containers = Vec::new();
+            for container in self.store.containers.list(Some(&sandbox.id), None).await {
+                containers.push(self.reconcile_reported_container(container).await);
+            }
             let vm_usage = self.sandbox_vm_usage(&sandbox.id).await;
             stats.push(pod_sandbox_stats(&sandbox, containers, vm_usage).await);
         }

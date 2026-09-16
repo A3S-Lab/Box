@@ -755,7 +755,11 @@ retain process or filesystem sessions after its owner dies.
   UpdateContainerResources refuse inventing Running for mutation gates without
   the same container health re-proof (#438 / #434/#437); CRI StartContainer
   refuses inventing "already running" from durable Running without the same
-  container health re-proof (#441 / #438/#434);
+  container health re-proof (#441 / #438/#434); CRI ContainerStats /
+  ListContainerStats refuse inventing Running usage without the same
+  container health re-proof (#442 / #434/#436); CRI PodSandboxStats /
+  ListPodSandboxStats refuse inventing Ready/Running pod usage without the
+  same health re-proof (#443 / #442/#436);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
