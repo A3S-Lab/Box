@@ -649,6 +649,9 @@ impl VmManager {
         let state = self.state.read().await;
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Paused => {
+                return Err(BoxError::ExecError("VM is paused".to_string()));
+            }
             BoxState::Created => {
                 return Err(BoxError::ExecError("VM not yet booted".to_string()));
             }

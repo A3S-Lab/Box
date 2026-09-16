@@ -64,6 +64,10 @@ pub enum BoxState {
     /// A session is compressing its context
     Compacting,
 
+    /// Host SIGSTOP froze the shim; guest exec is not operable until resume
+    /// re-authenticates (#424).
+    Paused,
+
     /// VM terminated, resources freed
     Stopped,
 }

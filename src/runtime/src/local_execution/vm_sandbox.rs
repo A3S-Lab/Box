@@ -58,7 +58,10 @@ impl VmLocalExecutionBackend {
                 let state = guard.state().await;
                 if !matches!(
                     state,
-                    crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+                    crate::BoxState::Ready
+                        | crate::BoxState::Busy
+                        | crate::BoxState::Compacting
+                        | crate::BoxState::Paused
                 ) {
                     return Ok(LocalExecutionObservation {
                         state: ExecutionState::Paused,

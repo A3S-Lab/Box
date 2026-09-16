@@ -196,13 +196,18 @@ impl VmLocalExecutionBackend {
         record: &BoxRecord,
         manager: &VmManager,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
-        // A start/pause/inspect handle implies operable guest exec. Created /
-        // Failed / Stopped managers must not invent a handle from PID + layout
-        // path alone (#422 / #415/#416 parity).
+        // A start/pause/inspect handle implies operable guest exec — or durable
+        // pause bookkeeping. Created / Failed / Stopped managers must not invent
+        // a handle from PID + layout path alone (#422 / #415/#416 parity).
+        // Paused is allowed so finish_pause can retain a lease handle without
+        // inventing Ready while the shim is SIGSTOP'd (#424).
         let state = manager.state().await;
         if !matches!(
             state,
-            crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
+            crate::BoxState::Ready
+                | crate::BoxState::Busy
+                | crate::BoxState::Compacting
+                | crate::BoxState::Paused
         ) {
             return Err(ExecutionManagerError::Unavailable(format!(
                 "execution {} has no authenticated Ready runtime for a handle (state={state:?})",

@@ -760,3 +760,130 @@ async fn test_attach_running_process_refuses_ready_without_exec_heartbeat() {
         "Windows attach must not invent Ready from shim PID + layout path alone"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn microvm_pause_demotes_ready_when_exec_frozen() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SleepHandler {
+        pid: u32,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl crate::vmm::VmHandler for SleepHandler {
+        fn stop(&mut self, _: i32, _: u64) -> a3s_box_core::error::Result<()> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+        fn is_running(&self) -> bool {
+            !self.stopped.load(Ordering::SeqCst)
+        }
+        fn has_exited(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+    }
+
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn sleep for SIGSTOP fixture");
+    let pid = child.id();
+
+    let vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-pause-demote".to_string(),
+    );
+    *vm.state.write().await = BoxState::Ready;
+    *vm.handler.write().await = Some(Box::new(SleepHandler {
+        pid,
+        stopped: Arc::new(AtomicBool::new(false)),
+    }));
+
+    vm.pause().await.expect("SIGSTOP pause");
+    assert_eq!(
+        vm.state().await,
+        BoxState::Paused,
+        "pause must demote Ready so frozen exec is not inventable"
+    );
+    assert!(
+        !vm.health_check().await.expect("health"),
+        "Paused must fail health_check"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn microvm_resume_refuses_ready_without_post_cont_heartbeat() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SleepHandler {
+        pid: u32,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl crate::vmm::VmHandler for SleepHandler {
+        fn stop(&mut self, _: i32, _: u64) -> a3s_box_core::error::Result<()> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+        fn is_running(&self) -> bool {
+            !self.stopped.load(Ordering::SeqCst)
+        }
+        fn has_exited(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+    }
+
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn sleep for SIGCONT fixture");
+    let pid = child.id();
+
+    let vm = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(16),
+        "box-resume-no-hb".to_string(),
+    );
+    *vm.state.write().await = BoxState::Paused;
+    *vm.handler.write().await = Some(Box::new(SleepHandler {
+        pid,
+        stopped: Arc::new(AtomicBool::new(false)),
+    }));
+    // No exec socket — post-CONT re-auth must fail closed.
+    vm.exec_socket_path = None;
+
+    let error = vm
+        .resume()
+        .await
+        .expect_err("SIGCONT alone must not invent Ready");
+    assert!(
+        error.to_string().contains("re-authenticate") || error.to_string().contains("Paused"),
+        "expected fail-closed resume, got {error}"
+    );
+    assert_eq!(
+        vm.state().await,
+        BoxState::Paused,
+        "failed re-auth must leave Paused, not invent Ready"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
