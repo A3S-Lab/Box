@@ -384,14 +384,27 @@ impl VmLocalExecutionBackend {
     async fn promote_if_ready(&self, record: &BoxRecord, manager: &mut VmManager) -> bool {
         let socket_dir = crate::vm::runtime_socket_dir(&self.home_dir, &record.id);
         let exec_socket = socket_dir.join("exec.sock");
-        if !exec_endpoint_ready(record.id.as_str(), Some(&exec_socket)).await {
-            return false;
-        }
         manager.exec_socket_path = Some(exec_socket);
         manager.pty_socket_path = Some(socket_dir.join("pty.sock"));
         manager.port_forward_socket_path = Some(socket_dir.join("portfwd.sock"));
-        *manager.state.write().await = crate::BoxState::Ready;
-        true
+
+        // Authenticate and retain proof the same way attach / Sandbox recover do.
+        // A dropped one-shot heartbeat must not leave Ready with only PID for
+        // later health (#418 / #413/#415 parity).
+        #[cfg(unix)]
+        {
+            manager.promote_ready_if_exec_authenticated().await
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows VmManager does not retain ExecClient; still require the
+            // named-pipe heartbeat before Ready (no path-presence invent).
+            if !exec_endpoint_ready(record.id.as_str(), manager.exec_socket_path()).await {
+                return false;
+            }
+            *manager.state.write().await = crate::BoxState::Ready;
+            true
+        }
     }
 
     /// After `boot()` Ok, require authenticated Ready before returning a start

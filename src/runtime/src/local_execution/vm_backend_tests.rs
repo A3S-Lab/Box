@@ -774,7 +774,10 @@ async fn created_observation_stays_creating_without_exec_heartbeat() {
         .managers
         .insert(record.id.clone(), Arc::clone(&manager));
 
-    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+    let observation = backend
+        .inspect_registered(&record, Arc::clone(&manager))
+        .await
+        .unwrap();
 
     assert_eq!(
         observation.state,
@@ -782,6 +785,40 @@ async fn created_observation_stays_creating_without_exec_heartbeat() {
         "layout exec.sock path alone must not invent Ready/Running"
     );
     assert!(observation.handle.is_none());
+    let guard = manager.lock().await;
+    assert_eq!(
+        guard.state().await,
+        crate::BoxState::Created,
+        "failed promote must leave Created"
+    );
+    #[cfg(unix)]
+    assert!(
+        guard.exec_client().is_none(),
+        "failed promote must not retain an unauthenticated exec client"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn promote_if_ready_refuses_ready_without_authenticated_exec_client() {
+    // Direct promote path: no heartbeat ⇒ no Ready and no retained client (#418).
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Created;
+
+    let promoted = backend.promote_if_ready(&record, &mut manager).await;
+
+    assert!(
+        !promoted,
+        "promote_if_ready must refuse without authenticated heartbeat"
+    );
+    assert_eq!(manager.state().await, crate::BoxState::Created);
+    assert!(
+        manager.exec_client().is_none(),
+        "promote must not invent Ready or retain a client without heartbeat"
+    );
 }
 
 #[tokio::test]
@@ -818,5 +855,10 @@ async fn start_refuses_handle_when_boot_left_created_without_exec_heartbeat() {
         manager.state().await,
         crate::BoxState::Created,
         "failed Ready gate must leave Created for inspect/promote_if_ready"
+    );
+    #[cfg(unix)]
+    assert!(
+        manager.exec_client().is_none(),
+        "failed Ready gate must not retain an unauthenticated exec client"
     );
 }

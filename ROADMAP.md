@@ -715,7 +715,9 @@ retain process or filesystem sessions after its owner dies.
   aligns Ready after `wait_for_exec_available`; managed observe refuses
   inventing `Running` from durable `Pausing` + backend `Creating`, and
   inventing `Paused` from durable `Resuming` + backend `Creating` (project
-  `Creating` until pause/resume evidence authenticates);
+  `Creating` until pause/resume evidence authenticates); managed MicroVM
+  `promote_if_ready` retains the authenticated Unix `ExecClient` after
+  heartbeat instead of dropping a one-shot probe (#418 / #413/#415 parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
