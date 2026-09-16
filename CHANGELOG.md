@@ -197,6 +197,10 @@ All notable changes to A3S Box will be documented in this file.
   sustains healthy from shim PID alone — require retained-client or
   `guest-control.ready` + named-pipe heartbeat (#420 / #419 parity). Does
   **not** flip B2, invent Live digests, or widen heartbeat timeouts.
+- Managed MicroVM `require_authenticated_ready_for_start` re-proves exec
+  health when in-memory state is already Ready/Busy/Compacting — stale Ready
+  without heartbeat must not invent a start handle / durable Running
+  (#421 / #419/#420). Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

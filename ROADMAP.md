@@ -721,7 +721,9 @@ retain process or filesystem sessions after its owner dies.
   Unix `health_check` for Ready/Busy/Compacting requires exec heartbeat
   (retained or reconnect), not shim PID alone (#419 / #418); Windows
   `health_check` likewise requires retained-client or `guest-control.ready` +
-  named-pipe heartbeat (#420 / #419 parity);
+  named-pipe heartbeat (#420 / #419 parity); managed MicroVM start re-proves
+  exec health when in-memory Ready/Busy/Compacting is already set — stale
+  Ready without heartbeat must not invent a start handle (#421 / #419/#420);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

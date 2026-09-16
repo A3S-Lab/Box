@@ -869,3 +869,41 @@ async fn start_refuses_handle_when_boot_left_created_without_exec_heartbeat() {
         "failed Ready gate must not retain an unauthenticated exec client"
     );
 }
+
+#[tokio::test]
+async fn start_refuses_handle_when_ready_lacks_exec_heartbeat() {
+    // Stale Ready (PID alive, no exec heartbeat) must not invent a start handle
+    // / durable Running (#421 / #419/#420). Re-prove health before trusting
+    // in-memory Ready from an earlier one-shot promote.
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Starting.as_status().to_string();
+
+    let mut manager = backend.new_manager(&record).unwrap();
+    *manager.state.write().await = crate::BoxState::Ready;
+    *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::new(AtomicUsize::new(0)),
+        stop_calls: Arc::new(AtomicUsize::new(0)),
+        available_after: usize::MAX,
+        reports_running: true,
+        durable_exit_path: None,
+    }));
+    // Layout path alone — no live exec endpoint — must fail the Ready gate.
+    manager.exec_socket_path =
+        Some(crate::vm::runtime_socket_dir(temporary.path(), &record.id).join("exec.sock"));
+
+    let error = backend
+        .require_authenticated_ready_for_start(&record, &mut manager)
+        .await
+        .expect_err("Ready without heartbeat must not authorize a start handle");
+    assert!(
+        matches!(error, ExecutionManagerError::Unavailable(_)),
+        "expected Unavailable so Starting can retry/observe, got {error:?}"
+    );
+    #[cfg(unix)]
+    assert!(
+        manager.exec_client().is_none(),
+        "failed Ready re-proof must not retain an unauthenticated exec client"
+    );
+}
