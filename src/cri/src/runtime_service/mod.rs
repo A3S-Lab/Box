@@ -2225,9 +2225,19 @@ impl RuntimeService for BoxRuntimeService {
             .require_reported_sandbox_ready(&req.pod_sandbox_id, "UpdatePodSandboxResources")
             .await?;
 
+        // Ready alone must not invent "resources applied". Pod-level VM resize
+        // is unsupported — fail closed when linux/annotations request a change
+        // (#451 / #437). Empty id-only requests stay Ok (no side effect claimed).
+        if req.linux.is_some() || !req.annotations.is_empty() {
+            return Err(Status::unimplemented(format!(
+                "UpdatePodSandboxResources is not supported for microVM-backed sandbox {} (pod-level resource mutation)",
+                req.pod_sandbox_id
+            )));
+        }
+
         tracing::info!(
             sandbox_id = %req.pod_sandbox_id,
-            "CRI UpdatePodSandboxResources accepted as a no-op; pod-level VM resizing is not supported yet"
+            "CRI UpdatePodSandboxResources: no linux/annotations mutation requested"
         );
 
         Ok(Response::new(UpdatePodSandboxResourcesResponse {}))

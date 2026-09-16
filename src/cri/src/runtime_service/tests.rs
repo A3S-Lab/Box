@@ -5491,6 +5491,59 @@ async fn test_port_forward_refuses_ready_without_vm_health() {
 }
 
 #[tokio::test]
+async fn update_pod_sandbox_resources_refuses_inventing_applied_resources_when_unsupported() {
+    let svc = make_test_service();
+    // Authenticated Ready still must not invent Ok for unsupported pod-level
+    // resize ? kubelet treats Ok as resources applied (#451 / #437).
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
+
+    let result = svc
+        .update_pod_sandbox_resources(Request::new(UpdatePodSandboxResourcesRequest {
+            pod_sandbox_id: "sb-1".to_string(),
+            linux: Some(LinuxContainerResources {
+                cpu_quota: 50_000,
+                ..Default::default()
+            }),
+            annotations: HashMap::new(),
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert!(
+        err.message().contains("not supported"),
+        "unsupported pod resize must fail closed, not invent Ok: {}",
+        err.message()
+    );
+    assert_eq!(
+        svc.store.sandboxes.get("sb-1").await.unwrap().state,
+        SandboxState::Ready,
+        "refuse must not demote authenticated Ready"
+    );
+}
+
+#[tokio::test]
+async fn update_pod_sandbox_resources_allows_empty_mutation_when_ready() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
+
+    svc.update_pod_sandbox_resources(Request::new(UpdatePodSandboxResourcesRequest {
+        pod_sandbox_id: "sb-1".to_string(),
+        linux: None,
+        annotations: HashMap::new(),
+    }))
+    .await
+    .expect("id-only UpdatePodSandboxResources claims no side effect");
+}
+
+#[tokio::test]
 async fn test_port_forward_requires_ready_vm() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
