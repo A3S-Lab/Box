@@ -4590,3 +4590,25 @@ async fn test_acquire_vm_without_pool_fails_without_shim() {
     // Expected: error because no shim binary available
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn acquire_vm_refuses_ready_sandbox_without_exec_heartbeat() {
+    let mut svc = make_test_service();
+    let tmp = tempfile::tempdir().unwrap();
+    // Layout path alone must not authenticate — attach leaves Created (#413),
+    // and CRI must not invent Sandbox Ready from that soft state (#428).
+    svc.test_vm_exec_socket_path = Some(tmp.path().join("missing-exec.sock"));
+    let err = svc
+        .acquire_vm_with_box_id(
+            a3s_box_core::config::BoxConfig::default(),
+            "test-acquire-no-hb".to_string(),
+        )
+        .await
+        .expect_err("acquire must fail closed without authenticated Ready");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("not Ready") || err.message().contains("heartbeat"),
+        "unexpected acquire error: {}",
+        err.message()
+    );
+}
