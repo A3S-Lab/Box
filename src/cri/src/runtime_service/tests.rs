@@ -527,75 +527,80 @@ where
     let tmp = tempdir_for_unix_socket("a3s-cri-exec-test");
     let socket_path = tmp.path().join("exec.sock");
     let listener = bind_test_exec_listener(&socket_path)?;
+    // Shared once-callback: health re-proof may heartbeat while a Data stream
+    // is open, so Accept must stay concurrent (#445 CI / invent-refusal).
+    let assert_request = std::sync::Arc::new(tokio::sync::Mutex::new(Some(assert_request)));
 
     tokio::spawn(async move {
-        let mut assert_request = Some(assert_request);
-
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = tokio::io::split(stream);
-            let mut reader = a3s_transport::FrameReader::new(r);
-            let mut writer = a3s_transport::FrameWriter::new(w);
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let assert_request = assert_request.clone();
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
 
-            match reader.read_frame().await.unwrap() {
-                None => continue,
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
-                    let heartbeat = a3s_transport::Frame::heartbeat();
-                    let encoded = heartbeat.encode().unwrap();
-                    writer.into_inner().write_all(&encoded).await.unwrap();
-                }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
-                    let request: a3s_box_core::exec::ExecRequest =
-                        serde_json::from_slice(&frame.payload).unwrap();
-                    assert!(request.streaming);
-                    let Some(assert_request) = assert_request.take() else {
-                        panic!("exec stream server received more than one request");
-                    };
-                    assert_request(&request);
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        let request: a3s_box_core::exec::ExecRequest =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        assert!(request.streaming);
+                        let Some(assert_request) = assert_request.lock().await.take() else {
+                            panic!("exec stream server received more than one request");
+                        };
+                        assert_request(&request);
 
-                    if !stdout.is_empty() {
-                        let chunk = a3s_box_core::exec::ExecChunk {
-                            stream: a3s_box_core::exec::StreamType::Stdout,
-                            data: stdout.to_vec(),
+                        if !stdout.is_empty() {
+                            let chunk = a3s_box_core::exec::ExecChunk {
+                                stream: a3s_box_core::exec::StreamType::Stdout,
+                                data: stdout.to_vec(),
+                            };
+                            writer
+                                .write_data(&serde_json::to_vec(&chunk).unwrap())
+                                .await
+                                .unwrap();
+                        }
+
+                        if !stderr.is_empty() {
+                            let chunk = a3s_box_core::exec::ExecChunk {
+                                stream: a3s_box_core::exec::StreamType::Stderr,
+                                data: stderr.to_vec(),
+                            };
+                            writer
+                                .write_data(&serde_json::to_vec(&chunk).unwrap())
+                                .await
+                                .unwrap();
+                        }
+
+                        sleep(exit_delay).await;
+
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code,
+                            oom_killed: false,
                         };
                         writer
-                            .write_data(&serde_json::to_vec(&chunk).unwrap())
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
                             .await
                             .unwrap();
                     }
-
-                    if !stderr.is_empty() {
-                        let chunk = a3s_box_core::exec::ExecChunk {
-                            stream: a3s_box_core::exec::StreamType::Stderr,
-                            data: stderr.to_vec(),
-                        };
-                        writer
-                            .write_data(&serde_json::to_vec(&chunk).unwrap())
-                            .await
-                            .unwrap();
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // Destroy may deliver signal-main over this socket. Drop
+                        // without ACK so teardown fails closed to InstantStop /
+                        // handler.stop instead of waiting provider grace (#445 CI).
                     }
-
-                    sleep(exit_delay).await;
-
-                    let exit = a3s_box_core::exec::ExecExit {
-                        exit_code,
-                        oom_killed: false,
-                    };
-                    writer
-                        .write_control(&serde_json::to_vec(&exit).unwrap())
-                        .await
-                        .unwrap();
-                    break;
+                    Some(frame) => {
+                        panic!("unexpected frame type: {:?}", frame.frame_type);
+                    }
                 }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
-                    // Destroy may deliver signal-main over this socket. Drop
-                    // without ACK so teardown fails closed to InstantStop /
-                    // handler.stop instead of waiting provider grace (#445 CI).
-                }
-                Some(frame) => {
-                    panic!("unexpected frame type: {:?}", frame.frame_type);
-                }
-            }
+            });
         }
     });
 
@@ -909,45 +914,49 @@ async fn spawn_cancelable_exec_stream_server() -> Option<TestExecServer> {
 
     tokio::spawn(async move {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = tokio::io::split(stream);
-            let mut reader = a3s_transport::FrameReader::new(r);
-            let mut writer = a3s_transport::FrameWriter::new(w);
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            // Concurrent Accept: StopContainer re-proofs health with a heartbeat
+            // while the workload Data stream waits for cancel (#445 CI).
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(stream);
+                let mut reader = a3s_transport::FrameReader::new(r);
+                let mut writer = a3s_transport::FrameWriter::new(w);
 
-            match reader.read_frame().await.unwrap() {
-                None => continue,
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
-                    let heartbeat = a3s_transport::Frame::heartbeat();
-                    let encoded = heartbeat.encode().unwrap();
-                    writer.into_inner().write_all(&encoded).await.unwrap();
-                }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
-                    let request: a3s_box_core::exec::ExecRequest =
-                        serde_json::from_slice(&frame.payload).unwrap();
-                    assert!(request.streaming);
+                match reader.read_frame().await.unwrap() {
+                    None => {}
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                        let heartbeat = a3s_transport::Frame::heartbeat();
+                        let encoded = heartbeat.encode().unwrap();
+                        let _ = writer.into_inner().write_all(&encoded).await;
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                        let request: a3s_box_core::exec::ExecRequest =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        assert!(request.streaming);
 
-                    let cancel = reader.read_frame().await.unwrap().unwrap();
-                    assert_eq!(cancel.frame_type, a3s_transport::FrameType::Control);
-                    assert_eq!(cancel.payload, b"cancel");
+                        let cancel = reader.read_frame().await.unwrap().unwrap();
+                        assert_eq!(cancel.frame_type, a3s_transport::FrameType::Control);
+                        assert_eq!(cancel.payload, b"cancel");
 
-                    let exit = a3s_box_core::exec::ExecExit {
-                        exit_code: 137,
-                        oom_killed: false,
-                    };
-                    writer
-                        .write_control(&serde_json::to_vec(&exit).unwrap())
-                        .await
-                        .unwrap();
-                    break;
+                        let exit = a3s_box_core::exec::ExecExit {
+                            exit_code: 137,
+                            oom_killed: false,
+                        };
+                        writer
+                            .write_control(&serde_json::to_vec(&exit).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
+                    }
+                    Some(frame) => {
+                        panic!("unexpected frame type: {:?}", frame.frame_type);
+                    }
                 }
-                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
-                    // signal-main during destroy: fail closed (no ACK).
-                    continue;
-                }
-                Some(frame) => {
-                    panic!("unexpected frame type: {:?}", frame.frame_type);
-                }
-            }
+            });
         }
     });
 
@@ -5264,7 +5273,12 @@ async fn test_port_forward_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("VM is not ready")
+            || err.message().contains("requires a ready sandbox"),
+        "unauthenticated VM must not invent PortForward: {}",
+        err.message()
+    );
 }
 
 #[tokio::test]

@@ -292,7 +292,9 @@ All notable changes to A3S Box will be documented in this file.
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only
   keepalive exec server (no multi-hour Data exit delay) with per-connection
-  accept tasks (#445 CI). Does **not** invent Live digests or flip B2.
+  accept tasks, and workload exec fixtures keep Accept concurrent so health
+  re-proof heartbeats are not blocked behind an open Data stream (#445 CI).
+  Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
