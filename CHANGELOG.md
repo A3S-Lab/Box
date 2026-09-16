@@ -173,6 +173,11 @@ All notable changes to A3S Box will be documented in this file.
   (`promote_ready_if_exec_authenticated`); otherwise leave `Created` for
   observe/`promote_if_ready` (#415 / #413/#414 parity). Does **not** flip B2
   or invent Live digests.
+- Managed MicroVM `start` no longer invents a start handle (and thus durable
+  `Running`) when `boot()` left `Created` after a failed restore soft-probe
+  (`require_authenticated_ready_for_start` / `promote_if_ready`). Pool warm
+  publish likewise aligns `BoxState::Ready` after `wait_for_exec_available`
+  (#416 / #414 seam). Does **not** flip B2 or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
