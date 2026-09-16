@@ -705,7 +705,9 @@ retain process or filesystem sessions after its owner dies.
   heartbeat + `guest-control.ready`); Windows pool `wait_for_exec_available`
   fails closed instead of unconditional `Ok(())`;
   `attach_running_process` refuses inventing Ready from shim PID / layout
-  path alone (authenticated exec heartbeat, else `Created`);
+  path alone (authenticated exec heartbeat, else `Created`); Unix snapshot-
+  restore boot refuses inventing Ready after a failed one-shot exec probe
+  (leave `Created`, no `box.ready`, #414 / #413 parity);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

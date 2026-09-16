@@ -4,7 +4,7 @@ use a3s_box_core::error::{BoxError, Result};
 
 use crate::grpc::ExecClient;
 
-use super::VmManager;
+use super::{BoxState, VmManager};
 
 const DEFAULT_EXEC_READY_TIMEOUT_MS: u64 = 15_000;
 // WHPX cold boots commonly cross ~5s before the guest exec accept loop is up.
@@ -276,7 +276,9 @@ impl VmManager {
     /// readiness the way a cold boot does — blocking on [`wait_for_exec_ready`]'s
     /// cold-boot loop would stall registration for up to its safety cap. Instead try
     /// exactly one connect + heartbeat to populate `exec_client` if the guest answers
-    /// promptly, and otherwise proceed immediately: exec/attach connect on demand.
+    /// promptly. A failed probe must **not** authorize Ready — callers use
+    /// [`Self::set_boot_completion_state`] and leave `Created` for
+    /// observe/`promote_if_ready` (#414 / #413 parity).
     #[cfg(unix)]
     pub(crate) async fn probe_exec_ready_once(&mut self, exec_socket_path: &std::path::Path) {
         use tokio::time::Duration;
@@ -289,8 +291,28 @@ impl VmManager {
             return;
         }
         tracing::debug!(
-            "restore: exec server did not answer an immediate heartbeat; exec/attach will connect on demand"
+            "restore: exec server did not answer an immediate heartbeat; leaving Created until heartbeat authenticates"
         );
+    }
+
+    /// Publish Ready only when the exec channel is authenticated.
+    ///
+    /// Unix: `exec_client` must already hold a successful heartbeat (cold
+    /// [`wait_for_exec_ready`] or restore [`probe_exec_ready_once`]). Otherwise
+    /// leave `Created` — never invent Ready from a live shim alone (#414).
+    /// Windows: cold `wait_for_exec_ready` already fail-closed, so Ready is
+    /// authorized when that wait returned `Ok(())`.
+    pub(crate) async fn set_boot_completion_state(&self) -> bool {
+        #[cfg(unix)]
+        let ready = self.exec_client.is_some();
+        #[cfg(windows)]
+        let ready = true;
+        *self.state.write().await = if ready {
+            BoxState::Ready
+        } else {
+            BoxState::Created
+        };
+        ready
     }
 }
 
@@ -315,6 +337,8 @@ fn vm_exited_before_exec_ready(box_dir: &std::path::Path, exit_code: Option<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::config::BoxConfig;
+    use a3s_box_core::event::EventEmitter;
 
     #[test]
     fn test_parse_exec_ready_timeout_ms() {
@@ -331,5 +355,29 @@ mod tests {
             DEFAULT_EXEC_READY_TIMEOUT_MS
         );
         assert_eq!(parse_exec_ready_timeout_ms(Some("2500")), 2500);
+    }
+
+    #[tokio::test]
+    async fn test_set_boot_completion_state_without_exec_client() {
+        let vm = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(16),
+            "box-boot-completion".to_string(),
+        );
+        let ready = vm.set_boot_completion_state().await;
+        #[cfg(unix)]
+        {
+            assert!(
+                !ready,
+                "Unix boot completion must not invent Ready without exec heartbeat"
+            );
+            assert_eq!(vm.state().await, BoxState::Created);
+        }
+        #[cfg(windows)]
+        {
+            // Windows boot only reaches this helper after wait_for_exec_ready Ok.
+            assert!(ready);
+            assert_eq!(vm.state().await, BoxState::Ready);
+        }
     }
 }

@@ -163,6 +163,11 @@ All notable changes to A3S Box will be documented in this file.
   (Unix connect+heartbeat; Windows `guest-control.ready` + named-pipe
   heartbeat). Otherwise leave `Created` for observe/`promote_if_ready`. Does
   **not** flip B2 or invent Live digests.
+- Unix snapshot-restore boot no longer invents Ready after a failed one-shot
+  exec probe (`probe_exec_ready_once`). Boot completion publishes Ready only
+  when the heartbeat authenticated; otherwise leave `Created` (no `box.ready`)
+  for observe/`promote_if_ready` (#414 / #413 parity). Does **not** flip B2
+  or invent Live digests.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
