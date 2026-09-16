@@ -48,11 +48,10 @@ use convert::ANN_ADDITIONAL_POD_IPS;
 use convert::{
     container_event_response, container_exit_reason, container_mount_to_cri, container_state_label,
     container_state_to_cri, container_summary, container_user_from_linux_config,
-    ensure_container_image_available, ensure_container_running, ensure_sandbox_ready,
-    ensure_vm_ready, merge_env, resolve_command_and_args, resolve_container_mounts,
-    resource_update_from_cri, sandbox_state_label, sandbox_summary, sanitize_path_component,
-    stop_container_timeout_ms, stop_container_wait_duration, ContainerRootfsPaths,
-    ResolvedContainerImage, ANN_POD_IP,
+    ensure_container_image_available, ensure_container_running, ensure_vm_ready, merge_env,
+    resolve_command_and_args, resolve_container_mounts, resource_update_from_cri,
+    sandbox_state_label, sandbox_summary, sanitize_path_component, stop_container_timeout_ms,
+    stop_container_wait_duration, ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
 };
 #[cfg(test)]
 use log_writer::CriLogWriter;
@@ -1115,14 +1114,10 @@ impl RuntimeService for BoxRuntimeService {
         let req = request.into_inner();
         let sandbox_id = &req.pod_sandbox_id;
 
-        // Verify sandbox exists
+        // Verify sandbox exists and is Ready after VM health re-proof (#437).
         let sandbox = self
-            .store
-            .sandboxes
-            .get(sandbox_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
-        ensure_sandbox_ready(&sandbox, "CreateContainer")?;
+            .require_reported_sandbox_ready(sandbox_id, "CreateContainer")
+            .await?;
 
         let config = req
             .config
@@ -2177,15 +2172,9 @@ impl RuntimeService for BoxRuntimeService {
         request: Request<UpdatePodSandboxResourcesRequest>,
     ) -> Result<Response<UpdatePodSandboxResourcesResponse>, Status> {
         let req = request.into_inner();
-        let sandbox = self
-            .store
-            .sandboxes
-            .get(&req.pod_sandbox_id)
-            .await
-            .ok_or_else(|| {
-                Status::not_found(format!("Sandbox not found: {}", req.pod_sandbox_id))
-            })?;
-        ensure_sandbox_ready(&sandbox, "UpdatePodSandboxResources")?;
+        let _sandbox = self
+            .require_reported_sandbox_ready(&req.pod_sandbox_id, "UpdatePodSandboxResources")
+            .await?;
 
         tracing::info!(
             sandbox_id = %req.pod_sandbox_id,
@@ -2581,14 +2570,10 @@ impl RuntimeService for BoxRuntimeService {
             ));
         }
 
-        // Verify sandbox exists
+        // Verify sandbox exists and is Ready after VM health re-proof (#437).
         let sandbox = self
-            .store
-            .sandboxes
-            .get(sandbox_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
-        ensure_sandbox_ready(&sandbox, "PortForward")?;
+            .require_reported_sandbox_ready(sandbox_id, "PortForward")
+            .await?;
 
         // critest passes the target port in the RPC; `crictl port-forward` sends
         // an empty list and carries the port only in the SPDY stream header

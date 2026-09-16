@@ -454,6 +454,28 @@ impl BoxRuntimeService {
         }
     }
 
+    /// Load a sandbox and refuse inventing Ready for mutation gates.
+    ///
+    /// CreateContainer / PortForward / UpdatePodSandboxResources must not
+    /// accept durable Ready without VM health re-proof (#437 / #436/#431).
+    pub(super) async fn require_reported_sandbox_ready(
+        &self,
+        sandbox_id: &str,
+        operation: &str,
+    ) -> Result<PodSandbox, Status> {
+        let mut sandbox = self
+            .store
+            .sandboxes
+            .get(sandbox_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Sandbox not found: {sandbox_id}")))?;
+        sandbox.state = self
+            .reconcile_reported_sandbox_state(sandbox_id, sandbox.state)
+            .await;
+        super::convert::ensure_sandbox_ready(&sandbox, operation)?;
+        Ok(sandbox)
+    }
+
     /// Re-prove durable Running against live sandbox VM health; demote when inventable.
     ///
     /// Status/List must not invent ContainerRunning when the sandbox VM is gone

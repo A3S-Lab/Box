@@ -258,6 +258,10 @@ All notable changes to A3S Box will be documented in this file.
   Ready/Running gauges from durable store alone — same sandbox/container health
   reconcile before emitting metrics (#436 / #435/#434). Does **not** invent Live
   digests or flip B2.
+- CRI `CreateContainer` / `PortForward` / `UpdatePodSandboxResources` refuse
+  inventing Ready for mutation gates from durable store alone — re-prove VM
+  health before accepting (#437 / #436/#431). Does **not** invent Live digests
+  or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
