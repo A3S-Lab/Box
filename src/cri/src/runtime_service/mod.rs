@@ -1853,6 +1853,8 @@ impl RuntimeService for BoxRuntimeService {
             .get(container_id)
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+        // Durable Running alone must not invent ContainerRunning (#434).
+        let container = self.reconcile_reported_container(container).await;
 
         let state = match container.state {
             ContainerState::Created => crate::cri_api::ContainerState::ContainerCreated,
@@ -1968,8 +1970,12 @@ impl RuntimeService for BoxRuntimeService {
             .containers
             .list(sandbox_filter, label_filter)
             .await;
+        let mut reconciled = Vec::with_capacity(containers.len());
+        for container in containers {
+            reconciled.push(self.reconcile_reported_container(container).await);
+        }
 
-        let items: Vec<crate::cri_api::Container> = containers
+        let items: Vec<crate::cri_api::Container> = reconciled
             .into_iter()
             .filter(|c| {
                 if let Some(ref filter) = req.filter {
@@ -2024,8 +2030,12 @@ impl RuntimeService for BoxRuntimeService {
             .containers
             .list(sandbox_filter, label_filter)
             .await;
+        let mut reconciled = Vec::with_capacity(containers.len());
+        for container in containers {
+            reconciled.push(self.reconcile_reported_container(container).await);
+        }
 
-        let containers = containers
+        let containers = reconciled
             .into_iter()
             .filter(|container| {
                 if let Some(ref filter) = req.filter {

@@ -247,6 +247,10 @@ All notable changes to A3S Box will be documented in this file.
   publishes Ready only via `set_boot_completion_state` and fail-closes when the
   authenticated exec client was not retained (#433 / #425/#430). Does **not**
   invent Live digests or flip B2.
+- CRI `ContainerStatus` / `ListContainers` / `StreamContainers` refuse inventing
+  ContainerRunning from durable Running alone — demote to Exited(255) when the
+  sandbox VM is missing or unhealthy (#434 / #432/#431). Does **not** invent
+  Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
