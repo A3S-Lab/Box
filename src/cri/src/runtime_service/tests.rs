@@ -3549,6 +3549,26 @@ async fn test_remove_container_force_stops_running_container() {
     assert!(svc.store.containers.get("c-1").await.is_none());
 }
 
+#[tokio::test]
+async fn remove_container_refuses_inventing_force_stop_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Running without VM health must demote, not invent force-stop (#445).
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    svc.remove_container(Request::new(RemoveContainerRequest {
+        container_id: "c-stale".to_string(),
+    }))
+    .await
+    .unwrap();
+
+    assert!(
+        svc.store.containers.get("c-stale").await.is_none(),
+        "stale Running must demote then remove without inventing live force-stop"
+    );
+}
+
 // ── Container Status ─────────────────────────────────────────────
 
 #[tokio::test]

@@ -282,6 +282,9 @@ All notable changes to A3S Box will be documented in this file.
   re-check / sibling Running guards refuse inventing live Ready/Running from
   durable store alone — re-prove VM health before mutation gates (#444 /
   #443/#437/#434). Does **not** invent Live digests or flip B2.
+- CRI `RemoveContainer` refuses inventing force-stop of durable Running without
+  sandbox VM health re-proof — demote inventable Running before delete (#445 /
+  #444/#434). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is

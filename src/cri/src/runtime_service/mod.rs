@@ -1822,6 +1822,9 @@ impl RuntimeService for BoxRuntimeService {
         let Some(container) = self.store.containers.get(container_id).await else {
             return Ok(Response::new(RemoveContainerResponse {}));
         };
+        // Durable Running alone must not invent force-stop of a live container
+        // (#445 / #444/#434). Demote inventable Running first.
+        let container = self.reconcile_reported_container(container).await;
 
         // CRI RemoveContainer force-removes: a still-running container is
         // stopped first (timeout 0), then deleted — matching containerd/cri-o.
