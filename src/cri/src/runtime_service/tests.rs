@@ -3250,20 +3250,24 @@ async fn test_container_status_created() {
 }
 
 #[tokio::test]
-async fn test_container_status_running() {
+async fn container_status_refuses_stale_running_without_vm_health() {
     let svc = make_test_service();
     svc.store
         .containers
-        .add(test_container("c-1", "sb-1"))
+        .add(test_container("c-stale", "sb-stale"))
         .await;
     svc.store
         .containers
-        .mark_started("c-1", 2_000_000_000)
+        .mark_started("c-stale", 2_000_000_000)
         .await;
+    assert_eq!(
+        svc.store.containers.get("c-stale").await.unwrap().state,
+        ContainerState::Running
+    );
 
     let resp = svc
         .container_status(Request::new(ContainerStatusRequest {
-            container_id: "c-1".to_string(),
+            container_id: "c-stale".to_string(),
             verbose: false,
         }))
         .await
@@ -3273,9 +3277,50 @@ async fn test_container_status_running() {
     let status = resp.status.unwrap();
     assert_eq!(
         status.state(),
-        crate::cri_api::ContainerState::ContainerRunning
+        crate::cri_api::ContainerState::ContainerExited,
+        "durable Running without sandbox VM health must not invent ContainerRunning"
     );
-    assert_eq!(status.started_at, 2_000_000_000);
+    assert_eq!(status.exit_code, 255);
+    assert_eq!(
+        svc.store.containers.get("c-stale").await.unwrap().state,
+        ContainerState::Exited,
+        "stale Running must be demoted in durable store"
+    );
+}
+
+#[tokio::test]
+async fn list_containers_refuses_stale_running_without_vm_health() {
+    let svc = make_test_service();
+    svc.store
+        .containers
+        .add(test_container("c-stale-list", "sb-stale"))
+        .await;
+    svc.store
+        .containers
+        .mark_started("c-stale-list", 2_000_000_000)
+        .await;
+
+    let resp = svc
+        .list_containers(Request::new(ListContainersRequest { filter: None }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.containers.len(), 1);
+    assert_eq!(
+        resp.containers[0].state(),
+        crate::cri_api::ContainerState::ContainerExited,
+        "list must not invent ContainerRunning without sandbox VM health"
+    );
+    assert_eq!(
+        svc.store
+            .containers
+            .get("c-stale-list")
+            .await
+            .unwrap()
+            .state,
+        ContainerState::Exited
+    );
 }
 
 #[tokio::test]
@@ -3477,7 +3522,25 @@ async fn test_list_containers_filter_by_state() {
     svc.store.containers.add(running).await;
     svc.store.containers.add(exited).await;
 
-    let resp = svc
+    let created = svc
+        .list_containers(Request::new(ListContainersRequest {
+            filter: Some(ContainerFilter {
+                id: String::new(),
+                state: Some(ContainerStateValue {
+                    state: crate::cri_api::ContainerState::ContainerCreated as i32,
+                }),
+                pod_sandbox_id: String::new(),
+                label_selector: HashMap::new(),
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.containers.len(), 1);
+    assert_eq!(created.containers[0].id, "c-created");
+
+    // Durable Running without VM health demotes (#434) — Running filter stays empty.
+    let running_filter = svc
         .list_containers(Request::new(ListContainersRequest {
             filter: Some(ContainerFilter {
                 id: String::new(),
@@ -3491,13 +3554,32 @@ async fn test_list_containers_filter_by_state() {
         .await
         .unwrap()
         .into_inner();
-
-    assert_eq!(resp.containers.len(), 1);
-    assert_eq!(resp.containers[0].id, "c-running");
-    assert_eq!(
-        resp.containers[0].state(),
-        crate::cri_api::ContainerState::ContainerRunning
+    assert!(
+        running_filter.containers.is_empty(),
+        "list must not invent ContainerRunning without sandbox VM health"
     );
+
+    let exited_filter = svc
+        .list_containers(Request::new(ListContainersRequest {
+            filter: Some(ContainerFilter {
+                id: String::new(),
+                state: Some(ContainerStateValue {
+                    state: crate::cri_api::ContainerState::ContainerExited as i32,
+                }),
+                pod_sandbox_id: String::new(),
+                label_selector: HashMap::new(),
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut exited_ids: Vec<_> = exited_filter
+        .containers
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    exited_ids.sort_unstable();
+    assert_eq!(exited_ids, vec!["c-exited", "c-running"]);
 }
 
 #[tokio::test]

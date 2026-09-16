@@ -454,6 +454,42 @@ impl BoxRuntimeService {
         }
     }
 
+    /// Re-prove durable Running against live sandbox VM health; demote when inventable.
+    ///
+    /// Status/List must not invent ContainerRunning when the sandbox VM is gone
+    /// or unhealthy (#434 / load_state + StopPodSandbox parity).
+    pub(super) async fn reconcile_reported_container(&self, container: Container) -> Container {
+        if container.state != ContainerState::Running {
+            return container;
+        }
+        let healthy = {
+            let managers = self.vm_managers.read().await;
+            match managers.get(&container.sandbox_id) {
+                Some(vm) => matches!(vm.health_check().await, Ok(true)),
+                None => false,
+            }
+        };
+        if healthy {
+            return container;
+        }
+        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let _ = self
+            .store
+            .mark_container_exited_if_running(&container.id, now_ns, 255, false)
+            .await;
+        self.store
+            .containers
+            .get(&container.id)
+            .await
+            .unwrap_or_else(|| {
+                let mut demoted = container;
+                demoted.state = ContainerState::Exited;
+                demoted.exit_code = 255;
+                demoted.finished_at = now_ns;
+                demoted
+            })
+    }
+
     /// Fail closed unless the VM can run guest exec (Ready/Busy/Compacting).
     ///
     /// Soft-Created boots (#414) and attach-without-heartbeat (#413) must not

@@ -744,7 +744,8 @@ retain process or filesystem sessions after its owner dies.
   StreamPodSandboxes refuse inventing Ready from durable state without the
   same health re-proof (#432 / #431); Rootfs-maintenance boot refuses inventing
   Ready without `set_boot_completion_state` retained-client proof (#433 /
-  #425/#430);
+  #425/#430); CRI ContainerStatus/ListContainers refuse inventing Running from
+  durable state without sandbox VM health (#434 / #432/#431);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
