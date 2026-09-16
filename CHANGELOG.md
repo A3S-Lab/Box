@@ -12,6 +12,11 @@ All notable changes to A3S Box will be documented in this file.
   OP_SHUTDOWN from a forking parent (nginx master closing its accepted-fd copy
   before the worker responds) is still ignored, matching `release`. Does **not**
   change keep-alive framing, Content-Length clients, or bridge/passt.
+- TSI `-p` published ports are reachable again from inside the guest on
+  `127.0.0.1:<guest_port>` / `[::1]:<guest_port>` via loopback connect hairpin
+  through the host listener (#448). Bumps vendored libkrun; removes the stale
+  CLI warning that claimed all TSI localhost health checks fail (unpublished
+  listens already stayed in-guest per #378). Non-loopback connects are unchanged.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun

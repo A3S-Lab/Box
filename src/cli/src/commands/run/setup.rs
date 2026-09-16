@@ -75,22 +75,9 @@ pub(super) async fn setup_and_boot(
     };
     let network_mode = common::resolve_network(args.common.network.as_deref());
 
-    // Default (TSI) networking proxies guest sockets to the host, so a container
-    // cannot reach its own services over the guest loopback. A health check that
-    // probes localhost would always fail — point the user at bridge networking.
-    if matches!(network_mode, a3s_box_core::NetworkMode::Tsi) {
-        if let Some(cmd) = &args.common.health_cmd {
-            let lc = cmd.to_lowercase();
-            if lc.contains("localhost") || lc.contains("127.0.0.1") {
-                eprintln!(
-                    "warning: the health check probes localhost, but default (TSI) networking \
-                     cannot reach a container's own services over loopback, so the check will fail. \
-                     For a working localhost, create and attach a bridge network: \
-                     `a3s-box network create mynet` then run with `--network mynet`."
-                );
-            }
-        }
-    }
+    // TSI loopback to a service in the same box works: unpublished listens stay
+    // in-guest (#378), and published `-p` ports hairpin loopback connects through
+    // the host listener (libkrun / #448). Do not warn about localhost health checks.
 
     let tee = build_tee_config(args);
 
