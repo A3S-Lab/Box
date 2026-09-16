@@ -609,8 +609,20 @@ impl BoxRuntimeService {
         if let Some(exec_socket_path) = &self.test_vm_exec_socket_path {
             let box_id = box_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let mut vm = VmManager::with_box_id(box_config, EventEmitter::new(256), box_id);
+            // Disposable shim PID — never attach the cargo-test process. Destroy
+            // sends SIGTERM to this PID; attaching std::process::id() self-kills
+            // the suite (#445 CI SIGTERM).
+            let mut stub = std::process::Command::new("sleep")
+                .arg("3600")
+                .spawn()
+                .map_err(|error| {
+                    Status::internal(format!("failed to spawn disposable VMM stub: {error}"))
+                })?;
+            let stub_pid = stub.id();
+            // Ownership transfers to the OS until destroy SIGTERMs stub_pid.
+            std::mem::forget(stub);
             vm.attach_running_process(
-                std::process::id(),
+                stub_pid,
                 exec_socket_path.clone(),
                 Some(exec_socket_path.with_file_name("pty.sock")),
             )
