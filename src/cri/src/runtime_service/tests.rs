@@ -1239,6 +1239,142 @@ async fn list_container_stats_refuses_stale_running_without_vm_health() {
 }
 
 #[tokio::test]
+async fn pod_sandbox_stats_refuses_stale_running_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Ready + Running without VM health must not invent pod usage (#443).
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    let resp = svc
+        .pod_sandbox_stats(Request::new(PodSandboxStatsRequest {
+            pod_sandbox_id: "sb-stale".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let linux = resp.stats.unwrap().linux.unwrap();
+    assert!(
+        linux.containers.is_empty(),
+        "pod stats must not invent per-container Running usage without VM health"
+    );
+    assert_eq!(
+        linux
+            .process
+            .as_ref()
+            .unwrap()
+            .process_count
+            .as_ref()
+            .unwrap()
+            .value,
+        0,
+        "process_count must not invent Running without VM health"
+    );
+    assert_eq!(
+        svc.store.sandboxes.get("sb-stale").await.unwrap().state,
+        SandboxState::NotReady,
+        "stale Ready must be demoted in durable store"
+    );
+    assert_eq!(
+        svc.store.containers.get("c-stale").await.unwrap().state,
+        ContainerState::Exited,
+        "stale Running must be demoted in durable store"
+    );
+}
+
+#[tokio::test]
+async fn list_pod_sandbox_stats_refuses_stale_running_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Ready + Running without VM health must not invent list pod usage (#443).
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    let mut running = test_container("c-stale", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    let resp = svc
+        .list_pod_sandbox_stats(Request::new(ListPodSandboxStatsRequest { filter: None }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.stats.len(), 1);
+    let linux = resp.stats[0].linux.as_ref().unwrap();
+    assert!(
+        linux.containers.is_empty(),
+        "list must not invent per-container Running usage without VM health"
+    );
+    assert_eq!(
+        linux
+            .process
+            .as_ref()
+            .unwrap()
+            .process_count
+            .as_ref()
+            .unwrap()
+            .value,
+        0
+    );
+    assert_eq!(
+        svc.store.sandboxes.get("sb-stale").await.unwrap().state,
+        SandboxState::NotReady
+    );
+    assert_eq!(
+        svc.store.containers.get("c-stale").await.unwrap().state,
+        ContainerState::Exited
+    );
+}
+
+#[tokio::test]
+async fn list_pod_sandbox_stats_reports_running_when_vm_health_authenticated() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let mut running = test_container("c-running", "sb-1");
+    running.state = ContainerState::Running;
+    let mut exited = test_container("c-exited", "sb-1");
+    exited.state = ContainerState::Exited;
+    svc.store.containers.add(running).await;
+    svc.store.containers.add(exited).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
+
+    let resp = svc
+        .list_pod_sandbox_stats(Request::new(ListPodSandboxStatsRequest { filter: None }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.stats.len(), 1);
+    let linux = resp.stats[0].linux.as_ref().unwrap();
+    assert_eq!(linux.containers.len(), 1);
+    assert_eq!(
+        linux.containers[0].attributes.as_ref().unwrap().id,
+        "c-running"
+    );
+    assert_eq!(
+        linux
+            .process
+            .as_ref()
+            .unwrap()
+            .process_count
+            .as_ref()
+            .unwrap()
+            .value,
+        1
+    );
+    assert_eq!(
+        svc.store.sandboxes.get("sb-1").await.unwrap().state,
+        SandboxState::Ready
+    );
+    assert_eq!(
+        svc.store.containers.get("c-running").await.unwrap().state,
+        ContainerState::Running
+    );
+}
+
+#[tokio::test]
 async fn test_list_container_stats_only_reports_running_containers() {
     let svc = make_test_service();
     let mut running = test_container("c-running", "sb-1");
