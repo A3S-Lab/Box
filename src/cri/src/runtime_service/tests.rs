@@ -508,10 +508,12 @@ impl DisposableVmmStub {
 
 impl Drop for DisposableVmmStub {
     fn drop(&mut self) {
-        // Best-effort SIGKILL without waitpid — destroy may already have reaped.
+        // Best-effort SIGKILL; never wait — destroy/waitpid may already have reaped.
         let _ = std::process::Command::new("kill")
             .args(["-9", &self.pid.to_string()])
-            .status();
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 }
 
@@ -622,8 +624,68 @@ where
                         .unwrap();
                     break;
                 }
+                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                    // Destroy may deliver signal-main over this socket. Do not ACK:
+                    // an ACK would make destroy wait out the provider grace window
+                    // for a host sleep stub that guest signal cannot kill. Closing
+                    // without ACK keeps fail-closed teardown on handler.stop.
+                    continue;
+                }
                 Some(frame) => {
                     panic!("unexpected frame type: {:?}", frame.frame_type);
+                }
+            }
+        }
+    });
+
+    Some(TestExecServer {
+        _tmp: tmp,
+        socket_path,
+        _vmm_stub: None,
+    })
+}
+
+/// Heartbeat-only guest control stand-in for invent-refusal fixtures.
+///
+/// Unlike [`spawn_exec_stream_server`], this never sleeps on Data (the keepalive
+/// helpers previously used a 3600s exit delay that could freeze CI if any RPC
+/// opened an exec stream against the fixture socket).
+async fn spawn_keepalive_exec_server() -> Option<TestExecServer> {
+    let tmp = tempdir_for_unix_socket("a3s-cri-keepalive-exec");
+    let socket_path = tmp.path().join("exec.sock");
+    let listener = bind_test_exec_listener(&socket_path)?;
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+
+            match reader.read_frame().await.unwrap() {
+                None => continue,
+                Some(frame) if frame.frame_type == a3s_transport::FrameType::Heartbeat => {
+                    let heartbeat = a3s_transport::Frame::heartbeat();
+                    let encoded = heartbeat.encode().unwrap();
+                    writer.into_inner().write_all(&encoded).await.unwrap();
+                }
+                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                    // Fail closed on signal-main — see spawn_exec_stream_server.
+                    continue;
+                }
+                Some(frame) if frame.frame_type == a3s_transport::FrameType::Data => {
+                    // Never sleep: invent-refusal fixtures must not open a long
+                    // exec stream on the keepalive socket.
+                    let exit = a3s_box_core::exec::ExecExit {
+                        exit_code: 255,
+                        oom_killed: false,
+                    };
+                    let _ = writer
+                        .write_control(&serde_json::to_vec(&exit).unwrap())
+                        .await;
+                }
+                Some(frame) => {
+                    panic!("unexpected keepalive frame type: {:?}", frame.frame_type);
                 }
             }
         }
@@ -710,6 +772,9 @@ async fn spawn_multi_exec_stream_server(
                             .await
                             .unwrap();
                     }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
+                    }
                     Some(frame) => panic!("unexpected frame type: {:?}", frame.frame_type),
                 }
             });
@@ -776,6 +841,9 @@ async fn spawn_counting_exec_server(
                             .write_control(&serde_json::to_vec(&exit).unwrap())
                             .await
                             .unwrap();
+                    }
+                    Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                        // signal-main during destroy: fail closed (no ACK).
                     }
                     Some(frame) => panic!("unexpected frame type: {:?}", frame.frame_type),
                 }
@@ -910,6 +978,10 @@ async fn spawn_cancelable_exec_stream_server() -> Option<TestExecServer> {
                         .unwrap();
                     break;
                 }
+                Some(frame) if frame.frame_type == a3s_transport::FrameType::Control => {
+                    // signal-main during destroy: fail closed (no ACK).
+                    continue;
+                }
                 Some(frame) => {
                     panic!("unexpected frame type: {:?}", frame.frame_type);
                 }
@@ -955,7 +1027,7 @@ async fn insert_authenticated_sandbox_vm(
     svc: &BoxRuntimeService,
     sandbox_id: &str,
 ) -> Option<TestExecServer> {
-    let mut server = spawn_exec_stream_server(b"", b"", 0, Duration::from_secs(3600)).await?;
+    let mut server = spawn_keepalive_exec_server().await?;
     let (vm, stub) = attach_ready_test_vm(sandbox_id, &server.socket_path).await;
     server._vmm_stub = Some(stub);
     svc.vm_managers
