@@ -117,9 +117,7 @@ fn run_passt_bridge(
                 // Host egress via passt is dead, but peer frames never needed
                 // passt. Keep the Ethernet switch up so other boxes on the
                 // network can still reach this MAC (#454).
-                tracing::error!(
-                    "passt closed its guest connection; continuing peer-only bridge"
-                );
+                tracing::error!("passt closed its guest connection; continuing peer-only bridge");
                 if let Some(path) = backend_lost_marker.as_ref() {
                     if let Err(error) = std::fs::write(path, b"passt\n") {
                         tracing::warn!(

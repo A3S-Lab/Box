@@ -407,6 +407,23 @@ impl Drop for PasstManager {
     }
 }
 
+/// Path of the durable marker written when the shim's passt bridge observes
+/// passt EOF while the box is still up (#454).
+pub fn passt_backend_lost_marker(socket_dir: &Path) -> PathBuf {
+    socket_dir.join("passt.backend_lost")
+}
+
+/// True when inspect/events should treat the bridge backend as lost.
+///
+/// Either the shim wrote [`passt_backend_lost_marker`], or the authoritative
+/// `passt.pid` no longer names a live passt/passt.avx2 process.
+pub fn passt_backend_lost(socket_dir: &Path) -> bool {
+    if passt_backend_lost_marker(socket_dir).exists() {
+        return true;
+    }
+    !passt_pid_file_alive(socket_dir)
+}
+
 /// True when a bridge-mode box's passt backend is gone (#454).
 ///
 /// Resolves the box runtime socket directory under `home` and checks the

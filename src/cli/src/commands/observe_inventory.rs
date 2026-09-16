@@ -21,11 +21,11 @@
 //! invented pool `ps` path. Creating stays out of scope (create race). Do not
 //! observe Running boxes on every list.
 
+#[cfg(target_os = "linux")]
+use a3s_box_core::NetworkMode;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionState, OperationId,
 };
-#[cfg(target_os = "linux")]
-use a3s_box_core::NetworkMode;
 
 use crate::state::{BoxRecord, StateFile};
 
@@ -34,7 +34,9 @@ use crate::state::{BoxRecord, StateFile};
 /// Persists `health_status=unhealthy` so `inspect` / `events` / `ps` can see the
 /// network backend loss without inventing a lifecycle status change.
 #[cfg(target_os = "linux")]
-pub(crate) fn observe_bridge_passt_backend_loss(home: &std::path::Path) -> Result<(), std::io::Error> {
+pub(crate) fn observe_bridge_passt_backend_loss(
+    home: &std::path::Path,
+) -> Result<(), std::io::Error> {
     let mut touched = Vec::new();
     {
         let state = StateFile::load_default()?;
