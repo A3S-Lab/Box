@@ -4546,6 +4546,51 @@ async fn test_stop_pod_sandbox_uses_workload_stop_controls_for_running_container
 }
 
 #[tokio::test]
+async fn test_stop_pod_sandbox_refuses_inventing_sigkill_for_created() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
+    // Created never-started sibling must not invent SIGKILL exit 137 (#448).
+    svc.store
+        .containers
+        .add(test_container("c-created", "sb-1"))
+        .await;
+    svc.store
+        .containers
+        .add(test_container("c-running", "sb-1"))
+        .await;
+    svc.store
+        .containers
+        .mark_started("c-running", 2_000_000_000)
+        .await;
+
+    svc.stop_pod_sandbox(Request::new(StopPodSandboxRequest {
+        pod_sandbox_id: "sb-1".to_string(),
+    }))
+    .await
+    .unwrap();
+
+    let sb = svc.store.sandboxes.get("sb-1").await.unwrap();
+    assert_eq!(sb.state, SandboxState::NotReady);
+
+    let created = svc.store.containers.get("c-created").await.unwrap();
+    assert_eq!(created.state, ContainerState::Exited);
+    assert_eq!(
+        created.exit_code, 0,
+        "Created never-started must not invent SIGKILL 137 on StopPodSandbox"
+    );
+
+    let running = svc.store.containers.get("c-running").await.unwrap();
+    assert_eq!(running.state, ContainerState::Exited);
+    assert_eq!(
+        running.exit_code, 137,
+        "live Running without workload stop still gets sandbox teardown SIGKILL"
+    );
+}
+
+#[tokio::test]
 async fn test_stop_pod_sandbox_disconnects_network_endpoint() {
     let svc = make_test_service();
     let mut sandbox = test_networked_sandbox("sb-1");

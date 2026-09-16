@@ -767,7 +767,9 @@ retain process or filesystem sessions after its owner dies.
   inventing live stop / VM teardown / sandbox NotReady from durable Running
   alone (#446 / #445/#434); CRI ReopenContainerLog refuses inventing rotation
   success without sandbox VM health re-proof, an active supervisor reopen
-  handle, and a completed reopen ack (#447 / #438/#434);
+  handle, and a completed reopen ack (#447 / #438/#434); CRI StopPodSandbox
+  refuses inventing SIGKILL exit 137 for Created never-started containers
+  (#448 / #447/#444);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
