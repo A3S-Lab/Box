@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Guest-init port-forward no longer deadlocks under TSI when the host sends
+  `OPEN` then `DATA` as separate writes (#446). The guest reader waits with
+  `poll(POLLIN)` and non-blocking `read` instead of a blocking `recv` that
+  stalls concurrent `send` on the same AF_INET connection; `FRAME_DATA` writes
+  clone the target and release the stream map mutex before `write_all`, so one
+  stalled stream cannot wedge later OPEN/ACK. Does **not** change publish maps,
+  invent Live digests, or alter bridge/passt networking.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
