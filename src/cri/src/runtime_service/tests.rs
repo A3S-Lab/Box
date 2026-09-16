@@ -3325,6 +3325,9 @@ async fn test_stop_container_stops_workload_without_tearing_down_sandbox_vm() {
 async fn test_stop_container_refuses_vm_teardown_with_other_running_containers() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -4210,20 +4213,23 @@ async fn test_stop_pod_sandbox_no_vm() {
     .await
     .unwrap();
 
-    // Sandbox should be NotReady
+    // Inventable Ready without VM health demotes rather than inventing SIGKILL
+    // stop (#444 / #434).
     let sb = svc.store.sandboxes.get("sb-1").await.unwrap();
     assert_eq!(sb.state, SandboxState::NotReady);
 
-    // Container should be Exited
     let c = svc.store.containers.get("c-1").await.unwrap();
     assert_eq!(c.state, ContainerState::Exited);
-    assert_eq!(c.exit_code, 137);
+    assert_eq!(c.exit_code, 255);
 }
 
 #[tokio::test]
 async fn test_stop_pod_sandbox_uses_workload_stop_controls_for_running_containers() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -4323,6 +4329,8 @@ async fn test_stop_pod_sandbox_removes_vm_manager() {
         .containers
         .mark_started("c-1", 2_000_000_000)
         .await;
+    // Unauthenticated manager present — inventable Ready demotes, but host
+    // cleanup must still drop the manager (#444).
     let vm = VmManager::with_box_id(
         a3s_box_core::config::BoxConfig::default(),
         EventEmitter::new(16),
@@ -4343,7 +4351,7 @@ async fn test_stop_pod_sandbox_removes_vm_manager() {
 
     let c = svc.store.containers.get("c-1").await.unwrap();
     assert_eq!(c.state, ContainerState::Exited);
-    assert_eq!(c.exit_code, 137);
+    assert_eq!(c.exit_code, 255);
 }
 
 #[tokio::test]
@@ -4463,6 +4471,11 @@ async fn test_remove_pod_sandbox_rejects_ready_sandbox() {
         .containers
         .add(test_container("c-1", "sb-1"))
         .await;
+    // Authenticated Ready must still refuse Remove (#444) — inventable Ready
+    // without VM health is covered by the stale-ready allow path below.
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .remove_pod_sandbox(Request::new(RemovePodSandboxRequest {
@@ -4476,6 +4489,27 @@ async fn test_remove_pod_sandbox_rejects_ready_sandbox() {
     assert!(err.message().contains("requires a stopped sandbox"));
     assert!(svc.store.sandboxes.get("sb-1").await.is_some());
     assert!(svc.store.containers.get("c-1").await.is_some());
+}
+
+#[tokio::test]
+async fn remove_pod_sandbox_allows_stale_ready_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Ready with no VM health must not invent a live sandbox that
+    // blocks RemovePodSandbox (#444 / #431/#437).
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    svc.store
+        .containers
+        .add(test_container("c-stale", "sb-stale"))
+        .await;
+
+    svc.remove_pod_sandbox(Request::new(RemovePodSandboxRequest {
+        pod_sandbox_id: "sb-stale".to_string(),
+    }))
+    .await
+    .unwrap();
+
+    assert!(svc.store.sandboxes.get("sb-stale").await.is_none());
+    assert!(svc.store.containers.get("c-stale").await.is_none());
 }
 
 // ── Exec/Attach/PortForward error paths ──────────────────────────

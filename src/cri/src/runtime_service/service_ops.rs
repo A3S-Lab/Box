@@ -388,12 +388,22 @@ impl BoxRuntimeService {
     }
 
     pub(super) async fn has_other_running_containers(&self, container: &Container) -> bool {
-        self.store
+        let listed = self
+            .store
             .containers
             .list(Some(&container.sandbox_id), None)
-            .await
-            .into_iter()
-            .any(|other| other.id != container.id && other.state == ContainerState::Running)
+            .await;
+        for other in listed {
+            if other.id == container.id {
+                continue;
+            }
+            // Durable Running alone must not invent sibling liveness (#444 / #434).
+            let other = self.reconcile_reported_container(other).await;
+            if other.state == ContainerState::Running {
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn emit_container_event(

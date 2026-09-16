@@ -278,6 +278,10 @@ All notable changes to A3S Box will be documented in this file.
   refuse inventing Ready/Running pod usage from durable store alone — re-prove
   sandbox VM health and demote before reporting (#443 / #442/#436). Does
   **not** invent Live digests or flip B2.
+- CRI `RemovePodSandbox` / `StopPodSandbox` / CreateContainer late Ready
+  re-check / sibling Running guards refuse inventing live Ready/Running from
+  durable store alone — re-prove VM health before mutation gates (#444 /
+  #443/#437/#434). Does **not** invent Live digests or flip B2.
 
 - `pool start` reaps init-reparented `a3s-box-shim` orphans scoped to the
   current `A3S_HOME` before bind/prewarm (#373). Warm-pool ownership is
