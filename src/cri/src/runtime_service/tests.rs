@@ -906,6 +906,20 @@ async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManage
     vm
 }
 
+/// Insert an authenticated Ready VmManager; keep the returned server alive.
+async fn insert_authenticated_sandbox_vm(
+    svc: &BoxRuntimeService,
+    sandbox_id: &str,
+) -> Option<TestExecServer> {
+    let server = spawn_exec_stream_server(b"", b"", 0, Duration::from_secs(3600)).await?;
+    let vm = attach_ready_test_vm(sandbox_id, &server.socket_path).await;
+    svc.vm_managers
+        .write()
+        .await
+        .insert(sandbox_id.to_string(), vm);
+    Some(server)
+}
+
 async fn put_test_oci_image(store: &ImageStore, reference: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let blobs = tmp.path().join("blobs").join("sha256");
@@ -1416,6 +1430,9 @@ async fn test_checkpoint_container_is_explicitly_unsupported() {
 async fn test_get_container_events_streams_lifecycle_events() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let mut events = svc
         .get_container_events(Request::new(GetEventsRequest {}))
@@ -1873,6 +1890,9 @@ async fn test_create_container_sandbox_not_found() {
 async fn test_create_container_missing_config() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .create_container(Request::new(CreateContainerRequest {
@@ -1889,6 +1909,9 @@ async fn test_create_container_missing_config() {
 async fn test_create_container_missing_metadata() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .create_container(Request::new(CreateContainerRequest {
@@ -1902,6 +1925,49 @@ async fn test_create_container_missing_metadata() {
         .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn test_create_container_refuses_ready_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Ready with no authenticated VM must not invent CreateContainer (#437).
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+
+    let result = svc
+        .create_container(Request::new(CreateContainerRequest {
+            pod_sandbox_id: "sb-stale".to_string(),
+            config: Some(ContainerConfig {
+                metadata: Some(ContainerMetadata {
+                    name: "stale".to_string(),
+                    attempt: 0,
+                }),
+                image: Some(ImageSpec {
+                    image: "nginx:latest".to_string(),
+                    annotations: HashMap::new(),
+                }),
+                command: vec!["nginx".to_string()],
+                ..Default::default()
+            }),
+            sandbox_config: None,
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a ready sandbox"),
+        "unexpected message: {}",
+        err.message()
+    );
+    assert!(
+        svc.store
+            .containers
+            .list(Some("sb-stale"), None)
+            .await
+            .is_empty(),
+        "CreateContainer must not allocate on inventable Ready"
+    );
 }
 
 #[tokio::test]
@@ -1940,6 +2006,9 @@ async fn test_create_container_requires_ready_sandbox() {
 async fn test_create_container_allows_multi_container_pod() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
     svc.store
         .containers
@@ -1984,6 +2053,9 @@ async fn test_create_container_allows_multi_container_pod() {
 async fn test_create_container_success() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     let resp = svc
@@ -2069,6 +2141,9 @@ async fn test_create_container_success() {
 async fn test_create_container_materializes_readonly_mount() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     let source = tempfile::tempdir().unwrap();
@@ -2138,6 +2213,9 @@ async fn test_create_container_materializes_readonly_mount() {
 async fn test_create_container_materializes_writable_mount() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     // Mirrors the CRI volume conformance: a writable mount with selinux_relabel
@@ -2272,6 +2350,9 @@ fn test_parse_localhost_seccomp_deny_reports_read_and_parse_errors() {
 async fn test_create_container_requires_pulled_image() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .create_container(Request::new(CreateContainerRequest {
@@ -2308,6 +2389,9 @@ async fn test_create_container_requires_pulled_image() {
 async fn test_create_container_uses_image_defaults() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let image_digest = put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
 
     let resp = svc
@@ -2369,6 +2453,9 @@ async fn test_create_container_uses_image_defaults() {
 async fn test_create_then_start_container_uses_image_defaults_and_rootfs() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec_keepalive) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
     let _image_digest = put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
 
     let resp = svc
@@ -4637,6 +4724,9 @@ async fn test_port_forward_empty_ports_rejected_when_sandbox_declares_none() {
     // declares no ports therefore has nothing to forward to.
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+    let Some(_exec) = insert_authenticated_sandbox_vm(&svc, "sb-1").await else {
+        return;
+    };
 
     let result = svc
         .port_forward(Request::new(PortForwardRequest {
@@ -4685,6 +4775,28 @@ async fn test_port_forward_requires_ready_sandbox() {
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(err.message().contains("requires a ready sandbox"));
+}
+
+#[tokio::test]
+async fn test_port_forward_refuses_ready_without_vm_health() {
+    let svc = make_test_service();
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+
+    let result = svc
+        .port_forward(Request::new(PortForwardRequest {
+            pod_sandbox_id: "sb-stale".to_string(),
+            port: vec![8080],
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a ready sandbox"),
+        "durable Ready without VM health must not invent PortForward (#437): {}",
+        err.message()
+    );
 }
 
 #[tokio::test]
