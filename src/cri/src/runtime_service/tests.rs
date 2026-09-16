@@ -1278,7 +1278,9 @@ async fn test_list_pod_sandbox_metrics_returns_lifecycle_snapshot() {
     assert_eq!(resp.pod_sandbox_metrics.len(), 1);
     let metrics = &resp.pod_sandbox_metrics[0];
     assert_eq!(metrics.pod_sandbox_id, "sb-1");
-    assert_eq!(pod_metric_value(metrics, "a3s_box_pod_sandbox_ready"), 1.0);
+    // VmManager present without authenticated exec heartbeat must not invent
+    // Ready/Running metric gauges (#436 / #435/#419).
+    assert_eq!(pod_metric_value(metrics, "a3s_box_pod_sandbox_ready"), 0.0);
     assert_eq!(
         pod_metric_value(metrics, "a3s_box_pod_sandbox_vm_manager_present"),
         1.0
@@ -1289,11 +1291,11 @@ async fn test_list_pod_sandbox_metrics_returns_lifecycle_snapshot() {
     );
     assert_eq!(
         pod_metric_value(metrics, "a3s_box_pod_sandbox_containers_running"),
-        1.0
+        0.0
     );
     assert_eq!(
         pod_metric_value(metrics, "a3s_box_pod_sandbox_containers_exited"),
-        1.0
+        2.0
     );
     let first_metric = metrics.metrics.first().unwrap();
     assert_eq!(
@@ -1303,6 +1305,48 @@ async fn test_list_pod_sandbox_metrics_returns_lifecycle_snapshot() {
     assert_eq!(
         first_metric.labels.get("namespace"),
         Some(&"default".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_list_pod_sandbox_metrics_refuses_ready_without_vm_health() {
+    let svc = make_test_service();
+    // Durable Ready with no VM manager — must not invent ready=1 (#436).
+    svc.store.sandboxes.add(test_sandbox("sb-stale")).await;
+    let mut running = test_container("c-stale-running", "sb-stale");
+    running.state = ContainerState::Running;
+    svc.store.containers.add(running).await;
+
+    let resp = svc
+        .list_pod_sandbox_metrics(Request::new(ListPodSandboxMetricsRequest {
+            filter: Some(PodSandboxStatsFilter {
+                id: "sb-stale".to_string(),
+                label_selector: HashMap::new(),
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.pod_sandbox_metrics.len(), 1);
+    let metrics = &resp.pod_sandbox_metrics[0];
+    assert_eq!(
+        pod_metric_value(metrics, "a3s_box_pod_sandbox_ready"),
+        0.0,
+        "durable Ready without VM health must not invent ready metric"
+    );
+    assert_eq!(
+        pod_metric_value(metrics, "a3s_box_pod_sandbox_vm_manager_present"),
+        0.0
+    );
+    assert_eq!(
+        pod_metric_value(metrics, "a3s_box_pod_sandbox_containers_running"),
+        0.0,
+        "durable Running without sandbox VM health must not invent running metric"
+    );
+    assert_eq!(
+        pod_metric_value(metrics, "a3s_box_pod_sandbox_containers_exited"),
+        1.0
     );
 }
 
@@ -1322,6 +1366,14 @@ async fn test_stream_pod_sandbox_metrics_returns_snapshot() {
     let response = stream.next().await.unwrap().unwrap();
     assert_eq!(response.pod_sandbox_metrics.len(), 1);
     assert_eq!(response.pod_sandbox_metrics[0].pod_sandbox_id, "sb-1");
+    assert_eq!(
+        pod_metric_value(
+            &response.pod_sandbox_metrics[0],
+            "a3s_box_pod_sandbox_ready"
+        ),
+        0.0,
+        "stream metrics must not invent Ready without VM health (#436)"
+    );
     assert!(stream.next().await.is_none());
 }
 

@@ -2253,14 +2253,22 @@ impl RuntimeService for BoxRuntimeService {
             self.vm_managers.read().await.keys().cloned().collect();
 
         let mut metrics = Vec::new();
-        for sandbox in sandboxes {
+        for mut sandbox in sandboxes {
             if let Some(ref filter) = req.filter {
                 if !filter.id.is_empty() && sandbox.id != filter.id {
                     continue;
                 }
             }
 
-            let containers = self.store.containers.list(Some(&sandbox.id), None).await;
+            // Metrics must not invent Ready/Running from durable store alone
+            // (#436 / #435/#434/#431).
+            sandbox.state = self
+                .reconcile_reported_sandbox_state(&sandbox.id, sandbox.state)
+                .await;
+            let mut containers = Vec::new();
+            for container in self.store.containers.list(Some(&sandbox.id), None).await {
+                containers.push(self.reconcile_reported_container(container).await);
+            }
             metrics.push(pod_sandbox_metrics(
                 &sandbox,
                 &containers,
