@@ -848,21 +848,30 @@ impl RuntimeService for BoxRuntimeService {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let containers = self.store.containers.list(Some(sandbox_id), None).await;
         for container in &containers {
-            if container.state != ContainerState::Exited {
-                let updated = self
-                    .store
-                    .mark_container_exited(&container.id, now_ns, 137)
-                    .await;
-                if updated {
-                    self.emit_container_event(
-                        &container.id,
-                        &container.sandbox_id,
-                        ContainerEventType::ContainerStoppedEvent,
-                        now_ns,
-                        "StopPodSandbox",
-                        "Container stopped by pod sandbox shutdown",
-                    );
-                }
+            if container.state == ContainerState::Exited {
+                continue;
+            }
+            // Created never-started must not invent SIGKILL 137 — exit 0 means
+            // the workload never ran (#448). Live Running that survived workload
+            // stop still gets sandbox-teardown SIGKILL.
+            let exit_code = if container.state == ContainerState::Created {
+                0
+            } else {
+                137
+            };
+            let updated = self
+                .store
+                .mark_container_exited(&container.id, now_ns, exit_code)
+                .await;
+            if updated {
+                self.emit_container_event(
+                    &container.id,
+                    &container.sandbox_id,
+                    ContainerEventType::ContainerStoppedEvent,
+                    now_ns,
+                    "StopPodSandbox",
+                    "Container stopped by pod sandbox shutdown",
+                );
             }
         }
         {

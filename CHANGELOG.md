@@ -292,6 +292,10 @@ All notable changes to A3S Box will be documented in this file.
   Running alone — re-prove sandbox VM health, require an active supervisor
   reopen handle, and fail closed on supervisor timeout instead of warn-only Ok
   (#447 / #438/#434). Does **not** invent Live digests or flip B2.
+- CRI `StopPodSandbox` refuses inventing SIGKILL exit `137` for Created
+  containers that never started — record exit `0` for never-ran workloads while
+  live Running that survives workload stop still gets teardown SIGKILL
+  (#448 / #447/#444). Does **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only
