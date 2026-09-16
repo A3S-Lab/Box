@@ -1509,10 +1509,11 @@ async fn test_status_verbose_info() {
         .into_inner();
 
     assert_eq!(resp.info.get("sandbox_count"), Some(&"2".to_string()));
-    assert_eq!(resp.info.get("sandbox_ready_count"), Some(&"1".to_string()));
+    // Durable Ready/Running without VM health must not invent status counts (#435).
+    assert_eq!(resp.info.get("sandbox_ready_count"), Some(&"0".to_string()));
     assert_eq!(
         resp.info.get("sandbox_not_ready_count"),
-        Some(&"1".to_string())
+        Some(&"2".to_string())
     );
     assert_eq!(resp.info.get("container_count"), Some(&"3".to_string()));
     assert_eq!(
@@ -1521,11 +1522,11 @@ async fn test_status_verbose_info() {
     );
     assert_eq!(
         resp.info.get("container_running_count"),
-        Some(&"1".to_string())
+        Some(&"0".to_string())
     );
     assert_eq!(
         resp.info.get("container_exited_count"),
-        Some(&"1".to_string())
+        Some(&"2".to_string())
     );
     assert_eq!(resp.info.get("vm_manager_count"), Some(&"0".to_string()));
     assert_eq!(
