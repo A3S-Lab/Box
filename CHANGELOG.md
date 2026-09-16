@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- TSI published ports (`-p`) forward guest `shutdown`/`close` to the host TCP
+  socket after data has transferred, so clients waiting on EOF no longer wait
+  the vsock reaper's fixed 5 s deferred removal (#447). Premature both-direction
+  OP_SHUTDOWN from a forking parent (nginx master closing its accepted-fd copy
+  before the worker responds) is still ignored, matching `release`. Does **not**
+  change keep-alive framing, Content-Length clients, or bridge/passt.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
