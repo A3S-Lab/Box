@@ -512,6 +512,26 @@ impl BoxRuntimeService {
             })
     }
 
+    /// Load a container and refuse inventing Running for mutation gates.
+    ///
+    /// ExecSync / Exec / Attach / UpdateContainerResources must not accept
+    /// durable Running without sandbox VM health re-proof (#438 / #434/#437).
+    pub(super) async fn require_reported_container_running(
+        &self,
+        container_id: &str,
+        operation: &str,
+    ) -> Result<Container, Status> {
+        let container = self
+            .store
+            .containers
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {container_id}")))?;
+        let container = self.reconcile_reported_container(container).await;
+        super::convert::ensure_container_running(&container, operation)?;
+        Ok(container)
+    }
+
     /// Fail closed unless the VM can run guest exec (Ready/Busy/Compacting).
     ///
     /// Soft-Created boots (#414) and attach-without-heartbeat (#413) must not

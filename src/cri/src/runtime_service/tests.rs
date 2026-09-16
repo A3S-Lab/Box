@@ -3850,7 +3850,7 @@ async fn test_update_container_resources_rejects_exited_container() {
 }
 
 #[tokio::test]
-async fn test_update_container_resources_requires_ready_vm() {
+async fn test_update_container_resources_refuses_running_with_unhealthy_vm() {
     let svc = make_test_service();
     svc.store
         .containers
@@ -3881,7 +3881,13 @@ async fn test_update_container_resources_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(demoted.state, ContainerState::Exited);
 }
 
 #[tokio::test]
@@ -4285,9 +4291,9 @@ async fn test_exec_sync_container_not_found() {
 }
 
 #[tokio::test]
-async fn test_exec_sync_sandbox_not_found() {
+async fn test_exec_sync_refuses_running_without_vm_health() {
     let svc = make_test_service();
-    // Container exists but no VM for its sandbox
+    // Durable Running with no sandbox VM must not invent ExecSync (#438 / #434).
     svc.store
         .containers
         .add(test_container("c-1", "sb-missing"))
@@ -4305,7 +4311,20 @@ async fn test_exec_sync_sandbox_not_found() {
         }))
         .await;
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(
+        demoted.state,
+        ContainerState::Exited,
+        "stale Running must be demoted in durable store"
+    );
+    assert_eq!(demoted.exit_code, 255);
 }
 
 #[tokio::test]
@@ -4348,8 +4367,10 @@ async fn test_exec_sync_requires_running_container() {
 }
 
 #[tokio::test]
-async fn test_exec_sync_requires_ready_vm() {
+async fn test_exec_sync_refuses_running_with_unhealthy_vm() {
     let svc = make_test_service();
+    // Durable Running + VmManager without authenticated exec must not invent
+    // ExecSync (#438 / #434).
     svc.store
         .containers
         .add(test_container("c-1", "sb-1"))
@@ -4376,7 +4397,14 @@ async fn test_exec_sync_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(demoted.state, ContainerState::Exited);
+    assert_eq!(demoted.exit_code, 255);
 }
 
 #[tokio::test]
@@ -4442,7 +4470,7 @@ async fn test_exec_requires_running_container() {
 }
 
 #[tokio::test]
-async fn test_exec_requires_ready_vm() {
+async fn test_exec_refuses_running_with_unhealthy_vm() {
     let svc = make_test_service();
     svc.store
         .containers
@@ -4473,7 +4501,13 @@ async fn test_exec_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(demoted.state, ContainerState::Exited);
 }
 
 #[tokio::test]
@@ -4592,7 +4626,7 @@ async fn test_attach_requires_running_container() {
 }
 
 #[tokio::test]
-async fn test_attach_requires_ready_vm() {
+async fn test_attach_refuses_running_with_unhealthy_vm() {
     let svc = make_test_service();
     svc.store
         .containers
@@ -4622,7 +4656,13 @@ async fn test_attach_requires_ready_vm() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("VM is not ready"));
+    assert!(
+        err.message().contains("requires a running container"),
+        "unexpected message: {}",
+        err.message()
+    );
+    let demoted = svc.store.containers.get("c-1").await.expect("container");
+    assert_eq!(demoted.state, ContainerState::Exited);
 }
 
 #[tokio::test]
