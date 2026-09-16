@@ -307,6 +307,10 @@ All notable changes to A3S Box will be documented in this file.
   annotations request pod-level mutation — unsupported resize fails closed as
   Unimplemented instead of acknowledging applied resources (#451 / #437). Does
   **not** invent Live digests or flip B2.
+- CRI `UpdateRuntimeConfig` refuses inventing Ok when `NetworkConfig.pod_cidr`
+  is non-empty — unsupported runtime network mutation fails closed as
+  Unimplemented instead of acknowledging applied CIDR (#452 / #451). Does
+  **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only

@@ -2199,9 +2199,25 @@ impl RuntimeService for BoxRuntimeService {
 
     async fn update_runtime_config(
         &self,
-        _request: Request<UpdateRuntimeConfigRequest>,
+        request: Request<UpdateRuntimeConfigRequest>,
     ) -> Result<Response<UpdateRuntimeConfigResponse>, Status> {
-        // Accept but ignore runtime config updates for now
+        let req = request.into_inner();
+        // Ok must not invent "runtime network config applied". MicroVM CRI
+        // does not apply NetworkConfig.pod_cidr — fail closed when a non-empty
+        // CIDR is requested (#452 / #451). Empty / no-op stays Ok.
+        let pod_cidr = req
+            .runtime_config
+            .as_ref()
+            .and_then(|c| c.network_config.as_ref())
+            .map(|n| n.pod_cidr.as_str())
+            .unwrap_or("");
+        if !pod_cidr.is_empty() {
+            return Err(Status::unimplemented(format!(
+                "UpdateRuntimeConfig is not supported for microVM runtime (pod_cidr={pod_cidr} ignored)"
+            )));
+        }
+
+        tracing::info!("CRI UpdateRuntimeConfig: no network mutation requested");
         Ok(Response::new(UpdateRuntimeConfigResponse {}))
     }
 
