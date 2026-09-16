@@ -412,7 +412,9 @@ impl VmLocalExecutionBackend {
     ///
     /// `#414` may leave `Created` when the restore soft-probe fails while still
     /// returning `Ok(())` from boot. PID + layout socket alone must not invent
-    /// Running (#416). Keep the in-process owner so inspect can promote later.
+    /// Running (#416). In-memory Ready/Busy/Compacting from an earlier one-shot
+    /// promote must also re-prove exec health — stale Ready without heartbeat
+    /// must not invent a start handle (#421 / #419/#420).
     async fn require_authenticated_ready_for_start(
         &self,
         record: &BoxRecord,
@@ -423,7 +425,16 @@ impl VmLocalExecutionBackend {
             state,
             crate::BoxState::Ready | crate::BoxState::Busy | crate::BoxState::Compacting
         ) {
-            return Ok(());
+            match manager.health_check().await {
+                Ok(true) => return Ok(()),
+                Ok(false) | Err(_) => {
+                    tracing::debug!(
+                        execution_id = %record.id,
+                        ?state,
+                        "in-memory Ready without exec heartbeat; refusing start until re-auth"
+                    );
+                }
+            }
         }
         if self.promote_if_ready(record, manager).await {
             return Ok(());
