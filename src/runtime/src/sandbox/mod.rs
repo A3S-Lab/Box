@@ -138,7 +138,7 @@ pub(crate) use mount_alias::cleanup_sandbox_mount_aliases;
 #[cfg(target_os = "linux")]
 pub(crate) use mount_alias::sandbox_mount_alias_root;
 #[cfg(feature = "vm")]
-pub(crate) use mount_alias::stage_read_only_mount_aliases;
+pub(crate) use mount_alias::stage_external_mount_aliases;
 #[cfg(not(target_os = "linux"))]
 pub struct A3sOciController;
 #[cfg(not(target_os = "linux"))]

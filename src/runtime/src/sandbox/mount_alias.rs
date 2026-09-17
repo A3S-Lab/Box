@@ -1,10 +1,12 @@
-//! Box-owned aliases for caller-owned read-only Sandbox attachments.
+//! Box-owned aliases for caller-owned Sandbox attachments.
 //!
 //! A3S OCI resolves bind sources after entering the workload user namespace.
-//! A readable Artifact root below a private provider directory can therefore be
-//! inaccessible even though the Box service itself opened it successfully.
-//! These aliases pin the already-open source into the Box-owned Sandbox tree;
-//! caller permissions and storage ownership remain unchanged.
+//! A readable/writable Artifact root below a private provider directory can
+//! therefore be inaccessible even though the Box service itself opened it
+//! successfully. These aliases pin the already-open source into the Box-owned
+//! Sandbox tree; caller permissions and storage ownership remain unchanged.
+//! Read-only aliases remount `ro`; read-write aliases keep the bind writable
+//! while still applying `nosuid,nodev`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,16 +26,17 @@ pub(crate) fn sandbox_mount_alias_root(home_dir: &Path, box_id: &str) -> PathBuf
         .join(ATTACHMENTS_DIRECTORY)
 }
 
-/// Replace each distinct caller-owned source with one read-only bind alias.
+/// Replace each distinct caller-owned source with one Box-owned bind alias.
 ///
-/// Existing aliases are removed first, so a persistent Sandbox restart never
-/// reuses a mount from an older runtime generation. A partial preparation is
-/// rolled back before the error is returned.
+/// `sources` entries are `(canonical_host_path, read_only)`. Existing aliases
+/// are removed first, so a persistent Sandbox restart never reuses a mount from
+/// an older runtime generation. A partial preparation is rolled back before the
+/// error is returned.
 #[cfg(target_os = "linux")]
-pub(crate) fn stage_read_only_mount_aliases(
+pub(crate) fn stage_external_mount_aliases(
     home_dir: &Path,
     box_id: &str,
-    sources: &[PathBuf],
+    sources: &[(PathBuf, bool)],
     id_mappings: &SandboxIdMappingPlan,
 ) -> Result<HashMap<PathBuf, PathBuf>> {
     cleanup_sandbox_mount_aliases(home_dir, box_id)?;
@@ -45,12 +48,12 @@ pub(crate) fn stage_read_only_mount_aliases(
     create_alias_root(&root)?;
     let mut aliases = HashMap::new();
 
-    for source in sources {
+    for (source, read_only) in sources {
         if aliases.contains_key(source) {
             continue;
         }
         let target = root.join(format!("{:04}", aliases.len()));
-        if let Err(error) = stage_one_alias(source, &target, id_mappings) {
+        if let Err(error) = stage_one_alias(source, &target, id_mappings, *read_only) {
             let rollback = cleanup_sandbox_mount_aliases(home_dir, box_id);
             return match rollback {
                 Ok(()) => Err(error),
@@ -72,10 +75,10 @@ pub(crate) fn stage_read_only_mount_aliases(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn stage_read_only_mount_aliases(
+pub(crate) fn stage_external_mount_aliases(
     _home_dir: &Path,
     _box_id: &str,
-    _sources: &[PathBuf],
+    _sources: &[(PathBuf, bool)],
     _id_mappings: &SandboxIdMappingPlan,
 ) -> Result<HashMap<PathBuf, PathBuf>> {
     Err(BoxError::ConfigError(
@@ -204,7 +207,12 @@ fn require_plain_managed_directory(path: &Path, label: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn stage_one_alias(source: &Path, target: &Path, id_mappings: &SandboxIdMappingPlan) -> Result<()> {
+fn stage_one_alias(
+    source: &Path,
+    target: &Path,
+    id_mappings: &SandboxIdMappingPlan,
+    read_only: bool,
+) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
 
@@ -234,7 +242,12 @@ fn stage_one_alias(source: &Path, target: &Path, id_mappings: &SandboxIdMappingP
     }
     let source_file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
     let metadata = source_file.metadata().map_err(BoxError::IoError)?;
-    super::rootfs::validate_external_mount_root_metadata(source, &metadata, id_mappings, true)?;
+    super::rootfs::validate_external_mount_root_metadata(
+        source,
+        &metadata,
+        id_mappings,
+        read_only,
+    )?;
 
     if metadata.is_dir() {
         std::fs::create_dir(target).map_err(BoxError::IoError)?;
@@ -294,33 +307,40 @@ fn stage_one_alias(source: &Path, target: &Path, id_mappings: &SandboxIdMappingP
         });
     }
 
-    let read_only = unsafe {
+    let mut remount_flags = libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV;
+    if read_only {
+        remount_flags |= libc::MS_RDONLY;
+    }
+    let remounted = unsafe {
         libc::mount(
             std::ptr::null(),
             target_c.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+            remount_flags,
             std::ptr::null(),
         )
     };
-    if read_only != 0 {
+    if remounted != 0 {
         let error = std::io::Error::last_os_error();
         let _ = detach_mount(target);
         return Err(BoxError::BoxBootError {
             message: format!(
-                "Failed to make Sandbox attachment alias {} read-only: {error}",
-                target.display()
+                "Failed to finalize Sandbox attachment alias {} ({}): {error}",
+                target.display(),
+                if read_only { "read-only" } else { "read-write" }
             ),
             hint: None,
         });
     }
 
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").map_err(BoxError::IoError)?;
-    if !mount_is_read_only(&mountinfo, target) {
+    let is_ro = mount_is_read_only(&mountinfo, target);
+    if read_only != is_ro {
         let _ = detach_mount(target);
         return Err(BoxError::BoxBootError {
             message: format!(
-                "Sandbox attachment alias did not become read-only: {}",
+                "Sandbox attachment alias did not become {}: {}",
+                if read_only { "read-only" } else { "read-write" },
                 target.display()
             ),
             hint: None,
@@ -477,10 +497,10 @@ mod tests {
         std::fs::create_dir_all(home.join("boxes/execution-1/sandbox")).unwrap();
         assert!(validate_external_mount_access(&source, &mappings(), true).is_err());
 
-        let aliases = stage_read_only_mount_aliases(
+        let aliases = stage_external_mount_aliases(
             &home,
             "execution-1",
-            std::slice::from_ref(&source),
+            &[(source.clone(), true)],
             &mappings(),
         )
         .unwrap();
@@ -506,6 +526,54 @@ mod tests {
     }
 
     #[test]
+    fn aliases_a_read_write_source_below_a_private_caller_root() {
+        if !can_mount() {
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        set_mode(fixture.path(), 0o755);
+        let private = fixture.path().join("provider");
+        let source = private.join("artifact/root");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("scratch.txt"), b"seed").unwrap();
+        set_mode(&private, 0o700);
+        set_mode(&source, 0o775);
+
+        let home = fixture.path().join("a3s");
+        std::fs::create_dir_all(home.join("boxes/execution-rw/sandbox")).unwrap();
+        assert!(validate_external_mount_access(&source, &mappings(), false).is_err());
+
+        let aliases = stage_external_mount_aliases(
+            &home,
+            "execution-rw",
+            &[(source.clone(), false)],
+            &mappings(),
+        )
+        .unwrap();
+        let alias = aliases.get(&source).unwrap();
+        assert_eq!(std::fs::read(alias.join("scratch.txt")).unwrap(), b"seed");
+        std::fs::write(alias.join("scratch.txt"), b"updated").unwrap();
+        assert!(validate_external_mount_access(alias, &mappings(), false).is_ok());
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+        assert!(!mount_is_read_only(&mountinfo, alias));
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::read(source.join("scratch.txt")).unwrap(),
+            b"updated"
+        );
+
+        cleanup_sandbox_mount_aliases(&home, "execution-rw").unwrap();
+        assert!(!sandbox_mount_alias_root(&home, "execution-rw").exists());
+        assert_eq!(
+            std::fs::read(source.join("scratch.txt")).unwrap(),
+            b"updated"
+        );
+    }
+
+    #[test]
     fn failed_alias_set_rolls_back_earlier_mounts() {
         if !can_mount() {
             return;
@@ -521,10 +589,10 @@ mod tests {
         let home = fixture.path().join("a3s");
         std::fs::create_dir_all(home.join("boxes/execution-2/sandbox")).unwrap();
 
-        assert!(stage_read_only_mount_aliases(
+        assert!(stage_external_mount_aliases(
             &home,
             "execution-2",
-            &[readable, unreadable],
+            &[(readable, true), (unreadable, true)],
             &mappings(),
         )
         .is_err());
