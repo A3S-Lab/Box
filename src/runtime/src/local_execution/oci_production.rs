@@ -281,6 +281,19 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
                 ));
             }
         };
+        let attachments = match super::oci_secret_attachments::attach_box_managed_secret_mounts(
+            &bundle,
+            attachments,
+            metadata.request.policy.managed_secret_root.as_deref(),
+        ) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                return Err(cleanup_after_prepare_failure(
+                    &manager,
+                    format!("failed to classify Box-managed Secret mounts: {error}"),
+                ));
+            }
+        };
         let attachments = match super::oci_network_attachments::attach_box_owned_linux_network(
             &bundle,
             attachments,

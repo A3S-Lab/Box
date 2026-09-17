@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Native Linux SandboxViaOci prepare classifies Box-managed Secret bind mounts
+  via `CreateAttachments::mark_secret_mount` (mount-index only; no secret
+  bytes). Does **not** close ROADMAP B4/B3/B2 or claim materialization /
+  authorization changes.
 - Native Linux SandboxViaOci prepare classifies prepared `linux.netDevices`
   into `a3s.oci.attachments.v3` (caller-owned identities +
   ReleaseRuntimeNamespace / PreserveCallerNamespace by namespace path). Bundles
