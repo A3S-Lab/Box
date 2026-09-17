@@ -846,6 +846,10 @@ open and harness reports still keep
 
 - [ ] Keep image distribution, builds, named volumes, snapshots, and commits in
   Box while passing immutable, descriptor-bound attachments to OCI Runtime.
+  **Partial:** Native Linux SandboxViaOci prepare now binds Box-owned named and
+  anonymous volumes into `a3s.oci.attachments.v2` (caller-owned DetachOnly);
+  image/build/snapshot/commit descriptor handoff and the B3 exit gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep network objects, IPAM, DNS, aliases, and publication policy in Box;
   delegate namespace, VM NIC, and guest transport attachment to OCI Runtime.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux

@@ -81,6 +81,8 @@ pub(crate) mod oci_portable_rootfs;
 #[cfg(feature = "vm")]
 mod oci_production;
 mod oci_session;
+#[cfg(feature = "vm")]
+mod oci_storage_attachments;
 mod operations;
 mod port;
 mod prepared_rootfs;

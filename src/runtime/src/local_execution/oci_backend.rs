@@ -687,6 +687,9 @@ impl OciLifecycleAdapter {
             .attachments
             .digest()
             .map_err(|error| sdk_error("digest attachments", error))?;
+        info.attachments
+            .require(&prepared.attachments)
+            .map_err(|error| sdk_error("require attachment schema", error))?;
         let created = self
             .client
             .create(CreateRequest {

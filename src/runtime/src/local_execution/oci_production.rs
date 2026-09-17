@@ -266,6 +266,21 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
                 ));
             }
         };
+        let attachments = match super::oci_storage_attachments::attach_box_owned_volume_storage(
+            &bundle,
+            attachments,
+            self.preparer.home_dir(),
+            record,
+            &prepared.anonymous_volumes,
+        ) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                return Err(cleanup_after_prepare_failure(
+                    &manager,
+                    format!("failed to attach Box-owned volume storage: {error}"),
+                ));
+            }
+        };
         let mut result = match OciPreparedExecution::with_attachments(
             bundle,
             attachments,
