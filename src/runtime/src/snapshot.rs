@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::RootfsMetadataManifest;
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::{
     IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
 };
@@ -912,6 +913,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn managed_snapshot_installs_only_terminal_rootfs_metadata() {
         let tmp = TempDir::new().unwrap();

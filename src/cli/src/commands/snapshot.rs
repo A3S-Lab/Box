@@ -232,7 +232,7 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
         })?;
         store.save(meta, &rootfs_path)?
     };
-    #[cfg(all(target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     let saved = {
         let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
         if stopped_sandbox_uses_managed_metadata(record) {
