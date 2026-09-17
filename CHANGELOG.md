@@ -6,12 +6,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Native Linux SandboxViaOci prepare also classifies the Box-owned `/workspace`
+  bind as `a3s.oci.attachments.v2` storage (`a3s.box.workspace`, caller-owned
+  DetachOnly). External caller binds stay unclassified. Does **not** close
+  ROADMAP B3/B2 or claim bind-alias storage identities.
 - Native Linux SandboxViaOci prepare binds Box-owned named and anonymous
   volumes into `a3s.oci.attachments.v2` (`attach_storage_mount`, caller-owned
   DetachOnly) before create, and create fail-closes unless the runtime
-  advertises that schema. External binds and workspace mounts stay
-  unclassified. Does **not** close ROADMAP B3/B2 or claim network v3 /
-  Windows volume parity.
+  advertises that schema. External binds stay unclassified unless they are
+  the Box-owned `/workspace` path (see above). Does **not** close ROADMAP
+  B3/B2 or claim network v3 / Windows volume parity.
 - Stopped managed Linux Sandbox `a3s-box commit` / `export` / `diff` reuse the
   OCI-mapped host-rootfs capture path (same walk as stopped managed snapshots)
   instead of bare directory archives with host subordinate UIDs. MicroVM
