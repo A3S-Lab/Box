@@ -418,7 +418,7 @@ const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROOTFS_METADATA_ENTRIES: usize = 1_000_000;
 const MAX_GUEST_PATH_BYTES: usize = 4096;
 
-fn read_guest_rootfs_metadata(
+pub(crate) fn read_guest_rootfs_metadata(
     rootfs_dir: &Path,
 ) -> Result<a3s_box_core::rootfs_metadata::RootfsMetadataManifest, Box<dyn std::error::Error>> {
     use std::io::Read;
