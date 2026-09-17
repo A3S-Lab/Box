@@ -108,11 +108,7 @@ pub(super) fn resolve_copy_route(
         // Managed OCI file/filesystem copy is available while Running or
         // freezer-Paused; exec-based tar paths stay Running-only elsewhere.
         if record.status != "running" && record.status != "paused" {
-            return Err(format!(
-                "Box {} is neither running nor paused",
-                record.name
-            )
-            .into());
+            return Err(format!("Box {} is neither running nor paused", record.name).into());
         }
         let metadata = record
             .managed_execution
