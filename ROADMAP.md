@@ -859,11 +859,12 @@ open and harness reports still keep
   `linux.netDevices` into `a3s.oci.attachments.v3` (caller-owned identities;
   cleanup mode follows namespace path). Opt-in
   `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` (matched root) keeps a
-  Privileged owner and stages one host veth + emits `linux.netDevices` for
-  Bridge (NetworkStore IPAM; peer unbridged/DOWN). GA default remains
-  delegated rootless/`base_v2` loopback-only. Bridge fabric/CNI, Compose named
-  networks, multi-device, rootless/MicroVM/Windows parity, and the B3 exit
-  gate remain open. Does **not** flip `b2_process_session_recovery_closed`.
+  Privileged owner, stages one host veth + emits `linux.netDevices` for Bridge
+  (NetworkStore IPAM), and enslaves the peer on a Box-owned Linux bridge for
+  L2. GA default remains delegated rootless/`base_v2` loopback-only. CNI,
+  NAT/outbound, published ports, DNS/aliases, Compose named networks,
+  multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product

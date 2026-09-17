@@ -6,20 +6,24 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Keep-authority SandboxViaOci Bridge fabric: after staging the host veth pair,
+  attach the peer to a deterministic Box-owned Linux bridge (`a3sb` + network
+  hash) and bring it UP so same-network endpoints share L2. Container end stays
+  unbridged for OCI Create. Idle bridges are deleted on last-endpoint teardown.
+  Does **not** add CNI/NAT/published ports/DNS, unlock Compose named networks,
+  close ROADMAP B3/B2, or change GA rootless default.
 - Opt-in SandboxViaOci named-bridge host netDevices staging: with
   `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` (matched root), Bridge
-  mode stages one host veth pair (NetworkStore IP/MAC on the container end;
-  peer stays unbridged/DOWN), emits `linux.netDevices` → existing
-  `attachments.v3` classify. Without the env, sandbox named bridge still
-  fail-closes. Does **not** wire CNI/bridge fabric, unlock Compose named
-  networks, close ROADMAP B3/B2, or change GA rootless default.
+  mode stages one host veth pair (NetworkStore IP/MAC on the container end),
+  emits `linux.netDevices` → existing `attachments.v3` classify. Without the
+  env, sandbox named bridge still fail-closes. Does **not** unlock Compose
+  named networks, close ROADMAP B3/B2, or change GA rootless default.
 - Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` spawns the Native
   Linux SandboxViaOci owner without `--delegated-cgroup-root` when matched root
   (`euid==uid==0`), so Hello can advertise `a3s.oci.attachments.v3`. Unset keeps
   the Sandbox GA delegated rootless/`base_v2` default. Mixing modes against a
-  live owner fail-closes. Named-bridge host veth staging is a separate opt-in
-  path under the same env. Does **not** wire CNI/bridge fabric, close ROADMAP
-  B3/B2, or change GA default.
+  live owner fail-closes. Named-bridge staging/fabric is a separate opt-in path
+  under the same env. Does **not** close ROADMAP B3/B2 or change GA default.
 - CLI health probes for OCI-routed managed boxes use session exec (same path as
   `a3s-box exec`) instead of the empty SandboxViaOci exec socket. Compose
   `--isolation sandbox` healthchecks and `service_healthy` waits are enabled
