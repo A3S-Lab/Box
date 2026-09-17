@@ -3,12 +3,12 @@
 use std::path::Path;
 
 use a3s_box_core::snapshot::SnapshotMetadata;
+#[cfg(target_os = "linux")]
+use a3s_box_core::ExecutionIsolation;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManagerError,
     ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, OperationId,
 };
-#[cfg(target_os = "linux")]
-use a3s_box_core::ExecutionIsolation;
 
 use super::create::startup_terminal_state;
 use super::record::lease_from_record;
@@ -713,14 +713,13 @@ pub fn capture_sandbox_host_rootfs_for_commit(
             record.id
         )));
     }
-    let rootfs = super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir).ok_or_else(
-        || {
+    let rootfs =
+        super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir).ok_or_else(|| {
             ExecutionManagerError::Unavailable(format!(
                 "execution {} has no populated managed rootfs for host-rootfs commit",
                 record.id
             ))
-        },
-    )?;
+        })?;
     let manifest = capture_sandbox_rootfs_metadata(record, &rootfs)?;
     Ok((rootfs, manifest))
 }

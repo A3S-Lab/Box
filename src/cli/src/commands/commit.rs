@@ -313,8 +313,8 @@ fn capture_paused_or_running_host_rootfs(
     record: &crate::state::BoxRecord,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (rootfs, manifest) =
-        a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record).map_err(|error| {
+    let (rootfs, manifest) = a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record)
+        .map_err(|error| {
             format!(
                 "Cannot capture Sandbox host rootfs for box '{}': {error}",
                 record.name

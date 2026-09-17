@@ -80,6 +80,8 @@ pub use box_record::{
     ManagedRestartOutcome, ManagedRuntimeRoute,
 };
 pub use box_state::BoxStateStore;
+#[cfg(target_os = "linux")]
+pub use local_execution::capture_sandbox_host_rootfs_for_commit;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
     LocalExecutionBackendRouter, LocalExecutionHandle, LocalExecutionManager,
@@ -88,8 +90,6 @@ pub use local_execution::{
     OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint,
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
-#[cfg(target_os = "linux")]
-pub use local_execution::capture_sandbox_host_rootfs_for_commit;
 #[cfg(feature = "vm")]
 pub use local_execution::{
     LinuxKvmOciBundleProvider, LinuxKvmOciMigrationConfig, NativeLinuxOciBundleProvider,
