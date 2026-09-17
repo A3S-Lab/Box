@@ -169,6 +169,30 @@ fn commit_capture_mode(
     let live_pid = record.pid.is_some_and(|pid| {
         crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
     });
+    let live_sandbox_host =
+        record.isolation.is_sandbox() && matches!(record.status.as_str(), "running" | "paused");
+    if live_sandbox_host {
+        #[cfg(windows)]
+        return Err(format!(
+            "Windows commit requires box '{}' to be stopped because WHPX has no post-boot guest archive channel",
+            record.name
+        )
+        .into());
+        #[cfg(not(windows))]
+        {
+            if !live_pid {
+                return Err(format!(
+                    "Cannot commit box '{}' because its host process is not live",
+                    record.name
+                )
+                .into());
+            }
+            // SandboxViaOci leaves exec_socket_path empty: the prepared host
+            // rootfs is the commit source (same walk as managed snapshots).
+            // Freezer-paused Sandboxes capture in place.
+            return Ok(CommitCaptureMode::LiveHostRootfs);
+        }
+    }
     if record.status == "running" {
         #[cfg(windows)]
         return Err(format!(
@@ -185,13 +209,15 @@ fn commit_capture_mode(
                 )
                 .into());
             }
-            // SandboxViaOci leaves exec_socket_path empty: the prepared host
-            // rootfs is the commit source (same walk as managed snapshots).
-            if record.isolation.is_sandbox() {
-                return Ok(CommitCaptureMode::LiveHostRootfs);
-            }
             return Ok(CommitCaptureMode::LiveGuest);
         }
+    }
+    if record.status == "paused" {
+        return Err(format!(
+            "Cannot commit paused MicroVM box '{}'; resume it first, or use a Sandbox",
+            record.name
+        )
+        .into());
     }
     super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
     if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
