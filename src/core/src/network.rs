@@ -18,12 +18,10 @@ pub const OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV: &str =
 /// Presence alone is enough here; matched-root / owner authority is enforced at
 /// Native Linux prepare and owner spawn.
 pub fn sandbox_named_bridge_opt_in_enabled() -> bool {
-    match std::env::var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV) {
-        Ok(value) if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false") => {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        std::env::var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV),
+        Ok(value) if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    )
 }
 
 /// Network mode for a box.
