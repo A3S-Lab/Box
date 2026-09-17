@@ -18,6 +18,10 @@ const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-owner";
 const OWNER_SOCKET_NAME: &str = "runtime.sock";
 const NATIVE_SESSION_SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
+/// Opt-in: keep Privileged host-service authority so Hello advertises
+/// `a3s.oci.attachments.v3`. Requires matched root (`euid==uid==0`). Unset keeps
+/// the Sandbox GA default (delegated cgroup → rootless drop → base_v2 only).
+const KEEP_NETWORK_DEVICE_AUTHORITY_ENV: &str = "A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -32,6 +36,9 @@ struct NativeLinuxOwnerRecord {
     agent_path: PathBuf,
     agent_sha256: String,
     socket_path: PathBuf,
+    /// Whether this owner retained Privileged network-device authority.
+    #[serde(default)]
+    keep_network_device_authority: bool,
 }
 
 impl NativeLinuxOwnerRecord {
@@ -40,6 +47,7 @@ impl NativeLinuxOwnerRecord {
         pid_start_time: u64,
         artifacts: &CertifiedA3sOci,
         socket_path: PathBuf,
+        keep_network_device_authority: bool,
     ) -> Self {
         Self {
             schema: OWNER_RECORD_SCHEMA.to_string(),
@@ -50,6 +58,7 @@ impl NativeLinuxOwnerRecord {
             agent_path: artifacts.agent_path.clone(),
             agent_sha256: artifacts.agent_sha256.clone(),
             socket_path,
+            keep_network_device_authority,
         }
     }
 
@@ -137,6 +146,7 @@ pub(crate) async fn ensure_native_linux_oci_owner_with_options(
     let socket_path = service_root.join(OWNER_SOCKET_NAME);
     let endpoint = OciRuntimeEndpoint::unix_socket(socket_path.clone())?;
     let record_path = service_root.join(OWNER_RECORD_NAME);
+    let keep_network_device_authority = keep_network_device_authority_requested()?;
     if let Some(record) = load_owner_record(&record_path, &socket_path)? {
         if record.is_alive() {
             if !record.artifacts_match(artifacts) {
@@ -144,6 +154,14 @@ pub(crate) async fn ensure_native_linux_oci_owner_with_options(
                     "the live native Linux OCI owner uses different runtime artifacts; stop it explicitly before changing artifacts"
                         .to_string(),
                 ));
+            }
+            if record.keep_network_device_authority != keep_network_device_authority {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "the live native Linux OCI owner keep_network_device_authority={} but this process requested {}; stop the owner before changing {}",
+                    record.keep_network_device_authority,
+                    keep_network_device_authority,
+                    KEEP_NETWORK_DEVICE_AUTHORITY_ENV
+                )));
             }
             let result = wait_until_ready(&endpoint, None).await;
             drop(lock);
@@ -160,7 +178,7 @@ pub(crate) async fn ensure_native_linux_oci_owner_with_options(
         )));
     }
 
-    let mut child = spawn_owner(service_root, artifacts)?;
+    let mut child = spawn_owner(service_root, artifacts, keep_network_device_authority)?;
     let launch_pid = child.id();
     let launch_start_time = crate::process::pid_start_time(launch_pid).ok_or_else(|| {
         let _ = child.kill();
@@ -177,6 +195,7 @@ pub(crate) async fn ensure_native_linux_oci_owner_with_options(
         launch_start_time,
         artifacts,
         socket_path.clone(),
+        keep_network_device_authority,
     );
     if let Err(error) = write_owner_record(&record_path, &provisional) {
         let _ = child.kill();
@@ -199,7 +218,11 @@ pub(crate) async fn ensure_native_linux_oci_owner_with_options(
             other => other,
         });
     }
-    let _record = match resolve_owner_identity_from_socket(&socket_path, artifacts) {
+    let _record = match resolve_owner_identity_from_socket(
+        &socket_path,
+        artifacts,
+        keep_network_device_authority,
+    ) {
         Ok(record) => {
             if let Err(error) = write_owner_record(&record_path, &record) {
                 let _ = child.kill();
@@ -278,6 +301,7 @@ async fn wait_until_ready(
 fn resolve_owner_identity_from_socket(
     socket_path: &Path,
     artifacts: &CertifiedA3sOci,
+    keep_network_device_authority: bool,
 ) -> ExecutionManagerResult<NativeLinuxOwnerRecord> {
     use std::mem::{size_of, MaybeUninit};
     use std::os::fd::AsRawFd;
@@ -338,13 +362,46 @@ fn resolve_owner_identity_from_socket(
         pid_start_time,
         artifacts,
         socket_path.to_path_buf(),
+        keep_network_device_authority,
     ))
 }
 
-fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionManagerResult<Child> {
+fn keep_network_device_authority_requested() -> ExecutionManagerResult<bool> {
+    match std::env::var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") => {
+            Ok(false)
+        }
+        Ok(_) => {
+            // SAFETY: reading real/effective UIDs is async-signal-safe and
+            // does not mutate process state.
+            let euid = unsafe { libc::geteuid() };
+            let uid = unsafe { libc::getuid() };
+            if euid != 0 || uid != 0 {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "{KEEP_NETWORK_DEVICE_AUTHORITY_ENV} requires matched root (euid==uid==0); Sandbox GA default remains the delegated rootless owner"
+                )));
+            }
+            Ok(true)
+        }
+        Err(error) => Err(ExecutionManagerError::Unavailable(format!(
+            "failed to read {KEEP_NETWORK_DEVICE_AUTHORITY_ENV}: {error}"
+        ))),
+    }
+}
+
+fn spawn_owner(
+    service_root: &Path,
+    artifacts: &CertifiedA3sOci,
+    keep_network_device_authority: bool,
+) -> ExecutionManagerResult<Child> {
     let stdout = open_owner_log(&service_root.join("owner.stdout.log"))?;
     let stderr = open_owner_log(&service_root.join("owner.stderr.log"))?;
-    let owner_cgroup = prepare_owner_delegation_child()?;
+    let owner_cgroup = if keep_network_device_authority {
+        None
+    } else {
+        prepare_owner_delegation_child()?
+    };
     // Prefer the Sandbox OCI launcher name so production setuid installs elevate
     // for device-policy bootstrap; CI packages the same a3s-oci binary there.
     let launcher = crate::sandbox::resolve_sandbox_oci_launcher(None)
@@ -358,6 +415,11 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
     let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
         .filter(|value| !value.is_empty())
         .filter(|_| unsafe { libc::geteuid() } != 0);
+    if keep_network_device_authority && elevate_wrapper.is_some() {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "{KEEP_NETWORK_DEVICE_AUTHORITY_ENV} is incompatible with A3S_BOX_CI_SETPRIV_WRAPPER; matched-root keep-authority cannot use the lab setpriv drop path"
+        )));
+    }
     if elevate_wrapper.is_none() && unsafe { libc::geteuid() } != 0 {
         crate::sandbox::require_operator_setuid_launcher(&launcher)
             .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))?;
@@ -377,9 +439,13 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
         .arg("--root")
         .arg(service_root)
         .arg("--agent")
-        .arg(&artifacts.agent_path)
-        .arg("--delegated-cgroup-root")
-        .arg(crate::sandbox::linux_sandbox_delegated_cgroup_root())
+        .arg(&artifacts.agent_path);
+    if !keep_network_device_authority {
+        command
+            .arg("--delegated-cgroup-root")
+            .arg(crate::sandbox::linux_sandbox_delegated_cgroup_root());
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -396,6 +462,8 @@ fn spawn_owner(service_root: &Path, artifacts: &CertifiedA3sOci) -> ExecutionMan
     // drops to the real UID before publishing the SDK socket. Migrate into a
     // child below the empty delegated root so rootless open accepts host-owned
     // membership without moving the Sandbox CI harness out of its probe cgroup.
+    // Keep-authority omits that flag so the owner stays Privileged and can
+    // advertise a3s.oci.attachments.v3.
     unsafe {
         command.pre_exec(move || {
             if let Some(ref cgroup) = owner_cgroup {
@@ -907,7 +975,7 @@ mod tests {
             agent_sha256: "b".repeat(64),
         };
         let socket = PathBuf::from("/tmp/a3s-owner/runtime.sock");
-        let record = NativeLinuxOwnerRecord::new(42, 7, &artifacts, socket.clone());
+        let record = NativeLinuxOwnerRecord::new(42, 7, &artifacts, socket.clone(), false);
         record.validate(&socket).unwrap();
         assert!(record.artifacts_match(&artifacts));
         assert!(record.validate(Path::new("/tmp/other.sock")).is_err());
@@ -949,6 +1017,7 @@ mod tests {
             start_time,
             &artifacts,
             PathBuf::from("/tmp/a3s-owner/runtime.sock"),
+            false,
         );
         assert!(!record.is_alive(), "a zombie owner must be reclaimed");
         child.wait().expect("reap completed owner fixture");
@@ -962,6 +1031,57 @@ mod tests {
         );
         // spawn_owner always exports this as "1" so Box-owned Sandbox create
         // and Live reopen share the supervised Host path.
+    }
+
+    #[test]
+    fn keep_network_device_authority_defaults_off() {
+        std::env::remove_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+        assert!(!keep_network_device_authority_requested().unwrap());
+    }
+
+    #[test]
+    fn keep_network_device_authority_rejects_non_root_opt_in() {
+        std::env::set_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "1");
+        let result = keep_network_device_authority_requested();
+        std::env::remove_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+        // On Windows this module is not compiled; on Linux non-root CI this
+        // must fail closed. Matched-root lab hosts may accept the opt-in.
+        if unsafe { libc::geteuid() } != 0 || unsafe { libc::getuid() } != 0 {
+            let error = result.expect_err("non-root must fail closed");
+            assert!(
+                error.to_string().contains("requires matched root"),
+                "{error}"
+            );
+        } else {
+            assert!(result.unwrap());
+        }
+    }
+
+    #[test]
+    fn owner_record_preserves_keep_authority_flag() {
+        let artifacts = CertifiedA3sOci {
+            runtime_path: PathBuf::from("/opt/a3s/a3s-oci"),
+            runtime_sha256: "a".repeat(64),
+            agent_path: PathBuf::from("/opt/a3s/a3s-oci-agent"),
+            agent_sha256: "b".repeat(64),
+        };
+        let socket = PathBuf::from("/tmp/a3s-owner/runtime.sock");
+        let record = NativeLinuxOwnerRecord::new(42, 7, &artifacts, socket, true);
+        let encoded = serde_json::to_string(&record).unwrap();
+        let decoded: NativeLinuxOwnerRecord = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.keep_network_device_authority);
+        let legacy = r#"{
+            "schema":"a3s.box.native-linux-oci-owner.v1",
+            "pid":1,
+            "pid_start_time":2,
+            "runtime_path":"/opt/a3s/a3s-oci",
+            "runtime_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "agent_path":"/opt/a3s/a3s-oci-agent",
+            "agent_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "socket_path":"/tmp/a3s-owner/runtime.sock"
+        }"#;
+        let legacy: NativeLinuxOwnerRecord = serde_json::from_str(legacy).unwrap();
+        assert!(!legacy.keep_network_device_authority);
     }
 
     #[test]
