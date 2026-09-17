@@ -302,20 +302,38 @@ mod tests {
         assert_eq!(attached.schema_version(), "a3s.oci.attachments.v3");
         assert_eq!(attached.network_attachments().len(), 2);
         assert_eq!(
-            attached.network_attachments()[0].identity().interface().as_str(),
+            attached.network_attachments()[0]
+                .identity()
+                .interface()
+                .as_str(),
             format!("a3s.box.netif.veth-a.{id}")
         );
         assert_eq!(
-            attached.network_attachments()[1].identity().interface().as_str(),
+            attached.network_attachments()[1]
+                .identity()
+                .interface()
+                .as_str(),
             format!("a3s.box.netif.veth-b.{id}")
         );
         assert_eq!(
-            attached.network_attachments()[0].identity().namespace().as_str(),
-            attached.network_attachments()[1].identity().namespace().as_str()
+            attached.network_attachments()[0]
+                .identity()
+                .namespace()
+                .as_str(),
+            attached.network_attachments()[1]
+                .identity()
+                .namespace()
+                .as_str()
         );
         assert_eq!(
-            attached.network_attachments()[0].identity().cleanup().as_str(),
-            attached.network_attachments()[1].identity().cleanup().as_str()
+            attached.network_attachments()[0]
+                .identity()
+                .cleanup()
+                .as_str(),
+            attached.network_attachments()[1]
+                .identity()
+                .cleanup()
+                .as_str()
         );
     }
 }
