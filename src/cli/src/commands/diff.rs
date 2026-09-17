@@ -346,15 +346,26 @@ fn archive_rootfs_key(path: &Path) -> Result<Option<String>, String> {
 /// Create the per-box baseline snapshot used by `a3s-box diff`.
 ///
 /// The caller should invoke this after the rootfs is prepared and before user
-/// mutations that should appear in later diff output.
+/// mutations that should appear in later diff output. Managed Linux
+/// SandboxViaOci prefers an OCI-mapped metadata baseline when mapping
+/// artifacts exist (same contract as live/stopped `diff`); otherwise falls
+/// back to a host walk for compatibility roots.
 pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve the provider's rootfs: `merged` (overlay) is the freshly-mounted
-    // pristine image at boot time; `rootfs` (plain provider) likewise.
-    if let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) {
-        a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
+    let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    {
+        if a3s_box_runtime::sandbox::rootfs::try_create_managed_sandbox_diff_baseline_if_absent(
+            box_dir,
+            &rootfs_dir,
+        )? {
+            return Ok(());
+        }
     }
+    a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
     Ok(())
 }
 

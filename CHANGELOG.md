@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Managed Linux SandboxViaOci `diff` baseline is captured from OCI-mapped rootfs
+  metadata (same mode/size contract as live/stopped host-rootfs `diff`) and
+  fails closed on prepare instead of silently installing a host-subordinate
+  walk. Does **not** close ROADMAP B3/B2 or claim MicroVM live host-path
+  snapshot parity.
+
 ### Added
 
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):

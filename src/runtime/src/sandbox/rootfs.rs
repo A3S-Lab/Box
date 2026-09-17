@@ -564,6 +564,42 @@ pub(crate) fn capture_rootfs_metadata(
     Ok(RootfsMetadataManifest::new(entries))
 }
 
+/// Capture and install the SandboxViaOci `diff` baseline from OCI-mapped metadata.
+///
+/// Returns `Ok(true)` when a retained ID-mapping artifact existed and the
+/// baseline was installed (or already present). Returns `Ok(false)` when no
+/// mappings are retained (caller may fall back to a host walk). Other capture
+/// failures are errors.
+#[cfg(target_os = "linux")]
+pub fn try_create_managed_sandbox_diff_baseline_if_absent(
+    box_dir: &Path,
+    rootfs: &Path,
+) -> Result<bool> {
+    let Some(plan) = load_rootfs_id_mappings(box_dir)? else {
+        return Ok(false);
+    };
+    let manifest = capture_rootfs_metadata(rootfs, &plan)?;
+    crate::rootfs::create_diff_baseline_from_metadata_if_absent(box_dir, &manifest)?;
+    Ok(true)
+}
+
+/// Capture and install the SandboxViaOci `diff` baseline from OCI-mapped metadata.
+///
+/// Requires a retained ID-mapping artifact under `box_dir`. First-writer-wins.
+#[cfg(target_os = "linux")]
+pub fn create_managed_sandbox_diff_baseline_if_absent(
+    box_dir: &Path,
+    rootfs: &Path,
+) -> Result<()> {
+    if try_create_managed_sandbox_diff_baseline_if_absent(box_dir, rootfs)? {
+        return Ok(());
+    }
+    Err(BoxError::BuildError(format!(
+        "Sandbox diff baseline requires retained rootfs ID mappings under {}",
+        box_dir.display()
+    )))
+}
+
 #[cfg(target_os = "linux")]
 fn collect_snapshot_rootfs_metadata(
     root: &Path,

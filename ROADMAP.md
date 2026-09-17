@@ -874,9 +874,10 @@ open and harness reports still keep
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
-  managed quiesce/host-rootfs surface; MicroVM live host-path snapshots and the
-  full B3 storage/network qualification gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  managed quiesce/host-rootfs surface; SandboxViaOci `diff` baselines use the
+  same OCI-mapped metadata contract as live/stopped capture. MicroVM live
+  host-path snapshots and the full B3 storage/network qualification gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and
   removal driven by the durable Box record.

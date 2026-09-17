@@ -526,4 +526,19 @@ impl VmManager {
             );
         }
     }
+
+    /// Capture the SandboxViaOci diff baseline from OCI-mapped rootfs metadata.
+    ///
+    /// Fail closed: a missing or incomplete baseline must not let create succeed
+    /// while later `diff` compares against a host-subordinate walk.
+    #[cfg(target_os = "linux")]
+    pub(super) fn create_sandbox_oci_diff_baseline(
+        &self,
+        layout: &BoxLayout,
+        plan: &crate::sandbox::capability::SandboxIdMappingPlan,
+    ) -> Result<()> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let manifest = crate::sandbox::rootfs::capture_rootfs_metadata(&layout.rootfs_path, plan)?;
+        crate::rootfs::create_diff_baseline_from_metadata_if_absent(&box_dir, &manifest)
+    }
 }
