@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Stopped managed Linux Sandbox `a3s-box snapshot create` (and sync SDK
+  `create_snapshot`) persists OCI-mapped terminal rootfs metadata via
+  `SnapshotStore::save_managed`, matching live managed snapshots instead of
+  recording host subordinate UIDs from a bare directory `save`. MicroVM /
+  legacy stopped snapshots unchanged. Does **not** close ROADMAP B3/B2.
 - `a3s-box snapshot create` on a running or paused managed Linux Sandbox box
   routes through `LocalExecutionManager::create_filesystem_snapshot` (quiesce +
   OCI-mapped host rootfs `save_managed`) instead of refusing active boxes.

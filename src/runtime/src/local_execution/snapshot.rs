@@ -689,11 +689,12 @@ fn execution_state(state: ManagedExecutionState) -> ExecutionManagerResult<Execu
     }
 }
 
-/// Capture host-visible Sandbox rootfs metadata for a running managed box.
+/// Capture host-visible Sandbox rootfs metadata for commit / product snapshot.
 ///
-/// Used by `a3s-box commit` when SandboxViaOci has no guest archive socket: the
-/// prepared host rootfs is the authoritative filesystem, walked with the exact
-/// OCI UID/GID mappings (same path as managed filesystem snapshots).
+/// Used when SandboxViaOci has no guest archive socket: the prepared host
+/// rootfs is the authoritative filesystem, walked with the exact OCI UID/GID
+/// mappings (same path as managed filesystem snapshots). Works for running
+/// (quiesced) and stopped boxes that still retain mapping artifacts.
 #[cfg(target_os = "linux")]
 pub fn capture_sandbox_host_rootfs_for_commit(
     record: &BoxRecord,
@@ -703,20 +704,20 @@ pub fn capture_sandbox_host_rootfs_for_commit(
 )> {
     if record.isolation != ExecutionIsolation::Sandbox {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "execution {} is not a Sandbox isolation host-rootfs commit target",
+            "execution {} is not a Sandbox isolation host-rootfs capture target",
             record.id
         )));
     }
     if record.managed_execution.is_none() {
         return Err(ExecutionManagerError::Unavailable(format!(
-            "execution {} has no managed Sandbox metadata for host-rootfs commit",
+            "execution {} has no managed Sandbox metadata for host-rootfs capture",
             record.id
         )));
     }
     let rootfs =
         super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir).ok_or_else(|| {
             ExecutionManagerError::Unavailable(format!(
-                "execution {} has no populated managed rootfs for host-rootfs commit",
+                "execution {} has no populated managed rootfs for host-rootfs capture",
                 record.id
             ))
         })?;

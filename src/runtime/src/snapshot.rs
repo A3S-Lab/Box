@@ -105,9 +105,10 @@ impl SnapshotStore {
     }
 
     /// Save a managed Sandbox snapshot with an authoritative terminal rootfs
-    /// metadata manifest captured while the source execution is quiesced.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn save_managed(
+    /// metadata manifest (OCI UID/GID mappings), captured while the source is
+    /// quiesced or stopped with retained mapping artifacts.
+    #[cfg(target_os = "linux")]
+    pub fn save_managed(
         &self,
         metadata: SnapshotMetadata,
         rootfs_source: &Path,

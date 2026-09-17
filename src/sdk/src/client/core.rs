@@ -699,6 +699,23 @@ impl A3sBoxClient {
         let saved = {
             let _attached =
                 a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+            #[cfg(target_os = "linux")]
+            if record.isolation.is_sandbox() && record.managed_execution.is_some() {
+                let (rootfs_path, rootfs_metadata) =
+                    a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(&record).map_err(
+                        |error| {
+                            ClientError::Validation(format!(
+                                "cannot capture Sandbox host rootfs for stopped snapshot of {}: {error}",
+                                record.name
+                            ))
+                        },
+                    )?;
+                return Ok(SnapshotSummary::from(store.save_managed(
+                    metadata,
+                    &rootfs_path,
+                    &rootfs_metadata,
+                )?));
+            }
             let rootfs_path = resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
                 ClientError::Validation(format!(
                     "rootfs not found for box {} under {} (looked for merged/ and rootfs/)",
