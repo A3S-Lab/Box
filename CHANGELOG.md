@@ -7,10 +7,10 @@ All notable changes to A3S Box will be documented in this file.
 ### Fixed
 
 - SandboxViaOci create fails closed when an OCI `type=bind` mount remains
-  unclassified after Box-owned volume/workspace storage and managed Secret
-  classification (no silent external `-v /host:/guest` without a v2 storage
-  identity). Does **not** invent bind-alias storage attachments, close ROADMAP
-  B3/B2, or change MicroVM bind behavior.
+  unclassified after Box-owned volume/workspace storage, staged caller bind
+  aliases (`a3s.box.bind.{slot}`), and managed Secret classification. Does
+  **not** invent MicroVM bind-alias attachments, close ROADMAP B3/B2, or claim
+  Windows volume parity.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
@@ -25,6 +25,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Native Linux SandboxViaOci prepare classifies staged caller bind aliases under
+  `sandbox/attachments/{slot}` into `a3s.oci.attachments.v2` as
+  `a3s.box.bind.{slot}` (Caller + DetachOnly), so prepare-rewritten `-v` binds
+  participate in the attachment digest before the unclassified-bind reject gate.
+  Does **not** invent MicroVM bind-alias attachments, close ROADMAP B3/B2, or
+  claim Windows/Compose bind parity.
 - Stopped directory-backed MicroVM `export` / `diff` require guest rootfs
   metadata and archive/walk via the same guest-metadata contract as stopped
   `commit` (and Windows stopped `snapshot create`). Does **not** invent live
