@@ -250,7 +250,7 @@ async fn capture_rootfs_tar(
 }
 
 #[cfg(all(unix, target_os = "linux"))]
-async fn capture_live_host_rootfs_tar(
+pub(crate) async fn capture_live_host_rootfs_tar(
     record: &crate::state::BoxRecord,
     output: &Path,
     pause: bool,
@@ -260,7 +260,7 @@ async fn capture_live_host_rootfs_tar(
 
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
         format!(
-            "Cannot commit running Sandbox box '{}' because it has no managed lifecycle metadata",
+            "Cannot capture host rootfs for running Sandbox box '{}' because it has no managed lifecycle metadata",
             record.name
         )
     })?;
@@ -270,7 +270,7 @@ async fn capture_live_host_rootfs_tar(
 
     let managed_state = record.managed_state()?.ok_or_else(|| {
         format!(
-            "Cannot commit running Sandbox box '{}' because managed state is missing",
+            "Cannot capture host rootfs for running Sandbox box '{}' because managed state is missing",
             record.name
         )
     })?;
@@ -284,7 +284,7 @@ async fn capture_live_host_rootfs_tar(
     let refreshed = StateFile::load_default()?;
     let paused_record = refreshed.find_by_id(&record.id).ok_or_else(|| {
         format!(
-            "Box '{}' disappeared while pausing for host-rootfs commit",
+            "Box '{}' disappeared while pausing for host-rootfs capture",
             record.name
         )
     })?;
@@ -294,7 +294,7 @@ async fn capture_live_host_rootfs_tar(
         .map(|meta| meta.generation)
         .ok_or_else(|| {
             format!(
-                "Box '{}' lost managed metadata while pausing for host-rootfs commit",
+                "Box '{}' lost managed metadata while pausing for host-rootfs capture",
                 record.name
             )
         })?;
