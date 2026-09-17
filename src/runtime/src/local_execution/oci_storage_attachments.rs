@@ -20,8 +20,9 @@ const WORKSPACE_STORAGE_IDENTITY: &str = "a3s.box.workspace";
 /// Attach Box-owned VolumeStore mounts and the implicit `/workspace` bind into
 /// `a3s.oci.attachments.v2`.
 ///
-/// External caller bind mounts stay unclassified (OCI mount inventory only).
 /// Caller ownership + DetachOnly matches Box retaining deletion authority.
+/// External caller binds are not attached here; see
+/// [`reject_unclassified_bind_mounts`].
 pub(super) fn attach_box_owned_volume_storage(
     bundle: &OciBundle,
     attachments: CreateAttachments,
@@ -40,6 +41,80 @@ pub(super) fn attach_box_owned_volume_storage(
     )?;
     attachments = attach_workspace_bind(bundle, attachments, record, &mounts)?;
     Ok(attachments)
+}
+
+/// Fail closed when any OCI `type=bind` mount remains unclassified as storage
+/// or secret after Box attachment assembly.
+///
+/// External `-v /host:/guest` binds are staged into the bundle today but have
+/// no v2 storage identity. Until bind-alias attachments land, create must not
+/// claim a complete attachment contract while those mounts remain silent.
+pub(super) fn reject_unclassified_bind_mounts(
+    bundle: &OciBundle,
+    attachments: CreateAttachments,
+) -> ExecutionManagerResult<CreateAttachments> {
+    let mounts = oci_bind_mounts(bundle)?;
+    let classified = classified_bind_indices(&attachments)?;
+    for (index, mount) in mounts.iter().enumerate() {
+        if mount.source.is_none() {
+            continue;
+        }
+        if classified.contains(&index) {
+            continue;
+        }
+        let destination = mount
+            .destination
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("mount index {index}"));
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "SandboxViaOci rejects unclassified external bind mount at {destination}; \
+             use a Box-owned named/anonymous volume, the /workspace bind, or a managed Secret \
+             (caller-owned bind-alias storage identities are not attached yet)"
+        )));
+    }
+    Ok(attachments)
+}
+
+fn classified_bind_indices(
+    attachments: &CreateAttachments,
+) -> ExecutionManagerResult<std::collections::HashSet<usize>> {
+    let mut classified = std::collections::HashSet::new();
+    for storage in attachments.storage() {
+        if let Some(index) = mount_index_from_pointer(storage.mount().json_pointer()) {
+            classified.insert(index);
+        }
+    }
+    let encoded = serde_json::to_value(attachments).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to inspect attachment secrets for bind classification: {error}"
+        ))
+    })?;
+    if let Some(secrets) = encoded.get("secrets").and_then(|value| value.as_array()) {
+        for secret in secrets {
+            let pointer = secret
+                .pointer("/configuration/jsonPointer")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    secret
+                        .get("configuration")
+                        .and_then(|value| value.get("jsonPointer"))
+                        .and_then(|value| value.as_str())
+                });
+            if let Some(index) = pointer.and_then(mount_index_from_pointer) {
+                classified.insert(index);
+            }
+        }
+    }
+    Ok(classified)
+}
+
+fn mount_index_from_pointer(pointer: &str) -> Option<usize> {
+    let rest = pointer.strip_prefix("/mounts/")?;
+    if rest.contains('/') {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 fn attach_named_and_anonymous_volumes(
@@ -372,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_external_binds_without_volume_ownership() {
+    fn rejects_external_binds_without_volume_ownership() {
         let home = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         let source = external.path().canonicalize().unwrap();
@@ -404,7 +479,54 @@ mod tests {
         let attached =
             attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
                 .unwrap();
-        assert_eq!(attached.schema_version(), "a3s.oci.attachments.v1");
         assert!(attached.storage().is_empty());
+        let error = reject_unclassified_bind_mounts(&bundle, attached).unwrap_err();
+        assert!(
+            error.to_string().contains("unclassified external bind"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn accepts_volume_owned_binds_after_classification() {
+        let home = tempfile::tempdir().unwrap();
+        let store = VolumeStore::new(
+            home.path().join("volumes.json"),
+            home.path().join("volumes"),
+        );
+        let volume = store.create(VolumeConfig::new("dataset-a", "")).unwrap();
+        let source = PathBuf::from(&volume.mount_point).canonicalize().unwrap();
+
+        let bundle_dir = home.path().join("bundle");
+        std::fs::create_dir_all(bundle_dir.join("rootfs")).unwrap();
+        let bundle = OciBundle::from_json(
+            &bundle_dir,
+            serde_json::to_string(&json!({
+                "ociVersion": "1.3.0",
+                "root": {"path": "rootfs"},
+                "process": {
+                    "cwd": "/",
+                    "args": ["/bin/true"],
+                    "user": {"uid": 0, "gid": 0}
+                },
+                "mounts": [{
+                    "destination": "/data",
+                    "type": "bind",
+                    "source": source,
+                    "options": ["rbind", "rprivate", "nosuid", "nodev", "rw"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut record = make_record(home.path(), "11111111-1111-4111-8111-111111111114");
+        record.volume_names = vec!["dataset-a".to_string()];
+        let attachments = CreateAttachments::from_bundle(&bundle, ProcessIo::default()).unwrap();
+        let attached =
+            attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
+                .unwrap();
+        let accepted = reject_unclassified_bind_mounts(&bundle, attached).unwrap();
+        assert_eq!(accepted.storage().len(), 1);
     }
 }

@@ -849,10 +849,10 @@ open and harness reports still keep
   **Partial:** Native Linux SandboxViaOci prepare now binds Box-owned named and
   anonymous volumes, plus the Box-owned `/workspace` bind
   (`a3s.box.workspace`), into `a3s.oci.attachments.v2` (caller-owned
-  DetachOnly). External caller binds stay unclassified.
-  Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
-  parity, and the B3 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  DetachOnly). Unclassified external caller binds fail closed at create until
+  bind-alias storage identities land. Image/build/snapshot/commit descriptor
+  handoff, network v3, Windows volume parity, and the B3 exit gate remain open.
+  Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep network objects, IPAM, DNS, aliases, and publication policy in Box;
   delegate namespace, VM NIC, and guest transport attachment to OCI Runtime.
   **Partial:** Native Linux SandboxViaOci prepare classifies prepared

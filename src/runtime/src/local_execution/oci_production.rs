@@ -301,6 +301,17 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
                 ));
             }
         };
+        let attachments = match super::oci_storage_attachments::reject_unclassified_bind_mounts(
+            &bundle, attachments,
+        ) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                return Err(cleanup_after_prepare_failure(
+                    &manager,
+                    format!("failed to validate Box bind-mount attachment coverage: {error}"),
+                ));
+            }
+        };
         let attachments = match super::oci_network_attachments::attach_box_owned_linux_network(
             &bundle,
             attachments,

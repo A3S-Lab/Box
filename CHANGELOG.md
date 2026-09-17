@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- SandboxViaOci create fails closed when an OCI `type=bind` mount remains
+  unclassified after Box-owned volume/workspace storage and managed Secret
+  classification (no silent external `-v /host:/guest` without a v2 storage
+  identity). Does **not** invent bind-alias storage attachments, close ROADMAP
+  B3/B2, or change MicroVM bind behavior.
+
 ### Added
 
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):
