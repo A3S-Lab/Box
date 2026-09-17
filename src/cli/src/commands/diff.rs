@@ -63,10 +63,11 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // A guest-native block root has no host directory after ownership handoff.
     // Running MicroVMs stream one coherent guest-metadata archive over the exec
-    // channel; SandboxViaOci walks the prepared host rootfs instead. Directory-
-    // backed and stopped compatibility roots keep the local walk path.
+    // channel; SandboxViaOci walks the prepared host rootfs instead (Running or
+    // freezer-Paused). Directory-backed and stopped compatibility roots keep
+    // the local walk path.
     // Managed Sandbox pause uses the same lifecycle lock — release before that path.
-    let release_for_sandbox_host = record.status == "running" && record.isolation.is_sandbox();
+    let release_for_sandbox_host = uses_live_sandbox_host_rootfs(record);
     let mut lifecycle_lock = Some(lifecycle_lock);
     if release_for_sandbox_host {
         drop(lifecycle_lock.take());
@@ -116,6 +117,20 @@ async fn current_rootfs(
     record: &crate::state::BoxRecord,
     display_name: &str,
 ) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    if uses_live_sandbox_host_rootfs(record) {
+        let live_pid = record.pid.is_some_and(|pid| {
+            crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
+        });
+        if !live_pid {
+            return Err(format!(
+                "Cannot diff box '{}' because its host process is not live",
+                record.name
+            )
+            .into());
+        }
+        return current_sandbox_host_rootfs(record).await;
+    }
+
     if record.status == "running" {
         let live_pid = record.pid.is_some_and(|pid| {
             crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
@@ -126,9 +141,6 @@ async fn current_rootfs(
                 record.name
             )
             .into());
-        }
-        if record.isolation.is_sandbox() {
-            return current_sandbox_host_rootfs(record).await;
         }
         #[cfg(unix)]
         {
@@ -161,6 +173,14 @@ async fn current_rootfs(
         }
     }
 
+    if record.status == "paused" {
+        return Err(format!(
+            "Cannot diff paused MicroVM box '{}'; resume it first, or use a Sandbox",
+            record.name
+        )
+        .into());
+    }
+
     if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
         #[cfg(unix)]
         {
@@ -189,6 +209,11 @@ async fn current_rootfs(
         )
     })?;
     walk_dir(&rootfs_dir)
+}
+
+/// SandboxViaOci host-rootfs capture works while Running or freezer-Paused.
+fn uses_live_sandbox_host_rootfs(record: &crate::state::BoxRecord) -> bool {
+    record.isolation.is_sandbox() && matches!(record.status.as_str(), "running" | "paused")
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -330,6 +355,22 @@ pub fn create_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_sandbox_host_rootfs_accepts_running_and_paused() {
+        let mut running =
+            crate::test_helpers::fixtures::make_record("id", "box", "running", Some(1));
+        running.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let mut paused = crate::test_helpers::fixtures::make_record("id", "box", "paused", Some(1));
+        paused.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let mut microvm_paused =
+            crate::test_helpers::fixtures::make_record("id", "box", "paused", Some(1));
+        microvm_paused.isolation = a3s_box_core::ExecutionIsolation::Microvm;
+
+        assert!(uses_live_sandbox_host_rootfs(&running));
+        assert!(uses_live_sandbox_host_rootfs(&paused));
+        assert!(!uses_live_sandbox_host_rootfs(&microvm_paused));
+    }
 
     #[test]
     fn test_walk_dir_empty() {

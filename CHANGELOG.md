@@ -6,11 +6,19 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+<<<<<<< HEAD
 - Managed OCI Sandbox `cp` / `transfer_file` / `filesystem` accept freezer-paused
   boxes via the same observability fence as `stats`/`top` (`require_observable`
   + CLI `resolve_copy_route`), while exec/PTY and MicroVM guest-archive paths
   stay Running-only. Does **not** close ROADMAP B2/B3 or claim paused guest
   exec.
+=======
+- `a3s-box export` and `a3s-box diff` on a freezer-paused Linux SandboxViaOci
+  box reuse the same managed host-rootfs capture path as running Sandboxes
+  (already-paused captures in place; running still quiesces then resumes).
+  Paused MicroVM boxes fail closed instead of walking a stale offline root.
+  Does **not** close ROADMAP B3/B2 or claim MicroVM paused guest archives.
+>>>>>>> 1e27cf3c (feat(cli): paused Sandbox export and diff via host-rootfs capture)
 - Linux SandboxViaOci stages Box-owned `O_PATH` bind aliases for **read-write**
   as well as read-only caller-owned external mounts under private provider
   directories, so userns-resolved OCI sources stay reachable without chowning

@@ -27,16 +27,20 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
         )
     })?;
 
-    if record.status == "running" {
+    if uses_live_sandbox_host_rootfs(&record) {
         // Managed Sandbox pause/resume uses the same lifecycle lock; release the
         // CLI guard before host-rootfs capture so generation fencing stays exclusive.
-        if record.isolation.is_sandbox() {
-            drop(lifecycle_lock);
-            export_live_sandbox_host(record, &args.output).await?;
-        } else {
-            export_live_guest(record, &args.output).await?;
-            drop(lifecycle_lock);
-        }
+        drop(lifecycle_lock);
+        export_live_sandbox_host(record, &args.output).await?;
+    } else if record.status == "running" {
+        export_live_guest(record, &args.output).await?;
+        drop(lifecycle_lock);
+    } else if record.status == "paused" {
+        return Err(format!(
+            "Cannot export paused MicroVM box '{}'; resume it first, or use a Sandbox",
+            record.name
+        )
+        .into());
     } else {
         if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
             let mut file = tokio::fs::File::create(&args.output)
@@ -70,6 +74,13 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// SandboxViaOci host-rootfs capture works while Running or freezer-Paused
+/// (same quiesce surface as live commit/snapshot). MicroVM guest archives stay
+/// Running-only.
+fn uses_live_sandbox_host_rootfs(record: &crate::state::BoxRecord) -> bool {
+    record.isolation.is_sandbox() && matches!(record.status.as_str(), "running" | "paused")
+}
+
 #[cfg(all(unix, target_os = "linux"))]
 async fn export_live_sandbox_host(
     record: &crate::state::BoxRecord,
@@ -80,12 +91,12 @@ async fn export_live_sandbox_host(
     });
     if !live_pid {
         return Err(format!(
-            "Cannot export running box '{}' because its host process is not live",
+            "Cannot export box '{}' because its host process is not live",
             record.name
         )
         .into());
     }
-    // Quiesce via managed pause (same as live MicroVM guest archive with pause=true).
+    // Quiesce via managed pause when Running; already-Paused captures in place.
     super::commit::capture_live_host_rootfs_tar(record, std::path::Path::new(output), true).await
 }
 
@@ -187,5 +198,24 @@ mod tests {
             export_success_line("web", "web.tar", 1536),
             "Exported web to web.tar (1.5 KB)"
         );
+    }
+
+    #[test]
+    fn live_sandbox_host_rootfs_accepts_running_and_paused() {
+        let mut running =
+            crate::test_helpers::fixtures::make_record("id", "box", "running", Some(1));
+        running.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let mut paused = crate::test_helpers::fixtures::make_record("id", "box", "paused", Some(1));
+        paused.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let mut stopped = crate::test_helpers::fixtures::make_record("id", "box", "stopped", None);
+        stopped.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let mut microvm_paused =
+            crate::test_helpers::fixtures::make_record("id", "box", "paused", Some(1));
+        microvm_paused.isolation = a3s_box_core::ExecutionIsolation::Microvm;
+
+        assert!(uses_live_sandbox_host_rootfs(&running));
+        assert!(uses_live_sandbox_host_rootfs(&paused));
+        assert!(!uses_live_sandbox_host_rootfs(&stopped));
+        assert!(!uses_live_sandbox_host_rootfs(&microvm_paused));
     }
 }
