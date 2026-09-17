@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="assets/readme/hero.svg" width="100%" alt="A3S Box 将本地 OCI 工作负载解析到其请求的 MicroVM 或 Sandbox 隔离边界">
 </p>
 
@@ -51,8 +51,8 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 
 ## 当前发布线
 
-`3.2.6` 发布线（已发布为
-[v3.2.6](https://github.com/A3S-Lab/Box/releases/tag/v3.2.6)）在保持公共 SDK
+`3.2.7` 发布线（已发布为
+[v3.2.7](https://github.com/A3S-Lab/Box/releases/tag/v3.2.7)）在保持公共 SDK
 契约稳定的同时，打包 Linux Sandbox GA 默认激活与来自 `main` 的最新运行时修复：
 
 | 领域 | 最新行为 |

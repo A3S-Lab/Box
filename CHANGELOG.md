@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.7] — 2026-09-17
+
 ### Fixed
 
 - Runtime `NetworkMode::Outbound` is advertised and mapped to MicroVM/libkrun
@@ -577,8 +579,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Release line `3.2.7`: workspace, installers, and SDK packages align on
+  `v3.2.7`. Ships post-`3.2.6` honesty and reliability work (TSI `-p` FIN/hairpin,
+  guest DNS stub filter, passt peer keep + `backend_lost`, Runtime Outbound as
+  MicroVM/TSI-only, CRI/lifecycle refuse-to-invent gates, snapshot CLI honesty).
+  Does **not** close B2, claim MicroVM production cutover, Sandbox L3 egress, or
+  Cloud Bollard removal.
 - Website installation and quick-start document Linux Sandbox GA host prep for
-  the published `v3.2.6` line (leave `A3S_BOX_OCI_MIGRATION` unset; link the
+  the published `v3.2.7` line (leave `A3S_BOX_OCI_MIGRATION` unset; link the
   evidence binder). README points at the GitHub Release URL.
 
 ## [3.2.6] — 2026-09-12

@@ -90,9 +90,9 @@ class FakeRuntime {
         return { names: ['old-network'] }
       case 'runtime_diagnostics':
         return {
-          core_version: '3.2.6',
-          runtime_version: '3.2.6',
-          sdk_version: '3.2.6',
+          core_version: '3.2.7',
+          runtime_version: '3.2.7',
+          sdk_version: '3.2.7',
           home: '/tmp/a3s',
           virtualization: {
             available: true,
