@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- `a3s-box snapshot create` on a running or paused managed Linux Sandbox box
+  routes through `LocalExecutionManager::create_filesystem_snapshot` (quiesce +
+  OCI-mapped host rootfs `save_managed`) instead of refusing active boxes.
+  MicroVM / legacy live host-path snapshots still require stop-first. Sync SDK
+  `create_snapshot` points live Sandbox callers at `create_execution_snapshot`.
+  Does **not** close ROADMAP B3/B2 or claim MicroVM live snapshots.
 - `a3s-box commit` on a running Linux SandboxViaOci box captures the prepared
   host rootfs with OCI UID/GID mappings (same walk as managed filesystem
   snapshots) instead of requiring a guest archive socket. Optional `--pause`

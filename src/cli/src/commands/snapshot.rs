@@ -14,7 +14,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Subcommand)]
 pub enum SnapshotAction {
-    /// Create a snapshot from a stopped box
+    /// Create a snapshot from a stopped box, or a live managed Sandbox
     Create(SnapshotCreateArgs),
     /// Restore a box from a snapshot
     Restore(SnapshotRestoreArgs),
@@ -131,6 +131,7 @@ async fn execute_prune(args: SnapshotPruneArgs) -> Result<(), Box<dyn std::error
 async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::state::StateFile;
     use a3s_box_core::snapshot::SnapshotMetadata;
+    use a3s_box_core::{ExecutionId, ExecutionManager, ExecutionSnapshotId};
     use a3s_box_runtime::SnapshotStore;
 
     // Resolve once to a stable ID, then serialize with every lifecycle command
@@ -138,13 +139,42 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     // lock so a name lookup or status snapshot cannot go stale while waiting.
     let initial_state = StateFile::load_default()?;
     let box_id = resolve_box(&initial_state, &args.box_id)?.id.clone();
-    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
     let record = state
         .find_by_id(&box_id)
         .ok_or_else(|| format!("Box '{box_id}' was removed while waiting to snapshot it"))?;
     validate_snapshot_source_state(record)
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+
+    // Running managed Sandbox uses LocalExecutionManager quiesce + save_managed
+    // (same host-rootfs path as commit). Release the CLI lock first so fencing
+    // stays single-owner.
+    if record.is_active() {
+        let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+            format!(
+                "Cannot snapshot running Sandbox box '{}' because managed lifecycle metadata is missing",
+                record.name
+            )
+        })?;
+        let execution_id = ExecutionId::new(record.id.clone())?;
+        let generation = metadata.generation;
+        let snap_id = snapshot_create_id(args.name.as_deref())?;
+        let snapshot_id = ExecutionSnapshotId::new(snap_id.clone())?;
+        drop(lifecycle_lock);
+        let home = a3s_box_core::dirs_home();
+        let manager = super::configured_local_execution_manager(&home).await?;
+        let created = manager
+            .create_filesystem_snapshot(&execution_id, generation, &snapshot_id)
+            .await?;
+        if args.description.is_some() {
+            eprintln!(
+                "warning: --description is ignored for live Sandbox snapshots; managed create stores the snapshot id as the name"
+            );
+        }
+        println!("{}", created.snapshot_id);
+        return Ok(());
+    }
 
     // Generate snapshot ID and name
     let snap_id = format!(
@@ -215,6 +245,7 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
         })?;
         store.save(meta, &rootfs_path)?
     };
+    drop(lifecycle_lock);
 
     // Opt-in auto-prune: when A3S_BOX_MAX_SNAPSHOTS / A3S_BOX_MAX_SNAPSHOT_BYTES are
     // set, evict the oldest snapshots beyond the cap after each create so a
@@ -240,13 +271,35 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
 }
 
 fn validate_snapshot_source_state(record: &crate::state::BoxRecord) -> Result<(), String> {
-    if record.is_active() {
-        return Err(format!(
-            "Cannot snapshot active box '{}': stop it first. Live host-path snapshots are disabled because a running guest can race filesystem traversal.",
-            record.name
-        ));
+    if !record.is_active() {
+        return Ok(());
     }
-    Ok(())
+    // Managed SandboxViaOci snapshots quiesce through LocalExecutionManager and
+    // walk the prepared host rootfs with OCI mappings — the same path as live
+    // commit. MicroVM / legacy live host walks stay refused.
+    if record.isolation.is_sandbox() && record.managed_execution.is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "Cannot snapshot active box '{}': stop it first. Live host-path snapshots are disabled because a running guest can race filesystem traversal.",
+        record.name
+    ))
+}
+
+fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(name) = requested_name {
+        // Live managed create uses the product id as ExecutionSnapshotId.
+        a3s_box_core::ExecutionSnapshotId::new(name.to_string()).map_err(|error| {
+            Box::<dyn std::error::Error>::from(format!(
+                "Invalid --name '{name}' for a live Sandbox snapshot: {error}"
+            ))
+        })?;
+        return Ok(name.to_string());
+    }
+    Ok(format!(
+        "snap-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ))
 }
 
 /// Restore a box from a snapshot.
@@ -601,13 +654,45 @@ mod tests {
     use crate::test_helpers::fixtures::make_record;
 
     #[test]
-    fn snapshot_source_state_rejects_active_boxes() {
+    fn snapshot_source_state_rejects_active_microvm_boxes() {
         for status in ["running", "paused"] {
             let record = make_record("id", "box", status, Some(std::process::id()));
             let error = validate_snapshot_source_state(&record).unwrap_err();
             assert!(error.contains("stop it first"), "{error}");
             assert!(error.contains("filesystem traversal"), "{error}");
         }
+    }
+
+    #[test]
+    fn snapshot_source_state_allows_active_managed_sandbox() {
+        use a3s_box_core::{
+            BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, OperationId,
+        };
+        use a3s_box_runtime::ManagedExecutionMetadata;
+        use std::collections::BTreeMap;
+
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record = make_record(id, "sandbox", "running", Some(std::process::id()));
+        record.isolation = ExecutionIsolation::Sandbox;
+        record.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new("operation-create").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "external-1".to_string(),
+                    config: BoxConfig {
+                        isolation: ExecutionIsolation::Sandbox,
+                        image: record.image.clone(),
+                        ..Default::default()
+                    },
+                    labels: BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        validate_snapshot_source_state(&record).unwrap();
     }
 
     #[test]

@@ -631,6 +631,12 @@ impl A3sBoxClient {
             .cloned()
             .ok_or_else(|| ClientError::BoxNotFound(record_id.clone()))?;
         if record.is_active() {
+            if record.isolation.is_sandbox() && record.managed_execution.is_some() {
+                return Err(ClientError::Validation(format!(
+                    "cannot snapshot active Sandbox box {} through the sync product API; use create_execution_snapshot with the managed generation, or stop the box first",
+                    record.name
+                )));
+            }
             return Err(ClientError::Validation(format!(
                 "cannot snapshot active box {}: stop it first; live host-path snapshots are disabled because a running guest can race filesystem traversal",
                 record.name
