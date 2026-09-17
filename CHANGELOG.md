@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Native Linux SandboxViaOci prepare classifies prepared `linux.netDevices`
+  into `a3s.oci.attachments.v3` (caller-owned identities +
+  ReleaseRuntimeNamespace / PreserveCallerNamespace by namespace path). Bundles
+  without netDevices stay at v1/v2. Does **not** emit host interfaces, wire
+  bridge/CNI, close ROADMAP B3/B2, or claim rootless/MicroVM/Windows network
+  parity.
 - Native Linux SandboxViaOci prepare also classifies the Box-owned `/workspace`
   bind as `a3s.oci.attachments.v2` storage (`a3s.box.workspace`, caller-owned
   DetachOnly). External caller binds stay unclassified. Does **not** close
