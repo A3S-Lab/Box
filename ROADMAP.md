@@ -114,7 +114,7 @@ simulation is hardware certification. Executed KVM and SEV-SNP evidence
 therefore remain open while their repository gates are disabled.
 
 Box now pins `a3s-runtime` 0.5.0 at
-`4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd` and implements the atomic
+`aeb1dd96b5d3f823464d51fcabe99b6052874aee` and implements the atomic
 `ServiceLifecycle` contract without a second lifecycle store. Independent
 readiness and liveness thresholds use the existing generation-fenced port and
 exec boundaries; unhealthy liveness applies the declared restart policy to the
