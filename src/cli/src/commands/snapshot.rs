@@ -269,7 +269,16 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
                 record.box_dir.display()
             )
         })?;
-        store.save(meta, &rootfs_path)?
+        // Match stopped Windows commit: fail closed without guest rootfs metadata
+        // so restored snapshots retain Linux ownership/mode/symlink truth.
+        let rootfs_metadata =
+            super::commit::read_guest_rootfs_metadata(&rootfs_path).map_err(|error| {
+                format!(
+                    "Cannot create stopped snapshot of '{}': {error}",
+                    record.name
+                )
+            })?;
+        store.save_managed(meta, &rootfs_path, &rootfs_metadata)?
     };
     drop(lifecycle_lock);
 

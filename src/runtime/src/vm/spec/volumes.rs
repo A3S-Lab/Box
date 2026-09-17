@@ -186,11 +186,18 @@ impl VmManager {
             if !volume.read_only
                 || !metadata.file_type().is_file()
                 || metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
             {
                 return Err(BoxError::ConfigError(
                     "Managed transient Secret mounts must be read-only regular files".into(),
                 ));
             }
+        } else {
+            // Fail closed on symlink/reparse host sources before canonicalize
+            // follows them. Windows junctions and reparse points must not widen
+            // a bind or named-volume share outside the operator-stated path;
+            // inventing POSIX ownership/mode on virtio-fs remains out of scope.
+            refuse_symlink_or_reparse_volume_source(&host_path)?;
         }
         let host_path = host_path
             .canonicalize()
@@ -374,4 +381,37 @@ impl VmManager {
         let (volume, created) = store.claim_anonymous(name, &self.box_id)?;
         Ok((volume.mount_point, created))
     }
+}
+
+/// Reject symlink / Windows reparse host sources for ordinary bind and named
+/// volume shares. Callers must inspect the leaf with `symlink_metadata` before
+/// `canonicalize` follows it.
+fn refuse_symlink_or_reparse_volume_source(host_path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(host_path).map_err(BoxError::IoError)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(BoxError::ConfigError(format!(
+            "Volume host path {} must be a plain file or directory (symlink/reparse sources are refused)",
+            host_path.display()
+        )));
+    }
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(BoxError::ConfigError(format!(
+            "Volume host path {} must be a plain file or directory",
+            host_path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT — keep local so runtime does not need
+    // another windows-sys feature solely to classify mount sources.
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
