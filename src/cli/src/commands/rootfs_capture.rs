@@ -1,5 +1,11 @@
 //! Shared stopped guest-native rootfs capture through the maintenance VM.
 
+/// Stopped managed Sandbox product ops must use OCI-mapped host-rootfs metadata,
+/// not host subordinate UIDs from a bare directory walk.
+pub(crate) fn stopped_sandbox_uses_managed_host_rootfs(record: &crate::state::BoxRecord) -> bool {
+    record.isolation.is_sandbox() && record.managed_execution.is_some()
+}
+
 pub(crate) async fn archive_stopped_guest_native_rootfs<W>(
     record: &crate::state::BoxRecord,
     output: &mut W,

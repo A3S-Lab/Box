@@ -181,6 +181,11 @@ async fn current_rootfs(
         .into());
     }
 
+    if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
+        super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
+        return current_stopped_sandbox_host_rootfs(record).await;
+    }
+
     if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
         #[cfg(unix)]
         {
@@ -232,6 +237,27 @@ async fn current_sandbox_host_rootfs(
 ) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
     Err(format!(
         "Live Sandbox host-rootfs diff is unavailable for box '{}' on this platform",
+        record.name
+    )
+    .into())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn current_stopped_sandbox_host_rootfs(
+    record: &crate::state::BoxRecord,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let archive_path = temporary.path().join("rootfs.tar");
+    super::commit::capture_live_host_rootfs_tar(record, &archive_path, false).await?;
+    walk_tar_archive(&archive_path)
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+async fn current_stopped_sandbox_host_rootfs(
+    record: &crate::state::BoxRecord,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    Err(format!(
+        "Stopped Sandbox host-rootfs diff is unavailable for box '{}' on this platform",
         record.name
     )
     .into())
