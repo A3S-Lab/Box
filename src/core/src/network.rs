@@ -8,6 +8,24 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+/// Opt-in env for SandboxViaOci Privileged network-device authority and named
+/// bridge staging. Requires matched root at owner spawn; unset keeps GA rootless.
+pub const OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV: &str =
+    "A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY";
+
+/// Whether named-bridge Sandbox intent is allowed past `validate_sandbox_compatibility`.
+///
+/// Presence alone is enough here; matched-root / owner authority is enforced at
+/// Native Linux prepare and owner spawn.
+pub fn sandbox_named_bridge_opt_in_enabled() -> bool {
+    match std::env::var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV) {
+        Ok(value) if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false") => {
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Network mode for a box.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

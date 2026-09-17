@@ -74,6 +74,8 @@ mod oci_whpx_owner {
         Ok(format!(r"\\.\pipe\a3s-box-whpx-owner-{}", &digest[..32]))
     }
 }
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub(crate) mod oci_host_netdevice;
 #[cfg(feature = "vm")]
 mod oci_network_attachments;
 #[cfg(all(feature = "vm", target_os = "linux"))]

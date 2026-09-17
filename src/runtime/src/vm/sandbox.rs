@@ -228,6 +228,7 @@ impl VmManager {
                 requested_capabilities: self.config.cap_add.clone(),
                 execution_plan_digest,
                 runtime_digest,
+                host_net_device: None,
             };
             let oci_spec = compile_oci_spec(&bundle_spec)?;
             write_bundle(&bundle_dir, &oci_spec, &execution_plan, &capabilities)?;
@@ -471,6 +472,8 @@ impl VmManager {
                 layout.prefer_image_rootfs_metadata,
             )?;
 
+            let host_net_device =
+                stage_sandbox_host_net_device(&self.home_dir, &self.box_id, &self.config.network)?;
             let bundle_spec = SandboxBundleSpec {
                 box_id: self.box_id.clone(),
                 rootfs_path: layout.rootfs_path.clone(),
@@ -491,6 +494,7 @@ impl VmManager {
                 requested_capabilities: self.config.cap_add.clone(),
                 execution_plan_digest: digest_json(execution_plan)?,
                 runtime_digest,
+                host_net_device,
             };
             let oci_spec = compile_runtime_owned_oci_spec(&bundle_spec, &runtime_process)?;
             write_bundle(&bundle_dir, &oci_spec, execution_plan, capabilities)?;
@@ -528,6 +532,16 @@ impl VmManager {
     /// exact generation. Persistent writable data follows normal Box policy.
     pub(crate) fn cleanup_runtime_owned_sandbox_bundle(&self) -> Result<()> {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        if let Err(error) =
+            crate::local_execution::oci_host_netdevice::teardown_lease(&self.home_dir, &self.box_id)
+        {
+            tracing::warn!(
+                box_id = %self.box_id,
+                %error,
+                "Failed to tear down SandboxViaOci host netdevice lease during cleanup"
+            );
+        }
         crate::sandbox::cleanup_sandbox_mount_aliases(&self.home_dir, &self.box_id)?;
         self.rootfs_provider
             .cleanup(&box_dir, self.config.persistent)?;
@@ -715,6 +729,33 @@ fn workspace_mount_is_explicitly_configured(
         || tmpfs
             .iter()
             .any(|mount| mount.destination == Path::new("/workspace"))
+}
+
+fn stage_sandbox_host_net_device(
+    home_dir: &Path,
+    box_id: &str,
+    network: &a3s_box_core::NetworkMode,
+) -> Result<Option<String>> {
+    #[cfg(all(feature = "vm", target_os = "linux"))]
+    {
+        match crate::local_execution::oci_host_netdevice::stage_for_sandbox_bundle(
+            home_dir, box_id, network,
+        ) {
+            Ok(Some(lease)) => Ok(Some(lease.container_iface)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(BoxError::NetworkError(error.to_string())),
+        }
+    }
+    #[cfg(not(all(feature = "vm", target_os = "linux")))]
+    {
+        let _ = (home_dir, box_id);
+        if matches!(network, a3s_box_core::NetworkMode::Bridge { .. }) {
+            return Err(BoxError::NetworkError(
+                "SandboxViaOci host netdevice staging requires Linux keep-authority".to_string(),
+            ));
+        }
+        Ok(None)
+    }
 }
 
 fn mount_source_error(action: &str, mount: &SandboxMount, error: BoxError) -> BoxError {
