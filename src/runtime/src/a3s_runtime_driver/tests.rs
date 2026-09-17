@@ -115,6 +115,38 @@ fn driver_allows_explicit_shared_kernel_selection() {
 }
 
 #[tokio::test]
+async fn sandbox_capabilities_omit_outbound_without_egress() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = BoxRuntimeDriver::new_with_isolation(
+        BoxRuntimeDriverConfig {
+            home_dir: directory.path().join("home"),
+            secret_root: directory.path().join("runtime-secrets"),
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        ExecutionIsolation::Sandbox,
+    )
+    .unwrap();
+    driver
+        .provider_build
+        .set("a3s-box/test isolation/sandbox hypervisor/test".into())
+        .unwrap();
+
+    let capabilities = driver.capabilities().await.unwrap();
+    assert_eq!(
+        capabilities.network_modes,
+        vec![NetworkMode::None, NetworkMode::Service]
+    );
+    let mut outbound = spec(RuntimeUnitClass::Task);
+    outbound.network.mode = NetworkMode::Outbound;
+    assert!(matches!(
+        creation_request(&outbound, ExecutionIsolation::Sandbox),
+        Err(a3s_runtime::RuntimeError::UnsupportedCapabilities(missing))
+            if missing == vec!["network_mode:Outbound"]
+    ));
+}
+
+#[tokio::test]
 async fn qualification_constructor_freezes_explicit_provider_build() {
     let directory = tempfile::tempdir().unwrap();
     let home_dir = directory.path().join("home");
