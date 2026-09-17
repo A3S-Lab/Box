@@ -63,6 +63,20 @@ impl GuestTargetStream {
             Self::Exec(stream) => stream.shutdown(Shutdown::Both),
         }
     }
+
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        match self {
+            Self::Tcp(stream) => stream.as_raw_fd(),
+            Self::Exec(stream) => stream.as_raw_fd(),
+        }
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Self::Exec(stream) => stream.set_nonblocking(nonblocking),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -341,32 +355,46 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                 }
             }
             FRAME_DATA => {
-                let mut remove = false;
-                {
-                    let mut guard = streams.lock().unwrap();
-                    if let Some(stream) = guard.get_mut(&frame.stream_id) {
-                        match stream
-                            .write_all(&frame.payload)
-                            .and_then(|_| stream.flush())
-                        {
-                            Ok(()) => debug!(
-                                stream_id = frame.stream_id,
-                                len = frame.payload.len(),
-                                "pf: wrote client data to guest target"
-                            ),
+                // Clone under the map lock, then write outside it. Holding the
+                // map mutex across a guest write wedged every later OPEN/DATA
+                // when TSI stalled one stream (#446).
+                let mut stream = {
+                    let guard = streams.lock().unwrap();
+                    match guard.get(&frame.stream_id) {
+                        Some(stream) => match stream.try_clone() {
+                            Ok(cloned) => cloned,
                             Err(err) => {
-                                warn!(stream_id = frame.stream_id, error = %err, "pf: write to guest target failed");
-                                remove = true;
+                                warn!(
+                                    stream_id = frame.stream_id,
+                                    error = %err,
+                                    "pf: clone guest target for DATA write failed"
+                                );
+                                drop(guard);
+                                close_stream(frame.stream_id, &streams);
+                                let _ = write_frame(&writer, FRAME_CLOSE, frame.stream_id, &[]);
+                                continue;
                             }
+                        },
+                        None => {
+                            warn!(stream_id = frame.stream_id, "pf: DATA for unknown stream");
+                            continue;
                         }
-                    } else {
-                        warn!(stream_id = frame.stream_id, "pf: DATA for unknown stream");
-                        continue;
                     }
-                }
-                if remove {
-                    close_stream(frame.stream_id, &streams);
-                    let _ = write_frame(&writer, FRAME_CLOSE, frame.stream_id, &[]);
+                };
+                match stream
+                    .write_all(&frame.payload)
+                    .and_then(|_| stream.flush())
+                {
+                    Ok(()) => debug!(
+                        stream_id = frame.stream_id,
+                        len = frame.payload.len(),
+                        "pf: wrote client data to guest target"
+                    ),
+                    Err(err) => {
+                        warn!(stream_id = frame.stream_id, error = %err, "pf: write to guest target failed");
+                        close_stream(frame.stream_id, &streams);
+                        let _ = write_frame(&writer, FRAME_CLOSE, frame.stream_id, &[]);
+                    }
                 }
             }
             FRAME_CLOSE => {
@@ -410,9 +438,29 @@ fn spawn_guest_reader(
     streams: StreamMap,
 ) {
     thread::spawn(move || {
+        // Under libkrun TSI, a blocking recv() on an AF_INET socket blocks a
+        // concurrent send() on another fd of the same connection. Wait with
+        // poll(POLLIN) and read with O_NONBLOCK so OPEN→DATA relays complete
+        // (#446). Write half stays blocking.
+        if let Err(err) = stream.set_nonblocking(true) {
+            warn!(
+                stream_id,
+                error = %err,
+                "pf: failed to set guest target reader non-blocking"
+            );
+            close_stream(stream_id, &streams);
+            let _ = write_frame(&writer, FRAME_CLOSE, stream_id, &[]);
+            return;
+        }
+
         let mut buf = [0u8; 16 * 1024];
         debug!(stream_id, "pf: guest reader thread started");
         loop {
+            if let Err(err) = wait_fd_readable(stream.as_raw_fd()) {
+                warn!(stream_id, error = %err, "pf: guest target poll failed");
+                break;
+            }
+
             match stream.read(&mut buf) {
                 Ok(0) => {
                     debug!(stream_id, "pf: guest target read EOF");
@@ -426,6 +474,7 @@ fn spawn_guest_reader(
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(err) => {
                     warn!(stream_id, error = %err, "pf: guest target read error");
                     break;
@@ -437,6 +486,33 @@ fn spawn_guest_reader(
         close_stream(stream_id, &streams);
         let _ = write_frame(&writer, FRAME_CLOSE, stream_id, &[]);
     });
+}
+
+/// Block until `fd` is readable, errored, or hung up.
+///
+/// Prefer this over a blocking `recv()` whenever another thread may `send()` on
+/// the same TSI TCP connection (#446).
+#[cfg(target_os = "linux")]
+fn wait_fd_readable(fd: std::os::fd::RawFd) -> io::Result<()> {
+    loop {
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        }];
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if rc == 0 {
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 #[cfg(target_os = "linux")]
