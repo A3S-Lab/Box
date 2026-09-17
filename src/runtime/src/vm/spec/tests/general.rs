@@ -463,6 +463,24 @@ fn test_parse_volume_mount_creates_missing_dir() {
 }
 
 #[test]
+fn prepare_volume_mount_rejects_symlink_or_reparse_host_source() {
+    let outside = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let link = parent.path().join("linked-vol");
+    if !create_dir_symlink(outside.path(), &link) {
+        return;
+    }
+    let volume = format!("{}:/data", link.display());
+    let error = VmManager::parse_volume_mount(&volume, 0, std::path::Path::new("/tmp"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("symlink/reparse") || error.contains("plain file or directory"),
+        "{error}"
+    );
+}
+
+#[test]
 fn test_resolve_oci_entrypoint_with_entrypoint_and_cmd() {
     let config = OciImageConfig {
         entrypoint: Some(vec!["/bin/app".to_string()]),
