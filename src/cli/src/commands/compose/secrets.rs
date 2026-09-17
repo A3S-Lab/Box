@@ -74,6 +74,10 @@ impl ComposeSecretLease {
         &self.identity
     }
 
+    pub(super) fn secret_root(&self) -> &std::path::Path {
+        self.store.root()
+    }
+
     pub(super) fn configure_vm(
         &self,
         manager: &mut a3s_box_runtime::VmManager,
@@ -108,6 +112,10 @@ pub(super) struct ComposeSecretLease;
 #[cfg(not(target_os = "linux"))]
 impl ComposeSecretLease {
     pub(super) fn identity(&self) -> &str {
+        unreachable!("Secret preflight rejects non-Linux Compose execution")
+    }
+
+    pub(super) fn secret_root(&self) -> &std::path::Path {
         unreachable!("Secret preflight rejects non-Linux Compose execution")
     }
 
