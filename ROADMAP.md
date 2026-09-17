@@ -914,6 +914,10 @@ guest endpoint.
   RuntimeClass integration.
 - [ ] Preserve secret authorization and materialization in Box while handing
   only bounded, non-durable attachments to OCI Runtime.
+  **Partial:** Native Linux SandboxViaOci prepare classifies managed Secret
+  binds with `mark_secret_mount` (index-only). Auth/materialization remain in
+  Box. Compose/CRI/unified-adapter and the B4 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 
 Exit gate: Compose and the supported CRI profiles use the same runtime path as
 the CLI and SDK, with no duplicate lifecycle store or runtime subprocess
