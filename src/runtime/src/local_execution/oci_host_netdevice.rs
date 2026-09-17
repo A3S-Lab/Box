@@ -1,7 +1,7 @@
 //! Stage one host veth for SandboxViaOci named-bridge under keep-authority.
 //!
-//! IPAM stays in [`NetworkStore`]. The peer stays unbridged/DOWN. Create moves
-//! the container end into the runtime network namespace via `linux.netDevices`.
+//! IPAM stays in [`NetworkStore`]. The container end stays unbridged so OCI
+//! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,28 +11,36 @@ use a3s_box_core::{
     OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::NetworkStore;
 
-const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v1";
+const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v2";
 const GUEST_IFACE_NAME: &str = "eth0";
 
-/// Durable lease for a staged host netdevice pair.
+/// Durable lease for a staged host netdevice pair on a Box bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HostNetDeviceLease {
     pub schema: String,
     pub network: String,
+    pub bridge_iface: String,
     pub container_iface: String,
     pub peer_iface: String,
     pub guest_name: String,
 }
 
 impl HostNetDeviceLease {
-    fn new(network: &str, container_iface: String, peer_iface: String) -> Self {
+    fn new(
+        network: &str,
+        bridge_iface: String,
+        container_iface: String,
+        peer_iface: String,
+    ) -> Self {
         Self {
             schema: LEASE_SCHEMA.to_string(),
             network: network.to_string(),
+            bridge_iface,
             container_iface,
             peer_iface,
             guest_name: GUEST_IFACE_NAME.to_string(),
@@ -79,10 +87,18 @@ pub(crate) fn interface_names(box_id: &str) -> ExecutionManagerResult<(String, S
     Ok((format!("bv{hex}c"), format!("bv{hex}p")))
 }
 
+/// Deterministic IFNAMSIZ-safe Linux bridge name for a NetworkStore network.
+pub(crate) fn bridge_iface_name(network_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(network_name.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("a3sb{}", &digest[..8])
+}
+
 /// Stage one veth pair for Bridge+keep-authority; return lease when staged.
 ///
-/// Non-Bridge modes return `None` without host mutation. Peer stays DOWN and
-/// unbridged so OCI Create can move the container end.
+/// Non-Bridge modes return `None` without host mutation. The container end
+/// stays unbridged (Create-movable); the peer is enslaved to the Box bridge.
 pub(crate) fn stage_for_sandbox_bundle(
     home_dir: &Path,
     box_id: &str,
@@ -116,7 +132,8 @@ pub(crate) fn stage_for_sandbox_bundle(
     })?;
     let prefix_len = prefix_len_from_subnet(&config.subnet)?;
     let (container_iface, peer_iface) = interface_names(box_id)?;
-    let lease = HostNetDeviceLease::new(network_name, container_iface, peer_iface);
+    let bridge_iface = bridge_iface_name(network_name);
+    let lease = HostNetDeviceLease::new(network_name, bridge_iface, container_iface, peer_iface);
 
     // Replace any stale lease/ifaces from a previous failed prepare.
     let _ = teardown_lease(home_dir, box_id);
@@ -146,6 +163,8 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
 
     delete_link_if_present(&lease.container_iface);
     delete_link_if_present(&lease.peer_iface);
+    // Network-scoped bridge is shared across endpoints; delete only when empty.
+    try_delete_bridge_if_idle(&lease.bridge_iface);
 
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -210,6 +229,7 @@ fn stage_veth_pair(
     endpoint: &NetworkEndpoint,
     prefix_len: u8,
 ) -> ExecutionManagerResult<()> {
+    ensure_bridge(&lease.bridge_iface)?;
     run_ip(&[
         "link",
         "add",
@@ -221,7 +241,7 @@ fn stage_veth_pair(
         &lease.peer_iface,
     ])?;
     let staged = (|| -> ExecutionManagerResult<()> {
-        run_ip(&["link", "set", &lease.peer_iface, "down"])?;
+        // Container end must remain free of a bridge master so OCI Create can move it.
         run_ip(&[
             "link",
             "set",
@@ -237,6 +257,14 @@ fn stage_veth_pair(
             &lease.container_iface,
         ])?;
         run_ip(&["link", "set", &lease.container_iface, "up"])?;
+        run_ip(&[
+            "link",
+            "set",
+            &lease.peer_iface,
+            "master",
+            &lease.bridge_iface,
+        ])?;
+        run_ip(&["link", "set", &lease.peer_iface, "up"])?;
         Ok(())
     })();
     if let Err(error) = staged {
@@ -257,6 +285,54 @@ fn stage_veth_pair(
         "SandboxViaOci host netdevice staging requires Linux".to_string(),
     ))
 }
+
+#[cfg(target_os = "linux")]
+fn ensure_bridge(bridge_iface: &str) -> ExecutionManagerResult<()> {
+    if link_exists(bridge_iface) {
+        run_ip(&["link", "set", bridge_iface, "up"])?;
+        return Ok(());
+    }
+    run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
+    run_ip(&["link", "set", bridge_iface, "up"]).map_err(|error| {
+        delete_link_if_present(bridge_iface);
+        error
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn link_exists(name: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", "dev", name])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn try_delete_bridge_if_idle(bridge_iface: &str) {
+    if !link_exists(bridge_iface) {
+        return;
+    }
+    // `ip -o link show master <br>` lists slaves; empty means idle fabric.
+    let output = Command::new("ip")
+        .args(["-o", "link", "show", "master", bridge_iface])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+        return;
+    }
+    let _ = Command::new("ip")
+        .args(["link", "del", bridge_iface])
+        .output();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_delete_bridge_if_idle(_bridge_iface: &str) {}
 
 #[cfg(target_os = "linux")]
 fn run_ip(args: &[&str]) -> ExecutionManagerResult<()> {
@@ -302,6 +378,16 @@ mod tests {
     }
 
     #[test]
+    fn bridge_iface_name_is_stable_and_ifnamsiz_safe() {
+        let a = bridge_iface_name("dev");
+        let b = bridge_iface_name("dev");
+        assert_eq!(a, b);
+        assert!(a.starts_with("a3sb"));
+        assert_eq!(a.len(), 12);
+        assert_ne!(bridge_iface_name("dev"), bridge_iface_name("prod"));
+    }
+
+    #[test]
     fn bridge_without_keep_authority_fails_closed() {
         std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         let error = require_keep_authority_for_bridge(&NetworkMode::Bridge {
@@ -326,12 +412,18 @@ mod tests {
     fn lease_round_trip() {
         let home = tempfile::tempdir().unwrap();
         let id = "22222222-2222-4222-8222-222222222222";
-        let lease = HostNetDeviceLease::new("dev", "bv22222222c".into(), "bv22222222p".into());
+        let lease = HostNetDeviceLease::new(
+            "dev",
+            bridge_iface_name("dev"),
+            "bv22222222c".into(),
+            "bv22222222p".into(),
+        );
         persist_lease(home.path(), id, &lease).unwrap();
         let loaded: HostNetDeviceLease =
             serde_json::from_str(&std::fs::read_to_string(lease_path(home.path(), id)).unwrap())
                 .unwrap();
         assert_eq!(loaded, lease);
+        assert_eq!(loaded.schema, LEASE_SCHEMA);
         // Teardown without real ifaces still removes the lease file.
         teardown_lease(home.path(), id).unwrap();
         assert!(!lease_path(home.path(), id).exists());
