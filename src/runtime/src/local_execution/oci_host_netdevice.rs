@@ -2,22 +2,32 @@
 //!
 //! IPAM stays in [`NetworkStore`]. The container end stays unbridged so OCI
 //! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
-//! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE.
+//! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE. Optional
+//! static TCP published ports install per-box DNAT (+ localhost OUTPUT).
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use a3s_box_core::{
-    ExecutionManagerError, ExecutionManagerResult, NetworkEndpoint, NetworkMode,
-    OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
+    parse_port_mapping, ExecutionManagerError, ExecutionManagerResult, NetworkEndpoint,
+    NetworkMode, PortProtocol, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::NetworkStore;
 
-const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v3";
+const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v4";
 const GUEST_IFACE_NAME: &str = "eth0";
+
+/// One static TCP host→container publication persisted on the lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishedTcpPort {
+    pub host_port: u16,
+    pub guest_port: u16,
+}
 
 /// Durable lease for a staged host netdevice pair on a Box bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +40,9 @@ pub(crate) struct HostNetDeviceLease {
     pub container_iface: String,
     pub peer_iface: String,
     pub guest_name: String,
+    pub container_ip: String,
+    #[serde(default)]
+    pub published_tcp: Vec<PublishedTcpPort>,
 }
 
 impl HostNetDeviceLease {
@@ -39,6 +52,8 @@ impl HostNetDeviceLease {
         bridge_iface: String,
         container_iface: String,
         peer_iface: String,
+        container_ip: Ipv4Addr,
+        published_tcp: Vec<PublishedTcpPort>,
     ) -> Self {
         Self {
             schema: LEASE_SCHEMA.to_string(),
@@ -48,6 +63,8 @@ impl HostNetDeviceLease {
             container_iface,
             peer_iface,
             guest_name: GUEST_IFACE_NAME.to_string(),
+            container_ip: container_ip.to_string(),
+            published_tcp,
         }
     }
 }
@@ -103,15 +120,23 @@ pub(crate) fn bridge_iface_name(network_name: &str) -> String {
 ///
 /// Non-Bridge modes return `None` without host mutation. The container end
 /// stays unbridged (Create-movable); the peer is enslaved to the Box bridge.
+/// Optional static TCP `port_map` installs DNAT to the endpoint IP.
 pub(crate) fn stage_for_sandbox_bundle(
     home_dir: &Path,
     box_id: &str,
     network: &NetworkMode,
+    port_map: &[String],
 ) -> ExecutionManagerResult<Option<HostNetDeviceLease>> {
     let NetworkMode::Bridge {
         network: network_name,
     } = network
     else {
+        if !port_map.is_empty() {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "SandboxViaOci published ports require NetworkMode::Bridge under keep-authority"
+                    .to_string(),
+            ));
+        }
         return Ok(None);
     };
     require_keep_authority_for_bridge(network)?;
@@ -134,6 +159,7 @@ pub(crate) fn stage_for_sandbox_bundle(
             "box '{box_id}' is not connected to network '{network_name}'; resource guard must connect before prepare"
         ))
     })?;
+    let published_tcp = parse_static_published_tcp(port_map)?;
     let prefix_len = prefix_len_from_subnet(&config.subnet)?;
     let (container_iface, peer_iface) = interface_names(box_id)?;
     let bridge_iface = bridge_iface_name(network_name);
@@ -143,12 +169,15 @@ pub(crate) fn stage_for_sandbox_bundle(
         bridge_iface,
         container_iface,
         peer_iface,
+        endpoint.ip_address,
+        published_tcp,
     );
 
     // Replace any stale lease/ifaces from a previous failed prepare.
     let _ = teardown_lease(home_dir, box_id);
 
     stage_veth_pair(&lease, endpoint, prefix_len, config.gateway)?;
+    ensure_published_tcp_dnat(&lease)?;
     persist_lease(home_dir, box_id, &lease)?;
     Ok(Some(lease))
 }
@@ -171,6 +200,7 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
         }
     };
 
+    remove_published_tcp_dnat(&lease);
     delete_link_if_present(&lease.container_iface);
     delete_link_if_present(&lease.peer_iface);
     // Network-scoped bridge is shared across endpoints; delete only when empty.
@@ -351,6 +381,228 @@ fn ensure_bridge_egress_nat(subnet: &str, bridge_iface: &str) -> ExecutionManage
         "-j",
         "MASQUERADE",
     ])
+}
+
+fn parse_static_published_tcp(
+    port_map: &[String],
+) -> ExecutionManagerResult<Vec<PublishedTcpPort>> {
+    let mut published = Vec::with_capacity(port_map.len());
+    for entry in port_map {
+        let mapping = parse_port_mapping(entry).map_err(ExecutionManagerError::InvalidRequest)?;
+        if mapping.protocol != PortProtocol::Tcp {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "SandboxViaOci published ports only support TCP; got '{entry}'"
+            )));
+        }
+        if mapping.host_port == 0 {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "SandboxViaOci published ports reject host_port=0 auto-assign in '{entry}'"
+            )));
+        }
+        published.push(PublishedTcpPort {
+            host_port: mapping.host_port,
+            guest_port: mapping.guest_port,
+        });
+    }
+    Ok(published)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_published_tcp_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
+    if lease.published_tcp.is_empty() {
+        return Ok(());
+    }
+    enable_ipv4_forwarding()?;
+    for mapping in &lease.published_tcp {
+        ensure_one_published_tcp_dnat(&lease.container_ip, mapping)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_published_tcp_dnat(_lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_one_published_tcp_dnat(
+    container_ip: &str,
+    mapping: &PublishedTcpPort,
+) -> ExecutionManagerResult<()> {
+    let host = mapping.host_port.to_string();
+    let dest = format!("{container_ip}:{}", mapping.guest_port);
+    let guest = mapping.guest_port.to_string();
+
+    // Host LAN / non-local arrivals.
+    if !iptables_check(&[
+        "-t",
+        "nat",
+        "-C",
+        "PREROUTING",
+        "-p",
+        "tcp",
+        "--dport",
+        &host,
+        "-j",
+        "DNAT",
+        "--to-destination",
+        &dest,
+    ])? {
+        run_iptables(&[
+            "-t",
+            "nat",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "--dport",
+            &host,
+            "-j",
+            "DNAT",
+            "--to-destination",
+            &dest,
+        ])?;
+    }
+
+    // localhost:HOST on the host.
+    if !iptables_check(&[
+        "-t",
+        "nat",
+        "-C",
+        "OUTPUT",
+        "-d",
+        "127.0.0.1",
+        "-p",
+        "tcp",
+        "--dport",
+        &host,
+        "-j",
+        "DNAT",
+        "--to-destination",
+        &dest,
+    ])? {
+        run_iptables(&[
+            "-t",
+            "nat",
+            "-A",
+            "OUTPUT",
+            "-d",
+            "127.0.0.1",
+            "-p",
+            "tcp",
+            "--dport",
+            &host,
+            "-j",
+            "DNAT",
+            "--to-destination",
+            &dest,
+        ])?;
+    }
+
+    // Don't assume filter FORWARD is ACCEPT.
+    if !iptables_check(&[
+        "-C",
+        "FORWARD",
+        "-d",
+        container_ip,
+        "-p",
+        "tcp",
+        "--dport",
+        &guest,
+        "-j",
+        "ACCEPT",
+    ])? {
+        run_iptables(&[
+            "-A",
+            "FORWARD",
+            "-d",
+            container_ip,
+            "-p",
+            "tcp",
+            "--dport",
+            &guest,
+            "-j",
+            "ACCEPT",
+        ])?;
+    }
+    Ok(())
+}
+
+fn remove_published_tcp_dnat(lease: &HostNetDeviceLease) {
+    #[cfg(target_os = "linux")]
+    {
+        for mapping in &lease.published_tcp {
+            let host = mapping.host_port.to_string();
+            let dest = format!("{}:{}", lease.container_ip, mapping.guest_port);
+            let guest = mapping.guest_port.to_string();
+            let _ = Command::new("iptables")
+                .args([
+                    "-t",
+                    "nat",
+                    "-D",
+                    "PREROUTING",
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &host,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
+                ])
+                .output();
+            let _ = Command::new("iptables")
+                .args([
+                    "-t",
+                    "nat",
+                    "-D",
+                    "OUTPUT",
+                    "-d",
+                    "127.0.0.1",
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &host,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
+                ])
+                .output();
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    "FORWARD",
+                    "-d",
+                    &lease.container_ip,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &guest,
+                    "-j",
+                    "ACCEPT",
+                ])
+                .output();
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = lease;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn iptables_check(args: &[&str]) -> ExecutionManagerResult<bool> {
+    let output = Command::new("iptables")
+        .args(args)
+        .output()
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to query `iptables {}`: {error}",
+                args.join(" ")
+            ))
+        })?;
+    Ok(output.status.success())
 }
 
 #[cfg(target_os = "linux")]
@@ -552,6 +804,11 @@ mod tests {
             bridge_iface_name("dev"),
             "bv22222222c".into(),
             "bv22222222p".into(),
+            "10.88.0.2".parse().unwrap(),
+            vec![PublishedTcpPort {
+                host_port: 18080,
+                guest_port: 80,
+            }],
         );
         persist_lease(home.path(), id, &lease).unwrap();
         let loaded: HostNetDeviceLease =
@@ -560,9 +817,17 @@ mod tests {
         assert_eq!(loaded, lease);
         assert_eq!(loaded.schema, LEASE_SCHEMA);
         assert_eq!(loaded.subnet, "10.88.0.0/24");
+        assert_eq!(loaded.container_ip, "10.88.0.2");
+        assert_eq!(loaded.published_tcp.len(), 1);
         // Teardown without real ifaces still removes the lease file.
         teardown_lease(home.path(), id).unwrap();
         assert!(!lease_path(home.path(), id).exists());
+    }
+
+    #[test]
+    fn parse_static_published_tcp_rejects_host_port_zero() {
+        let error = parse_static_published_tcp(&["0:80".into()]).unwrap_err();
+        assert!(error.to_string().contains("host_port=0"), "{error}");
     }
 
     #[test]

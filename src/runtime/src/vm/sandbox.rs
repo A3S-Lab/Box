@@ -486,8 +486,12 @@ impl VmManager {
                 layout.prefer_image_rootfs_metadata,
             )?;
 
-            let host_net_device =
-                stage_sandbox_host_net_device(&self.home_dir, &self.box_id, &self.config.network)?;
+            let host_net_device = stage_sandbox_host_net_device(
+                &self.home_dir,
+                &self.box_id,
+                &self.config.network,
+                &self.config.port_map,
+            )?;
             let bundle_spec = SandboxBundleSpec {
                 box_id: self.box_id.clone(),
                 rootfs_path: layout.rootfs_path.clone(),
@@ -749,11 +753,12 @@ fn stage_sandbox_host_net_device(
     home_dir: &Path,
     box_id: &str,
     network: &a3s_box_core::NetworkMode,
+    port_map: &[String],
 ) -> Result<Option<String>> {
     #[cfg(all(feature = "vm", target_os = "linux"))]
     {
         match crate::local_execution::oci_host_netdevice::stage_for_sandbox_bundle(
-            home_dir, box_id, network,
+            home_dir, box_id, network, port_map,
         ) {
             Ok(Some(lease)) => Ok(Some(lease.container_iface)),
             Ok(None) => Ok(None),
@@ -762,10 +767,15 @@ fn stage_sandbox_host_net_device(
     }
     #[cfg(not(all(feature = "vm", target_os = "linux")))]
     {
-        let _ = (home_dir, box_id);
+        let _ = (home_dir, box_id, port_map);
         if matches!(network, a3s_box_core::NetworkMode::Bridge { .. }) {
             return Err(BoxError::NetworkError(
                 "SandboxViaOci host netdevice staging requires Linux keep-authority".to_string(),
+            ));
+        }
+        if !port_map.is_empty() {
+            return Err(BoxError::NetworkError(
+                "SandboxViaOci published ports require Linux keep-authority Bridge".to_string(),
             ));
         }
         Ok(None)

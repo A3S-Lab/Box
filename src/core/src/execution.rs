@@ -150,7 +150,12 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
         unsupported.push("vsock sidecars");
     }
     if !config.port_map.is_empty() {
-        unsupported.push("published ports");
+        // Published ports for SandboxViaOci require Bridge + keep-authority (prepare installs DNAT).
+        if !(matches!(config.network, NetworkMode::Bridge { .. })
+            && crate::network::sandbox_named_bridge_opt_in_enabled())
+        {
+            unsupported.push("published ports");
+        }
     }
     // Named bridge for SandboxViaOci is opt-in via keep-authority (matched root).
     // Prepare still fail-closes without a Privileged owner; GA rootless stays loopback-only.
