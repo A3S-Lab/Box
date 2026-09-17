@@ -855,6 +855,12 @@ open and harness reports still keep
   `b2_process_session_recovery_closed`.
 - [ ] Keep network objects, IPAM, DNS, aliases, and publication policy in Box;
   delegate namespace, VM NIC, and guest transport attachment to OCI Runtime.
+  **Partial:** Native Linux SandboxViaOci prepare classifies any prepared
+  `linux.netDevices` into `a3s.oci.attachments.v3` (caller-owned identities;
+  cleanup mode follows namespace path). Today's Sandbox bundles still omit
+  netDevices (no-op). Host-interface staging, bridge/CNI product wiring,
+  rootless/MicroVM/Windows parity, and the B3 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product

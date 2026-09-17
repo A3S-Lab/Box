@@ -281,6 +281,19 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
                 ));
             }
         };
+        let attachments = match super::oci_network_attachments::attach_box_owned_linux_network(
+            &bundle,
+            attachments,
+            record,
+        ) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                return Err(cleanup_after_prepare_failure(
+                    &manager,
+                    format!("failed to attach Box-owned Linux network: {error}"),
+                ));
+            }
+        };
         let mut result = match OciPreparedExecution::with_attachments(
             bundle,
             attachments,

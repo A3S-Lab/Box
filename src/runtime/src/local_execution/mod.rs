@@ -74,6 +74,8 @@ mod oci_whpx_owner {
         Ok(format!(r"\\.\pipe\a3s-box-whpx-owner-{}", &digest[..32]))
     }
 }
+#[cfg(feature = "vm")]
+mod oci_network_attachments;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 mod oci_owner;
 #[cfg(feature = "vm")]
@@ -81,7 +83,6 @@ pub(crate) mod oci_portable_rootfs;
 #[cfg(feature = "vm")]
 mod oci_production;
 mod oci_session;
-#[cfg(feature = "vm")]
 mod oci_storage_attachments;
 mod operations;
 mod port;
