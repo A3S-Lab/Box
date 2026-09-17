@@ -120,7 +120,7 @@ pub(super) fn creation_request_for(
         workdir: spec.process.working_directory.clone(),
         volumes,
         extra_env,
-        network: compile_network_mode(&spec.network.mode)?,
+        network: compile_network_mode(&spec.network.mode, execution_isolation)?,
         tmpfs,
         resource_limits: ResourceLimits {
             pids_limit: Some(u64::from(spec.resources.pids)),
@@ -258,7 +258,7 @@ fn validate_supported_shape(
             spec.isolation
         )]));
     }
-    compile_network_mode(&spec.network.mode)?;
+    compile_network_mode(&spec.network.mode, execution_isolation)?;
     if spec
         .network
         .ports
@@ -292,15 +292,26 @@ fn validate_supported_shape(
     }
 }
 
-fn compile_network_mode(mode: &RuntimeNetworkMode) -> RuntimeResult<NetworkMode> {
+fn compile_network_mode(
+    mode: &RuntimeNetworkMode,
+    execution_isolation: ExecutionIsolation,
+) -> RuntimeResult<NetworkMode> {
     match mode {
         // Runtime Service reachability is provided by the generation-fenced
         // vsock connector. Enabling TSI here would redirect the guest-side
         // loopback connection to the host instead of the local workload.
         RuntimeNetworkMode::None | RuntimeNetworkMode::Service => Ok(NetworkMode::None),
-        // Outbound uses default TSI socket proxying so the guest can reach
-        // host/external destinations without publishing Service endpoints.
-        RuntimeNetworkMode::Outbound => Ok(NetworkMode::Tsi),
+        // Outbound is libkrun TSI socket-proxy egress. SandboxViaOci keeps a
+        // private netns with loopback only (no TSI), so advertising or mapping
+        // Outbound there would be a false capability claim.
+        RuntimeNetworkMode::Outbound => {
+            if execution_isolation != ExecutionIsolation::Microvm {
+                return Err(RuntimeError::UnsupportedCapabilities(vec![
+                    "network_mode:Outbound".into(),
+                ]));
+            }
+            Ok(NetworkMode::Tsi)
+        }
     }
 }
 
