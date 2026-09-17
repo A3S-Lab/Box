@@ -32,8 +32,9 @@ pub fn spawn_health_checker(
 ) -> Result<tokio::task::JoinHandle<()>, String> {
     #[cfg(not(windows))]
     {
+        let _ = exec_socket_path;
         Ok(tokio::spawn(async move {
-            run_health_loop(box_id, exec_socket_path, health_check, None).await;
+            run_health_loop(box_id, health_check, None).await;
         }))
     }
     #[cfg(windows)]
@@ -141,13 +142,7 @@ pub(crate) async fn run_detached_health_worker(
         return Ok(());
     };
 
-    run_health_loop(
-        box_id,
-        record.exec_socket_path.clone(),
-        health_check,
-        Some(generation),
-    )
-    .await;
+    run_health_loop(box_id, health_check, Some(generation)).await;
     Ok(())
 }
 
@@ -225,12 +220,7 @@ pub(crate) fn detached_health_worker_active(record: &BoxRecord) -> bool {
 }
 
 #[cfg(not(windows))]
-async fn run_health_loop(
-    box_id: String,
-    exec_socket_path: PathBuf,
-    hc: HealthCheck,
-    expected_generation: Option<i64>,
-) {
+async fn run_health_loop(box_id: String, hc: HealthCheck, expected_generation: Option<i64>) {
     // Schedule the first probe at the end of start_period instead of waiting
     // for an additional interval. This matches the runtime health scheduler
     // and removes an avoidable interval from Compose dependency convergence.
