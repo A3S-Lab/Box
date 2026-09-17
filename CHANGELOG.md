@@ -20,6 +20,13 @@ All notable changes to A3S Box will be documented in this file.
   endpoint IP. Rejects `host_port=0`. Compose sandbox published ports stay
   fail-closed. Does **not** close ROADMAP B3/B4/B2 or claim UDP/auto-assign/
   rootless publish.
+
+### Fixed
+
+- Native Linux `box-owner.json` omits `keep_network_device_authority` when
+  false (legacy field set); local SDK smoke accepts the optional bool when
+  present. Restores Python owner-death evidence checks after keep-authority
+  records started serializing `false`. Does **not** close B2.
 - Keep-authority SandboxViaOci Bridge guest DNS files: Bridge prepare writes
   NetworkStore peer discovery into `/etc/hosts` (plus `add-host` / hostname
   aliases) instead of standalone-only hosts; `/etc/resolv.conf` continues to

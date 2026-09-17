@@ -199,7 +199,7 @@ def load_owner_record(host_root: Path) -> dict:
     )
     assert stat.S_IMODE(root_metadata.st_mode) == 0o700, f"{host_root} is not mode 0700"
     record = read_private_json(host_root / "box-owner.json")
-    assert set(record) == {
+    required_fields = {
         "schema",
         "pid",
         "pid_start_time",
@@ -209,6 +209,18 @@ def load_owner_record(host_root: Path) -> dict:
         "agent_sha256",
         "socket_path",
     }
+    optional_fields = {"keep_network_device_authority"}
+    actual_fields = set(record)
+    assert required_fields <= actual_fields, (
+        f"missing box-owner fields: {sorted(required_fields - actual_fields)}"
+    )
+    assert actual_fields <= required_fields | optional_fields, (
+        f"unexpected box-owner fields: {sorted(actual_fields - required_fields - optional_fields)}"
+    )
+    if "keep_network_device_authority" in record:
+        assert isinstance(record["keep_network_device_authority"], bool), (
+            "keep_network_device_authority must be a bool"
+        )
     assert record["schema"] == "a3s.box.native-linux-oci-owner.v1"
     assert Path(record["runtime_path"]).resolve() == Path(os.environ["A3S_BOX_OCI_RUNTIME_PATH"]).resolve()
     assert Path(record["agent_path"]).resolve() == Path(os.environ["A3S_BOX_OCI_AGENT_PATH"]).resolve()
