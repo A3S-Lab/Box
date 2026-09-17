@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` spawns the Native
+  Linux SandboxViaOci owner without `--delegated-cgroup-root` when matched root
+  (`euid==uid==0`), so Hello can advertise `a3s.oci.attachments.v3`. Unset keeps
+  the Sandbox GA delegated rootless/`base_v2` default. Mixing modes against a
+  live owner fail-closes. Does **not** emit host netDevices, wire bridge/CNI,
+  close ROADMAP B3/B2, or change GA default.
 - CLI health probes for OCI-routed managed boxes use session exec (same path as
   `a3s-box exec`) instead of the empty SandboxViaOci exec socket. Compose
   `--isolation sandbox` healthchecks and `service_healthy` waits are enabled
