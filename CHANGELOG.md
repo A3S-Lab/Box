@@ -12,6 +12,10 @@ All notable changes to A3S Box will be documented in this file.
   uses the managed pause/resume path so generation fencing stays single-owner.
   Does **not** close ROADMAP B3, invent Sandbox guest archive sockets, or claim
   Windows/live MicroVM commit changes.
+- `a3s-box export` and `a3s-box diff` on a running Linux SandboxViaOci box reuse
+  the same host-rootfs capture path (with managed pause) instead of failing on
+  an empty guest archive socket. Does **not** close ROADMAP B3 or change
+  MicroVM guest-archive export/diff.
 
 ## [3.2.7] — 2026-09-17
 

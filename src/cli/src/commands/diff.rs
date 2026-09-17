@@ -39,7 +39,7 @@ pub struct DiffArgs {
 pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     let initial_state = StateFile::load_default()?;
     let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
-    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
     let record = state.find_by_id(&box_id).ok_or_else(|| {
         format!(
@@ -62,10 +62,17 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
 
     // A guest-native block root has no host directory after ownership handoff.
-    // Running boxes therefore stream one coherent, guest-metadata archive over
-    // the exec channel. Directory-backed and stopped compatibility roots keep
-    // the local walk path.
+    // Running MicroVMs stream one coherent guest-metadata archive over the exec
+    // channel; SandboxViaOci walks the prepared host rootfs instead. Directory-
+    // backed and stopped compatibility roots keep the local walk path.
+    // Managed Sandbox pause uses the same lifecycle lock — release before that path.
+    let release_for_sandbox_host = record.status == "running" && record.isolation.is_sandbox();
+    let mut lifecycle_lock = Some(lifecycle_lock);
+    if release_for_sandbox_host {
+        drop(lifecycle_lock.take());
+    }
     let current = current_rootfs(record, &args.name).await?;
+    drop(lifecycle_lock);
 
     // Compute diff
     let mut changes = Vec::new();
@@ -119,6 +126,9 @@ async fn current_rootfs(
                 record.name
             )
             .into());
+        }
+        if record.isolation.is_sandbox() {
+            return current_sandbox_host_rootfs(record).await;
         }
         #[cfg(unix)]
         {
@@ -179,6 +189,27 @@ async fn current_rootfs(
         )
     })?;
     walk_dir(&rootfs_dir)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn current_sandbox_host_rootfs(
+    record: &crate::state::BoxRecord,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let archive_path = temporary.path().join("rootfs.tar");
+    super::commit::capture_live_host_rootfs_tar(record, &archive_path, true).await?;
+    walk_tar_archive(&archive_path)
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+async fn current_sandbox_host_rootfs(
+    record: &crate::state::BoxRecord,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    Err(format!(
+        "Live Sandbox host-rootfs diff is unavailable for box '{}' on this platform",
+        record.name
+    )
+    .into())
 }
 
 #[cfg(unix)]
