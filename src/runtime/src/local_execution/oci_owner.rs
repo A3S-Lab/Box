@@ -34,7 +34,8 @@ struct NativeLinuxOwnerRecord {
     agent_sha256: String,
     socket_path: PathBuf,
     /// Whether this owner retained Privileged network-device authority.
-    #[serde(default)]
+    /// Omitted when false so GA records keep the legacy field set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     keep_network_device_authority: bool,
 }
 
@@ -1069,8 +1070,24 @@ mod tests {
         let socket = PathBuf::from("/tmp/a3s-owner/runtime.sock");
         let record = NativeLinuxOwnerRecord::new(42, 7, &artifacts, socket, true);
         let encoded = serde_json::to_string(&record).unwrap();
+        assert!(
+            encoded.contains("keep_network_device_authority"),
+            "true keep-authority must serialize: {encoded}"
+        );
         let decoded: NativeLinuxOwnerRecord = serde_json::from_str(&encoded).unwrap();
         assert!(decoded.keep_network_device_authority);
+        let off = NativeLinuxOwnerRecord::new(
+            42,
+            7,
+            &artifacts,
+            PathBuf::from("/tmp/a3s-owner/runtime.sock"),
+            false,
+        );
+        let encoded_off = serde_json::to_string(&off).unwrap();
+        assert!(
+            !encoded_off.contains("keep_network_device_authority"),
+            "false keep-authority must omit the field for legacy field-set: {encoded_off}"
+        );
         let legacy = r#"{
             "schema":"a3s.box.native-linux-oci-owner.v1",
             "pid":1,
