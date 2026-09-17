@@ -88,6 +88,8 @@ pub use local_execution::{
     OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint,
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
+#[cfg(target_os = "linux")]
+pub use local_execution::capture_sandbox_host_rootfs_for_commit;
 #[cfg(feature = "vm")]
 pub use local_execution::{
     LinuxKvmOciBundleProvider, LinuxKvmOciMigrationConfig, NativeLinuxOciBundleProvider,

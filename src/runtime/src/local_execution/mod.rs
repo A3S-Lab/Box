@@ -135,6 +135,8 @@ pub use oci_production::{
 };
 use record::{build_managed_record, status_from_record};
 pub use router::{LocalExecutionBackendRouter, OciMigrationPolicy};
+#[cfg(target_os = "linux")]
+pub use snapshot::capture_sandbox_host_rootfs_for_commit;
 use store::RuntimeUpdate;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 pub(crate) use transient_registry_auth::{TransientRegistryAuthBroker, TransientRegistryAuthLease};

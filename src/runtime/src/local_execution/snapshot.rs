@@ -7,6 +7,8 @@ use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManagerError,
     ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, OperationId,
 };
+#[cfg(target_os = "linux")]
+use a3s_box_core::ExecutionIsolation;
 
 use super::create::startup_terminal_state;
 use super::record::lease_from_record;
@@ -685,6 +687,42 @@ fn execution_state(state: ManagedExecutionState) -> ExecutionManagerResult<Execu
             "invalid stable snapshot state {state}"
         ))),
     }
+}
+
+/// Capture host-visible Sandbox rootfs metadata for a running managed box.
+///
+/// Used by `a3s-box commit` when SandboxViaOci has no guest archive socket: the
+/// prepared host rootfs is the authoritative filesystem, walked with the exact
+/// OCI UID/GID mappings (same path as managed filesystem snapshots).
+#[cfg(target_os = "linux")]
+pub fn capture_sandbox_host_rootfs_for_commit(
+    record: &BoxRecord,
+) -> ExecutionManagerResult<(
+    std::path::PathBuf,
+    a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+)> {
+    if record.isolation != ExecutionIsolation::Sandbox {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "execution {} is not a Sandbox isolation host-rootfs commit target",
+            record.id
+        )));
+    }
+    if record.managed_execution.is_none() {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "execution {} has no managed Sandbox metadata for host-rootfs commit",
+            record.id
+        )));
+    }
+    let rootfs = super::prepared_rootfs::resolve_prepared_rootfs(&record.box_dir).ok_or_else(
+        || {
+            ExecutionManagerError::Unavailable(format!(
+                "execution {} has no populated managed rootfs for host-rootfs commit",
+                record.id
+            ))
+        },
+    )?;
+    let manifest = capture_sandbox_rootfs_metadata(record, &rootfs)?;
+    Ok((rootfs, manifest))
 }
 
 #[cfg(target_os = "linux")]

@@ -40,7 +40,10 @@ pub struct CommitArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommitCaptureMode {
+    /// MicroVM guest archive over the exec socket.
     LiveGuest,
+    /// SandboxViaOci host-visible prepared rootfs (no guest archive socket).
+    LiveHostRootfs,
     OfflineDirectory,
     OfflineGuestNative,
 }
@@ -100,18 +103,32 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     let image_dir = tmp.path();
     let rootfs_tar = image_dir.join("rootfs.tar");
 
-    capture_rootfs_tar(
-        record,
-        rootfs_dir.as_deref(),
-        &rootfs_tar,
-        args.pause,
-        capture_mode,
-    )
-    .await?;
-    // Detach an offline platform rootfs before allowing a waiting start to use
-    // it, then release the lifecycle lock once no further rootfs reads occur.
-    drop(attached_rootfs);
-    drop(lifecycle_lock);
+    // Managed Sandbox pause/resume takes the same cross-process lifecycle lock.
+    // Release the CLI guard before that path so generation fencing stays single-owner.
+    if capture_mode == CommitCaptureMode::LiveHostRootfs {
+        drop(lifecycle_lock);
+        capture_rootfs_tar(
+            record,
+            rootfs_dir.as_deref(),
+            &rootfs_tar,
+            args.pause,
+            capture_mode,
+        )
+        .await?;
+    } else {
+        capture_rootfs_tar(
+            record,
+            rootfs_dir.as_deref(),
+            &rootfs_tar,
+            args.pause,
+            capture_mode,
+        )
+        .await?;
+        // Detach an offline platform rootfs before allowing a waiting start to use
+        // it, then release the lifecycle lock once no further rootfs reads occur.
+        drop(attached_rootfs);
+        drop(lifecycle_lock);
+    }
 
     // Build OCI image layout
     build_oci_image_from_tar(
@@ -168,6 +185,11 @@ fn commit_capture_mode(
                 )
                 .into());
             }
+            // SandboxViaOci leaves exec_socket_path empty: the prepared host
+            // rootfs is the commit source (same walk as managed snapshots).
+            if record.isolation.is_sandbox() {
+                return Ok(CommitCaptureMode::LiveHostRootfs);
+            }
             return Ok(CommitCaptureMode::LiveGuest);
         }
     }
@@ -187,6 +209,10 @@ async fn capture_rootfs_tar(
     pause: bool,
     capture_mode: CommitCaptureMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if capture_mode == CommitCaptureMode::LiveHostRootfs {
+        return capture_live_host_rootfs_tar(record, output, pause).await;
+    }
+
     if capture_mode == CommitCaptureMode::LiveGuest && record.exec_socket_path.exists() {
         let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
         let mut file = tokio::fs::File::create(output).await?;
@@ -221,6 +247,93 @@ async fn capture_rootfs_tar(
     })?;
     let manifest = read_guest_rootfs_metadata(rootfs_dir)?;
     create_tar_from_guest_metadata(rootfs_dir, &manifest, output)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn capture_live_host_rootfs_tar(
+    record: &crate::state::BoxRecord,
+    output: &Path,
+    pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::{ExecutionId, ExecutionManager};
+    use a3s_box_runtime::ManagedExecutionState;
+
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        format!(
+            "Cannot commit running Sandbox box '{}' because it has no managed lifecycle metadata",
+            record.name
+        )
+    })?;
+    let execution_id = ExecutionId::new(record.id.clone())?;
+    let home = a3s_box_core::dirs_home();
+    let manager = super::configured_local_execution_manager(&home).await?;
+
+    let managed_state = record.managed_state()?.ok_or_else(|| {
+        format!(
+            "Cannot commit running Sandbox box '{}' because managed state is missing",
+            record.name
+        )
+    })?;
+
+    if !(pause && managed_state == ManagedExecutionState::Running) {
+        return capture_paused_or_running_host_rootfs(record, output);
+    }
+
+    let mut generation = metadata.generation;
+    manager.pause(&execution_id, generation, true).await?;
+    let refreshed = StateFile::load_default()?;
+    let paused_record = refreshed.find_by_id(&record.id).ok_or_else(|| {
+        format!(
+            "Box '{}' disappeared while pausing for host-rootfs commit",
+            record.name
+        )
+    })?;
+    generation = paused_record
+        .managed_execution
+        .as_ref()
+        .map(|meta| meta.generation)
+        .ok_or_else(|| {
+            format!(
+                "Box '{}' lost managed metadata while pausing for host-rootfs commit",
+                record.name
+            )
+        })?;
+    let capture_result = capture_paused_or_running_host_rootfs(paused_record, output);
+    if let Err(error) = capture_result {
+        // Best-effort resume so a failed tar does not leave the box paused.
+        let _ = manager.resume(&execution_id, generation).await;
+        return Err(error);
+    }
+    manager.resume(&execution_id, generation).await?;
+    Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn capture_paused_or_running_host_rootfs(
+    record: &crate::state::BoxRecord,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (rootfs, manifest) =
+        a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record).map_err(|error| {
+            format!(
+                "Cannot capture Sandbox host rootfs for box '{}': {error}",
+                record.name
+            )
+        })?;
+    create_tar_from_guest_metadata(&rootfs, &manifest, output)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+async fn capture_live_host_rootfs_tar(
+    record: &crate::state::BoxRecord,
+    _output: &Path,
+    _pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(format!(
+        "Cannot commit running Sandbox box '{}' because host-rootfs commit requires Linux",
+        record.name
+    )
+    .into())
 }
 
 #[cfg(windows)]
