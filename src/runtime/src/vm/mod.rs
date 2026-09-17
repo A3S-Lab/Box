@@ -22,6 +22,7 @@ pub(crate) use layout::{
     legacy_sandbox_runtime_root, persistent_rootfs_generation_exists, runtime_socket_dir,
     sandbox_runtime_root,
 };
+pub(crate) use spec::cleanup_virtiofs_ro_shares;
 pub use maintenance::archive_stopped_guest_native_rootfs;
 
 use std::path::{Path, PathBuf};

@@ -951,7 +951,10 @@ impl VmManager {
     }
 }
 
+mod virtiofs_ro;
 mod volumes;
+
+pub(crate) use virtiofs_ro::cleanup_virtiofs_ro_shares;
 
 #[cfg(test)]
 #[path = "spec/tests.rs"]

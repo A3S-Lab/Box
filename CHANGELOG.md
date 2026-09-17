@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux MicroVM `:ro` volumes stage a private host bind remounted `MS_RDONLY`
+  before virtio-fs attach (guest `MS_RDONLY` alone is not host write denial).
+  Aligns with SandboxViaOci RO attachment aliases. Non-Linux remains
+  guest-honor-only until native share denial exists. Does **not** invent
+  Windows durable POSIX UID/GID on virtio-fs, close ROADMAP B3/B2, or claim
+  UDP/publish gates.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
