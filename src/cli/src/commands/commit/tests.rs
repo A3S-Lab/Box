@@ -428,6 +428,45 @@ fn paused_microvm_commit_fails_closed() {
     assert!(error.contains("paused MicroVM"));
 }
 
+#[cfg(all(unix, target_os = "linux"))]
+#[test]
+fn stopped_managed_sandbox_selects_host_rootfs_commit() {
+    use crate::test_helpers::fixtures::make_record;
+    use a3s_box_core::{
+        BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, OperationId,
+    };
+    use a3s_box_runtime::ManagedExecutionMetadata;
+    use std::collections::BTreeMap;
+
+    let id = "11111111-1111-4111-8111-111111111111";
+    let mut sandbox = make_record(id, "sandbox", "stopped", None);
+    sandbox.isolation = ExecutionIsolation::Sandbox;
+    sandbox.exec_socket_path = std::path::PathBuf::new();
+    sandbox.managed_execution = Some(
+        ManagedExecutionMetadata::new(
+            OperationId::new("operation-create").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "external-1".to_string(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Sandbox,
+                    image: sandbox.image.clone(),
+                    ..Default::default()
+                },
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        commit_capture_mode(&sandbox).unwrap(),
+        CommitCaptureMode::StoppedHostRootfs
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn running_microvm_selects_guest_archive_commit() {

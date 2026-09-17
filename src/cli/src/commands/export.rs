@@ -42,12 +42,16 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
         )
         .into());
     } else {
-        if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
+        if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
+            drop(lifecycle_lock);
+            export_stopped_sandbox_host(record, &args.output).await?;
+        } else if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
             let mut file = tokio::fs::File::create(&args.output)
                 .await
                 .map_err(|error| format!("Failed to create {}: {error}", args.output))?;
             super::rootfs_capture::archive_stopped_guest_native_rootfs(record, &mut file).await?;
             file.sync_all().await?;
+            drop(lifecycle_lock);
         } else {
             let rootfs_dir = super::resolve_box_rootfs(&record.box_dir)
                 .ok_or_else(|| rootfs_not_found_message(&args.name, &record.box_dir))?;
@@ -62,8 +66,8 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
             builder
                 .finish()
                 .map_err(|e| format!("Failed to finalize archive: {e}"))?;
+            drop(lifecycle_lock);
         }
-        drop(lifecycle_lock);
     }
 
     let size = std::fs::metadata(&args.output)
@@ -107,6 +111,28 @@ async fn export_live_sandbox_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err(format!(
         "Live Sandbox host-rootfs export is unavailable for box '{}' on this platform",
+        record.name
+    )
+    .into())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn export_stopped_sandbox_host(
+    record: &crate::state::BoxRecord,
+    output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
+    // Already stopped: capture OCI-mapped host rootfs without pause/resume.
+    super::commit::capture_live_host_rootfs_tar(record, std::path::Path::new(output), false).await
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+async fn export_stopped_sandbox_host(
+    record: &crate::state::BoxRecord,
+    _output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(format!(
+        "Stopped Sandbox host-rootfs export is unavailable for box '{}' on this platform",
         record.name
     )
     .into())

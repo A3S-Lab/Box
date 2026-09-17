@@ -44,6 +44,8 @@ enum CommitCaptureMode {
     LiveGuest,
     /// SandboxViaOci host-visible prepared rootfs (no guest archive socket).
     LiveHostRootfs,
+    /// Stopped managed Sandbox: OCI-mapped host rootfs (same walk as snapshots).
+    StoppedHostRootfs,
     OfflineDirectory,
     OfflineGuestNative,
 }
@@ -105,7 +107,10 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Managed Sandbox pause/resume takes the same cross-process lifecycle lock.
     // Release the CLI guard before that path so generation fencing stays single-owner.
-    if capture_mode == CommitCaptureMode::LiveHostRootfs {
+    if matches!(
+        capture_mode,
+        CommitCaptureMode::LiveHostRootfs | CommitCaptureMode::StoppedHostRootfs
+    ) {
         drop(lifecycle_lock);
         capture_rootfs_tar(
             record,
@@ -220,6 +225,20 @@ fn commit_capture_mode(
         .into());
     }
     super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
+    if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
+        #[cfg(all(unix, target_os = "linux"))]
+        {
+            return Ok(CommitCaptureMode::StoppedHostRootfs);
+        }
+        #[cfg(not(all(unix, target_os = "linux")))]
+        {
+            return Err(format!(
+                "Cannot commit stopped Sandbox box '{}' because managed host-rootfs commit requires Linux",
+                record.name
+            )
+            .into());
+        }
+    }
     if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
         Ok(CommitCaptureMode::OfflineGuestNative)
     } else {
@@ -237,6 +256,19 @@ async fn capture_rootfs_tar(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if capture_mode == CommitCaptureMode::LiveHostRootfs {
         return capture_live_host_rootfs_tar(record, output, pause).await;
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    if capture_mode == CommitCaptureMode::StoppedHostRootfs {
+        return capture_paused_or_running_host_rootfs(record, output);
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    if capture_mode == CommitCaptureMode::StoppedHostRootfs {
+        return Err(format!(
+            "Cannot commit stopped Sandbox box '{}' because managed host-rootfs commit requires Linux",
+            record.name
+        )
+        .into());
     }
 
     if capture_mode == CommitCaptureMode::LiveGuest && record.exec_socket_path.exists() {

@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Stopped managed Linux Sandbox `a3s-box commit` / `export` / `diff` reuse the
+  OCI-mapped host-rootfs capture path (same walk as stopped managed snapshots)
+  instead of bare directory archives with host subordinate UIDs. MicroVM
+  offline paths unchanged. Does **not** close ROADMAP B3/B2.
 - Managed OCI Sandbox `cp` / `transfer_file` / `filesystem` accept freezer-paused
   boxes via the same observability fence as `stats`/`top` (`require_observable`
   + CLI `resolve_copy_route`), while exec/PTY and MicroVM guest-archive paths
