@@ -27,7 +27,7 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
         )
     })?;
 
-    if uses_live_sandbox_host_rootfs(&record) {
+    if uses_live_sandbox_host_rootfs(record) {
         // Managed Sandbox pause/resume uses the same lifecycle lock; release the
         // CLI guard before host-rootfs capture so generation fencing stays exclusive.
         drop(lifecycle_lock);
