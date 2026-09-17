@@ -120,29 +120,51 @@ fn image_matches_filter(image: &Image, filter: &str) -> bool {
 
 /// A3S Box implementation of the CRI ImageService.
 /// Convert a CRI per-request `AuthConfig` (kubelet fills it from a pod's
-/// `imagePullSecrets`) into a registry credential. Supports the standard
-/// username/password shape and the Docker-config base64 `auth` ("user:pass")
-/// field. Bearer tokens (`identity_token`/`registry_token`) are not modeled by
-/// `RegistryAuth` yet, so a token-only AuthConfig yields `None` and the caller
-/// falls back to the service-default credential.
-fn auth_config_to_registry_auth(auth: &AuthConfig) -> Option<RegistryAuth> {
+/// `imagePullSecrets`) into a registry credential.
+///
+/// Supports username/password, Docker-config base64 `auth` ("user:pass"), and
+/// `identity_token` (mapped like Docker config.json → basic
+/// `oauth2accesstoken` / token). `registry_token` bearer is not modeled by
+/// [`RegistryAuth`] yet — callers must fail closed rather than invent an
+/// anonymous / service-default pull that pretends the secret was used (#453).
+///
+/// Returns `Ok(None)` only when AuthConfig is empty (no credential fields).
+fn auth_config_to_registry_auth(auth: &AuthConfig) -> Result<Option<RegistryAuth>, Status> {
     if !auth.username.is_empty() {
-        return Some(RegistryAuth::basic(
+        return Ok(Some(RegistryAuth::basic(
             auth.username.clone(),
             auth.password.clone(),
-        ));
+        )));
     }
     if !auth.auth.is_empty() {
         use base64::Engine;
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(auth.auth.trim()) {
-            if let Ok(pair) = String::from_utf8(decoded) {
-                if let Some((user, pass)) = pair.split_once(':') {
-                    return Some(RegistryAuth::basic(user, pass));
-                }
-            }
-        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(auth.auth.trim())
+            .map_err(|_| {
+                Status::invalid_argument("AuthConfig.auth is not valid base64 user:pass")
+            })?;
+        let pair = String::from_utf8(decoded).map_err(|_| {
+            Status::invalid_argument("AuthConfig.auth is not valid UTF-8 user:pass")
+        })?;
+        let (user, pass) = pair
+            .split_once(':')
+            .ok_or_else(|| Status::invalid_argument("AuthConfig.auth must decode to user:pass"))?;
+        return Ok(Some(RegistryAuth::basic(user, pass)));
     }
-    None
+    if !auth.identity_token.is_empty() {
+        // Match CredentialStore / Docker config.json identitytoken handling.
+        return Ok(Some(RegistryAuth::basic(
+            "oauth2accesstoken",
+            auth.identity_token.clone(),
+        )));
+    }
+    if !auth.registry_token.is_empty() {
+        return Err(Status::unimplemented(
+            "PullImage AuthConfig.registry_token (bearer) is not supported; \
+             refusing to invent anonymous pull with unused imagePullSecrets",
+        ));
+    }
+    Ok(None)
 }
 
 pub struct BoxImageService {
@@ -275,15 +297,26 @@ impl ImageService for BoxImageService {
 
         // Honor kubelet's per-request credentials (imagePullSecrets). When the
         // request carries usable auth, pull with a one-off puller built from it;
-        // otherwise fall back to the service-default registry credential.
-        match req.auth.as_ref().and_then(auth_config_to_registry_auth) {
-            Some(auth) => {
-                tracing::info!(image = %image_spec.image, "CRI PullImage (request auth)");
-                ImagePuller::new(self.image_store.clone(), auth)
-                    .pull(&image_spec.image)
-                    .await
-                    .map_err(box_error_to_status)?;
-            }
+        // empty AuthConfig falls back to the service-default credential. Token
+        // fields we cannot apply fail closed — never invent Ok anonymous pull
+        // while pretending secrets were used (#453 / #452).
+        match req.auth.as_ref() {
+            Some(auth) => match auth_config_to_registry_auth(auth)? {
+                Some(auth) => {
+                    tracing::info!(image = %image_spec.image, "CRI PullImage (request auth)");
+                    ImagePuller::new(self.image_store.clone(), auth)
+                        .pull(&image_spec.image)
+                        .await
+                        .map_err(box_error_to_status)?;
+                }
+                None => {
+                    tracing::info!(image = %image_spec.image, "CRI PullImage");
+                    self.image_puller
+                        .pull(&image_spec.image)
+                        .await
+                        .map_err(box_error_to_status)?;
+                }
+            },
             None => {
                 tracing::info!(image = %image_spec.image, "CRI PullImage");
                 self.image_puller
@@ -741,8 +774,9 @@ mod tests {
             username: "alice".into(),
             password: "secret".into(),
             ..Default::default()
-        });
-        let ra = ra.expect("username/password auth");
+        })
+        .expect("username/password auth must parse")
+        .expect("username/password auth");
         assert_eq!(
             ra.basic_credentials(),
             Some(("alice".into(), "secret".into()))
@@ -756,18 +790,47 @@ mod tests {
             auth: encoded,
             ..Default::default()
         })
+        .expect("encoded username/password auth must parse")
         .expect("encoded username/password auth");
         assert_eq!(ra.basic_credentials(), Some(("bob".into(), "pw123".into())));
         assert_eq!(format!("{ra:?}"), "<redacted-registry-auth>");
 
-        // Bearer-token-only AuthConfig -> None (no RegistryAuth bearer support yet)
-        assert!(auth_config_to_registry_auth(&AuthConfig {
+        // identity_token -> oauth2accesstoken basic (Docker config.json parity)
+        let ra = auth_config_to_registry_auth(&AuthConfig {
             identity_token: "tok".into(),
             ..Default::default()
         })
-        .is_none());
+        .expect("identity_token must map")
+        .expect("identity_token auth");
+        assert_eq!(
+            ra.basic_credentials(),
+            Some(("oauth2accesstoken".into(), "tok".into()))
+        );
+
+        // registry_token-only must fail closed — never invent None→anonymous (#453)
+        let err = auth_config_to_registry_auth(&AuthConfig {
+            registry_token: "bearer-tok".into(),
+            ..Default::default()
+        })
+        .expect_err("registry_token must not invent anonymous fallback");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(
+            err.message().contains("registry_token") || err.message().contains("not supported"),
+            "unexpected refuse message: {}",
+            err.message()
+        );
+
+        // Malformed auth must fail closed, not invent service-default fallback
+        let err = auth_config_to_registry_auth(&AuthConfig {
+            auth: "!!!not-base64!!!".into(),
+            ..Default::default()
+        })
+        .expect_err("malformed AuthConfig.auth must fail closed");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         // Empty -> None (caller falls back to the service-default credential)
-        assert!(auth_config_to_registry_auth(&AuthConfig::default()).is_none());
+        assert!(auth_config_to_registry_auth(&AuthConfig::default())
+            .expect("empty AuthConfig")
+            .is_none());
     }
 }
