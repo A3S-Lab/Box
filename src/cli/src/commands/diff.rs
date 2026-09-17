@@ -191,7 +191,6 @@ async fn current_rootfs(
     walk_dir(&rootfs_dir)
 }
 
-
 #[cfg(all(unix, target_os = "linux"))]
 async fn current_sandbox_host_rootfs(
     record: &crate::state::BoxRecord,
