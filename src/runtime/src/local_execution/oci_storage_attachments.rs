@@ -229,7 +229,7 @@ fn oci_bind_mounts(bundle: &OciBundle) -> ExecutionManagerResult<Vec<OciBindMoun
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let read_only = options.iter().any(|option| *option == "ro");
+            let read_only = options.contains(&"ro");
             OciBindMount {
                 source: if typ == Some("bind") { source } else { None },
                 destination,
