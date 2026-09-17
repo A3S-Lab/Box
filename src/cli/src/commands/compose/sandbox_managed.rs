@@ -57,26 +57,43 @@ pub(super) fn sandbox_box_config(mut config: BoxConfig) -> BoxConfig {
     config
 }
 
+/// Inputs for one Compose SandboxViaOci service create/start.
+pub(super) struct SandboxServiceBootRequest<'a> {
+    pub project_name: &'a str,
+    pub svc_name: &'a str,
+    pub box_config: BoxConfig,
+    pub labels: BTreeMap<String, String>,
+    pub restart_policy: ExecutionRestartPolicy,
+    pub max_restart_count: u32,
+    pub volume_names: Vec<String>,
+    pub secret_root: Option<&'a Path>,
+    pub health_check: Option<crate::state::HealthCheck>,
+    pub healthcheck_disabled: bool,
+}
+
 /// Create and start one Compose service through the configured local execution manager.
 pub(super) async fn boot_sandbox_service(
-    project_name: &str,
-    svc_name: &str,
-    box_config: BoxConfig,
-    labels: BTreeMap<String, String>,
-    restart_policy: ExecutionRestartPolicy,
-    max_restart_count: u32,
-    volume_names: Vec<String>,
-    secret_root: Option<&Path>,
-    health_check: Option<crate::state::HealthCheck>,
-    healthcheck_disabled: bool,
+    request: SandboxServiceBootRequest<'_>,
 ) -> Result<BoxRecord, Box<dyn std::error::Error>> {
+    let SandboxServiceBootRequest {
+        project_name,
+        svc_name,
+        box_config,
+        labels,
+        restart_policy,
+        max_restart_count,
+        volume_names,
+        secret_root,
+        health_check,
+        healthcheck_disabled,
+    } = request;
     let home = a3s_box_core::dirs_home();
     let manager = super::super::configured_local_execution_manager(&home).await?;
     manager.preflight_isolation(box_config.isolation).await?;
 
     let box_name = format!("{project_name}-{svc_name}");
     let operation_id = OperationId::new(format!("compose-sandbox-{}", uuid::Uuid::new_v4()))?;
-    let request = CreateExecutionRequest {
+    let create_request = CreateExecutionRequest {
         external_sandbox_id: operation_id.as_str().to_string(),
         config: box_config,
         labels,
@@ -103,7 +120,7 @@ pub(super) async fn boot_sandbox_service(
         rootfs_snapshot_id: None,
     };
 
-    let reservation = manager.create(request, &operation_id).await?;
+    let reservation = manager.create(create_request, &operation_id).await?;
     let execution_id = reservation.execution_id.clone();
     if let Err(error) = manager.start(&execution_id, reservation.generation).await {
         let _ = manager

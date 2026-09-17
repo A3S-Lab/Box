@@ -599,16 +599,18 @@ async fn execute_up(
             let box_config = sandbox_managed::sandbox_box_config(box_config);
             let image = box_config.image.clone();
             match sandbox_managed::boot_sandbox_service(
-                project_name,
-                svc_name,
-                box_config,
-                labels.into_iter().collect(),
-                restart_policy,
-                max_restart_count,
-                volume_names,
-                sandbox_managed::lease_secret_root(secret_lease.as_ref()),
-                health_check,
-                healthcheck_disabled,
+                sandbox_managed::SandboxServiceBootRequest {
+                    project_name,
+                    svc_name,
+                    box_config,
+                    labels: labels.into_iter().collect(),
+                    restart_policy,
+                    max_restart_count,
+                    volume_names,
+                    secret_root: sandbox_managed::lease_secret_root(secret_lease.as_ref()),
+                    health_check,
+                    healthcheck_disabled,
+                },
             )
             .await
             {
