@@ -44,7 +44,7 @@ identity, generation fencing, recovery, Service endpoints, health observations,
 logs, exec, resource controls, and cleanup.
 
 The provider pins `a3s-runtime` 0.5.0 at
-`4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd` and advertises its atomic
+`aeb1dd96b5d3f823464d51fcabe99b6052874aee` and advertises its atomic
 `ServiceLifecycle` feature. `RuntimeUnitSpec::health` remains readiness for
 traffic admission. `RuntimeServiceLifecycle::liveness` independently drives
 recovery according to the declared restart policy, while
