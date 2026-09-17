@@ -80,6 +80,8 @@ pub use box_record::{
     ManagedRestartOutcome, ManagedRuntimeRoute,
 };
 pub use box_state::BoxStateStore;
+#[cfg(target_os = "linux")]
+pub use local_execution::capture_sandbox_host_rootfs_for_commit;
 pub use local_execution::{
     acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
     LocalExecutionBackendRouter, LocalExecutionHandle, LocalExecutionManager,

@@ -383,6 +383,37 @@ fn offline_commit_rejects_transitional_state_and_live_pid() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn running_sandbox_selects_host_rootfs_commit() {
+    use crate::test_helpers::fixtures::make_record;
+    use a3s_box_core::ExecutionIsolation;
+
+    let mut sandbox = make_record("id", "sandbox", "running", Some(std::process::id()));
+    sandbox.isolation = ExecutionIsolation::Sandbox;
+    sandbox.exec_socket_path = std::path::PathBuf::new();
+
+    assert_eq!(
+        commit_capture_mode(&sandbox).unwrap(),
+        CommitCaptureMode::LiveHostRootfs
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn running_microvm_selects_guest_archive_commit() {
+    use crate::test_helpers::fixtures::make_record;
+    use a3s_box_core::ExecutionIsolation;
+
+    let mut microvm = make_record("id", "vm", "running", Some(std::process::id()));
+    microvm.isolation = ExecutionIsolation::Microvm;
+
+    assert_eq!(
+        commit_capture_mode(&microvm).unwrap(),
+        CommitCaptureMode::LiveGuest
+    );
+}
+
 #[test]
 fn stopped_guest_native_commit_selects_maintenance_capture() {
     use crate::test_helpers::fixtures::make_record;

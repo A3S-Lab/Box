@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `a3s-box commit` on a running Linux SandboxViaOci box captures the prepared
+  host rootfs with OCI UID/GID mappings (same walk as managed filesystem
+  snapshots) instead of requiring a guest archive socket. Optional `--pause`
+  uses the managed pause/resume path so generation fencing stays single-owner.
+  Does **not** close ROADMAP B3, invent Sandbox guest archive sockets, or claim
+  Windows/live MicroVM commit changes.
+
 ## [3.2.7] — 2026-09-17
 
 ### Fixed
