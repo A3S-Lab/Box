@@ -910,8 +910,9 @@ guest endpoint.
   over the unified adapter.
   **Partial:** Compose `--isolation sandbox` up/down now uses
   `LocalExecutionManager` / SandboxViaOci (same create/start/remove path as
-  CLI/SDK). Named bridges, published ports, health probes, warm-pool, MicroVM
-  Compose cutover, and the B4 exit gate remain open. Does **not** flip
+  CLI/SDK), including session-exec health probes and `service_healthy` waits.
+  Named bridges, published ports, warm-pool, MicroVM Compose cutover, and the
+  B4 exit gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Keep `a3s-box-cri` only as an optional full product adapter; it must use
   the same execution adapter and must not spawn the Box CLI.

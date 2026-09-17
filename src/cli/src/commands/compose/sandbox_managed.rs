@@ -46,20 +46,6 @@ pub(super) fn preflight_sandbox_compose(
             )
             .into());
         }
-        if !project.health_wait_deps(service_name).is_empty() {
-            return Err(format!(
-                "Compose --isolation sandbox does not support service_healthy dependencies on '{service_name}' yet"
-            )
-            .into());
-        }
-        if !project.healthcheck_disabled(service_name)
-            && project.healthcheck(service_name).is_some()
-        {
-            return Err(format!(
-                "Compose --isolation sandbox does not support healthcheck on service '{service_name}' yet"
-            )
-            .into());
-        }
     }
     Ok(())
 }
@@ -81,6 +67,8 @@ pub(super) async fn boot_sandbox_service(
     max_restart_count: u32,
     volume_names: Vec<String>,
     secret_root: Option<&Path>,
+    health_check: Option<crate::state::HealthCheck>,
+    healthcheck_disabled: bool,
 ) -> Result<BoxRecord, Box<dyn std::error::Error>> {
     let home = a3s_box_core::dirs_home();
     let manager = super::super::configured_local_execution_manager(&home).await?;
@@ -97,8 +85,8 @@ pub(super) async fn boot_sandbox_service(
             auto_remove: false,
             restart_policy,
             max_restart_count,
-            health_check: None,
-            healthcheck_disabled: true,
+            health_check,
+            healthcheck_disabled,
             log_config: Default::default(),
             volume_names,
             platform: None,

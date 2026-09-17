@@ -641,13 +641,10 @@ async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::err
         .filter(|record| health::should_probe(record, now))
         .filter(|record| !health::detached_health_worker_active(record))
         .filter_map(|record| {
-            record.health_check.as_ref().map(|hc| {
-                (
-                    record.id.clone(),
-                    record.exec_socket_path.clone(),
-                    hc.clone(),
-                )
-            })
+            record
+                .health_check
+                .as_ref()
+                .map(|hc| (record.id.clone(), hc.clone()))
         })
         .collect();
 
@@ -676,17 +673,17 @@ async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// Health-check probe input: (box id, exec socket path, health check).
+/// Health-check probe input: (box id, health check).
 #[cfg(not(windows))]
-type ProbeJob = (String, std::path::PathBuf, crate::state::HealthCheck);
+type ProbeJob = (String, crate::state::HealthCheck);
 
 /// Run the given probes concurrently with bounded fan-out, returning
 /// `(box_id, healthy, checked_at)` for each. Production wrapper over
-/// [`probe_all_with`] using the real exec probe.
+/// [`probe_all_with`] using the real exec probe (OCI session or exec socket).
 #[cfg(not(windows))]
 async fn probe_all(probes: Vec<ProbeJob>) -> Vec<(String, bool, chrono::DateTime<chrono::Utc>)> {
-    probe_all_with(probes, |sock, cmd, timeout_ns| async move {
-        health::run_probe(&sock, &cmd, timeout_ns).await
+    probe_all_with(probes, |box_id, cmd, timeout_ns| async move {
+        health::run_probe_for_box(&box_id, &cmd, timeout_ns).await
     })
     .await
 }
@@ -699,7 +696,7 @@ async fn probe_all_with<F, Fut>(
     probe: F,
 ) -> Vec<(String, bool, chrono::DateTime<chrono::Utc>)>
 where
-    F: Fn(std::path::PathBuf, Vec<String>, u64) -> Fut,
+    F: Fn(String, Vec<String>, u64) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     use futures::stream::StreamExt;
@@ -707,9 +704,9 @@ where
     // exec connections at once.
     const MAX_CONCURRENT_PROBES: usize = 16;
     futures::stream::iter(probes)
-        .map(|(box_id, exec_socket_path, health_check)| {
+        .map(|(box_id, health_check)| {
             let timeout_ns = health::probe_timeout_ns(&health_check);
-            let fut = probe(exec_socket_path, health_check.cmd, timeout_ns);
+            let fut = probe(box_id.clone(), health_check.cmd, timeout_ns);
             async move { (box_id, fut.await, chrono::Utc::now()) }
         })
         .buffer_unordered(MAX_CONCURRENT_PROBES)
@@ -1060,7 +1057,6 @@ mod tests {
             .map(|i| {
                 (
                     format!("box-{i}"),
-                    std::path::PathBuf::from("/nonexistent"),
                     crate::state::HealthCheck {
                         cmd: vec!["true".to_string()],
                         interval_secs: 0,
@@ -1076,7 +1072,7 @@ mod tests {
         let max_in_flight = Arc::new(AtomicUsize::new(0));
 
         let start = Instant::now();
-        let results = probe_all_with(probes, |_sock, _cmd, _timeout_ns| {
+        let results = probe_all_with(probes, |_box_id, _cmd, _timeout_ns| {
             let in_flight = Arc::clone(&in_flight);
             let max_in_flight = Arc::clone(&max_in_flight);
             async move {
