@@ -152,7 +152,11 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
     if !config.port_map.is_empty() {
         unsupported.push("published ports");
     }
-    if matches!(config.network, NetworkMode::Bridge { .. }) {
+    // Named bridge for SandboxViaOci is opt-in via keep-authority (matched root).
+    // Prepare still fail-closes without a Privileged owner; GA rootless stays loopback-only.
+    if matches!(config.network, NetworkMode::Bridge { .. })
+        && !crate::network::sandbox_named_bridge_opt_in_enabled()
+    {
         unsupported.push("named bridge networking");
     }
     if !config.sysctls.is_empty() {

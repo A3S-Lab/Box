@@ -18,10 +18,7 @@ const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-owner";
 const OWNER_SOCKET_NAME: &str = "runtime.sock";
 const NATIVE_SESSION_SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
-/// Opt-in: keep Privileged host-service authority so Hello advertises
-/// `a3s.oci.attachments.v3`. Requires matched root (`euid==uid==0`). Unset keeps
-/// the Sandbox GA default (delegated cgroup → rootless drop → base_v2 only).
-const KEEP_NETWORK_DEVICE_AUTHORITY_ENV: &str = "A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY";
+pub(crate) use a3s_box_core::OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV as KEEP_NETWORK_DEVICE_AUTHORITY_ENV;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -388,6 +385,10 @@ fn keep_network_device_authority_requested() -> ExecutionManagerResult<bool> {
             "failed to read {KEEP_NETWORK_DEVICE_AUTHORITY_ENV}: {error}"
         ))),
     }
+}
+
+pub(crate) fn keep_network_device_authority_active() -> ExecutionManagerResult<bool> {
+    keep_network_device_authority_requested()
 }
 
 fn spawn_owner(

@@ -216,6 +216,13 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
         _context: &OciBundlePreparationContext,
     ) -> ExecutionManagerResult<OciPreparedExecution> {
         let metadata = native_linux_metadata(record)?;
+        #[cfg(target_os = "linux")]
+        {
+            super::oci_host_netdevice::require_keep_authority_for_bridge(&record.network_mode)?;
+            super::oci_host_netdevice::require_keep_authority_for_bridge(
+                &metadata.request.config.network,
+            )?;
+        }
 
         // Re-hash the exact configured artifacts immediately before rootfs or
         // bundle mutations. Owner startup and bundle evidence use this same pair.

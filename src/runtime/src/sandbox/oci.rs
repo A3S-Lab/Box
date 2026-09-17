@@ -17,10 +17,10 @@ use a3s_oci_sdk::{
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
     LinuxDeviceBuilder, LinuxDeviceCgroupBuilder, LinuxDeviceType, LinuxIdMappingBuilder,
-    LinuxMemoryBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, LinuxPidsBuilder,
-    LinuxResourcesBuilder, LinuxSeccompAction, LinuxSeccompArgBuilder, LinuxSeccompBuilder,
-    LinuxSeccompOperator, LinuxSyscallBuilder, Mount, MountBuilder, ProcessBuilder, RootBuilder,
-    Spec, SpecBuilder, UserBuilder,
+    LinuxMemoryBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, LinuxNetDeviceBuilder,
+    LinuxPidsBuilder, LinuxResourcesBuilder, LinuxSeccompAction, LinuxSeccompArgBuilder,
+    LinuxSeccompBuilder, LinuxSeccompOperator, LinuxSyscallBuilder, Mount, MountBuilder,
+    ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 
 use super::capability::{validate_id_mapping_plan, IdMapping, SandboxIdMappingPlan};
@@ -201,6 +201,9 @@ pub struct SandboxBundleSpec {
     pub requested_capabilities: Vec<String>,
     pub execution_plan_digest: String,
     pub runtime_digest: String,
+    /// Optional host iface already staged in the owner netns (`linux.netDevices` key).
+    /// Guest name is always `eth0`. Absent for loopback-only Sandbox GA.
+    pub host_net_device: Option<String>,
 }
 
 /// Container process compiled for the long-lived A3S OCI Runtime owner.
@@ -396,7 +399,7 @@ fn compile_spec(
     process: oci_spec::runtime::Process,
     owner: SandboxProcessOwner,
 ) -> Result<Spec> {
-    let linux = LinuxBuilder::default()
+    let mut linux = LinuxBuilder::default()
         .uid_mappings(compile_id_mappings(&input.id_mappings.uid_mappings)?)
         .gid_mappings(compile_id_mappings(&input.id_mappings.gid_mappings)?)
         .namespaces(compile_namespaces()?)
@@ -406,9 +409,17 @@ fn compile_spec(
         .seccomp(compile_seccomp()?)
         .rootfs_propagation("private".to_string())
         .masked_paths(masked_paths())
-        .readonly_paths(readonly_paths())
-        .build()
-        .map_err(oci_error)?;
+        .readonly_paths(readonly_paths());
+    if let Some(host_iface) = input.host_net_device.as_deref() {
+        let device = LinuxNetDeviceBuilder::default()
+            .name("eth0".to_string())
+            .build()
+            .map_err(oci_error)?;
+        let mut net_devices = HashMap::new();
+        net_devices.insert(host_iface.to_string(), device);
+        linux = linux.net_devices(net_devices);
+    }
+    let linux = linux.build().map_err(oci_error)?;
 
     let mut annotations = HashMap::new();
     annotations.insert(
@@ -1584,6 +1595,7 @@ mod tests {
             requested_capabilities: Vec::new(),
             execution_plan_digest: format!("sha256:{}", "a".repeat(64)),
             runtime_digest: format!("sha256:{}", "b".repeat(64)),
+            host_net_device: None,
         }
     }
 
@@ -1607,6 +1619,23 @@ mod tests {
             additional_gids: vec![789],
             dropped_capabilities: vec!["SETUID".to_string()],
         }
+    }
+
+    #[test]
+    fn runtime_owned_compiler_emits_linux_net_devices_when_host_iface_staged() {
+        let mut input = sample_input();
+        input.host_net_device = Some("bv11111111c".to_string());
+        let value =
+            as_json(&compile_runtime_owned_oci_spec(&input, &sample_runtime_process()).unwrap());
+        assert_eq!(value["linux"]["netDevices"]["bv11111111c"]["name"], "eth0");
+    }
+
+    #[test]
+    fn runtime_owned_compiler_omits_net_devices_without_host_iface() {
+        let value = as_json(
+            &compile_runtime_owned_oci_spec(&sample_input(), &sample_runtime_process()).unwrap(),
+        );
+        assert!(value["linux"].get("netDevices").is_none());
     }
 
     #[test]
