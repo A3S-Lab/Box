@@ -51,7 +51,10 @@ pub fn spawn_inherited_passt_bridge(
     std::thread::Builder::new()
         .name("a3s-passt-bridge".to_string())
         .spawn(move || {
-            if let Err(error) = run_passt_bridge(guest, passt, bridge) {
+            let marker = passt_socket_path
+                .parent()
+                .map(|dir| dir.join("passt.backend_lost"));
+            if let Err(error) = run_passt_bridge(guest, passt, bridge, marker) {
                 tracing::warn!(%error, "passt peer bridge stopped");
             }
         })
@@ -81,6 +84,7 @@ fn run_passt_bridge(
     mut guest: UnixStream,
     mut passt: UnixStream,
     bridge: BridgePort,
+    backend_lost_marker: Option<PathBuf>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
     passt.set_nonblocking(true)?;
@@ -110,10 +114,22 @@ fn run_passt_bridge(
         match read_available(&mut passt, &mut passt_input)? {
             ReadState::Progress => progressed = true,
             ReadState::Eof => {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "passt closed its guest connection",
-                ));
+                // Host egress via passt is dead, but peer frames never needed
+                // passt. Keep the Ethernet switch up so other boxes on the
+                // network can still reach this MAC (#454).
+                tracing::error!("passt closed its guest connection; continuing peer-only bridge");
+                if let Some(path) = backend_lost_marker.as_ref() {
+                    if let Err(error) = std::fs::write(path, b"passt\n") {
+                        tracing::warn!(
+                            %error,
+                            path = %path.display(),
+                            "failed to write passt.backend_lost marker"
+                        );
+                    }
+                }
+                // Drain any pending guest-bound bytes, then peer-only.
+                let _ = to_guest.flush(&mut guest);
+                return run_peer_only_bridge(guest, bridge, guest_input, to_guest);
             }
             ReadState::Idle => {}
         }
@@ -142,6 +158,49 @@ fn run_passt_bridge(
                 !to_guest.is_empty(),
                 !to_passt.is_empty(),
             )?;
+        }
+    }
+}
+
+/// Continue switching peer Ethernet after passt exits (#454).
+///
+/// Guest frames that previously needed the gateway/passt path are dropped;
+/// unicast/broadcast frames that `BridgePort` can deliver locally keep flowing.
+fn run_peer_only_bridge(
+    mut guest: UnixStream,
+    bridge: BridgePort,
+    mut guest_input: Vec<u8>,
+    mut to_guest: PendingBytes,
+) -> io::Result<()> {
+    guest.set_nonblocking(true)?;
+
+    loop {
+        let mut progressed = false;
+        progressed |= to_guest.flush(&mut guest)?;
+
+        match read_available(&mut guest, &mut guest_input)? {
+            ReadState::Progress => progressed = true,
+            ReadState::Eof => return Ok(()),
+            ReadState::Idle => {}
+        }
+        for frame in decode_frames(&mut guest_input)? {
+            progressed = true;
+            // forward_from_guest returns true when the gateway would also need
+            // the frame. With passt gone we still deliver peer copies via the
+            // switch, then drop the gateway leg.
+            let _needs_gateway = bridge.forward_from_guest(&frame);
+        }
+
+        let mut peer_frames = Vec::new();
+        bridge.drain_frames(&mut peer_frames, IO_BURST);
+        for frame in peer_frames {
+            progressed = true;
+            to_guest.push_frame(&frame)?;
+        }
+
+        progressed |= to_guest.flush(&mut guest)?;
+        if !progressed {
+            poll_peer_only(&guest, bridge.raw_fd(), !to_guest.is_empty())?;
         }
     }
 }
@@ -312,6 +371,35 @@ fn poll_network(
     Ok(())
 }
 
+fn poll_peer_only(guest: &UnixStream, bridge_fd: RawFd, guest_writable: bool) -> io::Result<()> {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: guest.as_raw_fd(),
+            events: libc::POLLIN | if guest_writable { libc::POLLOUT } else { 0 },
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: bridge_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let result = unsafe {
+        libc::poll(
+            descriptors.as_mut_ptr(),
+            descriptors.len() as libc::nfds_t,
+            POLL_TIMEOUT_MS,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,8 +466,10 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
-        let thread_a = std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a));
-        let thread_b = std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b));
+        let thread_a =
+            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None));
+        let thread_b =
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
 
         let peer = ethernet_frame(mac_b, mac_a, 0x11);
         write_frame(&mut guest_a, &peer);
@@ -441,8 +531,10 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
 
-        let thread_a = std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a));
-        let thread_b = std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b));
+        let thread_a =
+            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None));
+        let thread_b =
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
 
         let request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 3]);
         write_frame(&mut guest_a, &request);
@@ -462,6 +554,49 @@ mod tests {
         write_frame(&mut guest_a, &gateway_request);
         assert_eq!(read_frame(&mut guest_b), gateway_request);
         assert_eq!(read_frame(&mut backend_a), gateway_request);
+
+        drop(guest_a);
+        drop(guest_b);
+        assert!(thread_a.join().unwrap().is_ok());
+        assert!(thread_b.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn passt_eof_keeps_peer_switch_and_writes_backend_lost_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let marker = socket_dir.path().join("passt.backend_lost");
+        let mac_a = [0x02, 0x42, 10, 91, 0, 2];
+        let mac_b = [0x02, 0x42, 10, 91, 0, 3];
+        let bridge_a = BridgePort::bind(directory.path(), mac_a).unwrap();
+        let bridge_b = BridgePort::bind(directory.path(), mac_b).unwrap();
+        let (mut guest_a, proxy_a) = UnixStream::pair().unwrap();
+        let (mut guest_b, proxy_b) = UnixStream::pair().unwrap();
+        let (passt_a, backend_a) = UnixStream::pair().unwrap();
+        let (passt_b, _backend_b) = UnixStream::pair().unwrap();
+        guest_b
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let marker_for_thread = marker.clone();
+        let thread_a = std::thread::spawn(move || {
+            run_passt_bridge(proxy_a, passt_a, bridge_a, Some(marker_for_thread))
+        });
+        let thread_b =
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
+
+        // Kill passt's side of box A — previously this dropped BridgePort and
+        // peer unicast died (#454).
+        drop(backend_a);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            marker.exists(),
+            "shim must write passt.backend_lost when passt exits"
+        );
+
+        let peer = ethernet_frame(mac_b, mac_a, 0x44);
+        write_frame(&mut guest_a, &peer);
+        assert_eq!(read_frame(&mut guest_b), peer);
 
         drop(guest_a);
         drop(guest_b);

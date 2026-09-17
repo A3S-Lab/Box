@@ -94,7 +94,9 @@ pub struct CommonBoxArgs {
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 
-    /// Publish a TCP port (host_port:guest_port[/tcp]), can be repeated
+    /// Publish a TCP port (host_port:guest_port[/tcp]), can be repeated.
+    /// Under default TSI networking the listener is on the host; in-guest
+    /// `127.0.0.1:<guest_port>` reaches it via loopback hairpin (#448).
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
 

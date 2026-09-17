@@ -21,11 +21,66 @@
 //! invented pool `ps` path. Creating stays out of scope (create race). Do not
 //! observe Running boxes on every list.
 
+#[cfg(target_os = "linux")]
+use a3s_box_core::NetworkMode;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionState, OperationId,
 };
 
 use crate::state::{BoxRecord, StateFile};
+
+/// Mark bridge-mode running boxes unhealthy when passt is dead (#454).
+///
+/// Persists `health_status=unhealthy` so `inspect` / `events` / `ps` can see the
+/// network backend loss without inventing a lifecycle status change.
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_bridge_passt_backend_loss(
+    home: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    let mut touched = Vec::new();
+    {
+        let state = StateFile::load_default()?;
+        for record in state.list(true) {
+            if !matches!(record.status.as_str(), "running") {
+                continue;
+            }
+            if !matches!(record.network_mode, NetworkMode::Bridge { .. }) {
+                continue;
+            }
+            if record.health_status == "unhealthy" {
+                continue;
+            }
+            if a3s_box_runtime::network::passt_backend_lost_for_box(home, &record.id) {
+                touched.push(record.id.clone());
+            }
+        }
+    }
+    if touched.is_empty() {
+        return Ok(());
+    }
+
+    StateFile::modify(|state| {
+        for id in &touched {
+            if let Some(record) = state.find_by_id_mut(id) {
+                if matches!(record.status.as_str(), "running")
+                    && matches!(record.network_mode, NetworkMode::Bridge { .. })
+                    && a3s_box_runtime::network::passt_backend_lost_for_box(home, id)
+                {
+                    record.health_status = "unhealthy".to_string();
+                }
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    })?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn observe_bridge_passt_backend_loss(
+    _home: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    Ok(())
+}
 
 /// Whether this record needs manager observation for inventory honesty.
 ///
@@ -240,6 +295,8 @@ pub(crate) async fn resume_managed_restart_claims_best_effort(
 pub(crate) async fn refresh_default_home_after_inventory_observation(
 ) -> Result<StateFile, Box<dyn std::error::Error>> {
     let home = a3s_box_core::dirs_home();
+    // Best-effort: surface dead passt backends before projecting inventory (#454).
+    let _ = observe_bridge_passt_backend_loss(&home);
     let state = StateFile::load_default()?;
     let needs_work = state.list(true).into_iter().any(|record| {
         needs_managed_inventory_observation(record)
