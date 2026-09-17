@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Volume prepare and managed VolumeStore paths refuse symlink / Windows reparse
+  host sources before `canonicalize` follows them (plain file or directory
+  only). Aligns MicroVM bind prepare with Runtime Volume canonical-directory
+  fencing. Does **not** invent Windows virtio-fs POSIX UID/GID bind parity,
+  host-enforced `:ro` write denial, or close ROADMAP B3/B2.
 - Windows stopped `snapshot create` requires guest rootfs metadata and saves via
   `SnapshotStore::save_managed` (same honesty contract as stopped Windows
   `commit`), instead of a bare host-tree copy. Does **not** invent Windows live

@@ -871,10 +871,11 @@ open and harness reports still keep
   `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
-  **Partial:** Windows stopped `snapshot create` now requires guest rootfs
-  metadata and uses `save_managed` (aligned with stopped Windows `commit`).
-  Host bind/named-volume symlink/RO fail-closed policy and full virtio-fs
-  Linux UID/GID storage remain open. Does **not** flip
+  **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata
+  via `save_managed` (aligned with stopped Windows `commit`). Bind/named-volume
+  prepare and managed VolumeStore paths refuse symlink/reparse host sources
+  before following them. Host `:ro` write denial on virtio-fs and full Linux
+  UID/GID storage on Windows binds remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
