@@ -13,6 +13,12 @@ All notable changes to A3S Box will be documented in this file.
   clone the target and release the stream map mutex before `write_all`, so one
   stalled stream cannot wedge later OPEN/ACK. Does **not** change publish maps,
   invent Live digests, or alter bridge/passt networking.
+- Guest `/etc/resolv.conf` no longer inherits host loopback DNS stubs such as
+  systemd-resolved `127.0.0.53` (#455). Host inheritance filters `127.0.0.0/8`
+  and `::1`, prefers `/run/systemd/resolve/resolv.conf` when the stub is
+  detected, and falls back to the built-in public DNS defaults when no usable
+  upstream remains. Explicit `--dns` is unchanged. Does **not** change TSI
+  connected-UDP loopback semantics in vendored libkrun.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
