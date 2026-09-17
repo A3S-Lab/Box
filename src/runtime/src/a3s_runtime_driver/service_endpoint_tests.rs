@@ -576,10 +576,7 @@ async fn capabilities_advertise_outbound_and_reject_udp_without_mutation() {
 
     let mut outbound = runtime_spec("service-endpoint-outbound", 1, RuntimeUnitClass::Task);
     outbound.network.mode = NetworkMode::Outbound;
-    assert!(driver
-        .apply(&outbound, &accepted(&outbound))
-        .await
-        .is_ok());
+    assert!(driver.apply(&outbound, &accepted(&outbound)).await.is_ok());
     let records = driver.manager.managed_records().await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(
