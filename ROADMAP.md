@@ -864,11 +864,12 @@ open and harness reports still keep
   and installs the NetworkStore gateway on the bridge plus a default route on
   the container end, with host `ip_forward` + per-subnet iptables MASQUERADE for
   egress and NetworkStore peer `/etc/hosts` discovery, plus optional static TCP
-  DNAT publication (CLI/SDK; Compose ports still fail-closed). GA default
-  remains delegated rootless/`base_v2` loopback-only. CNI, UDP/auto-assign
-  publish, DNS server/proxy, multi-device, rootless/MicroVM/Windows parity, and
-  the B3 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  DNAT publication (CLI/SDK; Compose ports still fail-closed). MicroVM bridge
+  `passt` likewise rejects unresolved `host_port=0` / invalid publish entries
+  instead of silent skip. GA default remains delegated rootless/`base_v2`
+  loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy, multi-device,
+  rootless/MicroVM/Windows parity, and the B3 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
