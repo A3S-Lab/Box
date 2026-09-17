@@ -862,10 +862,11 @@ open and harness reports still keep
   Privileged owner, stages one host veth + emits `linux.netDevices` for Bridge
   (NetworkStore IPAM), enslaves the peer on a Box-owned Linux bridge for L2,
   and installs the NetworkStore gateway on the bridge plus a default route on
-  the container end. GA default remains delegated rootless/`base_v2`
-  loopback-only. CNI, NAT/outbound, published ports, DNS/aliases, Compose named
-  networks, multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate
-  remain open. Does **not** flip `b2_process_session_recovery_closed`.
+  the container end, with host `ip_forward` + per-subnet iptables MASQUERADE for
+  egress. GA default remains delegated rootless/`base_v2` loopback-only. CNI,
+  published ports/DNAT, DNS/aliases, multi-device, rootless/MicroVM/Windows
+  parity, and the B3 exit gate remain open. Does **not** flip
+  `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
 - [ ] Add quiesce/resume integration for consistent stopped and online product

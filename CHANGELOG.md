@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Keep-authority SandboxViaOci Bridge egress NAT: enable host
+  `net.ipv4.ip_forward` and install idempotent iptables MASQUERADE for the
+  NetworkStore subnet (`! -o a3sb*`). Rules are removed when the idle bridge is
+  torn down. Does **not** add DNS/aliases, published ports/DNAT, CNI, close
+  ROADMAP B3/B2, or change GA rootless default.
 - Compose `--isolation sandbox` named bridge networks when
   `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` is set: create
   NetworkStore networks and preserve Bridge on service configs so SandboxViaOci
