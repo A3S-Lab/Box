@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::RootfsMetadataManifest;
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::{
     IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
 };
@@ -105,9 +106,10 @@ impl SnapshotStore {
     }
 
     /// Save a managed Sandbox snapshot with an authoritative terminal rootfs
-    /// metadata manifest captured while the source execution is quiesced.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn save_managed(
+    /// metadata manifest (OCI UID/GID mappings), captured while the source is
+    /// quiesced or stopped with retained mapping artifacts.
+    #[cfg(target_os = "linux")]
+    pub fn save_managed(
         &self,
         metadata: SnapshotMetadata,
         rootfs_source: &Path,
@@ -911,6 +913,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn managed_snapshot_installs_only_terminal_rootfs_metadata() {
         let tmp = TempDir::new().unwrap();

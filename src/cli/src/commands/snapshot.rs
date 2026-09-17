@@ -232,7 +232,33 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
         })?;
         store.save(meta, &rootfs_path)?
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    let saved = {
+        let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
+        if stopped_sandbox_uses_managed_metadata(record) {
+            let (rootfs_path, rootfs_metadata) =
+                a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record).map_err(
+                    |error| {
+                        format!(
+                            "Cannot capture Sandbox host rootfs for stopped snapshot of '{}': {error}",
+                            record.name
+                        )
+                    },
+                )?;
+            store.save_managed(meta, &rootfs_path, &rootfs_metadata)?
+        } else {
+            let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+                format!(
+                    "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
+                     snapshot a stopped box",
+                    record.name,
+                    record.box_dir.display()
+                )
+            })?;
+            store.save(meta, &rootfs_path)?
+        }
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     let saved = {
         let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
         let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
@@ -284,6 +310,12 @@ fn validate_snapshot_source_state(record: &crate::state::BoxRecord) -> Result<()
         "Cannot snapshot active box '{}': stop it first. Live host-path snapshots are disabled because a running guest can race filesystem traversal.",
         record.name
     ))
+}
+
+/// Stopped managed Sandbox snapshots must persist OCI-mapped terminal metadata
+/// via `save_managed`, not host subordinate UIDs from a bare `save`.
+fn stopped_sandbox_uses_managed_metadata(record: &crate::state::BoxRecord) -> bool {
+    record.isolation.is_sandbox() && record.managed_execution.is_some()
 }
 
 fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
@@ -699,6 +731,43 @@ mod tests {
     fn snapshot_source_state_accepts_stopped_boxes() {
         let record = make_record("id", "box", "stopped", None);
         validate_snapshot_source_state(&record).unwrap();
+    }
+
+    #[test]
+    fn stopped_sandbox_selects_managed_metadata_capture() {
+        use a3s_box_core::{
+            BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, OperationId,
+        };
+        use a3s_box_runtime::ManagedExecutionMetadata;
+        use std::collections::BTreeMap;
+
+        let microvm = make_record("id", "vm", "stopped", None);
+        assert!(!stopped_sandbox_uses_managed_metadata(&microvm));
+
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut sandbox = make_record(id, "sandbox", "stopped", None);
+        sandbox.isolation = ExecutionIsolation::Sandbox;
+        assert!(!stopped_sandbox_uses_managed_metadata(&sandbox));
+
+        sandbox.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new("operation-create").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "external-1".to_string(),
+                    config: BoxConfig {
+                        isolation: ExecutionIsolation::Sandbox,
+                        image: sandbox.image.clone(),
+                        ..Default::default()
+                    },
+                    labels: BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        assert!(stopped_sandbox_uses_managed_metadata(&sandbox));
     }
 
     #[test]
