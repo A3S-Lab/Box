@@ -10,6 +10,19 @@ All notable changes to A3S Box will be documented in this file.
   socket-proxy egress (#172). `None`/`Service` stay on the isolated vsock path
   (no TSI) so Service private endpoints are unchanged. Does **not** complete
   Cloud sole-Runtime cutover, Bollard removal, or clean-host re-cert.
+- Guest-init port-forward no longer deadlocks under TSI when the host sends
+  `OPEN` then `DATA` as separate writes (#446). The guest reader waits with
+  `poll(POLLIN)` and non-blocking `read` instead of a blocking `recv` that
+  stalls concurrent `send` on the same AF_INET connection; `FRAME_DATA` writes
+  clone the target and release the stream map mutex before `write_all`, so one
+  stalled stream cannot wedge later OPEN/ACK. Does **not** change publish maps,
+  invent Live digests, or alter bridge/passt networking.
+- Guest `/etc/resolv.conf` no longer inherits host loopback DNS stubs such as
+  systemd-resolved `127.0.0.53` (#455). Host inheritance filters `127.0.0.0/8`
+  and `::1`, prefers `/run/systemd/resolve/resolv.conf` when the stub is
+  detected, and falls back to the built-in public DNS defaults when no usable
+  upstream remains. Explicit `--dns` is unchanged. Does **not** change TSI
+  connected-UDP loopback semantics in vendored libkrun.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun
