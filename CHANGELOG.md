@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- ROADMAP / runtime README document the actual workspace `a3s-runtime` pin
+  (`aeb1dd96…`) instead of the stale `4c5fbd56…` revision. Does **not** change
+  the Cargo pin or claim Cloud pairing re-cert.
 - `snapshot rm` exits non-zero for missing targets and requires at least one
   argument; `rm`/`inspect` resolve ID, unique name, or unique ID prefix the
   same way as `restore` (#456). Does **not** change prune or create semantics.
