@@ -61,7 +61,10 @@ pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, Metric
 pub use platform::{
     BridgeNetworkBackend, HostGuestChannel, Platform, PlatformCapabilities, VmBackend,
 };
-pub use port::{normalize_port_maps, parse_port_mapping, PortMapping, PortProtocol};
+pub use port::{
+    normalize_and_resolve_port_maps, normalize_port_maps, parse_port_mapping,
+    resolve_auto_host_port, PortMapping, PortProtocol,
+};
 pub use pty::PTY_VSOCK_PORT;
 pub use scale::{
     InstanceDeregistration, InstanceEvent, InstanceHealth, InstanceInfo, InstanceRegistration,
