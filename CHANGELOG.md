@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime `NetworkMode::Outbound` is advertised and mapped to default TSI
+  socket-proxy egress (#172). `None`/`Service` stay on the isolated vsock path
+  (no TSI) so Service private endpoints are unchanged. Does **not** complete
+  Cloud sole-Runtime cutover, Bollard removal, or clean-host re-cert.
 - Default TSI no longer auto-publishes unpublished guest listeners onto host
   `0.0.0.0` (#371). The shim always passes an explicit `krun_set_port_map`
   allowlist (including empty when `-p` is absent), and vendored libkrun

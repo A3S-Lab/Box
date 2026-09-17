@@ -215,7 +215,11 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     assert_eq!(capabilities.isolation_levels, vec![IsolationLevel::Sandbox]);
     assert_eq!(
         capabilities.network_modes,
-        vec![NetworkMode::None, NetworkMode::Service]
+        vec![
+            NetworkMode::None,
+            NetworkMode::Outbound,
+            NetworkMode::Service
+        ]
     );
     assert_eq!(
         capabilities.mount_kinds,
@@ -445,6 +449,19 @@ fn mapping_keeps_none_and_service_on_the_isolated_vsock_path() {
             .config
             .network,
         a3s_box_core::NetworkMode::None
+    );
+}
+
+#[test]
+fn mapping_outbound_uses_tsi_socket_proxy_egress() {
+    let mut outbound = spec(RuntimeUnitClass::Task);
+    outbound.network.mode = NetworkMode::Outbound;
+    assert_eq!(
+        creation_request(&outbound, TEST_EXECUTION_ISOLATION)
+            .unwrap()
+            .config
+            .network,
+        a3s_box_core::NetworkMode::Tsi
     );
 }
 

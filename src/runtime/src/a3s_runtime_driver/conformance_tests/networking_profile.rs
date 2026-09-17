@@ -54,6 +54,54 @@ pub(super) async fn run(
         .remove_unit(client, &request.spec, "network-none")
         .await?;
 
+    let outbound_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|error| super::external("bind outbound network oracle", error))?;
+    let outbound_port = outbound_listener
+        .local_addr()
+        .map_err(|error| super::external("read outbound network oracle address", error))?
+        .port();
+    let accept = tokio::spawn(async move {
+        let (mut stream, _) = outbound_listener.accept().await?;
+        let mut buf = [0u8; 64];
+        let _ = stream.read(&mut buf).await?;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await?;
+        Ok::<_, std::io::Error>(())
+    });
+    let mut outbound = fixture.cases.task(
+        "network-outbound",
+        &format!(
+            "wget -q -T 5 -O /dev/null http://127.0.0.1:{outbound_port} && printf 'r17-network-outbound-ok\\n'"
+        ),
+        15_000,
+    );
+    outbound.spec.network.mode = NetworkMode::Outbound;
+    let outbound_observation = client.apply(&outbound).await?;
+    require(
+        outbound_observation.state == RuntimeUnitState::Succeeded,
+        "NetworkMode::Outbound workload could not reach the host loopback listener",
+    )?;
+    let outbound_record = fixture.record_for(&outbound.spec).await?;
+    let outbound_config = &outbound_record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| super::protocol("outbound fixture lost managed metadata"))?
+        .request
+        .config;
+    require(
+        outbound_config.network == BoxNetworkMode::Tsi,
+        "NetworkMode::Outbound was not mapped to TSI egress",
+    )?;
+    accept
+        .await
+        .map_err(|error| super::external("join outbound oracle accept", error))?
+        .map_err(|error| super::external("outbound oracle accept", error))?;
+    fixture
+        .remove_unit(client, &outbound.spec, "network-outbound")
+        .await?;
+
     let script = "while :; do { printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 15\\r\\nConnection: close\\r\\n\\r\\nr17-service-tcp'; } | nc -l -p 18080; done";
     let mut first = fixture.cases.service("network-service-first", script);
     first.spec.network.mode = NetworkMode::Service;

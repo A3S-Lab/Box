@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_runtime::contract::{
-    NetworkMode, RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
-    SecretReference, SecretTarget,
+    RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState, SecretReference,
+    SecretTarget,
 };
 use a3s_runtime::{
     FileRuntimeStateStore, RuntimeClient, RuntimeDriver, RuntimeError, RuntimeStateStore,
@@ -114,19 +114,6 @@ async fn reject_hostile_inputs(
     require(
         client.apply(&protected_mount).await.is_err(),
         "Box accepted a tmpfs mount below a protected host interface",
-    )?;
-
-    let mut outbound_network = template.clone();
-    outbound_network.request_id = fixture.cases.request_id("security-outbound-network");
-    outbound_network.spec.unit_id = fixture.cases.unit_id("security-outbound-network");
-    outbound_network.spec.network.mode = NetworkMode::Outbound;
-    require(
-        matches!(
-            client.apply(&outbound_network).await,
-            Err(RuntimeError::UnsupportedCapabilities(missing))
-                if missing == vec!["network_mode:Outbound"]
-        ),
-        "Box accepted an unadvertised outbound network",
     )?;
 
     let after = fixture
