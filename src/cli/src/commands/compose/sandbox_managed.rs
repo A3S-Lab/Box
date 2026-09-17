@@ -2,8 +2,8 @@
 //!
 //! MicroVM Compose keeps the legacy `VmManager::boot` path. This module only
 //! covers the SandboxViaOci GA route so Compose shares create/start/remove with
-//! CLI/SDK. Named bridges, published ports, and guest health probes stay
-//! fail-closed until they have a managed transport.
+//! CLI/SDK. Named bridges require keep-authority opt-in; published ports stay
+//! fail-closed.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,8 +11,9 @@ use std::path::Path;
 use a3s_box_core::config::BoxConfig;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
-    CreateExecutionRequest, ExecutionId, ExecutionManager, ExecutionRecordPolicy,
-    ExecutionRestartPolicy, KillExecutionOptions, OperationId,
+    sandbox_named_bridge_opt_in_enabled, CreateExecutionRequest, ExecutionId, ExecutionManager,
+    ExecutionRecordPolicy, ExecutionRestartPolicy, KillExecutionOptions, OperationId,
+    OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 use a3s_box_runtime::{ComposeRuntimePlan, ManagedExecutionState};
 
@@ -25,18 +26,20 @@ use super::secrets::ComposeSecretLease;
 pub(super) fn preflight_sandbox_compose(
     project: &ComposeRuntimePlan,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !project.config.networks.is_empty() {
-        return Err(
-            "Compose --isolation sandbox does not support declared bridge networks yet".into(),
-        );
+    let bridge_opt_in = sandbox_named_bridge_opt_in_enabled();
+    if !project.config.networks.is_empty() && !bridge_opt_in {
+        return Err(format!(
+            "Compose --isolation sandbox named bridge networks require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root)"
+        )
+        .into());
     }
     for service_name in &project.service_order {
         let service = project.config.services.get(service_name).ok_or_else(|| {
             format!("Service '{service_name}' disappeared from the resolved Compose project")
         })?;
-        if !service.networks.names().is_empty() {
+        if !service.networks.names().is_empty() && !bridge_opt_in {
             return Err(format!(
-                "Compose --isolation sandbox does not support named networks on service '{service_name}' yet"
+                "Compose --isolation sandbox named networks on service '{service_name}' require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root)"
             )
             .into());
         }
@@ -50,11 +53,23 @@ pub(super) fn preflight_sandbox_compose(
     Ok(())
 }
 
-/// Force loopback-only networking for SandboxViaOci Compose services.
+/// Apply SandboxViaOci Compose networking policy.
+///
+/// Loopback-only by default. Keep-authority opt-in preserves Bridge so prepare
+/// can stage host netDevices; published ports stay cleared.
 pub(super) fn sandbox_box_config(mut config: BoxConfig) -> BoxConfig {
-    config.network = NetworkMode::None;
+    if !sandbox_named_bridge_opt_in_enabled()
+        || !matches!(config.network, NetworkMode::Bridge { .. })
+    {
+        config.network = NetworkMode::None;
+    }
     config.port_map.clear();
     config
+}
+
+/// Whether Compose sandbox should create/attach NetworkStore networks.
+pub(super) fn sandbox_compose_creates_networks() -> bool {
+    sandbox_named_bridge_opt_in_enabled()
 }
 
 /// Inputs for one Compose SandboxViaOci service create/start.
@@ -206,9 +221,14 @@ mod tests {
     use super::*;
     use a3s_box_core::compose::{ComposeConfig, ServiceConfig, StringOrList};
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn preflight_rejects_published_ports() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
@@ -231,6 +251,8 @@ mod tests {
 
     #[test]
     fn preflight_accepts_loopback_only_service() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
@@ -258,5 +280,56 @@ mod tests {
         );
         assert!(matches!(config.network, NetworkMode::None));
         assert!(config.port_map.is_empty());
+    }
+
+    #[test]
+    fn preflight_rejects_named_networks_without_keep_authority() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                image: Some("alpine:latest".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut networks = HashMap::new();
+        networks.insert("frontend".to_string(), Default::default());
+        let config = ComposeConfig {
+            version: None,
+            services,
+            volumes: HashMap::new(),
+            networks,
+        };
+        let project = ComposeRuntimePlan::new("demo", config).unwrap();
+        let error = preflight_sandbox_compose(&project).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keep_authority_preserves_bridge_in_sandbox_box_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "1");
+        let config = sandbox_box_config(BoxConfig {
+            network: NetworkMode::Bridge {
+                network: "frontend".into(),
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            config.network,
+            NetworkMode::Bridge {
+                network: "frontend".into(),
+            }
+        );
+        assert!(sandbox_compose_creates_networks());
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+        assert!(!sandbox_compose_creates_networks());
     }
 }
