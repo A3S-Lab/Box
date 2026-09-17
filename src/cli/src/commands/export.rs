@@ -55,17 +55,15 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
         } else {
             let rootfs_dir = super::resolve_box_rootfs(&record.box_dir)
                 .ok_or_else(|| rootfs_not_found_message(&args.name, &record.box_dir))?;
-            let file = std::fs::File::create(&args.output)
-                .map_err(|e| format!("Failed to create {}: {e}", args.output))?;
-
-            let mut builder = tar::Builder::new(file);
-            builder.follow_symlinks(false);
-            builder
-                .append_dir_all(".", &rootfs_dir)
-                .map_err(|e| format!("Failed to archive filesystem: {e}"))?;
-            builder
-                .finish()
-                .map_err(|e| format!("Failed to finalize archive: {e}"))?;
+            // Match stopped commit: fail closed without guest rootfs metadata so
+            // NTFS host mode/ownership is never archived as guest filesystem truth.
+            let rootfs_metadata = super::commit::read_guest_rootfs_metadata(&rootfs_dir)
+                .map_err(|error| format!("Cannot export stopped box '{}': {error}", record.name))?;
+            super::commit::create_tar_from_guest_metadata(
+                &rootfs_dir,
+                &rootfs_metadata,
+                std::path::Path::new(&args.output),
+            )?;
             drop(lifecycle_lock);
         }
     }

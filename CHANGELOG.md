@@ -11,6 +11,12 @@ All notable changes to A3S Box will be documented in this file.
   fails closed on prepare instead of silently installing a host-subordinate
   walk. Does **not** close ROADMAP B3/B2 or claim MicroVM live host-path
   snapshot parity.
+- Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
+  (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
+  so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
+  silently drop or reject publish intent. Compose scale catalogs still keep
+  raw `0:guest` for runtime discovery. Does **not** unlock Compose sandbox
+  publish under GA, close ROADMAP B3/B4/B2, or claim UDP publish.
 - MicroVM bridge `passt` inbound TCP publish fails closed on unresolved
   `host_port=0` and invalid `port_map` entries instead of silently skipping
   them (CLI still resolves auto-assign before boot). Aligns with keep-authority
@@ -19,6 +25,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Stopped directory-backed MicroVM `export` / `diff` require guest rootfs
+  metadata and archive/walk via the same guest-metadata contract as stopped
+  `commit` (and Windows stopped `snapshot create`). Does **not** invent live
+  Windows export/diff, close ROADMAP B3/B2, or claim Windows volume/` :ro`
+  parity.
 - Volume prepare and managed VolumeStore paths refuse symlink / Windows reparse
   host sources before `canonicalize` follows them (plain file or directory
   only). Aligns MicroVM bind prepare with Runtime Volume canonical-directory

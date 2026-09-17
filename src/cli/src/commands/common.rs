@@ -398,32 +398,9 @@ pub(crate) fn effective_stop_signal(
 
 /// Validate and normalize published port mappings to the runtime format.
 pub(crate) fn normalize_port_maps(entries: &[String]) -> Result<Vec<String>, String> {
-    a3s_box_core::normalize_port_maps(entries)?
-        .into_iter()
-        .map(resolve_auto_host_port)
-        .collect()
-}
-
-/// Resolve an auto-assign host port (host part `0`, e.g. `-p 0:80`) to a
-/// concrete free ephemeral port by briefly claiming one with a TcpListener, so
-/// the shim/passt actually forward it and `port` prints the real number
-/// (matching Docker). A non-zero host port is returned unchanged.
-fn resolve_auto_host_port(entry: String) -> Result<String, String> {
-    let Some((host, guest)) = entry.split_once(':') else {
-        return Ok(entry);
-    };
-    if host != "0" {
-        return Ok(entry);
-    }
-    let listener = std::net::TcpListener::bind("0.0.0.0:0")
-        .map_err(|e| format!("failed to allocate a host port for '{entry}': {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("failed to read allocated host port: {e}"))?
-        .port();
-    // Release it so the box can bind the port (small TOCTOU window, as Docker has).
-    drop(listener);
-    Ok(format!("{port}:{guest}"))
+    // Resolve `0:guest` at CLI admission so shim/passt/DNAT see concrete ports
+    // and `a3s-box port` prints the real number (Docker-compatible).
+    a3s_box_core::normalize_and_resolve_port_maps(entries)
 }
 
 /// Reject runtime options that a3s-box cannot enforce yet.
@@ -704,15 +681,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_auto_host_port() {
+    fn test_normalize_port_maps_resolves_auto_host_port() {
         // A non-zero host port is unchanged.
         assert_eq!(
-            resolve_auto_host_port("8080:80".to_string()).unwrap(),
-            "8080:80"
+            normalize_port_maps(&["8080:80".to_string()]).unwrap(),
+            vec!["8080:80".to_string()]
         );
         // `0:80` resolves to a concrete non-zero host port, keeping the guest port.
-        let resolved = resolve_auto_host_port("0:80".to_string()).unwrap();
-        let (host, guest) = resolved.split_once(':').unwrap();
+        let resolved = normalize_port_maps(&["0:80".to_string()]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        let (host, guest) = resolved[0].split_once(':').unwrap();
         assert_eq!(guest, "80");
         assert_ne!(host, "0");
         assert!(host.parse::<u16>().unwrap() > 0);
