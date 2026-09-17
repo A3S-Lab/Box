@@ -545,7 +545,7 @@ async fn stop_remove_and_provider_loss_close_every_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capabilities_and_preflight_reject_udp_and_outbound_without_mutation() {
+async fn capabilities_advertise_outbound_and_reject_udp_without_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(DriverFakeBackend::default());
     let driver = fake_driver_with_backend_and_connector(
@@ -556,11 +556,15 @@ async fn capabilities_and_preflight_reject_udp_and_outbound_without_mutation() {
     let capabilities = driver.capabilities().await.unwrap();
     assert_eq!(
         capabilities.network_modes,
-        vec![NetworkMode::None, NetworkMode::Service]
+        vec![
+            NetworkMode::None,
+            NetworkMode::Outbound,
+            NetworkMode::Service
+        ]
     );
     assert!(capabilities.features.contains(&RuntimeFeature::ServiceTcp));
     assert!(!capabilities.features.contains(&RuntimeFeature::ServiceUdp));
-    assert!(!capabilities.network_modes.contains(&NetworkMode::Outbound));
+    assert!(capabilities.network_modes.contains(&NetworkMode::Outbound));
 
     let mut udp = service_spec("service-endpoint-udp", 1, &[("dns", 5_353)]);
     udp.network.ports[0].protocol = TransportProtocol::Udp;
@@ -570,12 +574,19 @@ async fn capabilities_and_preflight_reject_udp_and_outbound_without_mutation() {
             if missing == vec!["feature:ServiceUdp"]
     ));
 
-    let mut outbound = runtime_spec("service-endpoint-outbound", 1, RuntimeUnitClass::Service);
+    let mut outbound = runtime_spec("service-endpoint-outbound", 1, RuntimeUnitClass::Task);
     outbound.network.mode = NetworkMode::Outbound;
-    assert!(matches!(
-        driver.apply(&outbound, &accepted(&outbound)).await,
-        Err(RuntimeError::UnsupportedCapabilities(missing))
-            if missing == vec!["network_mode:Outbound"]
-    ));
-    assert!(driver.manager.managed_records().await.unwrap().is_empty());
+    assert!(driver.apply(&outbound, &accepted(&outbound)).await.is_ok());
+    let records = driver.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .request
+            .config
+            .network,
+        a3s_box_core::NetworkMode::Tsi
+    );
 }

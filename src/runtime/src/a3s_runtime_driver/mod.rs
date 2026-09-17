@@ -582,7 +582,11 @@ impl RuntimeDriver for BoxRuntimeDriver {
             // Runtime uses `Sandbox` as the provider-neutral isolation
             // class. `execution_isolation` selects Box's concrete backend.
             isolation_levels,
-            network_modes: vec![NetworkMode::None, NetworkMode::Service],
+            network_modes: vec![
+                NetworkMode::None,
+                NetworkMode::Outbound,
+                NetworkMode::Service,
+            ],
             mount_kinds,
             health_check_kinds: vec![
                 HealthCheckKind::Http,

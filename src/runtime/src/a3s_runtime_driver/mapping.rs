@@ -298,9 +298,9 @@ fn compile_network_mode(mode: &RuntimeNetworkMode) -> RuntimeResult<NetworkMode>
         // vsock connector. Enabling TSI here would redirect the guest-side
         // loopback connection to the host instead of the local workload.
         RuntimeNetworkMode::None | RuntimeNetworkMode::Service => Ok(NetworkMode::None),
-        unsupported => Err(RuntimeError::UnsupportedCapabilities(vec![format!(
-            "network_mode:{unsupported:?}"
-        )])),
+        // Outbound uses default TSI socket proxying so the guest can reach
+        // host/external destinations without publishing Service endpoints.
+        RuntimeNetworkMode::Outbound => Ok(NetworkMode::Tsi),
     }
 }
 

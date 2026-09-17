@@ -24,18 +24,19 @@ flushed without a false `EIO`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`e9c76176390785b978f151ea2475f997ff51ff006ce62e74fca45c6b875a9e93`).
+`b92b7d00e0b60ca729e0b1e98feff6471d3c7f62de29c8b706309ae3c0528b3b`).
 The deterministic archive was generated from local tooling commit
-`daec6e8498461c767f64a10d565c8a64adffcd7c`; that revision returns `-EPERM`
-for unpublished TSI listen so krun-guest keeps a native in-guest INET
-socket (A3S-Lab/libkrun#12, Box#370), on top of allowlist-only host binds,
-macOS VirtioFS directory-entry snapshotting, mutation-stable
-synthetic FUSE resume cookies, directory-stream ownership independent from the
-retained file handle, and retryable Unix-datagram TX backpressure handling. It
-does not change the packaged Windows runtime. Its
-`corresponding-source/2692169` directory preserves the exact wrapper source
-for the packaged firmware DLL. The archive also contains the Apache-2.0
-license and the EDK2 source notices.
+`f7c69184ad3cf3436343836176859cd2fc9c732e`; that revision keeps guest→host
+TSI reverse-proxy streams open until FIN/reaper (A3S-Lab/libkrun#13) and
+hairpins guest connects that target host-forwarded ports back into the guest
+(A3S-Lab/libkrun#14), on top of `-EPERM` for unpublished TSI listen
+(A3S-Lab/libkrun#12, Box#370), allowlist-only host binds, macOS VirtioFS
+directory-entry snapshotting, mutation-stable synthetic FUSE resume cookies,
+directory-stream ownership independent from the retained file handle, and
+retryable Unix-datagram TX backpressure handling. It does not change the
+packaged Windows runtime. Its `corresponding-source/2692169` directory
+preserves the exact wrapper source for the packaged firmware DLL. The archive
+also contains the Apache-2.0 license and the EDK2 source notices.
 
 ## Embedded kernel bundle
 

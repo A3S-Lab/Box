@@ -3008,18 +3008,28 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
+<<<<<<< HEAD
+- Runtime `NetworkMode::Outbound` is advertised and mapped to default TSI
+  socket-proxy egress (#172). `None`/`Service` stay on the isolated vsock path
+  (no TSI) so Service private endpoints are unchanged. Does **not** complete
+  Cloud sole-Runtime cutover, Bollard removal, or clean-host re-cert.
+=======
+=======
 - Bridge networking no longer drops the peer Ethernet switch when passt exits
   (#454). The shim keeps peer-only forwarding, writes `passt.backend_lost`, and
   `inspect` / inventory observation mark the box `health_status=unhealthy` so
   `events` can emit `unhealthy`. Host egress via passt remains unavailable until
   restart; peer traffic no longer dies solely because the BridgePort was
   dropped. Does **not** auto-respawn passt or invent Live digests.
+>>>>>>> origin/main
 - ROADMAP / runtime README document the actual workspace `a3s-runtime` pin
   (`aeb1dd96…`) instead of the stale `4c5fbd56…` revision. Does **not** change
   the Cargo pin or claim Cloud pairing re-cert.
 - `snapshot rm` exits non-zero for missing targets and requires at least one
   argument; `rm`/`inspect` resolve ID, unique name, or unique ID prefix the
   same way as `restore` (#456). Does **not** change prune or create semantics.
+>>>>>>> origin/main
 - Guest-init port-forward no longer deadlocks under TSI when the host sends
   `OPEN` then `DATA` as separate writes (#446). The guest reader waits with
   `poll(POLLIN)` and non-blocking `read` instead of a blocking `recv` that
