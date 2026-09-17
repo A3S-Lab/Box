@@ -867,10 +867,11 @@ open and harness reports still keep
   DNAT publication (CLI/SDK; Compose ports still fail-closed). Product
   admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a concrete
   ephemeral host port before boot so backends do not silently drop unresolved
-  auto-assign. GA default remains delegated rootless/`base_v2` loopback-only.
-  CNI, UDP publish, DNS server/proxy, multi-device, rootless/MicroVM/Windows
-  parity, and the B3 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  auto-assign. MicroVM bridge `passt` likewise rejects unresolved
+  `host_port=0` / invalid publish entries instead of silent skip. GA default
+  remains delegated rootless/`base_v2` loopback-only. CNI, UDP publish, DNS
+  server/proxy, multi-device, rootless/MicroVM/Windows parity, and the B3 exit
+  gate remain open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata

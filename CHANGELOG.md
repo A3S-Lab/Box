@@ -12,6 +12,11 @@ All notable changes to A3S Box will be documented in this file.
   silently drop or reject publish intent. Compose scale catalogs still keep
   raw `0:guest` for runtime discovery. Does **not** unlock Compose sandbox
   publish under GA, close ROADMAP B3/B4/B2, or claim UDP publish.
+- MicroVM bridge `passt` inbound TCP publish fails closed on unresolved
+  `host_port=0` and invalid `port_map` entries instead of silently skipping
+  them (CLI still resolves auto-assign before boot). Aligns with keep-authority
+  SandboxViaOci DNAT honesty. Does **not** close ROADMAP B3/B2 or claim
+  UDP/Compose auto-assign publish.
 
 ### Added
 
