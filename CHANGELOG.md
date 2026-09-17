@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Compose `--isolation sandbox` named bridge networks when
+  `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` is set: create
+  NetworkStore networks and preserve Bridge on service configs so SandboxViaOci
+  host netDevices staging can run. Without the env, named networks still
+  fail-closed (loopback-only GA). Published ports remain fail-closed. Does
+  **not** close ROADMAP B4/B3/B2 or claim NAT/DNS/publish parity.
 - Keep-authority SandboxViaOci Bridge gateway: assign NetworkStore gateway/CIDR
   on the Box Linux bridge and install a default route via that gateway on the
   container veth end (moves with Create into the runtime netns). Does **not**
@@ -35,10 +41,10 @@ All notable changes to A3S Box will be documented in this file.
   via that transport + detached health worker. Does **not** close ROADMAP B4
   or claim bridge/publish/warm-pool Compose parity.
 - Compose `--isolation sandbox` create/start/teardown uses the same
-  `LocalExecutionManager` / SandboxViaOci path as CLI/SDK (loopback-only;
-  named bridges and published ports fail closed). MicroVM Compose keeps
-  `VmManager::boot`. Does **not** close ROADMAP B4/B3/B2 or claim warm-pool /
-  bridge Compose parity.
+  `LocalExecutionManager` / SandboxViaOci path as CLI/SDK (loopback-only by
+  default; named bridges under keep-authority opt-in; published ports fail
+  closed). MicroVM Compose keeps `VmManager::boot`. Does **not** close ROADMAP
+  B4/B3/B2 or claim warm-pool / NAT / publish Compose parity.
 - Native Linux SandboxViaOci prepare classifies Box-managed Secret bind mounts
   via `CreateAttachments::mark_secret_mount` (mount-index only; no secret
   bytes). Does **not** close ROADMAP B4/B3/B2 or claim materialization /

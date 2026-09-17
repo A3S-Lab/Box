@@ -377,8 +377,9 @@ async fn execute_up(
     }
     let mut state = StateFile::load_default()?;
 
-    // Step 1: Create networks (MicroVM Compose only; SandboxViaOci stays loopback-only).
-    let networks = if isolation.is_sandbox() {
+    // Step 1: Create networks (MicroVM always; SandboxViaOci under keep-authority).
+    let networks = if isolation.is_sandbox() && !sandbox_managed::sandbox_compose_creates_networks()
+    {
         Vec::new()
     } else {
         project.required_networks()
