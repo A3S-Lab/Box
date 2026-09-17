@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- MicroVM bridge `passt` inbound TCP publish fails closed on unresolved
+  `host_port=0` and invalid `port_map` entries instead of silently skipping
+  them (CLI still resolves auto-assign before boot). Aligns with keep-authority
+  SandboxViaOci DNAT honesty. Does **not** close ROADMAP B3/B2 or claim
+  UDP/Compose auto-assign publish.
+
 ### Added
 
 - Volume prepare and managed VolumeStore paths refuse symlink / Windows reparse
