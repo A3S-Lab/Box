@@ -24,9 +24,9 @@ use crate::sandbox::A3sOciController;
 use crate::sandbox::{
     compile_oci_spec, compile_runtime_owned_oci_spec, plan_id_mappings,
     prepare_managed_mount_source, prepare_managed_secret_mount_source, prepare_sandbox_path_access,
-    probe_sandbox_capabilities_for, stage_read_only_mount_aliases, validate_external_mount_access,
-    write_bundle, SandboxBundleSpec, SandboxCapabilitySnapshot, SandboxLaunchSpec, SandboxMount,
-    SandboxResources, SandboxRuntimeProcess, SandboxTmpfs,
+    probe_sandbox_capabilities_for, stage_external_mount_aliases, write_bundle, SandboxBundleSpec,
+    SandboxCapabilitySnapshot, SandboxLaunchSpec, SandboxMount, SandboxResources,
+    SandboxRuntimeProcess, SandboxTmpfs,
 };
 
 use super::VmManager;
@@ -607,7 +607,7 @@ impl VmManager {
         id_mappings: &crate::sandbox::SandboxIdMappingPlan,
     ) -> Result<()> {
         let managed = self.managed_sandbox_mount_sources(&layout.workspace_path, mounts)?;
-        let mut read_only_external = Vec::new();
+        let mut external = Vec::new();
 
         for mount in mounts.iter() {
             if self
@@ -627,33 +627,32 @@ impl VmManager {
             } else if managed.contains(&mount.source) {
                 prepare_managed_mount_source(&mount.source, id_mappings)
                     .map_err(|error| mount_source_error("prepare managed source", mount, error))?;
-            } else if mount.read_only {
-                read_only_external.push(mount.source.clone());
             } else {
-                validate_external_mount_access(&mount.source, id_mappings, mount.read_only)
-                    .map_err(|error| {
-                        mount_source_error("validate external source", mount, error)
-                    })?;
+                // RO and RW caller-owned binds both get Box-owned O_PATH aliases so
+                // the userns-resolved OCI path stays reachable under private parents.
+                external.push((mount.source.clone(), mount.read_only));
             }
         }
 
-        let aliases = stage_read_only_mount_aliases(
-            &self.home_dir,
-            &self.box_id,
-            &read_only_external,
-            id_mappings,
-        )
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!(
-                "Failed to stage read-only Sandbox attachment aliases for [{}]: {error}",
-                read_only_external
-                    .iter()
-                    .map(|source| source.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            hint: None,
-        })?;
+        let aliases =
+            stage_external_mount_aliases(&self.home_dir, &self.box_id, &external, id_mappings)
+                .map_err(|error| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to stage Sandbox attachment aliases for [{}]: {error}",
+                        external
+                            .iter()
+                            .map(|(source, read_only)| {
+                                format!(
+                                    "{} ({})",
+                                    source.display(),
+                                    if *read_only { "ro" } else { "rw" }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    hint: None,
+                })?;
         for mount in mounts {
             if let Some(alias) = aliases.get(&mount.source) {
                 mount.source = alias.clone();

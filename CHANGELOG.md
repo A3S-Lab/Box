@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Linux SandboxViaOci stages Box-owned `O_PATH` bind aliases for **read-write**
+  as well as read-only caller-owned external mounts under private provider
+  directories, so userns-resolved OCI sources stay reachable without chowning
+  caller trees. RW aliases remount `nosuid,nodev` without `ro`; RO path
+  unchanged. Does **not** close ROADMAP B3/B2 or invent Windows bind parity.
 - Stopped managed Linux Sandbox `a3s-box snapshot create` (and sync SDK
   `create_snapshot`) persists OCI-mapped terminal rootfs metadata via
   `SnapshotStore::save_managed`, matching live managed snapshots instead of
