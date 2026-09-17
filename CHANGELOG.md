@@ -3008,6 +3008,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Bridge networking no longer drops the peer Ethernet switch when passt exits
+  (#454). The shim keeps peer-only forwarding, writes `passt.backend_lost`, and
+  `inspect` / inventory observation mark the box `health_status=unhealthy` so
+  `events` can emit `unhealthy`. Host egress via passt remains unavailable until
+  restart; peer traffic no longer dies solely because the BridgePort was
+  dropped. Does **not** auto-respawn passt or invent Live digests.
 - ROADMAP / runtime README document the actual workspace `a3s-runtime` pin
   (`aeb1dd96…`) instead of the stale `4c5fbd56…` revision. Does **not** change
   the Cargo pin or claim Cloud pairing re-cert.

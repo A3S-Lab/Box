@@ -58,8 +58,12 @@ pub fn is_default_ps_visible(record: &BoxRecord) -> bool {
 pub fn format_status(record: &BoxRecord) -> String {
     let mut annotations = Vec::new();
 
-    if is_active(record) && record.health_check.is_some() && record.health_status != "none" {
-        annotations.push(record.health_status.clone());
+    if is_active(record) && record.health_status != "none" {
+        // Show health for configured healthchecks and for network-backend
+        // degradation (#454) even when no healthcheck was declared.
+        if record.health_check.is_some() || record.health_status == "unhealthy" {
+            annotations.push(record.health_status.clone());
+        }
     }
 
     if matches!(record.status.as_str(), "stopped" | "dead") {
@@ -80,12 +84,15 @@ pub fn format_status(record: &BoxRecord) -> String {
 }
 
 pub fn status_details(record: &BoxRecord) -> StatusDetails {
-    let health =
-        if is_active(record) && record.health_check.is_some() && record.health_status != "none" {
+    let health = if is_active(record) && record.health_status != "none" {
+        if record.health_check.is_some() || record.health_status == "unhealthy" {
             Some(record.health_status.clone())
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     StatusDetails {
         state: record.status.clone(),

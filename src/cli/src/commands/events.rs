@@ -62,13 +62,13 @@ impl std::fmt::Display for Event {
 }
 
 /// Snapshot of box statuses for change detection.
-type StatusSnapshot = HashMap<String, String>;
+type StatusSnapshot = HashMap<String, (String, String)>;
 
 fn take_snapshot(state: &StateFile) -> StatusSnapshot {
     state
         .list(true)
         .into_iter()
-        .map(|r| (r.id.clone(), r.status.clone()))
+        .map(|r| (r.id.clone(), (r.status.clone(), r.health_status.clone())))
         .collect()
 }
 
@@ -195,10 +195,22 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
                 .or_insert_with(|| (r.name.clone(), r.image.clone()));
         }
 
-        // Detect new boxes
-        for (id, status) in &current {
-            let old_status = prev.get(id).map(|s| s.as_str());
+        // Detect new boxes / status / health transitions
+        for (id, (status, health)) in &current {
+            let old = prev.get(id);
+            let old_status = old.map(|(s, _)| s.as_str());
+            let old_health = old.map(|(_, h)| h.as_str());
+
+            let mut actions = Vec::new();
             if let Some(action) = status_to_action(old_status, status) {
+                actions.push(action.to_string());
+            }
+            // Surface passt/backend loss as a first-class unhealthy event (#454).
+            if health == "unhealthy" && old_health != Some("unhealthy") {
+                actions.push("unhealthy".to_string());
+            }
+
+            for action in actions {
                 let (name, image) = records
                     .get(id)
                     .cloned()
@@ -207,7 +219,7 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
                 let event = Event {
                     time: Utc::now(),
                     event_type: "container".to_string(),
-                    action: action.to_string(),
+                    action,
                     actor: Actor {
                         id: id.clone(),
                         name,

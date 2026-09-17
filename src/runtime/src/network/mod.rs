@@ -12,7 +12,10 @@ mod store;
 #[cfg(target_os = "macos")]
 pub use a3s_box_netproxy::NetProxyManager;
 #[cfg(any(target_os = "linux", all(test, unix)))]
-pub use passt::{terminate_passt, PasstManager};
+pub use passt::{
+    passt_backend_lost, passt_backend_lost_for_box, passt_backend_lost_marker, terminate_passt,
+    PasstManager,
+};
 pub use store::NetworkStore;
 
 /// Stable per-user switch directory for one logical bridge network.
