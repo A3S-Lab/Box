@@ -62,7 +62,9 @@ fn validate_sandbox_compose_published_ports(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for entry in ports {
         let mapping = parse_port_mapping(entry).map_err(|error| {
-            format!("Compose --isolation sandbox published port on service '{service_name}': {error}")
+            format!(
+                "Compose --isolation sandbox published port on service '{service_name}': {error}"
+            )
         })?;
         if mapping.protocol != PortProtocol::Tcp {
             return Err(format!(
