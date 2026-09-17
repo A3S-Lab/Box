@@ -213,7 +213,11 @@ async fn current_rootfs(
             record.box_dir.display()
         )
     })?;
-    walk_dir(&rootfs_dir)
+    // Match stopped commit/export: fail closed without guest rootfs metadata so
+    // NTFS host mode/ownership is never presented as guest filesystem truth.
+    let rootfs_metadata = super::commit::read_guest_rootfs_metadata(&rootfs_dir)
+        .map_err(|error| format!("Cannot diff stopped box '{display_name}': {error}"))?;
+    walk_guest_rootfs_metadata(&rootfs_metadata)
 }
 
 /// SandboxViaOci host-rootfs capture works while Running or freezer-Paused.
@@ -261,6 +265,71 @@ async fn current_stopped_sandbox_host_rootfs(
         record.name
     )
     .into())
+}
+
+/// Build a diff map from guest terminal rootfs metadata (not host NTFS mode bits).
+fn walk_guest_rootfs_metadata(
+    manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+    use a3s_box_core::rootfs_metadata::RootfsEntryKind;
+    use base64::Engine;
+
+    const DIRECTORY_MODE: u32 = 0o040000;
+    const REGULAR_FILE_MODE: u32 = 0o100000;
+    const SYMBOLIC_LINK_MODE: u32 = 0o120000;
+
+    let mut entries = HashMap::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&entry.path_base64)
+            .map_err(|error| format!("Invalid rootfs metadata path: {error}"))?;
+        let path = std::path::PathBuf::from(String::from_utf8_lossy(&bytes).as_ref());
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
+            continue;
+        }
+        let Some(key) = guest_metadata_rootfs_key(&path)? else {
+            continue;
+        };
+        let permissions = entry.mode & 0o7777;
+        let (size, mode, is_dir) = match entry.kind {
+            RootfsEntryKind::Directory => (0, DIRECTORY_MODE | permissions, true),
+            RootfsEntryKind::Regular => (entry.size, REGULAR_FILE_MODE | permissions, false),
+            RootfsEntryKind::Symlink => {
+                let size = entry
+                    .link_target_base64
+                    .as_ref()
+                    .and_then(|encoded| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .ok()
+                    })
+                    .map(|target| target.len() as u64)
+                    .unwrap_or(0);
+                (size, SYMBOLIC_LINK_MODE | permissions, false)
+            }
+        };
+        entries.insert(key, RootfsFileInfo { size, mode, is_dir });
+    }
+    Ok(entries)
+}
+
+fn guest_metadata_rootfs_key(path: &Path) -> Result<Option<String>, String> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => {
+                segments.push(segment.to_string_lossy().into_owned())
+            }
+            _ => {
+                return Err(format!(
+                    "guest rootfs metadata contains an unsafe path: {}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok((!segments.is_empty()).then(|| format!("/{}", segments.join("/"))))
 }
 
 #[cfg(unix)]

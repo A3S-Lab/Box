@@ -6,7 +6,7 @@ use a3s_box_core::config::ResourceConfig;
 use a3s_box_core::dns::parse_add_host_entries;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
-    parse_port_mapping, resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
+    resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
     ExecutionRecordPolicy, ExecutionSnapshotId, OperationId, PortMapping,
 };
 
@@ -329,16 +329,15 @@ impl SandboxCreateOptions {
         self.validate()?;
         let network = self.network.runtime_mode(client)?;
         let (volumes, volume_names) = resolve_mounts(client, self.mounts)?;
-        let port_map = self
-            .ports
-            .into_iter()
-            .map(|port| {
-                let entry = port.runtime_entry();
-                parse_port_mapping(&entry)
-                    .map(|mapping| mapping.runtime_entry())
-                    .map_err(ClientError::Validation)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let port_map = {
+            let entries = self
+                .ports
+                .into_iter()
+                .map(|port| port.runtime_entry())
+                .collect::<Vec<_>>();
+            a3s_box_core::normalize_and_resolve_port_maps(&entries)
+                .map_err(ClientError::Validation)?
+        };
         let tmpfs = self
             .tmpfs
             .iter()

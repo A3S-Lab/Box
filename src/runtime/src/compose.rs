@@ -161,7 +161,7 @@ impl ComposeRuntimePlan {
         let add_hosts = svc.extra_hosts.to_vec();
         a3s_box_core::dns::parse_add_host_entries(&add_hosts)
             .map_err(|e| BoxError::ConfigError(format!("Invalid extra_hosts entry: {e}")))?;
-        let port_map = a3s_box_core::normalize_port_maps(&svc.ports).map_err(|e| {
+        let port_map = a3s_box_core::normalize_and_resolve_port_maps(&svc.ports).map_err(|e| {
             BoxError::ConfigError(format!(
                 "Service '{}' has invalid port mapping: {}",
                 service_name, e
@@ -853,6 +853,28 @@ services:
             .unwrap();
 
         assert_eq!(box_config.port_map, vec!["8080:80"]);
+    }
+
+    #[test]
+    fn test_build_box_config_resolves_auto_assigned_host_port() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    ports:
+      - "0:80"
+"#;
+        let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
+        let box_config = project
+            .build_box_config("web", Some("myapp_default"))
+            .unwrap();
+
+        assert_eq!(box_config.port_map.len(), 1);
+        let (host, guest) = box_config.port_map[0].split_once(':').unwrap();
+        assert_eq!(guest, "80");
+        assert_ne!(host, "0");
+        assert!(host.parse::<u16>().unwrap() > 0);
     }
 
     #[test]
