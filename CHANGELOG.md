@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Windows stopped `snapshot create` requires guest rootfs metadata and saves via
+  `SnapshotStore::save_managed` (same honesty contract as stopped Windows
+  `commit`), instead of a bare host-tree copy. Does **not** invent Windows live
+  snapshot/commit, close ROADMAP B3/B2, or claim full Windows bind/volume
+  POSIX-on-virtio-fs parity.
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):
   admit `port_map` only with Bridge + keep-authority; install per-box iptables
   DNAT (PREROUTING + localhost OUTPUT) and FORWARD accept to the NetworkStore
