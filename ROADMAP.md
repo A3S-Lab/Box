@@ -875,15 +875,18 @@ open and harness reports still keep
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata
   via `save_managed` (aligned with stopped Windows `commit`). Bind/named-volume
   prepare and managed VolumeStore paths refuse symlink/reparse host sources
-  before following them. Host `:ro` write denial on virtio-fs and full Linux
-  UID/GID storage on Windows binds remain open. Does **not** flip
+  before following them. Stopped directory-backed MicroVM `export`/`diff`
+  require guest rootfs metadata (same honesty contract as stopped `commit`).
+  Host `:ro` write denial on virtio-fs and full Linux UID/GID storage on
+  Windows binds remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
-  managed quiesce/host-rootfs surface; Windows stopped snapshots now retain
-  guest metadata via `save_managed`; MicroVM live host-path snapshots and the
-  full B3 storage/network qualification gate remain open. Does **not** flip
+  managed quiesce/host-rootfs surface; Windows stopped snapshots retain guest
+  metadata via `save_managed`; stopped directory MicroVM export/diff retain
+  guest metadata; MicroVM live host-path snapshots and the full B3
+  storage/network qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and

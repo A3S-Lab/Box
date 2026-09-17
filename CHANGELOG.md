@@ -14,6 +14,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Stopped directory-backed MicroVM `export` / `diff` require guest rootfs
+  metadata and archive/walk via the same guest-metadata contract as stopped
+  `commit` (and Windows stopped `snapshot create`). Does **not** invent live
+  Windows export/diff, close ROADMAP B3/B2, or claim Windows volume/` :ro`
+  parity.
 - Volume prepare and managed VolumeStore paths refuse symlink / Windows reparse
   host sources before `canonicalize` follows them (plain file or directory
   only). Aligns MicroVM bind prepare with Runtime Volume canonical-directory
