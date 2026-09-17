@@ -44,11 +44,46 @@ impl PortMapping {
 }
 
 /// Validate and normalize multiple port mappings to runtime format.
+///
+/// Preserves `host_port=0` (auto-assign). Prefer
+/// [`normalize_and_resolve_port_maps`] before persisting a bootable box config
+/// so MicroVM/passt/TSI and keep-authority DNAT see a concrete host port.
 pub fn normalize_port_maps(entries: &[String]) -> Result<Vec<String>, String> {
     entries
         .iter()
         .map(|entry| parse_port_mapping(entry).map(|mapping| mapping.runtime_entry()))
         .collect()
+}
+
+/// Normalize published ports and resolve `host_port=0` to a free ephemeral port.
+///
+/// Matches Docker CLI behavior: briefly claim `0.0.0.0:0`, then release so the
+/// runtime can bind the chosen port (small TOCTOU window). Non-zero host ports
+/// are unchanged. Call this at product admission (CLI/Compose/SDK) before
+/// persisting `port_map` for boot.
+pub fn normalize_and_resolve_port_maps(entries: &[String]) -> Result<Vec<String>, String> {
+    normalize_port_maps(entries)?
+        .into_iter()
+        .map(resolve_auto_host_port)
+        .collect()
+}
+
+/// Resolve an auto-assign host port (`0:guest`) to a concrete free ephemeral
+/// port. A non-zero host port is returned unchanged.
+pub fn resolve_auto_host_port(entry: String) -> Result<String, String> {
+    let mapping = parse_port_mapping(&entry)?;
+    if mapping.host_port != 0 {
+        return Ok(mapping.runtime_entry());
+    }
+    let listener = std::net::TcpListener::bind("0.0.0.0:0")
+        .map_err(|e| format!("failed to allocate a host port for '{entry}': {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read allocated host port: {e}"))?
+        .port();
+    // Release so the box can bind the port (small TOCTOU window, as Docker has).
+    drop(listener);
+    Ok(format!("{port}:{}", mapping.guest_port))
 }
 
 /// Parse a published-port mapping.
@@ -154,6 +189,32 @@ mod tests {
 
         assert_eq!(mapping.host_port, 0);
         assert_eq!(mapping.guest_port, 8080);
+    }
+
+    #[test]
+    fn test_resolve_auto_host_port_leaves_static_ports() {
+        assert_eq!(
+            resolve_auto_host_port("8080:80".to_string()).unwrap(),
+            "8080:80"
+        );
+    }
+
+    #[test]
+    fn test_resolve_auto_host_port_allocates_ephemeral() {
+        let resolved = resolve_auto_host_port("0:80".to_string()).unwrap();
+        let (host, guest) = resolved.split_once(':').unwrap();
+        assert_eq!(guest, "80");
+        assert_ne!(host, "0");
+        assert!(host.parse::<u16>().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_normalize_and_resolve_port_maps() {
+        let resolved = normalize_and_resolve_port_maps(&["0:443/tcp".to_string()]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        let (host, guest) = resolved[0].split_once(':').unwrap();
+        assert_eq!(guest, "443");
+        assert_ne!(host, "0");
     }
 
     #[test]
