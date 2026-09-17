@@ -401,6 +401,35 @@ fn running_sandbox_selects_host_rootfs_commit() {
 
 #[cfg(not(windows))]
 #[test]
+fn paused_sandbox_selects_host_rootfs_commit() {
+    use crate::test_helpers::fixtures::make_record;
+    use a3s_box_core::ExecutionIsolation;
+
+    let mut sandbox = make_record("id", "sandbox", "paused", Some(std::process::id()));
+    sandbox.isolation = ExecutionIsolation::Sandbox;
+    sandbox.exec_socket_path = std::path::PathBuf::new();
+
+    assert_eq!(
+        commit_capture_mode(&sandbox).unwrap(),
+        CommitCaptureMode::LiveHostRootfs
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn paused_microvm_commit_fails_closed() {
+    use crate::test_helpers::fixtures::make_record;
+    use a3s_box_core::ExecutionIsolation;
+
+    let mut microvm = make_record("id", "vm", "paused", Some(std::process::id()));
+    microvm.isolation = ExecutionIsolation::Microvm;
+
+    let error = commit_capture_mode(&microvm).unwrap_err().to_string();
+    assert!(error.contains("paused MicroVM"));
+}
+
+#[cfg(not(windows))]
+#[test]
 fn running_microvm_selects_guest_archive_commit() {
     use crate::test_helpers::fixtures::make_record;
     use a3s_box_core::ExecutionIsolation;
