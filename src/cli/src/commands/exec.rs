@@ -190,7 +190,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub(super) async fn execute_captured(
+pub(crate) async fn execute_captured(
     record: &crate::state::BoxRecord,
     request: a3s_box_core::exec::ExecRequest,
 ) -> Result<a3s_box_core::exec::ExecOutput, Box<dyn std::error::Error>> {
@@ -228,7 +228,7 @@ pub(super) async fn execute_captured(
     }
 }
 
-fn uses_oci_session(record: &crate::state::BoxRecord) -> bool {
+pub(crate) fn uses_oci_session(record: &crate::state::BoxRecord) -> bool {
     record
         .managed_execution
         .as_ref()

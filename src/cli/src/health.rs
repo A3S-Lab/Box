@@ -32,8 +32,9 @@ pub fn spawn_health_checker(
 ) -> Result<tokio::task::JoinHandle<()>, String> {
     #[cfg(not(windows))]
     {
+        let _ = exec_socket_path;
         Ok(tokio::spawn(async move {
-            run_health_loop(box_id, exec_socket_path, health_check, None).await;
+            run_health_loop(box_id, health_check, None).await;
         }))
     }
     #[cfg(windows)]
@@ -141,13 +142,7 @@ pub(crate) async fn run_detached_health_worker(
         return Ok(());
     };
 
-    run_health_loop(
-        box_id,
-        record.exec_socket_path.clone(),
-        health_check,
-        Some(generation),
-    )
-    .await;
+    run_health_loop(box_id, health_check, Some(generation)).await;
     Ok(())
 }
 
@@ -225,12 +220,7 @@ pub(crate) fn detached_health_worker_active(record: &BoxRecord) -> bool {
 }
 
 #[cfg(not(windows))]
-async fn run_health_loop(
-    box_id: String,
-    exec_socket_path: PathBuf,
-    hc: HealthCheck,
-    expected_generation: Option<i64>,
-) {
+async fn run_health_loop(box_id: String, hc: HealthCheck, expected_generation: Option<i64>) {
     // Schedule the first probe at the end of start_period instead of waiting
     // for an additional interval. This matches the runtime health scheduler
     // and removes an avoidable interval from Compose dependency convergence.
@@ -244,7 +234,7 @@ async fn run_health_loop(
             break;
         }
 
-        let healthy = run_probe(&exec_socket_path, &hc.cmd, timeout_ns).await;
+        let healthy = run_probe_for_box(&box_id, &hc.cmd, timeout_ns).await;
 
         // Reload fresh under the state lock and apply ONLY this box's health
         // fields, so concurrent monitor/CLI writers are not clobbered.
@@ -307,6 +297,48 @@ fn health_worker_matches_record(
                 .map(|generation| health_generation(record) == Some(generation))
                 .unwrap_or(true)
     })
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn run_probe_for_box(box_id: &str, cmd: &[String], timeout_ns: u64) -> bool {
+    let Ok(state) = StateFile::load_default() else {
+        return false;
+    };
+    let Some(record) = state.find_by_id(box_id) else {
+        return false;
+    };
+    run_probe_for_record(record, cmd, timeout_ns).await
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn run_probe_for_record(
+    record: &BoxRecord,
+    cmd: &[String],
+    timeout_ns: u64,
+) -> bool {
+    use a3s_box_core::exec::ExecRequest;
+
+    let request = ExecRequest {
+        request_id: None,
+        cmd: cmd.to_vec(),
+        timeout_ns,
+        env: vec![],
+        working_dir: None,
+        rootfs: None,
+        stdin: None,
+        stdin_streaming: false,
+        user: None,
+        streaming: false,
+    };
+
+    if crate::commands::exec::uses_oci_session(record) {
+        return match crate::commands::exec::execute_captured(record, request).await {
+            Ok(output) => output.exit_code == 0,
+            Err(_) => false,
+        };
+    }
+
+    run_probe(&record.exec_socket_path, cmd, timeout_ns).await
 }
 
 #[cfg(not(windows))]

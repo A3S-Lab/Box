@@ -583,23 +583,52 @@ async fn execute_up(
                 service_restart_policy(svc_name, Some(service))
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let restart_policy = sandbox_managed::execution_restart_policy(&restart_policy)?;
+            let healthcheck_disabled = project.healthcheck_disabled(svc_name);
+            let service_health_check = project.healthcheck(svc_name).map(|hc| HealthCheck {
+                cmd: hc.cmd,
+                interval_secs: hc.interval_secs,
+                timeout_secs: hc.timeout_secs,
+                retries: hc.retries,
+                start_period_secs: hc.start_period_secs,
+            });
+            let health_check = if healthcheck_disabled {
+                None
+            } else {
+                service_health_check
+            };
             let box_config = sandbox_managed::sandbox_box_config(box_config);
             let image = box_config.image.clone();
             match sandbox_managed::boot_sandbox_service(
-                project_name,
-                svc_name,
-                box_config,
-                labels.into_iter().collect(),
-                restart_policy,
-                max_restart_count,
-                volume_names,
-                sandbox_managed::lease_secret_root(secret_lease.as_ref()),
+                sandbox_managed::SandboxServiceBootRequest {
+                    project_name,
+                    svc_name,
+                    box_config,
+                    labels: labels.into_iter().collect(),
+                    restart_policy,
+                    max_restart_count,
+                    volume_names,
+                    secret_root: sandbox_managed::lease_secret_root(secret_lease.as_ref()),
+                    health_check,
+                    healthcheck_disabled,
+                },
             )
             .await
             {
                 Ok(record) => {
                     if let Some(lease) = secret_lease.as_mut() {
                         lease.persist();
+                    }
+                    if let Err(error) = crate::health::spawn_detached_health_checker(&record) {
+                        let service_box = ServiceBox::from_record(&record);
+                        let rollback_services =
+                            rollback_with_current(&started_services, service_box);
+                        return rollback_compose_up(
+                            &mut state,
+                            &rollback_services,
+                            &created_networks,
+                            error,
+                        )
+                        .await;
                     }
                     let service_box = ServiceBox::from_record(&record);
                     started_services.push(service_box);
