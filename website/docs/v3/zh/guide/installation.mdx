@@ -66,7 +66,7 @@ brew install a3s-lab/tap/a3s-box
 
 | 行为                 | Linux/macOS                   | Windows                         |
 | -------------------- | ----------------------------- | ------------------------------- |
-| 固定版本             | `--version v3.2.6`            | `-Version v3.2.6`               |
+| 固定版本             | `--version v3.2.7`            | `-Version v3.2.7`               |
 | 指定目录             | `--install-dir PATH`          | `-InstallDir PATH`              |
 | 不修改 `PATH`        | `--no-modify-path`            | `-NoModifyPath`                 |
 | 替换非安装器管理目录 | `--force`                     | `-Force`                        |
@@ -77,14 +77,14 @@ brew install a3s-lab/tap/a3s-box
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
-  sh -s -- --version v3.2.6 --no-modify-path
+  sh -s -- --version v3.2.7 --no-modify-path
 ```
 
 Windows 带参数安装：
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
-& ([scriptblock]::Create($installer)) -Version v3.2.6 -NoModifyPath
+& ([scriptblock]::Create($installer)) -Version v3.2.7 -NoModifyPath
 ```
 
 ## 离线安装
@@ -93,15 +93,15 @@ $installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
 
 ```bash
 sh ./install.sh \
-  --version v3.2.6 \
-  --archive ./a3s-box-v3.2.6-linux-x86_64.tar.gz \
+  --version v3.2.7 \
+  --archive ./a3s-box-v3.2.7-linux-x86_64.tar.gz \
   --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 ```powershell
 .\install.ps1 `
-  -Version v3.2.6 `
-  -ArchivePath .\a3s-box-v3.2.6-windows-x86_64.zip `
+  -Version v3.2.7 `
+  -ArchivePath .\a3s-box-v3.2.7-windows-x86_64.zip `
   -Sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
@@ -116,9 +116,9 @@ sh ./install.sh \
 `# >>> a3s-box installer >>>` 与 `# <<< a3s-box installer <<<` 之间的块；
 Windows 需从用户 `PATH` 移除该目录。卸载二进制不会自动删除运行时数据。
 
-## Linux Sandbox 主机准备（3.2.6 GA）
+## Linux Sandbox 主机准备（3.2.7 GA）
 
-安装器不会启用 Sandbox 主机能力。在经认证的 Linux 主机上安装 `v3.2.6` 或更新版本后，
+安装器不会启用 Sandbox 主机能力。在经认证的 Linux 主机上安装 `v3.2.7` 或更新版本后，
 准备委托 cgroup 与 setuid launcher，然后**不要**设置 `A3S_BOX_OCI_MIGRATION`：
 
 ```bash
