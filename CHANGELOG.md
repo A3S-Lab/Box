@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Compose `--isolation sandbox` create/start/teardown uses the same
+  `LocalExecutionManager` / SandboxViaOci path as CLI/SDK (loopback-only;
+  named bridges, published ports, and healthchecks fail closed). MicroVM
+  Compose keeps `VmManager::boot`. Does **not** close ROADMAP B4/B3/B2 or
+  claim warm-pool / health-probe / bridge Compose parity.
 - Native Linux SandboxViaOci prepare classifies Box-managed Secret bind mounts
   via `CreateAttachments::mark_secret_mount` (mount-index only; no secret
   bytes). Does **not** close ROADMAP B4/B3/B2 or claim materialization /
