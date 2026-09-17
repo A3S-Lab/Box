@@ -105,8 +105,14 @@ pub(super) fn resolve_copy_route(
         .as_ref()
         .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
     {
-        if record.status != "running" {
-            return Err(format!("Box {} is not running", record.name).into());
+        // Managed OCI file/filesystem copy is available while Running or
+        // freezer-Paused; exec-based tar paths stay Running-only elsewhere.
+        if record.status != "running" && record.status != "paused" {
+            return Err(format!(
+                "Box {} is neither running nor paused",
+                record.name
+            )
+            .into());
         }
         let metadata = record
             .managed_execution

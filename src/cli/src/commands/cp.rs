@@ -1,4 +1,5 @@
-//! `a3s-box cp` command — Copy files or directories between host and a running box.
+//! `a3s-box cp` command — Copy files or directories between host and a box
+//! (running, or freezer-paused for managed OCI Sandbox file I/O).
 //!
 //! Uses the selected runtime session's native file protocol for single files.
 //! Directories are archived with `tar` before transfer.
@@ -716,8 +717,23 @@ mod tests {
 
         let error = resolve_copy_route(&record).unwrap_err().to_string();
 
-        assert_eq!(error, "Box managed-copy is not running");
+        assert_eq!(error, "Box managed-copy is neither running nor paused");
         assert!(!error.contains("socket"));
+    }
+
+    #[test]
+    fn paused_oci_copy_route_uses_managed_identity() {
+        let generation = ExecutionGeneration::new(5).unwrap();
+        let mut record = oci_record("paused", generation);
+        record.exec_socket_path = PathBuf::from("missing-copy-socket");
+
+        assert_eq!(
+            resolve_copy_route(&record).unwrap(),
+            CopyRoute::Managed {
+                execution_id: ExecutionId::new(record.id).unwrap(),
+                generation,
+            }
+        );
     }
 
     #[tokio::test]

@@ -15,10 +15,11 @@ use super::session_support::{
     debug_session_environment, has_oci_runtime, inherit_container_environment,
     inherit_execution_security_environment,
 };
+use super::support::managed_state;
 use super::LocalExecutionManager;
 use crate::{
-    BoxRecord, ExecClient, PtyClient, StreamingExec, StreamingExecInput, StreamingPty,
-    StreamingPtyInput,
+    BoxRecord, ExecClient, ManagedExecutionState, PtyClient, StreamingExec, StreamingExecInput,
+    StreamingPty, StreamingPtyInput,
 };
 
 #[async_trait]
@@ -158,14 +159,18 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
+        // OCI-routed Sandbox file I/O stays available while freezer-paused (same
+        // observability fence as stats/processes). Guest-exec MicroVM paths still
+        // require Running because pause freezes guest archive I/O.
         let record = self
-            .require_running_record(execution_id, generation)
+            .require_observable_record(execution_id, generation)
             .await?;
         if has_oci_runtime(&record) {
-            self.require_same_runtime(&record, execution_id, generation)
+            self.require_same_observable_runtime(&record, execution_id, generation)
                 .await?;
             return self.backend.transfer_file(&record, request).await;
         }
+        require_running_for_guest_session(&record, execution_id)?;
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
@@ -194,13 +199,14 @@ impl ExecutionSessionManager for LocalExecutionManager {
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
         let record = self
-            .require_running_record(execution_id, generation)
+            .require_observable_record(execution_id, generation)
             .await?;
         if has_oci_runtime(&record) {
-            self.require_same_runtime(&record, execution_id, generation)
+            self.require_same_observable_runtime(&record, execution_id, generation)
                 .await?;
             return self.backend.filesystem(&record, request).await;
         }
+        require_running_for_guest_session(&record, execution_id)?;
         let (client, stream) = self
             .bind_exec_record(&record, execution_id, generation)
             .await?;
@@ -373,6 +379,19 @@ fn validate_microvm_exec_request_id(request: &ExecRequest) -> ExecutionManagerRe
         }
         _ => Ok(()),
     }
+}
+
+fn require_running_for_guest_session(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+) -> ExecutionManagerResult<()> {
+    if managed_state(record)? != ManagedExecutionState::Running {
+        return Err(ExecutionManagerError::Conflict {
+            execution_id: execution_id.clone(),
+            message: "execution is not running".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn session_error(

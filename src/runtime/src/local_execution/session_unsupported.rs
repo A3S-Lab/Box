@@ -98,10 +98,10 @@ impl ExecutionSessionManager for LocalExecutionManager {
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
         let record = self
-            .require_running_record(execution_id, generation)
+            .require_observable_record(execution_id, generation)
             .await?;
         if has_oci_runtime(&record) {
-            self.require_same_runtime(&record, execution_id, generation)
+            self.require_same_observable_runtime(&record, execution_id, generation)
                 .await?;
             return self.backend.transfer_file(&record, request).await;
         }
@@ -115,10 +115,10 @@ impl ExecutionSessionManager for LocalExecutionManager {
         request: FilesystemRequest,
     ) -> ExecutionManagerResult<FilesystemResponse> {
         let record = self
-            .require_running_record(execution_id, generation)
+            .require_observable_record(execution_id, generation)
             .await?;
         if has_oci_runtime(&record) {
-            self.require_same_runtime(&record, execution_id, generation)
+            self.require_same_observable_runtime(&record, execution_id, generation)
                 .await?;
             return self.backend.filesystem(&record, request).await;
         }
