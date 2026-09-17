@@ -153,7 +153,14 @@ impl VmManager {
                 resolv_content,
             )?;
             self.write_hostname_file(&layout)?;
-            self.write_standalone_hosts_file(&layout)?;
+            match &self.config.network {
+                a3s_box_core::NetworkMode::Bridge { network } => {
+                    self.write_hosts_file(&layout, network)?;
+                }
+                _ => {
+                    self.write_standalone_hosts_file(&layout)?;
+                }
+            }
 
             let resources = SandboxResources::from_box_config(&self.config)?;
             let mut instance_spec = self.build_instance_spec(&layout)?;
@@ -431,7 +438,14 @@ impl VmManager {
                 resolv_content,
             )?;
             self.write_hostname_file(&layout)?;
-            self.write_standalone_hosts_file(&layout)?;
+            match &self.config.network {
+                a3s_box_core::NetworkMode::Bridge { network } => {
+                    self.write_hosts_file(&layout, network)?;
+                }
+                _ => {
+                    self.write_standalone_hosts_file(&layout)?;
+                }
+            }
 
             let resources = SandboxResources::from_box_config(&self.config)?;
             let instance_spec = self.build_runtime_owned_instance_spec(&layout)?;

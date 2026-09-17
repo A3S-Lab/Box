@@ -275,7 +275,7 @@ impl VmManager {
     fn render_network_hosts_file(&self, network_name: &str) -> Result<String> {
         use crate::network::NetworkStore;
 
-        let store = NetworkStore::default_path()?;
+        let store = NetworkStore::new(self.home_dir.join("networks.json"));
         let net_config = store.get(network_name)?.ok_or_else(|| {
             BoxError::NetworkError(format!("network '{}' not found", network_name))
         })?;
