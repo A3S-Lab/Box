@@ -436,7 +436,11 @@ fn validate_anonymous_config(
 
 fn ensure_managed_volume_directory(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || managed_volume_is_reparse_point(&metadata)
+                || !metadata.is_dir() =>
+        {
             return Err(BoxError::ConfigError(format!(
                 "managed volume path {} is not a directory",
                 path.display()
@@ -463,7 +467,10 @@ fn ensure_managed_volume_directory(path: &Path) -> Result<()> {
             path.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata.file_type().is_symlink()
+        || managed_volume_is_reparse_point(&metadata)
+        || !metadata.is_dir()
+    {
         return Err(BoxError::ConfigError(format!(
             "managed volume path {} is not a directory",
             path.display()
@@ -472,13 +479,27 @@ fn ensure_managed_volume_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn managed_volume_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
+#[cfg(not(windows))]
+fn managed_volume_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn remove_managed_volume_path(path: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(BoxError::IoError(error)),
     };
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+    if metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && !managed_volume_is_reparse_point(&metadata)
+    {
         std::fs::remove_dir_all(path).map_err(BoxError::IoError)
     } else {
         std::fs::remove_file(path).map_err(BoxError::IoError)
