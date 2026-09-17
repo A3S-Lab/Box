@@ -39,8 +39,9 @@ All notable changes to A3S Box will be documented in this file.
   `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` is set: create
   NetworkStore networks and preserve Bridge on service configs so SandboxViaOci
   host netDevices staging can run. Without the env, named networks still
-  fail-closed (loopback-only GA). Published ports remain fail-closed. Does
-  **not** close ROADMAP B4/B3/B2 or claim NAT/DNS/publish parity.
+  fail-closed (loopback-only GA). Keep-authority published TCP ports are
+  unlocked separately (see Added). Does **not** close ROADMAP B4/B3/B2 or claim
+  NAT/DNS/UDP/auto-assign Compose publish parity.
 - Keep-authority SandboxViaOci Bridge gateway: assign NetworkStore gateway/CIDR
   on the Box Linux bridge and install a default route via that gateway on the
   container veth end (moves with Create into the runtime netns). Does **not**
