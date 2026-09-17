@@ -63,11 +63,15 @@ readiness/liveness separation, liveness transition, graceful stop, and forced
 deadline cases; those ignored-by-default cases require the dedicated Linux
 Sandbox or KVM certification environment.
 
-Both Linux isolation paths implement the same advertised Runtime profile set.
-`NetworkMode::None` and `NetworkMode::Service` remain loopback-only and do not
-grant workload egress. A MicroVM retains explicit vsock IPC without libkrun TSI
-socket interception; Runtime Service listeners relay to the declared guest TCP
-ports through the generation-fenced execution connector.
+Both Linux isolation paths implement the shared Runtime contract for the modes
+they advertise. `NetworkMode::None` and `NetworkMode::Service` remain
+loopback-only and do not grant workload egress: Sandbox uses a private netns
+with host→guest Service relays; MicroVM keeps explicit vsock IPC without
+libkrun TSI socket interception for those modes. `NetworkMode::Outbound` is
+advertised only for MicroVM isolation and maps to default TSI socket-proxy
+egress so the guest can reach host/external destinations. Sandbox does not
+advertise Outbound and rejects it as `UnsupportedCapabilities` until a real
+Sandbox L3 egress path exists.
 
 Callers that need Runtime Secrets compose the driver with exactly one
 `BoxSecretMaterializer`:
