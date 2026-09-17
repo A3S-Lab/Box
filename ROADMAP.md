@@ -887,9 +887,10 @@ open and harness reports still keep
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
   managed quiesce/host-rootfs surface; Windows stopped snapshots retain guest
   metadata via `save_managed`; stopped directory MicroVM export/diff retain
-  guest metadata; MicroVM live host-path snapshots and the full B3
-  storage/network qualification gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  guest metadata; missing `rootfs_snapshot.json` fails closed on `diff` and
+  baseline-create errors abort boot instead of soft success; MicroVM live
+  host-path snapshots and the full B3 storage/network qualification gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and
   removal driven by the durable Box record.
