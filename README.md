@@ -570,8 +570,9 @@ persisted OCI route, including
 exact-generation process dispatch and normalized CPU/memory/PID/block-I/O
 snapshots for running or paused workloads. CLI `cp` uses that same durable
 route for filesystem classification, bounded single-file transfer, directory
-archive execution, and Unix permission restoration; an OCI-routed failure is
-never retried against a Box-owned socket. Live CLI `container-update` now
+archive execution, and Unix permission restoration on running or
+freezer-paused OCI Sandboxes; an OCI-routed failure is never retried against a
+Box-owned socket. Exec/PTY stay Running-only. Live CLI `container-update` now
 dispatches partial cgroup intent through the exact persisted generation,
 reuses interrupted/completed operation identities, and lets the managed
 lifecycle atomically apply and persist resource intent before any remaining

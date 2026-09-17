@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Managed OCI Sandbox `cp` / `transfer_file` / `filesystem` accept freezer-paused
+  boxes via the same observability fence as `stats`/`top` (`require_observable`
+  + CLI `resolve_copy_route`), while exec/PTY and MicroVM guest-archive paths
+  stay Running-only. Does **not** close ROADMAP B2/B3 or claim paused guest
+  exec.
 - Linux SandboxViaOci stages Box-owned `O_PATH` bind aliases for **read-write**
   as well as read-only caller-owned external mounts under private provider
   directories, so userns-resolved OCI sources stay reachable without chowning

@@ -467,7 +467,8 @@ retain process or filesystem sessions after its owner dies.
 - [x] Route CLI `cp` through the persisted OCI route, retaining
   exact-generation filesystem classification, bounded single-file transfer,
   directory archive execution, and Unix permission restoration without socket
-  fallback.
+  fallback for running and freezer-paused OCI Sandbox workloads (exec/PTY stay
+  Running-only). Does **not** flip `b2_process_session_recovery_closed`.
 - [x] Route live CLI `container-update` through the persisted OCI route with
   exact-generation, replay-safe resource intent and no socket fallback.
 - [x] Route the remaining socket-oriented CLI projections (`attach` and init
