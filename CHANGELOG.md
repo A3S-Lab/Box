@@ -6,10 +6,19 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
 - Runtime `NetworkMode::Outbound` is advertised and mapped to default TSI
   socket-proxy egress (#172). `None`/`Service` stay on the isolated vsock path
   (no TSI) so Service private endpoints are unchanged. Does **not** complete
   Cloud sole-Runtime cutover, Bollard removal, or clean-host re-cert.
+=======
+- ROADMAP / runtime README document the actual workspace `a3s-runtime` pin
+  (`aeb1dd96…`) instead of the stale `4c5fbd56…` revision. Does **not** change
+  the Cargo pin or claim Cloud pairing re-cert.
+- `snapshot rm` exits non-zero for missing targets and requires at least one
+  argument; `rm`/`inspect` resolve ID, unique name, or unique ID prefix the
+  same way as `restore` (#456). Does **not** change prune or create semantics.
+>>>>>>> origin/main
 - Guest-init port-forward no longer deadlocks under TSI when the host sends
   `OPEN` then `DATA` as separate writes (#446). The guest reader waits with
   `poll(POLLIN)` and non-blocking `read` instead of a blocking `recv` that
@@ -328,6 +337,10 @@ All notable changes to A3S Box will be documented in this file.
   is non-empty — unsupported runtime network mutation fails closed as
   Unimplemented instead of acknowledging applied CIDR (#452 / #451). Does
   **not** invent Live digests or flip B2.
+- CRI `PullImage` honors `AuthConfig.identity_token` as Docker-parity
+  `oauth2accesstoken` basic auth, and refuses inventing anonymous /
+  service-default pull when only unsupported `registry_token` or malformed
+  `auth` is present (#453 / #452). Does **not** invent Live digests or flip B2.
 - CRI unit-test helpers install an in-process instant-stop shim handler after
   attach so Stop/Remove destroy cannot SIGTERM the cargo-test binary or hang
   on host `sleep`/waitpid; invent-refusal fixtures use a heartbeat-only

@@ -114,7 +114,7 @@ simulation is hardware certification. Executed KVM and SEV-SNP evidence
 therefore remain open while their repository gates are disabled.
 
 Box now pins `a3s-runtime` 0.5.0 at
-`4c5fbd56bedd84d1007a7d9cd046a9f7083bbdcd` and implements the atomic
+`aeb1dd96b5d3f823464d51fcabe99b6052874aee` and implements the atomic
 `ServiceLifecycle` contract without a second lifecycle store. Independent
 readiness and liveness thresholds use the existing generation-fenced port and
 exec boundaries; unhealthy liveness applies the declared restart policy to the
@@ -776,7 +776,9 @@ retain process or filesystem sessions after its owner dies.
   `UpdatePodSandboxResources` refuses inventing Ok when linux/annotations
   request unsupported pod-level mutation (#451 / #437); CRI
   `UpdateRuntimeConfig` refuses inventing Ok when NetworkConfig.pod_cidr is
-  non-empty (#452 / #451);
+  non-empty (#452 / #451); CRI PullImage honors AuthConfig.identity_token and
+  refuses inventing anonymous pull for unsupported registry_token / malformed
+  auth (#453 / #452);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

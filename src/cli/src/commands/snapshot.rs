@@ -62,7 +62,8 @@ pub struct SnapshotLsArgs {
 /// Arguments for `snapshot rm`.
 #[derive(Parser)]
 pub struct SnapshotRmArgs {
-    /// Snapshot ID(s) to remove
+    /// Snapshot ID(s) or unique name(s) to remove (same resolution as restore)
+    #[arg(required = true, num_args = 1..)]
     pub ids: Vec<String>,
     /// Remove even if a restored box still references the snapshot as its
     /// copy-on-write overlay lower (`.snapshot-lower`).
@@ -73,7 +74,7 @@ pub struct SnapshotRmArgs {
 /// Arguments for `snapshot inspect`.
 #[derive(Parser)]
 pub struct SnapshotInspectArgs {
-    /// Snapshot ID to inspect
+    /// Snapshot ID or unique name to inspect (same resolution as restore)
     pub id: String,
 }
 
@@ -428,7 +429,17 @@ async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Erro
     let state = StateFile::load_default()?;
 
     let mut refused = false;
-    for id in &args.ids {
+    let mut missing = false;
+    for raw in &args.ids {
+        let meta = match resolve_snapshot(&store, raw) {
+            Ok(meta) => meta,
+            Err(err) => {
+                eprintln!("{err}");
+                missing = true;
+                continue;
+            }
+        };
+        let id = meta.id.as_str();
         if !args.force {
             let users = boxes_referencing_snapshot(&state, &store.rootfs_path(id));
             if !users.is_empty() {
@@ -448,14 +459,19 @@ async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Erro
             store.delete(id)?
         };
         if deleted {
-            println!("{}", id);
+            println!("{id}");
         } else {
-            eprintln!("Snapshot '{}' not found", id);
+            // Race: resolved then deleted by another process.
+            eprintln!("Snapshot '{id}' not found");
+            missing = true;
         }
     }
 
     if refused {
         return Err("one or more snapshots are still in use (not removed)".into());
+    }
+    if missing {
+        return Err("one or more snapshots were not found".into());
     }
     Ok(())
 }
@@ -492,9 +508,7 @@ async fn execute_inspect(args: SnapshotInspectArgs) -> Result<(), Box<dyn std::e
     use a3s_box_runtime::SnapshotStore;
 
     let store = SnapshotStore::default_path()?;
-    let meta = store
-        .get(&args.id)?
-        .ok_or_else(|| format!("Snapshot '{}' not found", args.id))?;
+    let meta = resolve_snapshot(&store, &args.id)?;
 
     println!("{}", serde_json::to_string_pretty(&meta)?);
     Ok(())
@@ -526,7 +540,7 @@ fn resolve_box<'a>(
     }
 }
 
-/// Resolve a snapshot by ID or name.
+/// Resolve a snapshot by ID, unique name, or unique ID prefix.
 fn resolve_snapshot(
     store: &a3s_box_runtime::SnapshotStore,
     id_or_name: &str,
@@ -535,18 +549,34 @@ fn resolve_snapshot(
     if let Some(meta) = store.get(id_or_name)? {
         return Ok(meta);
     }
-    // Try by name
     let all = store.list()?;
-    let by_name: Vec<_> = all.into_iter().filter(|s| s.name == id_or_name).collect();
+    // Try by name
+    let by_name: Vec<_> = all
+        .iter()
+        .filter(|s| s.name == id_or_name)
+        .cloned()
+        .collect();
     match by_name.len() {
-        0 => Err(format!("No snapshot found matching '{}'", id_or_name).into()),
-        1 => {
-            // Safe: len() == 1 guarantees next() returns Some
-            Ok(by_name.into_iter().next().expect("len checked"))
+        1 => return Ok(by_name.into_iter().next().expect("len checked")),
+        n if n > 1 => {
+            return Err(format!(
+                "Ambiguous snapshot reference '{id_or_name}': matches {n} snapshots by name"
+            )
+            .into());
         }
+        0 => {}
+        _ => unreachable!(),
+    }
+    // Unique ID prefix (same posture as `rm <box>` via find_by_id_prefix).
+    let by_prefix: Vec<_> = all
+        .into_iter()
+        .filter(|s| s.id.starts_with(id_or_name))
+        .collect();
+    match by_prefix.len() {
+        0 => Err(format!("No snapshot found matching '{id_or_name}'").into()),
+        1 => Ok(by_prefix.into_iter().next().expect("len checked")),
         n => Err(format!(
-            "Ambiguous snapshot reference '{}': matches {} snapshots",
-            id_or_name, n
+            "Ambiguous snapshot reference '{id_or_name}': matches {n} snapshots by ID prefix"
         )
         .into()),
     }
