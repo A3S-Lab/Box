@@ -202,10 +202,11 @@ impl PasstManager {
 
         // Forward published TCP ports into the guest. libkrun discards the
         // TSI host_port_map once a virtio-net device is attached, so passt is
-        // what actually publishes `-p host:guest` in bridge mode. Auto-assigned
-        // host ports (host_port == 0) cannot be forwarded by passt and are
-        // skipped. passt accepts a comma-separated `host:guest,...` spec.
-        let tcp_specs = passt_tcp_port_specs(port_map);
+        // what actually publishes `-p host:guest` in bridge mode. Unresolved
+        // host_port=0 cannot be forwarded by passt — fail closed rather than
+        // silently dropping publish intent (CLI resolves auto-assign earlier).
+        // passt accepts a comma-separated `host:guest,...` spec.
+        let tcp_specs = passt_tcp_port_specs(port_map)?;
         if !tcp_specs.is_empty() {
             let spec = tcp_specs.join(",");
             tracing::info!(tcp_ports = %spec, "Configuring passt inbound TCP port forwarding");
@@ -521,13 +522,25 @@ impl super::NetworkBackend for PasstManager {
 }
 
 /// Convert published ports to passt's inbound TCP forwarding spec entries.
-fn passt_tcp_port_specs(port_map: &[String]) -> Vec<String> {
-    port_map
-        .iter()
-        .filter_map(|m| a3s_box_core::parse_port_mapping(m).ok())
-        .filter(|m| m.host_port != 0)
-        .map(|m| format!("{}:{}", m.host_port, m.guest_port))
-        .collect()
+///
+/// Invalid mappings and unresolved `host_port=0` fail closed so bridge publish
+/// cannot report success while dropping requested ports.
+fn passt_tcp_port_specs(port_map: &[String]) -> Result<Vec<String>> {
+    let mut specs = Vec::with_capacity(port_map.len());
+    for entry in port_map {
+        let mapping = a3s_box_core::parse_port_mapping(entry).map_err(|error| {
+            BoxError::NetworkError(format!(
+                "passt published ports reject invalid mapping '{entry}': {error}"
+            ))
+        })?;
+        if mapping.host_port == 0 {
+            return Err(BoxError::NetworkError(format!(
+                "passt published ports reject host_port=0 auto-assign in '{entry}'"
+            )));
+        }
+        specs.push(format!("{}:{}", mapping.host_port, mapping.guest_port));
+    }
+    Ok(specs)
 }
 
 /// Convert a prefix length to a dotted-decimal netmask string.
@@ -554,15 +567,32 @@ mod tests {
     }
 
     #[test]
-    fn test_passt_tcp_port_specs_skips_invalid_and_auto_assigned_ports() {
+    fn test_passt_tcp_port_specs_accepts_static_tcp_mappings() {
         let specs = passt_tcp_port_specs(&[
             "8080:80".to_string(),
-            "0:443".to_string(),
-            "not-a-port-map".to_string(),
             "9000:90/tcp".to_string(),
-        ]);
+        ])
+        .unwrap();
 
         assert_eq!(specs, vec!["8080:80", "9000:90"]);
+    }
+
+    #[test]
+    fn test_passt_tcp_port_specs_rejects_host_port_zero() {
+        let error = passt_tcp_port_specs(&["0:443".to_string()]).unwrap_err();
+        assert!(
+            error.to_string().contains("host_port=0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_passt_tcp_port_specs_rejects_invalid_mapping() {
+        let error = passt_tcp_port_specs(&["not-a-port-map".to_string()]).unwrap_err();
+        assert!(
+            error.to_string().contains("invalid mapping"),
+            "{error}"
+        );
     }
 
     #[test]
