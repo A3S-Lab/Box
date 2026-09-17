@@ -6,12 +6,24 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Stopped directory-backed MicroVM `export` / `diff` require guest rootfs
+  metadata and archive/walk via the same guest-metadata contract as stopped
+  `commit` (and Windows stopped `snapshot create`). Does **not** invent live
+  Windows export/diff, close ROADMAP B3/B2, or claim Windows volume/` :ro`
+  parity.
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):
   admit `port_map` only with Bridge + keep-authority; install per-box iptables
   DNAT (PREROUTING + localhost OUTPUT) and FORWARD accept to the NetworkStore
   endpoint IP. Rejects `host_port=0`. Compose sandbox published ports stay
   fail-closed. Does **not** close ROADMAP B3/B4/B2 or claim UDP/auto-assign/
   rootless publish.
+
+### Fixed
+
+- Native Linux `box-owner.json` omits `keep_network_device_authority` when
+  false (legacy field set); local SDK smoke accepts the optional bool when
+  present. Restores Python owner-death evidence checks after keep-authority
+  records started serializing `false`. Does **not** close B2.
 - Keep-authority SandboxViaOci Bridge guest DNS files: Bridge prepare writes
   NetworkStore peer discovery into `/etc/hosts` (plus `add-host` / hostname
   aliases) instead of standalone-only hosts; `/etc/resolv.conf` continues to

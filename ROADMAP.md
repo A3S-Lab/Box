@@ -871,11 +871,16 @@ open and harness reports still keep
   `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
+  **Partial:** stopped directory-backed MicroVM `export`/`diff` now require
+  guest rootfs metadata (same honesty contract as stopped `commit`). Host
+  bind/named-volume symlink/RO fail-closed and virtio-fs UID/GID storage remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
-  managed quiesce/host-rootfs surface; MicroVM live host-path snapshots and the
-  full B3 storage/network qualification gate remain open. Does **not** flip
+  managed quiesce/host-rootfs surface; stopped directory MicroVM export/diff
+  retain guest metadata; MicroVM live host-path snapshots and the full B3
+  storage/network qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and

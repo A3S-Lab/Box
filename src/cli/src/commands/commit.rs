@@ -418,7 +418,7 @@ const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROOTFS_METADATA_ENTRIES: usize = 1_000_000;
 const MAX_GUEST_PATH_BYTES: usize = 4096;
 
-fn read_guest_rootfs_metadata(
+pub(crate) fn read_guest_rootfs_metadata(
     rootfs_dir: &Path,
 ) -> Result<a3s_box_core::rootfs_metadata::RootfsMetadataManifest, Box<dyn std::error::Error>> {
     use std::io::Read;
@@ -427,7 +427,7 @@ fn read_guest_rootfs_metadata(
         .join(a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let file = open_regular_file_no_follow(&metadata_path).map_err(|error| {
         format!(
-            "Guest rootfs metadata is unavailable at {}: {error}. Start the box with this A3S Box version and stop it cleanly before committing.",
+            "Guest rootfs metadata is unavailable at {}: {error}. Start the box with this A3S Box version and stop it cleanly before capturing the offline rootfs.",
             metadata_path.display()
         )
     })?;
@@ -462,7 +462,7 @@ fn read_guest_rootfs_metadata(
     Ok(manifest)
 }
 
-fn create_tar_from_guest_metadata(
+pub(crate) fn create_tar_from_guest_metadata(
     rootfs_dir: &Path,
     manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
     output: &Path,
