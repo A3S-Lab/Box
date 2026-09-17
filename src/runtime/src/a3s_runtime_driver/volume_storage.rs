@@ -173,6 +173,7 @@ fn validate_volume_path(path: &Path) -> RuntimeResult<()> {
     let canonical = path.canonicalize().map_err(volume_io_error)?;
     if !path.is_absolute()
         || metadata.file_type().is_symlink()
+        || volume_path_is_reparse_point(&metadata)
         || !metadata.file_type().is_dir()
         || canonical != path
     {
@@ -182,6 +183,17 @@ fn validate_volume_path(path: &Path) -> RuntimeResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn volume_path_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
+#[cfg(not(windows))]
+fn volume_path_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn volume_store_error(error: impl std::fmt::Display) -> RuntimeError {

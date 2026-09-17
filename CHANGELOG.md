@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Volume prepare and managed VolumeStore paths refuse symlink / Windows reparse
+  host sources before `canonicalize` follows them (plain file or directory
+  only). Aligns MicroVM bind prepare with Runtime Volume canonical-directory
+  fencing. Does **not** invent Windows virtio-fs POSIX UID/GID bind parity,
+  host-enforced `:ro` write denial, or close ROADMAP B3/B2.
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):
   admit `port_map` only with Bridge + keep-authority; install per-box iptables
   DNAT (PREROUTING + localhost OUTPUT) and FORWARD accept to the NetworkStore
