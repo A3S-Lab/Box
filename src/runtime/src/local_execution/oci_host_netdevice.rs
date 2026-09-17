@@ -2,6 +2,7 @@
 //!
 //! IPAM stays in [`NetworkStore`]. The container end stays unbridged so OCI
 //! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
+//! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::NetworkStore;
 
-const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v2";
+const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v3";
 const GUEST_IFACE_NAME: &str = "eth0";
 
 /// Durable lease for a staged host netdevice pair on a Box bridge.
@@ -24,6 +25,7 @@ const GUEST_IFACE_NAME: &str = "eth0";
 pub(crate) struct HostNetDeviceLease {
     pub schema: String,
     pub network: String,
+    pub subnet: String,
     pub bridge_iface: String,
     pub container_iface: String,
     pub peer_iface: String,
@@ -33,6 +35,7 @@ pub(crate) struct HostNetDeviceLease {
 impl HostNetDeviceLease {
     fn new(
         network: &str,
+        subnet: String,
         bridge_iface: String,
         container_iface: String,
         peer_iface: String,
@@ -40,6 +43,7 @@ impl HostNetDeviceLease {
         Self {
             schema: LEASE_SCHEMA.to_string(),
             network: network.to_string(),
+            subnet,
             bridge_iface,
             container_iface,
             peer_iface,
@@ -133,7 +137,13 @@ pub(crate) fn stage_for_sandbox_bundle(
     let prefix_len = prefix_len_from_subnet(&config.subnet)?;
     let (container_iface, peer_iface) = interface_names(box_id)?;
     let bridge_iface = bridge_iface_name(network_name);
-    let lease = HostNetDeviceLease::new(network_name, bridge_iface, container_iface, peer_iface);
+    let lease = HostNetDeviceLease::new(
+        network_name,
+        config.subnet.clone(),
+        bridge_iface,
+        container_iface,
+        peer_iface,
+    );
 
     // Replace any stale lease/ifaces from a previous failed prepare.
     let _ = teardown_lease(home_dir, box_id);
@@ -164,7 +174,7 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
     delete_link_if_present(&lease.container_iface);
     delete_link_if_present(&lease.peer_iface);
     // Network-scoped bridge is shared across endpoints; delete only when empty.
-    try_delete_bridge_if_idle(&lease.bridge_iface);
+    try_delete_bridge_if_idle(&lease.bridge_iface, &lease.subnet);
 
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -231,6 +241,7 @@ fn stage_veth_pair(
     gateway: std::net::Ipv4Addr,
 ) -> ExecutionManagerResult<()> {
     ensure_bridge(&lease.bridge_iface, gateway, prefix_len)?;
+    ensure_bridge_egress_nat(&lease.subnet, &lease.bridge_iface)?;
     run_ip(&[
         "link",
         "add",
@@ -308,7 +319,7 @@ fn ensure_bridge(
     }
     if let Err(error) = run_ip(&["link", "set", bridge_iface, "up"]) {
         // Only delete a bridge we may have just created with no slaves yet.
-        try_delete_bridge_if_idle(bridge_iface);
+        try_delete_bridge_if_idle(bridge_iface, "");
         return Err(error);
     }
     // Gateway lives on the bridge so peers ARP a real L2 next hop. Idempotent.
@@ -318,6 +329,106 @@ fn ensure_bridge(
         Err(error) if error.to_string().contains("File exists") => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Enable host IPv4 forwarding and install subnet MASQUERADE for bridge egress.
+#[cfg(target_os = "linux")]
+fn ensure_bridge_egress_nat(subnet: &str, bridge_iface: &str) -> ExecutionManagerResult<()> {
+    enable_ipv4_forwarding()?;
+    if iptables_nat_rule_present(subnet, bridge_iface)? {
+        return Ok(());
+    }
+    run_iptables(&[
+        "-t",
+        "nat",
+        "-A",
+        "POSTROUTING",
+        "-s",
+        subnet,
+        "!",
+        "-o",
+        bridge_iface,
+        "-j",
+        "MASQUERADE",
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn enable_ipv4_forwarding() -> ExecutionManagerResult<()> {
+    std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1").map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to enable net.ipv4.ip_forward for SandboxViaOci Bridge NAT: {error}"
+        ))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn iptables_nat_rule_present(subnet: &str, bridge_iface: &str) -> ExecutionManagerResult<bool> {
+    let output = Command::new("iptables")
+        .args([
+            "-t",
+            "nat",
+            "-C",
+            "POSTROUTING",
+            "-s",
+            subnet,
+            "!",
+            "-o",
+            bridge_iface,
+            "-j",
+            "MASQUERADE",
+        ])
+        .output()
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to query iptables MASQUERADE for {subnet}: {error}"
+            ))
+        })?;
+    Ok(output.status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_bridge_egress_nat(subnet: &str, bridge_iface: &str) {
+    if subnet.is_empty() || bridge_iface.is_empty() {
+        return;
+    }
+    let _ = Command::new("iptables")
+        .args([
+            "-t",
+            "nat",
+            "-D",
+            "POSTROUTING",
+            "-s",
+            subnet,
+            "!",
+            "-o",
+            bridge_iface,
+            "-j",
+            "MASQUERADE",
+        ])
+        .output();
+}
+
+#[cfg(target_os = "linux")]
+fn run_iptables(args: &[&str]) -> ExecutionManagerResult<()> {
+    let output = Command::new("iptables")
+        .args(args)
+        .output()
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to execute `iptables {}`: {error}",
+                args.join(" ")
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(ExecutionManagerError::Unavailable(format!(
+        "`iptables {}` failed: {}",
+        args.join(" "),
+        stderr.trim()
+    )))
 }
 
 #[cfg(target_os = "linux")]
@@ -330,8 +441,9 @@ fn link_exists(name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn try_delete_bridge_if_idle(bridge_iface: &str) {
+fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) {
     if !link_exists(bridge_iface) {
+        remove_bridge_egress_nat(subnet, bridge_iface);
         return;
     }
     // `ip -o link show master <br>` lists slaves; empty means idle fabric.
@@ -347,13 +459,14 @@ fn try_delete_bridge_if_idle(bridge_iface: &str) {
     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
         return;
     }
+    remove_bridge_egress_nat(subnet, bridge_iface);
     let _ = Command::new("ip")
         .args(["link", "del", bridge_iface])
         .output();
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_delete_bridge_if_idle(_bridge_iface: &str) {}
+fn try_delete_bridge_if_idle(_bridge_iface: &str, _subnet: &str) {}
 
 #[cfg(target_os = "linux")]
 fn run_ip(args: &[&str]) -> ExecutionManagerResult<()> {
@@ -435,6 +548,7 @@ mod tests {
         let id = "22222222-2222-4222-8222-222222222222";
         let lease = HostNetDeviceLease::new(
             "dev",
+            "10.88.0.0/24".into(),
             bridge_iface_name("dev"),
             "bv22222222c".into(),
             "bv22222222p".into(),
@@ -445,6 +559,7 @@ mod tests {
                 .unwrap();
         assert_eq!(loaded, lease);
         assert_eq!(loaded.schema, LEASE_SCHEMA);
+        assert_eq!(loaded.subnet, "10.88.0.0/24");
         // Teardown without real ifaces still removes the lease file.
         teardown_lease(home.path(), id).unwrap();
         assert!(!lease_path(home.path(), id).exists());
