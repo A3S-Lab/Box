@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI/SDK `snapshot restore` fails closed for managed SandboxViaOci captures
+  labeled `a3s.box.snapshot.capture=managed-sandbox-oci` instead of inventing a
+  MicroVM box with `managed_execution: None`. Live/stopped managed Sandbox
+  `save_managed` paths stamp the label. Does **not** invent SandboxViaOci
+  restore parity, close ROADMAP B3/B2, or rewrite unlabeled historical captures.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and

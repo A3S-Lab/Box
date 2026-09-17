@@ -740,6 +740,9 @@ impl A3sBoxClient {
         metadata
             .require_image_config()
             .map_err(|error| ClientError::Validation(error.to_string()))?;
+        metadata
+            .require_restorable_via_cli_or_sdk()
+            .map_err(|error| ClientError::Validation(error.to_string()))?;
         #[cfg(windows)]
         if metadata.has_effective_health_check() {
             return Err(ClientError::Validation(
@@ -771,6 +774,9 @@ impl A3sBoxClient {
         let metadata = restored_rootfs.metadata;
         metadata
             .require_image_config()
+            .map_err(|error| ClientError::Validation(error.to_string()))?;
+        metadata
+            .require_restorable_via_cli_or_sdk()
             .map_err(|error| ClientError::Validation(error.to_string()))?;
         #[cfg(windows)]
         if metadata.has_effective_health_check() {
