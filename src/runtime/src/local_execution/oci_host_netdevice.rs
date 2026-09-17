@@ -138,7 +138,7 @@ pub(crate) fn stage_for_sandbox_bundle(
     // Replace any stale lease/ifaces from a previous failed prepare.
     let _ = teardown_lease(home_dir, box_id);
 
-    stage_veth_pair(&lease, endpoint, prefix_len)?;
+    stage_veth_pair(&lease, endpoint, prefix_len, config.gateway)?;
     persist_lease(home_dir, box_id, &lease)?;
     Ok(Some(lease))
 }
@@ -228,8 +228,9 @@ fn stage_veth_pair(
     lease: &HostNetDeviceLease,
     endpoint: &NetworkEndpoint,
     prefix_len: u8,
+    gateway: std::net::Ipv4Addr,
 ) -> ExecutionManagerResult<()> {
-    ensure_bridge(&lease.bridge_iface)?;
+    ensure_bridge(&lease.bridge_iface, gateway, prefix_len)?;
     run_ip(&[
         "link",
         "add",
@@ -258,6 +259,15 @@ fn stage_veth_pair(
         ])?;
         run_ip(&["link", "set", &lease.container_iface, "up"])?;
         run_ip(&[
+            "route",
+            "replace",
+            "default",
+            "via",
+            &gateway.to_string(),
+            "dev",
+            &lease.container_iface,
+        ])?;
+        run_ip(&[
             "link",
             "set",
             &lease.peer_iface,
@@ -280,6 +290,7 @@ fn stage_veth_pair(
     _lease: &HostNetDeviceLease,
     _endpoint: &NetworkEndpoint,
     _prefix_len: u8,
+    _gateway: std::net::Ipv4Addr,
 ) -> ExecutionManagerResult<()> {
     Err(ExecutionManagerError::Unavailable(
         "SandboxViaOci host netdevice staging requires Linux".to_string(),
@@ -287,16 +298,26 @@ fn stage_veth_pair(
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_bridge(bridge_iface: &str) -> ExecutionManagerResult<()> {
-    if link_exists(bridge_iface) {
-        run_ip(&["link", "set", bridge_iface, "up"])?;
-        return Ok(());
+fn ensure_bridge(
+    bridge_iface: &str,
+    gateway: std::net::Ipv4Addr,
+    prefix_len: u8,
+) -> ExecutionManagerResult<()> {
+    if !link_exists(bridge_iface) {
+        run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
     }
-    run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
-    run_ip(&["link", "set", bridge_iface, "up"]).map_err(|error| {
-        delete_link_if_present(bridge_iface);
-        error
-    })
+    if let Err(error) = run_ip(&["link", "set", bridge_iface, "up"]) {
+        // Only delete a bridge we may have just created with no slaves yet.
+        try_delete_bridge_if_idle(bridge_iface);
+        return Err(error);
+    }
+    // Gateway lives on the bridge so peers ARP a real L2 next hop. Idempotent.
+    let cidr = format!("{gateway}/{prefix_len}");
+    match run_ip(&["addr", "add", &cidr, "dev", bridge_iface]) {
+        Ok(()) => Ok(()),
+        Err(error) if error.to_string().contains("File exists") => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(target_os = "linux")]

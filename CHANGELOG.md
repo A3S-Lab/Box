@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Keep-authority SandboxViaOci Bridge gateway: assign NetworkStore gateway/CIDR
+  on the Box Linux bridge and install a default route via that gateway on the
+  container veth end (moves with Create into the runtime netns). Does **not**
+  add NAT/MASQUERADE, published ports, DNS, unlock Compose named networks,
+  close ROADMAP B3/B2, or change GA rootless default.
 - Keep-authority SandboxViaOci Bridge fabric: after staging the host veth pair,
   attach the peer to a deterministic Box-owned Linux bridge (`a3sb` + network
   hash) and bring it UP so same-network endpoints share L2. Container end stays
