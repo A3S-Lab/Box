@@ -18,7 +18,7 @@ pub struct ExportArgs {
 pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let initial_state = StateFile::load_default()?;
     let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
-    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
     let record = state.find_by_id(&box_id).ok_or_else(|| {
         format!(
@@ -28,7 +28,15 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
     })?;
 
     if record.status == "running" {
-        export_live_guest(record, &args.output).await?;
+        // Managed Sandbox pause/resume uses the same lifecycle lock; release the
+        // CLI guard before host-rootfs capture so generation fencing stays exclusive.
+        if record.isolation.is_sandbox() {
+            drop(lifecycle_lock);
+            export_live_sandbox_host(record, &args.output).await?;
+        } else {
+            export_live_guest(record, &args.output).await?;
+            drop(lifecycle_lock);
+        }
     } else {
         if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
             let mut file = tokio::fs::File::create(&args.output)
@@ -51,6 +59,7 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
                 .finish()
                 .map_err(|e| format!("Failed to finalize archive: {e}"))?;
         }
+        drop(lifecycle_lock);
     }
 
     let size = std::fs::metadata(&args.output)
@@ -59,6 +68,37 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
 
     println!("{}", export_success_line(&args.name, &args.output, size));
     Ok(())
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+async fn export_live_sandbox_host(
+    record: &crate::state::BoxRecord,
+    output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let live_pid = record.pid.is_some_and(|pid| {
+        crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
+    });
+    if !live_pid {
+        return Err(format!(
+            "Cannot export running box '{}' because its host process is not live",
+            record.name
+        )
+        .into());
+    }
+    // Quiesce via managed pause (same as live MicroVM guest archive with pause=true).
+    super::commit::capture_live_host_rootfs_tar(record, std::path::Path::new(output), true).await
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+async fn export_live_sandbox_host(
+    record: &crate::state::BoxRecord,
+    _output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(format!(
+        "Live Sandbox host-rootfs export is unavailable for box '{}' on this platform",
+        record.name
+    )
+    .into())
 }
 
 #[cfg(unix)]
