@@ -11,6 +11,11 @@ All notable changes to A3S Box will be documented in this file.
   classification (no silent external `-v /host:/guest` without a v2 storage
   identity). Does **not** invent bind-alias storage attachments, close ROADMAP
   B3/B2, or change MicroVM bind behavior.
+- MicroVM bridge `passt` inbound TCP publish fails closed on unresolved
+  `host_port=0` and invalid `port_map` entries instead of silently skipping
+  them (CLI still resolves auto-assign before boot). Aligns with keep-authority
+  SandboxViaOci DNAT honesty. Does **not** close ROADMAP B3/B2 or claim
+  UDP/Compose auto-assign publish.
 
 ### Added
 
