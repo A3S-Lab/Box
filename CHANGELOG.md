@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Keep-authority SandboxViaOci published TCP DNAT teardown fails closed when
+  `iptables -D` cannot remove a still-present rule (lease file retained for
+  retry) instead of swallowing delete failures and dropping durable lease
+  state. Missing rules remain success. Does **not** close ROADMAP B3/B4/B2 or
+  claim UDP/Compose publish teardown parity.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and

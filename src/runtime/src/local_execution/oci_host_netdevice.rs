@@ -200,7 +200,7 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
         }
     };
 
-    remove_published_tcp_dnat(&lease);
+    remove_published_tcp_dnat(&lease)?;
     delete_link_if_present(&lease.container_iface);
     delete_link_if_present(&lease.peer_iface);
     // Network-scoped bridge is shared across endpoints; delete only when empty.
@@ -528,67 +528,95 @@ fn ensure_one_published_tcp_dnat(
     Ok(())
 }
 
-fn remove_published_tcp_dnat(lease: &HostNetDeviceLease) {
+fn remove_published_tcp_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
     #[cfg(target_os = "linux")]
     {
+        let mut failures = Vec::new();
         for mapping in &lease.published_tcp {
             let host = mapping.host_port.to_string();
             let dest = format!("{}:{}", lease.container_ip, mapping.guest_port);
             let guest = mapping.guest_port.to_string();
-            let _ = Command::new("iptables")
-                .args([
-                    "-t",
-                    "nat",
-                    "-D",
-                    "PREROUTING",
-                    "-p",
-                    "tcp",
-                    "--dport",
-                    &host,
-                    "-j",
-                    "DNAT",
-                    "--to-destination",
-                    &dest,
-                ])
-                .output();
-            let _ = Command::new("iptables")
-                .args([
-                    "-t",
-                    "nat",
-                    "-D",
-                    "OUTPUT",
-                    "-d",
-                    "127.0.0.1",
-                    "-p",
-                    "tcp",
-                    "--dport",
-                    &host,
-                    "-j",
-                    "DNAT",
-                    "--to-destination",
-                    &dest,
-                ])
-                .output();
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
-                    "FORWARD",
-                    "-d",
-                    &lease.container_ip,
-                    "-p",
-                    "tcp",
-                    "--dport",
-                    &guest,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .output();
+            if let Err(error) = iptables_delete_if_present(&[
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "tcp",
+                "--dport",
+                &host,
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
+            ]) {
+                failures.push(error.to_string());
+            }
+            if let Err(error) = iptables_delete_if_present(&[
+                "-t",
+                "nat",
+                "-D",
+                "OUTPUT",
+                "-d",
+                "127.0.0.1",
+                "-p",
+                "tcp",
+                "--dport",
+                &host,
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
+            ]) {
+                failures.push(error.to_string());
+            }
+            if let Err(error) = iptables_delete_if_present(&[
+                "-D",
+                "FORWARD",
+                "-d",
+                &lease.container_ip,
+                "-p",
+                "tcp",
+                "--dport",
+                &guest,
+                "-j",
+                "ACCEPT",
+            ]) {
+                failures.push(error.to_string());
+            }
         }
+        if !failures.is_empty() {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "failed to remove keep-authority published TCP DNAT for container {}: {}",
+                lease.container_ip,
+                failures.join("; ")
+            )));
+        }
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = lease;
+        Ok(())
     }
+}
+
+/// Delete an iptables rule when present; treat "missing rule" as success.
+#[cfg(target_os = "linux")]
+fn iptables_delete_if_present(delete_args: &[&str]) -> ExecutionManagerResult<()> {
+    // `-D` args share the same match as `-C` after replacing the action token.
+    let mut check_args = delete_args.to_vec();
+    if let Some(action) = check_args.iter_mut().find(|arg| **arg == "-D") {
+        *action = "-C";
+    } else {
+        return Err(ExecutionManagerError::Internal(
+            "iptables delete args missing -D action".into(),
+        ));
+    }
+    if !iptables_check(&check_args)? {
+        return Ok(());
+    }
+    run_iptables(delete_args)
 }
 
 #[cfg(target_os = "linux")]
@@ -822,6 +850,26 @@ mod tests {
         // Teardown without real ifaces still removes the lease file.
         teardown_lease(home.path(), id).unwrap();
         assert!(!lease_path(home.path(), id).exists());
+    }
+
+    #[test]
+    fn remove_published_tcp_dnat_is_ok_when_no_rules_present() {
+        let lease = HostNetDeviceLease::new(
+            "dev",
+            "10.88.0.0/24".into(),
+            bridge_iface_name("dev"),
+            "bv33333333c".into(),
+            "bv33333333p".into(),
+            "10.88.0.3".parse().unwrap(),
+            vec![PublishedTcpPort {
+                host_port: 18081,
+                guest_port: 8080,
+            }],
+        );
+        // Without matching iptables rules (or without iptables on this host),
+        // missing-rule deletes must not invent soft success by swallowing errors
+        // after a present rule failed to delete — absence is Ok.
+        remove_published_tcp_dnat(&lease).unwrap();
     }
 
     #[test]
