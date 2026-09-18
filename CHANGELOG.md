@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Architecture optimization plan
+  ([docs/architecture-optimization-plan.md](docs/architecture-optimization-plan.md)):
+  first-principles axes (recovery, OCI cutover, MicroVM egress/secrets,
+  storage honesty, orchestration), anti-overfit non-goals, a must-survive
+  capability matrix with full README CLI crosswalk and B5 non-loss checklist,
+  and near-term slices. Linked from ROADMAP prioritization and README docs.
+  Does **not** close B2/B3/B4 or claim Enterprise GA.
+
 ### Changed
 
 - Publish existing-host WSL2 `/dev/kvm` greened KVM Live

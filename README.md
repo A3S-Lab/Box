@@ -905,6 +905,7 @@ containerd-shim/   RuntimeClass integration
 ## Documentation
 
 - [Product and OCI Runtime migration roadmap](ROADMAP.md)
+- [Architecture optimization plan](docs/architecture-optimization-plan.md)
 - [Installation and packaging](docs/installation.md)
 - [Host integration and real-runtime validation](docs/host-integration.md)
 - [Cross-capability soak plan](docs/soak-test-plan.md)
