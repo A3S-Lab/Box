@@ -18,10 +18,13 @@ pub struct RmiArgs {
 
 pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = super::open_image_store()?;
-    let protected_images = match StateFile::load_default() {
-        Ok(state) => image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes),
-        Err(_) => Default::default(),
-    };
+    // Fail closed on state load so we cannot invent an empty protect set and
+    // remove in-use images (image-prune / system-prune parity).
+    let state = StateFile::load_default().map_err(|error| {
+        format!("Failed to load box state for rmi: {error}; refusing rmi success")
+    })?;
+    let protected_images =
+        image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
 
     let mut errors: Vec<String> = Vec::new();
 
@@ -95,5 +98,15 @@ mod tests {
             "alpine:latest",
             &protected
         ));
+    }
+
+    #[test]
+    fn rmi_state_load_error_message_refuses_invented_success() {
+        let message = format!(
+            "Failed to load box state for rmi: {}; refusing rmi success",
+            "permission denied"
+        );
+        assert!(message.contains("permission denied"));
+        assert!(message.contains("refusing rmi success"));
     }
 }
