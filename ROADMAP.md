@@ -882,7 +882,8 @@ open and harness reports still keep
   on synchronous overlay unmount and directory wipe (no warn-and-Ok invent-
   clean teardown). `terminate_passt` fails closed when passt remains after
   SIGTERM or pid/socket artifacts cannot be removed (CLI/SDK/managed/orphan/
-  destroy/boot-failure). `VolumeStore::prune` only reports
+  destroy/boot-failure). VM destroy fails closed when the runtime socket
+  directory or `boxes/{id}` cannot be removed. `VolumeStore::prune` only reports
   actually removed volumes and fails closed on non-idempotent remove errors;
   managed MicroVM destroy anonymous-volume cleanup fails closed like OCI
   remove. Image/build/snapshot/commit descriptor handoff, network v3, Windows

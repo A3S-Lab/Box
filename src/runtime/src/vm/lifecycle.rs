@@ -467,13 +467,23 @@ impl VmManager {
             }
         }
 
-        if let Err(e) = std::fs::remove_dir_all(&socket_dir) {
-            tracing::debug!(
-                box_id = %self.box_id,
-                path = %socket_dir.display(),
-                error = %e,
-                "Failed to cleanup VM socket directory"
-            );
+        match std::fs::remove_dir_all(&socket_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    path = %socket_dir.display(),
+                    error = %e,
+                    "Refusing invent-clean destroy while VM socket directory remains"
+                );
+                if stop_error.is_none() {
+                    stop_error = Some(BoxError::Other(format!(
+                        "Failed to remove VM socket directory {}: {e}; refusing invent-clean destroy",
+                        socket_dir.display()
+                    )));
+                }
+            }
         }
 
         // Remove the box working directory itself (overlay upper/work, logs,
@@ -539,12 +549,18 @@ impl VmManager {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         box_id = %self.box_id,
                         path = %box_dir.display(),
                         error = %e,
-                        "Failed to remove box directory on destroy"
+                        "Refusing invent-clean destroy while box directory remains"
                     );
+                    if stop_error.is_none() {
+                        stop_error = Some(BoxError::Other(format!(
+                            "Failed to remove box directory {}: {e}; refusing invent-clean destroy",
+                            box_dir.display()
+                        )));
+                    }
                 }
             }
         }

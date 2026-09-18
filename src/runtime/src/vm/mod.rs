@@ -754,24 +754,25 @@ impl VmManager {
             }
         };
 
-        match std::fs::remove_dir_all(&socket_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let socket_clean = match std::fs::remove_dir_all(&socket_dir) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => {
-                tracing::debug!(
+                tracing::error!(
                     box_id = %self.box_id,
                     path = %socket_dir.display(),
                     error = %error,
-                    "Failed to cleanup socket directory after boot failure"
+                    "Refusing invent-clean boot-failure cleanup while VM socket directory remains"
                 );
+                false
             }
-        }
+        };
 
         // A failed restart must never erase a persistent writable rootfs. The
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
-        // Retain the box dir when host-netdevice, :ro alias, passt, or provider
-        // teardown failed.
+        // Retain the box dir when host-netdevice, :ro alias, passt, provider, or
+        // socket teardown failed.
         if !self.config.persistent
             && mount_aliases_clean
             && host_net_clean
@@ -779,16 +780,17 @@ impl VmManager {
             && anon_volumes_clean
             && passt_clean
             && provider_clean
+            && socket_clean
         {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::error!(
                         box_id = %self.box_id,
                         path = %box_dir.display(),
                         error = %error,
-                        "Failed to cleanup box directory after boot failure"
+                        "Refusing invent-clean boot-failure cleanup while box directory remains"
                     );
                 }
             }
