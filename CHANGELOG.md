@@ -6,10 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
-- Compose `up` rollback fails closed on NetworkStore disconnect/update/remove
-  instead of warn-and-inventing a clean network undo; cleanup errors are chained
-  with the original up failure (parity with compose down). Does **not** close
-  ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
+- Compose `up` rollback fails closed on started-service teardown errors and on
+  NetworkStore disconnect/update/remove instead of warn-and-inventing a clean
+  undo; cleanup errors are chained with the original up failure (parity with
+  compose down). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - Compose `down` fails closed on network disconnect/update/remove and
   `--volumes` remove errors instead of warn-and-claiming project stop success;
   partial-service wipe logs wipe failures after teardown. Does **not** close
