@@ -61,30 +61,35 @@ fn submounts_under(mountinfo: &str, root: &str) -> Vec<String> {
 /// removed. CRI mounts are bind-mounted into the container rootfs (which is
 /// virtio-fs-shared into the pod VM), so `remove_dir_all` over a live bind would
 /// delete the host source through it. `umount -l` (MNT_DETACH) succeeds even if
-/// the mount is still busy.
+/// the mount is still busy. Mountinfo read failures and non-zero umount exits
+/// fail closed so remove cannot invent a clean host while a bind remains.
 #[cfg(target_os = "linux")]
-fn unmount_submounts_under(root: &std::path::Path) {
-    let mountinfo = match std::fs::read_to_string("/proc/self/mountinfo") {
-        Ok(content) => content,
-        Err(_) => return,
-    };
+fn unmount_submounts_under(root: &std::path::Path) -> Result<(), String> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+        format!(
+            "failed to read /proc/self/mountinfo before CRI rootfs cleanup of {}: {error}",
+            root.display()
+        )
+    })?;
     for mp in submounts_under(&mountinfo, &root.to_string_lossy()) {
-        if let Err(error) = std::process::Command::new("umount")
+        let status = std::process::Command::new("umount")
             .arg("-l")
             .arg(&mp)
             .status()
-        {
-            tracing::warn!(
-                mount = %mp,
-                error = %error,
-                "Failed to lazy-unmount CRI bind before rootfs cleanup"
-            );
+            .map_err(|error| format!("failed to spawn umount -l for {mp}: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "umount -l failed for {mp} with status {status}; refusing invent-clean CRI rootfs wipe"
+            ));
         }
     }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn unmount_submounts_under(_root: &std::path::Path) {}
+fn unmount_submounts_under(_root: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
 
 impl BoxRuntimeService {
     pub(super) async fn connect_sandbox_network(
@@ -259,9 +264,12 @@ impl BoxRuntimeService {
         .map_err(|e| Status::internal(format!("CRI mount materialization task failed: {e}")))?
     }
 
-    pub(super) async fn cleanup_container_rootfs_path(&self, rootfs_path: &str) {
+    pub(super) async fn cleanup_container_rootfs_path(
+        &self,
+        rootfs_path: &str,
+    ) -> Result<(), Status> {
         if rootfs_path.trim().is_empty() {
-            return;
+            return Ok(());
         }
 
         let rootfs_path = PathBuf::from(rootfs_path);
@@ -270,29 +278,34 @@ impl BoxRuntimeService {
                 path = %rootfs_path.display(),
                 "Skipping CRI rootfs cleanup outside managed rootfs base"
             );
-            return;
+            return Ok(());
         }
 
         // Lazy-unmount any CRI bind-mounts under the rootfs FIRST; otherwise
         // remove_dir_all would recurse through a live bind and delete the host
         // source. Safe no-op when there are none (the copy/test build path).
         let unmount_path = rootfs_path.clone();
-        let _ = tokio::task::spawn_blocking(move || unmount_submounts_under(&unmount_path)).await;
+        tokio::task::spawn_blocking(move || unmount_submounts_under(&unmount_path))
+            .await
+            .map_err(|error| {
+                Status::internal(format!(
+                    "CRI rootfs unmount task failed for {}: {error}",
+                    rootfs_path.display()
+                ))
+            })?
+            .map_err(Status::internal)?;
 
         match tokio::fs::remove_dir_all(&rootfs_path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::warn!(
-                    path = %rootfs_path.display(),
-                    error = %e,
-                    "Failed to remove CRI container rootfs"
-                );
-            }
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Status::internal(format!(
+                "Failed to remove CRI container rootfs {}: {e}; refusing invent-clean remove",
+                rootfs_path.display()
+            ))),
         }
     }
 
-    pub(super) async fn cleanup_sandbox_rootfs(&self, sandbox_id: &str) {
+    pub(super) async fn cleanup_sandbox_rootfs(&self, sandbox_id: &str) -> Result<(), Status> {
         let path = self
             .container_rootfs_base()
             .join(sanitize_path_component(sandbox_id));
@@ -301,18 +314,22 @@ impl BoxRuntimeService {
         // tree before removing it (see cleanup_container_rootfs_path). This also
         // reclaims binds leaked by a previously crashed CRI on restart.
         let unmount_path = path.clone();
-        let _ = tokio::task::spawn_blocking(move || unmount_submounts_under(&unmount_path)).await;
+        tokio::task::spawn_blocking(move || unmount_submounts_under(&unmount_path))
+            .await
+            .map_err(|error| {
+                Status::internal(format!(
+                    "CRI sandbox rootfs unmount task failed for {sandbox_id}: {error}"
+                ))
+            })?
+            .map_err(Status::internal)?;
 
         match tokio::fs::remove_dir_all(&path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to remove CRI sandbox container rootfs directory"
-                );
-            }
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Status::internal(format!(
+                "Failed to remove CRI sandbox container rootfs directory {}: {e}; refusing invent-clean remove",
+                path.display()
+            ))),
         }
     }
 

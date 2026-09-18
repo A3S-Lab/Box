@@ -790,7 +790,10 @@ retain process or filesystem sessions after its owner dies.
   `UpdateRuntimeConfig` refuses inventing Ok when NetworkConfig.pod_cidr is
   non-empty (#452 / #451); CRI PullImage honors AuthConfig.identity_token and
   refuses inventing anonymous pull for unsupported registry_token / malformed
-  auth (#453 / #452);
+  auth (#453 / #452); CRI RemoveContainer / RemovePodSandbox fail closed on
+  prepared rootfs wipe (umount exit status + directory remove) before durable
+  store deletion, and CreateContainer rollback refuses invent-clean rootfs
+  cleanup;
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still
@@ -847,8 +850,10 @@ owner replacement, and must publish final drain evidence before deletion.
 
 The standalone CRI adapter now reconciles persisted sandboxes to `NotReady`
 after a service restart, marks containers without a live VM exited, reclaims
-their bridge-network endpoints, and removes leaked CRI rootfs trees. This is
-resource-safe restart reconciliation, not process-session reattachment (that
+their bridge-network endpoints, and removes leaked CRI rootfs trees with
+fail-closed wipe (no invent-clean remove while a bind or undeletable tree
+remains). This is resource-safe restart reconciliation, not process-session
+reattachment (that
 Live observation matrix is observation-greened above; the B2 exit gate remains
 open and harness reports still keep
 `b2_process_session_recovery_closed=false`).

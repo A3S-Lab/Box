@@ -3811,6 +3811,42 @@ async fn test_remove_container() {
 }
 
 #[tokio::test]
+async fn remove_container_refuses_invent_clean_when_rootfs_wipe_fails() {
+    let svc = make_test_service();
+    let rootfs_path = svc
+        .container_rootfs_base()
+        .join("sb-1")
+        .join("c-busy")
+        .join("rootfs");
+    std::fs::create_dir_all(rootfs_path.parent().unwrap()).unwrap();
+    // A regular file where a directory is expected: remove_dir_all fails.
+    std::fs::write(&rootfs_path, b"not-a-directory").unwrap();
+    let mut container = test_container("c-busy", "sb-1");
+    container.rootfs_path = rootfs_path.to_string_lossy().to_string();
+    svc.store.containers.add(container).await;
+
+    let error = svc
+        .remove_container(Request::new(RemoveContainerRequest {
+            container_id: "c-busy".to_string(),
+        }))
+        .await
+        .expect_err("rootfs wipe failure must not invent RemoveContainer success");
+    assert!(
+        error.message().contains("refusing invent-clean"),
+        "unexpected message: {}",
+        error.message()
+    );
+    assert!(
+        svc.store.containers.get("c-busy").await.is_some(),
+        "durable CRI record must remain for a later fail-closed retry"
+    );
+    assert!(
+        rootfs_path.exists(),
+        "failed rootfs claim must remain for a later fail-closed retry"
+    );
+}
+
+#[tokio::test]
 async fn test_remove_container_missing_is_idempotent() {
     let svc = make_test_service();
 
