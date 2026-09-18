@@ -105,13 +105,17 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
 
     // Phase 3: Remove unused networks (mirrors `docker system prune`).
     // Reload state so freshly-removed boxes no longer count as network users.
+    // Fail closed on inventory/remove errors so system-prune cannot invent
+    // success while unused NetworkStore claims remain (`network prune` parity).
     let state = StateFile::load_default()?;
-    if let Ok(network_store) = a3s_box_runtime::NetworkStore::default_path() {
-        let (removed, _errors) = super::network::prune_unused_networks(&network_store, &state);
-        for name in &removed {
-            networks_removed += 1;
-            println!("Removed network: {name}");
-        }
+    let network_store = a3s_box_runtime::NetworkStore::default_path()?;
+    let (removed, errors) = super::network::prune_unused_networks(&network_store, &state)?;
+    for name in &removed {
+        networks_removed += 1;
+        println!("Removed network: {name}");
+    }
+    if !errors.is_empty() {
+        return Err(system_prune_network_errors(errors));
     }
 
     // Phase 4: `--all` also reclaims runtime caches that are not represented by
@@ -154,6 +158,14 @@ fn system_prune_box_cleanup_error(
 ) -> Box<dyn std::error::Error> {
     format!(
         "Failed to clean system-pruned Box {box_id}: {error}; preserving its state (refusing system-prune success)"
+    )
+    .into()
+}
+
+fn system_prune_network_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
+    format!(
+        "Failed to prune unused network(s): {}; refusing system-prune success",
+        errors.join("; ")
     )
     .into()
 }
@@ -304,6 +316,18 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("box-1"));
         assert!(message.contains("lease teardown refused"));
+        assert!(message.contains("refusing system-prune success"));
+    }
+
+    #[test]
+    fn system_prune_network_errors_refuse_invented_success() {
+        let err = system_prune_network_errors(vec![
+            "orphan: write failed".to_string(),
+            "other: locked".to_string(),
+        ]);
+        let message = err.to_string();
+        assert!(message.contains("orphan: write failed"));
+        assert!(message.contains("other: locked"));
         assert!(message.contains("refusing system-prune success"));
     }
 }
