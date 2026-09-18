@@ -224,10 +224,14 @@ impl VmManager {
                     tee_instance_config,
                 });
             }
-            tracing::warn!(
-                lower = %lower.display(),
-                "`.snapshot-lower` points at a missing dir; falling through to image pull"
-            );
+            // Marker present but lower gone: refuse inventing a fresh image
+            // rootfs for a snapshot-shaped box (same contract as
+            // prepare_preserved_rootfs).
+            return Err(BoxError::StateError(format!(
+                "Retained snapshot lower is missing for {}: {}",
+                self.box_id,
+                lower.display()
+            )));
         }
 
         // Snapshot restore pre-populates `box_dir/rootfs` with a captured full
