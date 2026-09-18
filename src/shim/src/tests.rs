@@ -362,6 +362,8 @@ fn test_network_config() -> a3s_box_core::vmm::NetworkInstanceConfig {
         prefix_len: 24,
         mac_address: [0x02, 0x42, 0x0a, 0x59, 0x00, 0x02],
         dns_servers: vec!["8.8.8.8".parse().unwrap()],
+        networks_json: None,
+        network_name: None,
     }
 }
 

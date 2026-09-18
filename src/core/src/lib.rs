@@ -54,8 +54,8 @@ pub use execution::{
     ExecutionBackend, IsolationClass, ResolvedExecutionPlan,
 };
 pub use network::{
-    sandbox_named_bridge_opt_in_enabled, IsolationMode, NetworkConfig, NetworkEndpoint,
-    NetworkMode, NetworkPolicy, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
+    lookup_network_a, sandbox_named_bridge_opt_in_enabled, IsolationMode, NetworkConfig,
+    NetworkEndpoint, NetworkMode, NetworkPolicy, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::{

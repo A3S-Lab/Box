@@ -929,8 +929,11 @@ open and harness reports still keep
   uses the same present-rule delete contract; CLI removal cleanup fails closed
   when NetworkStore cannot be opened for disconnect (no invent-clean detach).
   GA default remains delegated rootless/
-  `base_v2` loopback-only. CNI, DNS server/proxy,
-  multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
+  `base_v2` loopback-only. Netproxy Bridge (macOS) answers NetworkStore
+  name/alias DNS A queries from `networks.json` before upstream UDP/53
+  forward so late joiners resolve without rewriting guest hosts; Linux
+  passt, TCP/53, AAAA authority, CNI, multi-device, rootless/MicroVM/Windows
+  parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.

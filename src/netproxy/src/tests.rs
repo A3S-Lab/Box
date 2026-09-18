@@ -56,6 +56,8 @@ fn test_guest_and_proxy(dns_servers: Vec<Ipv4Addr>) -> (TestGuest, ProxyEngine) 
         stats,
         stats_path: None,
         bridge: None,
+        networks_json: None,
+        network_name: None,
     });
     (guest, proxy)
 }
@@ -248,6 +250,8 @@ fn proxy_engine_enables_any_ip_for_transparent_outbound_tcp() {
         stats: Arc::new(NetStats::default()),
         stats_path: None,
         bridge: None,
+        networks_json: None,
+        network_name: None,
     });
 
     assert!(engine.iface.any_ip());

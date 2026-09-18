@@ -70,6 +70,8 @@ impl VmManager {
             prefix_len,
             mac_address: [0x02, 0x42, 0x0a, 0x59, 0x00, 0x02],
             dns_servers,
+            networks_json: None,
+            network_name: None,
         };
         self.net_manager = Some(Box::new(netproxy));
         Ok(config)
@@ -242,6 +244,8 @@ impl VmManager {
             prefix_len,
             mac_address,
             dns_servers,
+            networks_json: Some(self.home_dir.join("networks.json")),
+            network_name: Some(network_name.to_string()),
         })
     }
 

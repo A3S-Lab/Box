@@ -108,6 +108,9 @@ pub struct InheritedNetProxyConfig<'a> {
     pub stats_path: Option<PathBuf>,
     pub bridge_socket_dir: Option<PathBuf>,
     pub own_mac: [u8; 6],
+    /// Optional Box `networks.json` for NetworkStore-local DNS A answers.
+    pub networks_json: Option<PathBuf>,
+    pub network_name: Option<String>,
 }
 
 pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) -> Result<()> {
@@ -120,6 +123,8 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
         stats_path,
         bridge_socket_dir,
         own_mac,
+        networks_json,
+        network_name,
     } = config;
     let socket = unsafe { UnixDatagram::from_raw_fd(fd) };
     let parsed = parse_port_forwards(port_map, guest_ip)
@@ -156,6 +161,8 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
                 stats,
                 stats_path,
                 bridge,
+                networks_json,
+                network_name,
             });
             engine.run();
             tracing::info!("NetProxy thread exiting");

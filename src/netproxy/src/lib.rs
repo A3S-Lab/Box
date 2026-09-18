@@ -6,7 +6,9 @@
 //! backend to the userspace gateway and provides these guest services:
 //!
 //! - **ARP**: handled automatically by smoltcp's interface layer.
-//! - **DNS**: UDP/53 queries forwarded to the host's configured DNS servers.
+//! - **DNS**: UDP/53 queries answered for NetworkStore names/aliases when a
+//!   bridge `networks.json` is configured, otherwise forwarded to the host's
+//!   configured DNS servers.
 //! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
 //!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
 //!   `"5353:53/udp"`).
@@ -17,6 +19,7 @@
 //! passt for gateway and egress traffic.
 
 mod device;
+mod dns_local;
 mod manager;
 mod passt_bridge;
 #[cfg(test)]
@@ -179,6 +182,9 @@ struct ProxyEngineConfig {
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
     bridge: Option<BridgePort>,
+    /// Optional Box `networks.json` + network name for local DNS A answers.
+    networks_json: Option<PathBuf>,
+    network_name: Option<String>,
 }
 
 struct ProxyEngine {
@@ -198,6 +204,8 @@ struct ProxyEngine {
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
     last_stats_write: std::time::Instant,
+    networks_json: Option<PathBuf>,
+    network_name: Option<String>,
 }
 
 impl ProxyEngine {
@@ -214,6 +222,8 @@ impl ProxyEngine {
             stats,
             stats_path,
             bridge,
+            networks_json,
+            network_name,
         } = config;
 
         let mut device = UnixgramDevice::new(socket, bridge, Arc::clone(&stats));
@@ -275,6 +285,8 @@ impl ProxyEngine {
             stats,
             stats_path,
             last_stats_write: std::time::Instant::now(),
+            networks_json,
+            network_name,
         }
     }
 
@@ -801,6 +813,19 @@ impl ProxyEngine {
         let Some((handle, dns_server, query, source)) = next_query else {
             return;
         };
+
+        // NetworkStore-local A answers before upstream forward (#B3 DNS proxy).
+        if let (Some(networks_json), Some(network_name)) =
+            (self.networks_json.as_deref(), self.network_name.as_deref())
+        {
+            if let Some(response) =
+                dns_local::try_network_a_response(&query, networks_json, network_name)
+            {
+                let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                socket.send_slice(&response, source).ok();
+                return;
+            }
+        }
 
         // Forward query to the real DNS server via a host UDP socket.
         match UdpSocket::bind("0.0.0.0:0") {

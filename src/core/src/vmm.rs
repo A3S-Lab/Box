@@ -94,6 +94,14 @@ pub struct NetworkInstanceConfig {
     /// DNS servers to configure inside the guest.
     #[serde(default)]
     pub dns_servers: Vec<Ipv4Addr>,
+
+    /// Optional path to Box `networks.json` for netproxy NetworkStore-local DNS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub networks_json: Option<PathBuf>,
+
+    /// Bridge network name paired with [`Self::networks_json`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
 }
 
 /// Stable guest device path used for an A3S-managed ext4 root disk.
@@ -731,6 +739,8 @@ mod tests {
                 prefix_len: 24,
                 mac_address: [0x02, 0x42, 0xac, 0x11, 0x00, 0x02],
                 dns_servers: vec!["8.8.8.8".parse().unwrap()],
+                networks_json: None,
+                network_name: None,
             }),
             ..Default::default()
         };
