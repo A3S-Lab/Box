@@ -896,7 +896,7 @@ services:
     }
 
     #[test]
-    fn test_compose_project_rejects_udp_ports() {
+    fn test_compose_project_keeps_udp_ports() {
         let yaml = r#"
 services:
   web:
@@ -905,10 +905,12 @@ services:
       - "8080:80/udp"
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
+        let box_config = project
+            .build_box_config("web", Some("myapp_default"))
+            .unwrap();
 
-        let err = ComposeRuntimePlan::new("myapp", config).unwrap_err();
-
-        assert!(err.to_string().contains("only TCP is supported"));
+        assert_eq!(box_config.port_map, vec!["8080:80/udp"]);
     }
 
     #[test]

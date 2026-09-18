@@ -3,7 +3,7 @@
 //! IPAM stays in [`NetworkStore`]. The container end stays unbridged so OCI
 //! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
 //! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE. Optional
-//! static TCP published ports install per-box DNAT (+ localhost OUTPUT).
+//! static TCP and UDP published ports install per-box DNAT (+ localhost OUTPUT).
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::NetworkStore;
 
-const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v4";
+const LEASE_SCHEMA: &str = "a3s.box.sandbox-host-netdevice.v5";
 const GUEST_IFACE_NAME: &str = "eth0";
 
 /// One static TCP host→container publication persisted on the lease.
@@ -43,6 +43,9 @@ pub(crate) struct HostNetDeviceLease {
     pub container_ip: String,
     #[serde(default)]
     pub published_tcp: Vec<PublishedTcpPort>,
+    /// Static UDP publications. Absent on v4 leases.
+    #[serde(default)]
+    pub published_udp: Vec<PublishedTcpPort>,
 }
 
 impl HostNetDeviceLease {
@@ -54,6 +57,7 @@ impl HostNetDeviceLease {
         peer_iface: String,
         container_ip: Ipv4Addr,
         published_tcp: Vec<PublishedTcpPort>,
+        published_udp: Vec<PublishedTcpPort>,
     ) -> Self {
         Self {
             schema: LEASE_SCHEMA.to_string(),
@@ -65,6 +69,7 @@ impl HostNetDeviceLease {
             guest_name: GUEST_IFACE_NAME.to_string(),
             container_ip: container_ip.to_string(),
             published_tcp,
+            published_udp,
         }
     }
 }
@@ -120,7 +125,7 @@ pub(crate) fn bridge_iface_name(network_name: &str) -> String {
 ///
 /// Non-Bridge modes return `None` without host mutation. The container end
 /// stays unbridged (Create-movable); the peer is enslaved to the Box bridge.
-/// Optional static TCP `port_map` installs DNAT to the endpoint IP.
+/// Optional static TCP and UDP `port_map` entries install DNAT to the endpoint IP.
 pub(crate) fn stage_for_sandbox_bundle(
     home_dir: &Path,
     box_id: &str,
@@ -159,7 +164,7 @@ pub(crate) fn stage_for_sandbox_bundle(
             "box '{box_id}' is not connected to network '{network_name}'; resource guard must connect before prepare"
         ))
     })?;
-    let published_tcp = parse_static_published_tcp(port_map)?;
+    let (published_tcp, published_udp) = parse_static_published_ports(port_map)?;
     let prefix_len = prefix_len_from_subnet(&config.subnet)?;
     let (container_iface, peer_iface) = interface_names(box_id)?;
     let bridge_iface = bridge_iface_name(network_name);
@@ -171,6 +176,7 @@ pub(crate) fn stage_for_sandbox_bundle(
         peer_iface,
         endpoint.ip_address,
         published_tcp,
+        published_udp,
     );
 
     // Replace any stale lease/ifaces from a previous failed prepare. Fail closed
@@ -179,7 +185,7 @@ pub(crate) fn stage_for_sandbox_bundle(
     teardown_lease(home_dir, box_id)?;
 
     stage_veth_pair(&lease, endpoint, prefix_len, config.gateway)?;
-    ensure_published_tcp_dnat(&lease)?;
+    ensure_published_dnat(&lease)?;
     persist_lease(home_dir, box_id, &lease)?;
     Ok(Some(lease))
 }
@@ -202,7 +208,7 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
         }
     };
 
-    remove_published_tcp_dnat(&lease)?;
+    remove_published_dnat(&lease)?;
     delete_link_if_present(&lease.container_iface)?;
     delete_link_if_present(&lease.peer_iface)?;
     // Network-scoped bridge is shared across endpoints; delete only when empty.
@@ -398,50 +404,54 @@ fn ensure_bridge_egress_nat(subnet: &str, bridge_iface: &str) -> ExecutionManage
     ])
 }
 
-fn parse_static_published_tcp(
+fn parse_static_published_ports(
     port_map: &[String],
-) -> ExecutionManagerResult<Vec<PublishedTcpPort>> {
-    let mut published = Vec::with_capacity(port_map.len());
+) -> ExecutionManagerResult<(Vec<PublishedTcpPort>, Vec<PublishedTcpPort>)> {
+    let mut tcp = Vec::new();
+    let mut udp = Vec::new();
     for entry in port_map {
         let mapping = parse_port_mapping(entry).map_err(ExecutionManagerError::InvalidRequest)?;
-        if mapping.protocol != PortProtocol::Tcp {
-            return Err(ExecutionManagerError::InvalidRequest(format!(
-                "SandboxViaOci published ports only support TCP; got '{entry}'"
-            )));
-        }
         if mapping.host_port == 0 {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "SandboxViaOci published ports reject host_port=0 auto-assign in '{entry}'"
             )));
         }
-        published.push(PublishedTcpPort {
+        let published = PublishedTcpPort {
             host_port: mapping.host_port,
             guest_port: mapping.guest_port,
-        });
+        };
+        match mapping.protocol {
+            PortProtocol::Tcp => tcp.push(published),
+            PortProtocol::Udp => udp.push(published),
+        }
     }
-    Ok(published)
+    Ok((tcp, udp))
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_published_tcp_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
-    if lease.published_tcp.is_empty() {
+fn ensure_published_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
+    if lease.published_tcp.is_empty() && lease.published_udp.is_empty() {
         return Ok(());
     }
     enable_ipv4_forwarding()?;
     for mapping in &lease.published_tcp {
-        ensure_one_published_tcp_dnat(&lease.container_ip, mapping)?;
+        ensure_one_published_dnat(&lease.container_ip, "tcp", mapping)?;
+    }
+    for mapping in &lease.published_udp {
+        ensure_one_published_dnat(&lease.container_ip, "udp", mapping)?;
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn ensure_published_tcp_dnat(_lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
+fn ensure_published_dnat(_lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_one_published_tcp_dnat(
+fn ensure_one_published_dnat(
     container_ip: &str,
+    protocol: &str,
     mapping: &PublishedTcpPort,
 ) -> ExecutionManagerResult<()> {
     let host = mapping.host_port.to_string();
@@ -455,7 +465,7 @@ fn ensure_one_published_tcp_dnat(
         "-C",
         "PREROUTING",
         "-p",
-        "tcp",
+        protocol,
         "--dport",
         &host,
         "-j",
@@ -469,7 +479,7 @@ fn ensure_one_published_tcp_dnat(
             "-A",
             "PREROUTING",
             "-p",
-            "tcp",
+            protocol,
             "--dport",
             &host,
             "-j",
@@ -488,7 +498,7 @@ fn ensure_one_published_tcp_dnat(
         "-d",
         "127.0.0.1",
         "-p",
-        "tcp",
+        protocol,
         "--dport",
         &host,
         "-j",
@@ -504,7 +514,7 @@ fn ensure_one_published_tcp_dnat(
             "-d",
             "127.0.0.1",
             "-p",
-            "tcp",
+            protocol,
             "--dport",
             &host,
             "-j",
@@ -521,7 +531,7 @@ fn ensure_one_published_tcp_dnat(
         "-d",
         container_ip,
         "-p",
-        "tcp",
+        protocol,
         "--dport",
         &guest,
         "-j",
@@ -533,7 +543,7 @@ fn ensure_one_published_tcp_dnat(
             "-d",
             container_ip,
             "-p",
-            "tcp",
+            protocol,
             "--dport",
             &guest,
             "-j",
@@ -543,66 +553,68 @@ fn ensure_one_published_tcp_dnat(
     Ok(())
 }
 
-fn remove_published_tcp_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
+fn remove_published_dnat(lease: &HostNetDeviceLease) -> ExecutionManagerResult<()> {
     #[cfg(target_os = "linux")]
     {
         let mut failures = Vec::new();
-        for mapping in &lease.published_tcp {
-            let host = mapping.host_port.to_string();
-            let dest = format!("{}:{}", lease.container_ip, mapping.guest_port);
-            let guest = mapping.guest_port.to_string();
-            if let Err(error) = iptables_delete_if_present(&[
-                "-t",
-                "nat",
-                "-D",
-                "PREROUTING",
-                "-p",
-                "tcp",
-                "--dport",
-                &host,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                &dest,
-            ]) {
-                failures.push(error.to_string());
-            }
-            if let Err(error) = iptables_delete_if_present(&[
-                "-t",
-                "nat",
-                "-D",
-                "OUTPUT",
-                "-d",
-                "127.0.0.1",
-                "-p",
-                "tcp",
-                "--dport",
-                &host,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                &dest,
-            ]) {
-                failures.push(error.to_string());
-            }
-            if let Err(error) = iptables_delete_if_present(&[
-                "-D",
-                "FORWARD",
-                "-d",
-                &lease.container_ip,
-                "-p",
-                "tcp",
-                "--dport",
-                &guest,
-                "-j",
-                "ACCEPT",
-            ]) {
-                failures.push(error.to_string());
+        for (protocol, mappings) in [("tcp", &lease.published_tcp), ("udp", &lease.published_udp)] {
+            for mapping in mappings {
+                let host = mapping.host_port.to_string();
+                let dest = format!("{}:{}", lease.container_ip, mapping.guest_port);
+                let guest = mapping.guest_port.to_string();
+                if let Err(error) = iptables_delete_if_present(&[
+                    "-t",
+                    "nat",
+                    "-D",
+                    "PREROUTING",
+                    "-p",
+                    protocol,
+                    "--dport",
+                    &host,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
+                ]) {
+                    failures.push(error.to_string());
+                }
+                if let Err(error) = iptables_delete_if_present(&[
+                    "-t",
+                    "nat",
+                    "-D",
+                    "OUTPUT",
+                    "-d",
+                    "127.0.0.1",
+                    "-p",
+                    protocol,
+                    "--dport",
+                    &host,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
+                ]) {
+                    failures.push(error.to_string());
+                }
+                if let Err(error) = iptables_delete_if_present(&[
+                    "-D",
+                    "FORWARD",
+                    "-d",
+                    &lease.container_ip,
+                    "-p",
+                    protocol,
+                    "--dport",
+                    &guest,
+                    "-j",
+                    "ACCEPT",
+                ]) {
+                    failures.push(error.to_string());
+                }
             }
         }
         if !failures.is_empty() {
             return Err(ExecutionManagerError::Unavailable(format!(
-                "failed to remove keep-authority published TCP DNAT for container {}: {}",
+                "failed to remove keep-authority published DNAT for container {}: {}",
                 lease.container_ip,
                 failures.join("; ")
             )));
@@ -876,6 +888,10 @@ mod tests {
                 host_port: 18080,
                 guest_port: 80,
             }],
+            vec![PublishedTcpPort {
+                host_port: 5300,
+                guest_port: 53,
+            }],
         );
         persist_lease(home.path(), id, &lease).unwrap();
         let loaded: HostNetDeviceLease =
@@ -886,6 +902,7 @@ mod tests {
         assert_eq!(loaded.subnet, "10.88.0.0/24");
         assert_eq!(loaded.container_ip, "10.88.0.2");
         assert_eq!(loaded.published_tcp.len(), 1);
+        assert_eq!(loaded.published_udp.len(), 1);
         // Teardown without real ifaces still removes the lease file.
         teardown_lease(home.path(), id).unwrap();
         assert!(!lease_path(home.path(), id).exists());
@@ -904,17 +921,34 @@ mod tests {
                 host_port: 18081,
                 guest_port: 8080,
             }],
+            vec![PublishedTcpPort {
+                host_port: 5300,
+                guest_port: 53,
+            }],
         );
         // Without matching iptables rules (or without iptables on this host),
         // missing-rule deletes must not invent soft success by swallowing errors
         // after a present rule failed to delete — absence is Ok.
-        remove_published_tcp_dnat(&lease).unwrap();
+        remove_published_dnat(&lease).unwrap();
     }
 
     #[test]
-    fn parse_static_published_tcp_rejects_host_port_zero() {
-        let error = parse_static_published_tcp(&["0:80".into()]).unwrap_err();
+    fn parse_static_published_ports_keeps_udp_and_rejects_host_port_zero() {
+        let (tcp, udp) =
+            parse_static_published_ports(&["8080:80".into(), "5300:53/udp".into()]).unwrap();
+        assert_eq!(tcp.len(), 1);
+        assert_eq!(udp[0].guest_port, 53);
+        let error = parse_static_published_ports(&["0:80".into()]).unwrap_err();
         assert!(error.to_string().contains("host_port=0"), "{error}");
+        let error = parse_static_published_ports(&["0:53/udp".into()]).unwrap_err();
+        assert!(error.to_string().contains("host_port=0"), "{error}");
+    }
+
+    #[test]
+    fn v4_lease_without_udp_field_still_loads() {
+        let raw = r#"{"schema":"a3s.box.sandbox-host-netdevice.v4","network":"dev","subnet":"10.88.0.0/24","bridge_iface":"a3sb","container_iface":"bv22222222c","peer_iface":"bv22222222p","guest_name":"eth0","container_ip":"10.88.0.2","published_tcp":[]}"#;
+        let loaded: HostNetDeviceLease = serde_json::from_str(raw).unwrap();
+        assert!(loaded.published_udp.is_empty());
     }
 
     #[test]

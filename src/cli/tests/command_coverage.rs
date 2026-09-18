@@ -1071,10 +1071,10 @@ fn test_noninteractive_boundary_command_smoke() {
         &[
             "create",
             "-p",
-            "18080:80/udp",
+            "18080:80/sctp",
             "docker.io/library/alpine:latest",
         ],
-        "only TCP is supported",
+        "only TCP and UDP are supported",
     );
     cli.fails(
         &[

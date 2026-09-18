@@ -712,13 +712,13 @@ mod tests {
     }
 
     #[test]
-    fn test_config_from_record_rejects_udp_port_map() {
+    fn test_config_from_record_keeps_udp_port_map() {
         let mut record = sample_record();
         record.port_map = vec!["8080:80/udp".to_string()];
 
-        let err = config_from_record(&record).unwrap_err();
+        let config = config_from_record(&record).unwrap();
 
-        assert!(err.contains("only TCP is supported"));
+        assert_eq!(config.port_map, vec!["8080:80/udp"]);
     }
 
     #[test]

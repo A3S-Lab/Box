@@ -1144,13 +1144,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_runtime_options_rejects_udp_publish() {
+    fn test_validate_runtime_options_accepts_udp_publish() {
         let mut args = default_common_args();
         args.publish = vec!["8080:80/udp".to_string()];
 
-        let err = validate_runtime_options(&args).unwrap_err();
-
-        assert!(err.contains("only TCP is supported"));
+        validate_runtime_options(&args).unwrap();
     }
 
     #[test]
