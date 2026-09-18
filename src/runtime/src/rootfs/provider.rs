@@ -398,23 +398,21 @@ impl RootfsProvider for OverlayProvider {
             || super::overlay::is_mountpoint(&box_dir.join("upper"))
             || super::overlay::is_mountpoint(&box_dir.join("work"));
 
+        // Always use synchronous unmount: lazy detach can invent clean cleanup
+        // while a stacked mount still holds host claim (product stop/remove /
+        // orphan reap parity).
+        super::unmount_box_overlay_for_reuse(&merged)?;
+
         if bounded {
             if persistent {
-                // Release the overlay view before removing its host directory,
-                // but retain the quota tmpfs and aliases as the durable
-                // writable generation for the next start.
-                super::unmount_box_overlay_for_reuse(&merged)?;
-                if merged.exists() && !super::overlay::is_mountpoint(&merged) {
-                    if let Err(error) = std::fs::remove_dir_all(&merged) {
-                        tracing::warn!(path = %merged.display(), %error, "Failed to remove bounded overlay view");
-                    }
-                }
+                // Retain the quota tmpfs and aliases as the durable writable
+                // generation for the next start; only drop the merged view.
+                remove_overlay_dir_if_present(&merged)?;
                 super::overlay::cleanup_bounded_writable_layer(box_dir, true)?;
                 tracing::info!("Persistent box: keeping bounded writable-layer tmpfs and aliases");
                 return Ok(());
             }
 
-            super::unmount_box_overlay(&merged);
             super::overlay::cleanup_bounded_writable_layer(box_dir, false)?;
             for dir_name in &[
                 "rootfs",
@@ -423,54 +421,25 @@ impl RootfsProvider for OverlayProvider {
                 "work",
                 super::overlay::WRITABLE_LAYER_DIR_NAME,
             ] {
-                let dir = box_dir.join(dir_name);
-                if dir.exists() && !super::overlay::is_mountpoint(&dir) {
-                    if let Err(error) = std::fs::remove_dir_all(&dir) {
-                        tracing::warn!(path = %dir.display(), %error, "Failed to remove bounded overlay directory");
-                    }
-                }
+                remove_overlay_dir_if_present(&box_dir.join(dir_name))?;
             }
             return Ok(());
         }
 
         if persistent {
-            // A retained upper is about to become the next generation's
-            // writable layer. Fully release every old mount before reuse;
-            // lazy detach can keep an old namespace writer alive and make the
-            // replacement generation observe stale rootfs state.
-            super::unmount_box_overlay_for_reuse(&merged)?;
             // Keep both possible persistent generations: a cache-miss generation
             // lives in `rootfs`, while later overlay writes live in `upper`.
             // The next prepare mounts their union again.
             tracing::info!("Persistent box: keeping rootfs and overlay upper on disk");
             for dir_name in &["merged", "work"] {
-                let dir = box_dir.join(dir_name);
-                if dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&dir) {
-                        tracing::warn!(path = %dir.display(), error = %e, "Failed to remove overlay dir");
-                    }
-                }
+                remove_overlay_dir_if_present(&box_dir.join(dir_name))?;
             }
             return Ok(());
         }
 
-        // A discarded rootfs can use bounded lazy unmount cleanup. It will
-        // never be mounted as a replacement generation.
-        super::unmount_box_overlay(&merged);
-
         for dir_name in &["rootfs", "upper", "work", "merged"] {
-            let dir = box_dir.join(dir_name);
-            if dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&dir) {
-                    tracing::warn!(
-                        path = %dir.display(),
-                        error = %e,
-                        "Failed to remove overlay dir"
-                    );
-                }
-            }
+            remove_overlay_dir_if_present(&box_dir.join(dir_name))?;
         }
-
         Ok(())
     }
 
@@ -478,6 +447,24 @@ impl RootfsProvider for OverlayProvider {
         "overlay"
     }
 }
+
+fn remove_overlay_dir_if_present(dir: &Path) -> Result<()> {
+    if super::overlay::is_mountpoint(dir) {
+        return Err(BoxError::StateError(format!(
+            "Refusing invent-clean overlay cleanup while {} remains mounted",
+            dir.display()
+        )));
+    }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BoxError::BuildError(format!(
+            "Failed to remove overlay dir {}: {error}; refusing invent-clean rootfs cleanup",
+            dir.display()
+        ))),
+    }
+}
+
 
 fn ensure_empty_rootfs_directory(rootfs: &Path) -> Result<()> {
     match std::fs::symlink_metadata(rootfs) {
@@ -870,6 +857,27 @@ mod tests {
         assert!(!box_dir.join("upper").exists());
         assert!(!box_dir.join("work").exists());
         assert!(!box_dir.join("merged").exists());
+    }
+
+    #[test]
+    fn overlay_provider_cleanup_refuses_invent_clean_when_dir_remove_fails() {
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        // A regular file where an overlay directory is expected: remove_dir_all fails.
+        std::fs::write(box_dir.join("merged"), b"not-a-directory").unwrap();
+
+        let error = OverlayProvider
+            .cleanup(&box_dir, false)
+            .expect_err("overlay wipe failure must not invent clean provider cleanup");
+        assert!(
+            error.to_string().contains("refusing invent-clean"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            box_dir.join("merged").exists(),
+            "failed overlay claim must remain for a later fail-closed retry"
+        );
     }
 
     #[test]

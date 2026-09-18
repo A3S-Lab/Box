@@ -17,6 +17,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Overlay rootfs provider cleanup fails closed on synchronous overlay unmount
+  and directory wipe (no warn-and-Ok / lazy detach invent-clean). Does **not**
+  close ROADMAP B3/B2 or unlock CNI/DNS/Windows/macOS `:ro`.
 - Orphan crash-recovery reap fails closed on platform rootfs detach, legacy
   MicroVM host cgroup removal, shim file-mount staging cleanup, external
   runtime socket directory (`/tmp/a3s-box-sockets/<id>`), and legacy Sandbox
