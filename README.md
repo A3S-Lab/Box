@@ -229,6 +229,7 @@ offline packages, Homebrew, PATH behavior, and uninstall steps live in
 | Kernel boundary | Dedicated guest Linux kernel | Shared host Linux kernel |
 | Qualified hosts | Linux/KVM, Apple Silicon/HVF, Windows x86_64/WHPX within the platform gates below | Certified Linux x86_64/aarch64 host |
 | Best fit | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
+| Unprivileged ownership | Linux directory virtio-fs is **same-UID only** (guest `chown` to another UID is `EPERM`; images with foreign layer UIDs fail closed before boot). Root lane, or macOS guest-native ext4 / Windows WHPX portable metadata, for foreign UIDs. | Host share retains Host UIDs; guest `chown` refused by design (userns mapping is separate) |
 | VM-only features | TEE, warm pool, snapshot-fork where qualified | Rejected |
 | Fallback | Never | Never |
 
@@ -561,7 +562,12 @@ qualification-only MicroVM path through
 `box-kvm-qualification-service` when `A3S_BOX_OCI_KVM_ENDPOINT` is set. On that
 Linux/macOS same-uid virtio-fs path, Box does not request guest portable
 rootfs-metadata ownership replay: the share retains Host UIDs and guest
-`chown` is refused by design. Windows WHPX still converts image metadata to
+`chown` is refused by design. The **default omit-isolation MicroVM** user lane
+on Linux is the same capability boundary: directory rootfs is exposed through
+same-UID virtio-fs, layer UID/GID restore is root-only, and unprivileged `run`
+fails closed when image metadata declares UIDs/GIDs outside `{0, host euid/egid}`
+instead of creating a box whose entrypoint then dies on `chown` `EPERM`.
+Windows WHPX still converts image metadata to
 `a3s.oci.rootfs-metadata.v1` so the guest can restore Linux ownership that
 NTFS cannot store. Image-declared
 anonymous volumes are planned from normalized image metadata after capability

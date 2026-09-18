@@ -17,6 +17,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Unprivileged Linux directory MicroVM fails closed when image metadata declares
+  UIDs/GIDs outside `{0, host euid/egid}` (#562): same-UID virtio-fs cannot
+  `chown` to those IDs, so `run` no longer creates a live-then-dead box for
+  nginx/postgres-class images. README documents the MicroVM user-lane contract
+  (not only Sandbox). Guest-native ext4, Sandbox userns, and root-lane boots are
+  unchanged. Entrypoint-only chown with all-root layers remains a documented
+  residual. Does **not** close ROADMAP B3/B2 or implement idmap/fakeroot.
 - Host-global `/tmp/a3s-box-sockets` (and macOS `/private/tmp/...`) is created
   and kept sticky world-writable (`1777`) so a root-lane MicroVM/Sandbox cannot
   permanently brick later unprivileged `run` (#560). Per-box socket dirs stay

@@ -204,6 +204,7 @@ impl VmManager {
                 if let Some(config) = oci_config.as_ref() {
                     crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
                 }
+                self.admit_unprivileged_microvm_directory_rootfs(&rootfs_path)?;
                 let tee_instance_config = self.generate_tee_config(&box_dir)?;
                 return Ok(BoxLayout {
                     rootfs_path,
@@ -284,6 +285,7 @@ impl VmManager {
                 }
             }
             let tee_instance_config = self.generate_tee_config(&box_dir)?;
+            self.admit_unprivileged_microvm_directory_rootfs(&rootfs_path)?;
             return Ok(BoxLayout {
                 rootfs_path,
                 resumed_rootfs: None,
@@ -328,6 +330,7 @@ impl VmManager {
             // Record that this box holds `cache_key` as its overlay lower, so a
             // concurrent box's cache prune won't evict it mid-mount (ENOENT).
             self.mark_rootfs_cache_key(&box_dir, cache_key);
+            self.admit_unprivileged_microvm_directory_rootfs(&rootfs_path)?;
             let tee_instance_config = self.generate_tee_config(&box_dir)?;
             return Ok(BoxLayout {
                 rootfs_path,
@@ -554,6 +557,8 @@ impl VmManager {
             crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
         }
 
+        self.admit_unprivileged_microvm_directory_rootfs(&rootfs_path)?;
+
         // Generate TEE configuration if enabled
         let tee_instance_config = self.generate_tee_config(&box_dir)?;
 
@@ -576,6 +581,16 @@ impl VmManager {
 
     pub(crate) fn socket_dir(&self) -> PathBuf {
         runtime_socket_dir(&self.home_dir, &self.box_id)
+    }
+
+    /// Fail closed for unprivileged directory MicroVM when image metadata
+    /// declares foreign UIDs/GIDs (#562). Sandbox userns and guest-native
+    /// ext4/WHPX paths must not use this gate.
+    fn admit_unprivileged_microvm_directory_rootfs(&self, rootfs_path: &Path) -> Result<()> {
+        if self.config.isolation.is_sandbox() {
+            return Ok(());
+        }
+        crate::oci::admit_unprivileged_same_uid_directory_rootfs(rootfs_path)
     }
 
     /// Try to get a cached rootfs and copy it to the target path.
