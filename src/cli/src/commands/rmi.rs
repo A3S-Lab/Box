@@ -66,10 +66,10 @@ pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => {
                     println!("Removed: {}", target.reference);
                 }
+                // `--force` only ignores missing images; lock/I/O/unsafe-path
+                // failures must still refuse inventing rmi success.
+                Err(e) if args.force && is_rmi_force_ignorable_missing(&e) => {}
                 Err(e) => {
-                    if args.force {
-                        continue; // silently skip not-found in force mode
-                    }
                     errors.push(format!("{}: {e}", target.reference));
                 }
             }
@@ -79,9 +79,21 @@ pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        let msg = errors.join("\n");
-        Err(format!("Failed to remove image(s):\n{msg}").into())
+        Err(format!(
+            "Failed to remove image(s):\n{}; refusing rmi success",
+            errors.join("\n")
+        )
+        .into())
     }
+}
+
+/// `--force` may skip only ImageStore not-found; other remove Errs fail closed.
+fn is_rmi_force_ignorable_missing(error: &a3s_box_core::error::BoxError) -> bool {
+    matches!(
+        error,
+        a3s_box_core::error::BoxError::OciImageError(msg)
+            if msg.starts_with("Image not found:")
+    )
 }
 
 #[cfg(test)]
@@ -108,5 +120,22 @@ mod tests {
         );
         assert!(message.contains("permission denied"));
         assert!(message.contains("refusing rmi success"));
+    }
+
+    #[test]
+    fn rmi_force_only_ignores_image_not_found_remove_errors() {
+        assert!(is_rmi_force_ignorable_missing(
+            &a3s_box_core::error::BoxError::OciImageError(
+                "Image not found: alpine:missing".to_string()
+            )
+        ));
+        assert!(!is_rmi_force_ignorable_missing(
+            &a3s_box_core::error::BoxError::OciImageError(
+                "Failed to remove image directory: permission denied".to_string()
+            )
+        ));
+        assert!(!is_rmi_force_ignorable_missing(
+            &a3s_box_core::error::BoxError::Other("io error".to_string())
+        ));
     }
 }
