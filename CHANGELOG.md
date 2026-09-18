@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI inventory refresh (`ps` / `prune` / `info` / `df` / `events` / stats /
+  logs / compose read+wait / inspect) fails closed on managed inspect,
+  remove-retry, restart-reconcile, and passt backend-loss observation
+  instead of warn-and-continuing with stale transitional claims. Does **not**
+  close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - SDK product `remove_box` / `prune_boxes` / `stop_box` route managed
   executions through the canonical execution manager (CLI `rm`/`stop`/`prune`
   parity) instead of inventing legacy PID teardown for `managed_execution`
