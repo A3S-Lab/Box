@@ -904,6 +904,7 @@ open and harness reports still keep
   `rootfs_snapshot.json` fails closed on `diff` and baseline-create errors abort
   boot instead of soft success; boot fails closed when `.snapshot-lower` is
   present but the lower directory is missing (no image-pull fallthrough);
+  snapshot delete/prune inventory fails closed on `.snapshot-lower` I/O errors;
   MicroVM live host-path snapshots and the full B3 storage/network
   qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
