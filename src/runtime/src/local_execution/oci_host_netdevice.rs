@@ -321,11 +321,16 @@ fn stage_veth_pair(
         Ok(())
     })();
     if let Err(error) = staged {
-        // Best-effort rollback of a partially staged veth pair; primary staging
-        // error is returned. Lease file is not persisted until stage succeeds.
-        let _ = delete_link_if_present(&lease.container_iface);
-        let _ = delete_link_if_present(&lease.peer_iface);
-        return Err(error);
+        // No lease file yet — surface rollback failures so orphan fabric is not
+        // hidden behind the primary staging error.
+        let mut message = error.to_string();
+        if let Err(cleanup) = delete_link_if_present(&lease.container_iface) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        if let Err(cleanup) = delete_link_if_present(&lease.peer_iface) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        return Err(ExecutionManagerError::Unavailable(message));
     }
     Ok(())
 }
@@ -352,10 +357,15 @@ fn ensure_bridge(
         run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
     }
     if let Err(error) = run_ip(&["link", "set", bridge_iface, "up"]) {
-        // Best-effort rollback of a bridge we may have just created with no
-        // slaves and no MASQUERADE yet (empty subnet skips NAT delete).
-        let _ = try_delete_bridge_if_idle(bridge_iface, "");
-        return Err(error);
+        // Rollback a bridge we may have just created with no slaves and no
+        // MASQUERADE yet (empty subnet skips NAT delete). Surface rollback
+        // failure so orphan bridges are not hidden behind the primary up error.
+        return Err(match try_delete_bridge_if_idle(bridge_iface, "") {
+            Ok(()) => error,
+            Err(cleanup) => ExecutionManagerError::Unavailable(format!(
+                "{error}; rollback also failed: {cleanup}"
+            )),
+        });
     }
     // Gateway lives on the bridge so peers ARP a real L2 next hop. Idempotent.
     let cidr = format!("{gateway}/{prefix_len}");
