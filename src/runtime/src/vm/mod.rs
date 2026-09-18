@@ -387,6 +387,12 @@ pub struct VmManager {
     /// failed restarts must retain the pre-existing guest data.
     pub(crate) preserve_rootfs_on_boot_failure: bool,
 
+    /// Guest (or authenticated provider) already finished during readiness.
+    /// Ephemeral `--rm` boxes must keep `boxes/{id}` (exit evidence + console)
+    /// so startup reconciliation and foreground drain can observe exit 0
+    /// (#576). Real boot aborts without a terminal status still wipe.
+    pub(crate) retain_box_dir_after_boot_terminal: bool,
+
     /// TEE extension (attestation, sealing, secret injection)
     #[cfg(unix)]
     pub(crate) tee: Option<Box<dyn TeeExtension>>,
@@ -454,6 +460,7 @@ impl VmManager {
             restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
+            retain_box_dir_after_boot_terminal: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider,
@@ -495,6 +502,7 @@ impl VmManager {
             restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
+            retain_box_dir_after_boot_terminal: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider,
@@ -616,8 +624,20 @@ impl VmManager {
             #[cfg(target_os = "windows")]
             let completed_before_cleanup =
                 completed_before_cleanup || guest_exit_before_cleanup.is_some();
+            // Short one-shots often finish before the exec heartbeat (#411 /
+            // #576). That is a completed task, not a failed rootfs build: keep
+            // durable guest exit evidence and console bytes for startup
+            // reconciliation even on ephemeral `--rm` boxes. Provider-only
+            // nonzero crash codes without guest evidence still wipe ephemeral
+            // dirs (exit_code() can re-auth from the cached nonzero).
+            let durable_guest_exit =
+                crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
             if self.config.persistent && self.shim_exit_code.is_some() && completed_before_cleanup {
                 self.preserve_rootfs_on_boot_failure = true;
+            }
+            if durable_guest_exit && completed_before_cleanup {
+                self.preserve_rootfs_on_boot_failure = true;
+                self.retain_box_dir_after_boot_terminal = true;
             }
         }
 
@@ -772,8 +792,10 @@ impl VmManager {
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
         // Retain the box dir when host-netdevice, :ro alias, passt, provider, or
-        // socket teardown failed.
+        // socket teardown failed — and when the guest already published a
+        // terminal status during readiness (#576 short-task success).
         if !self.config.persistent
+            && !self.retain_box_dir_after_boot_terminal
             && mount_aliases_clean
             && host_net_clean
             && virtiofs_ro_clean
@@ -832,6 +854,7 @@ impl VmManager {
             restore_rootfs_cache_key: None,
             healthcheck_disabled: false,
             preserve_rootfs_on_boot_failure: false,
+            retain_box_dir_after_boot_terminal: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider,

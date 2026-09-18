@@ -65,6 +65,7 @@ fn make_vm_manager_with_home(home_dir: &Path) -> VmManager {
         restore_rootfs_cache_key: None,
         healthcheck_disabled: false,
         preserve_rootfs_on_boot_failure: false,
+        retain_box_dir_after_boot_terminal: false,
         #[cfg(unix)]
         tee: None,
         rootfs_provider: crate::rootfs::default_provider(),

@@ -17,6 +17,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Ephemeral MicroVM one-shots that publish a durable guest exit (including
+  `0`) before the exec heartbeat no longer wipe `boxes/{id}` during
+  boot-failure cleanup, so `exit_code()` still authenticates and CLI
+  `run --rm` startup reconciliation can treat the task as completed
+  (#576). Provider-only nonzero crashes without guest evidence still wipe.
+  Does **not** close ROADMAP B2/B3.
+- `just test-vm` / `just test-tee` locate `a3s-libkrun-sys` build outputs
+  under `lib64` (Linux) or `lib` (macOS), including release profiles (#575).
 - macOS netproxy answers NetworkStore name/alias A and AAAA NODATA on
   TCP/53 before opening the upstream TCP proxy. Unknown names still use that
   proxy, with the bytes already read prefetched. Linux passt_bridge still

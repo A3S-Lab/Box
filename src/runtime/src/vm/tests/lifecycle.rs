@@ -293,6 +293,38 @@ async fn test_cleanup_boot_failure_retains_an_exact_terminal_status() {
 }
 
 #[tokio::test]
+async fn test_cleanup_boot_failure_retains_ephemeral_dir_for_durable_exit_zero() {
+    // #576: ephemeral `--rm` one-shots that publish guest exit 0 before the
+    // exec heartbeat must keep boxes/{id} so exit_code() still authenticates
+    // and CLI startup reconciliation can treat the run as completed.
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-ephemeral-exit-zero-during-boot".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 0 }));
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    let exit_path = box_dir.join("upper").join(".a3s_exit_code");
+    std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+    std::fs::write(&exit_path, "0\n").unwrap();
+    std::fs::write(box_dir.join("logs").join("console.log"), b"ok\n").unwrap();
+
+    vm.cleanup_boot_failure().await;
+
+    assert_eq!(vm.exit_code(), Some(0));
+    assert!(vm.retain_box_dir_after_boot_terminal);
+    assert!(vm.preserve_rootfs_on_boot_failure);
+    assert!(
+        box_dir.exists(),
+        "ephemeral box dir with durable guest exit 0 must survive boot-failure cleanup"
+    );
+    assert_eq!(std::fs::read(box_dir.join("logs").join("console.log")).unwrap(), b"ok\n");
+    assert_eq!(std::fs::read_to_string(&exit_path).unwrap().trim(), "0");
+}
+
+#[tokio::test]
 async fn test_cleanup_boot_completion_preserves_first_persistent_rootfs() {
     let tmp = tempfile::tempdir().unwrap();
     let box_id = "box-persistent-completed-during-boot".to_string();
