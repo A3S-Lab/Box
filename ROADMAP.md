@@ -853,7 +853,8 @@ open and harness reports still keep
   DetachOnly). Remaining unclassified external binds fail closed at create.
   Legacy CLI/SDK stop/remove volume detach and anonymous volume removal fail
   closed like managed cleanup; `VolumeStore::prune` only reports actually
-  removed volumes and fails closed on non-idempotent remove errors.
+  removed volumes and fails closed on non-idempotent remove errors; managed
+  MicroVM destroy anonymous-volume cleanup fails closed like OCI remove.
   Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
   parity, and the B3 exit gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
