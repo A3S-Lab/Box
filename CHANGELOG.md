@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM image-declared anonymous `VOLUME` materialization fails closed on
+  `VolumeStore` claim failure instead of warn-and-skip, aligning with Sandbox
+  ownership honesty. Does **not** close ROADMAP B3/B2, invent Windows volume/
+  `:ro` parity, or flip `b2_process_session_recovery_closed`.
 - Keep-authority SandboxViaOci published TCP DNAT teardown fails closed when
   `iptables -D` cannot remove a still-present rule (lease file retained for
   retry) instead of swallowing delete failures and dropping durable lease

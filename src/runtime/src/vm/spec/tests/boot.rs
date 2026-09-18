@@ -578,6 +578,44 @@ fn test_build_instance_spec_tracks_new_anonymous_volumes_only() {
 }
 
 #[test]
+fn microvm_fails_closed_when_anonymous_volume_claim_is_rejected() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let mut oci_config = test_oci_config(None, None);
+    oci_config.volumes = vec!["/data".to_string()];
+    let layout = test_layout(layout_dir.path(), Some(oci_config), true);
+
+    let mut vm = test_vm_manager(BoxConfig::default());
+    vm.home_dir = home.path().to_path_buf();
+    assert!(
+        !vm.config.isolation.is_sandbox(),
+        "default isolation must exercise the MicroVM fail-closed path"
+    );
+
+    let planned = vm.plan_anonymous_volumes(layout.oci_config.as_ref().unwrap()).unwrap();
+    assert_eq!(planned.len(), 1);
+    let store = crate::volume::VolumeStore::new(
+        home.path().join("volumes.json"),
+        home.path().join("volumes"),
+    );
+    store
+        .claim_anonymous(&planned[0].name, "other-box")
+        .expect("seed conflicting anonymous owner");
+
+    let error = vm
+        .build_instance_spec(&layout)
+        .expect_err("MicroVM must not soft-skip a failed anonymous VOLUME claim");
+    assert!(
+        error
+            .to_string()
+            .contains("Failed to create required anonymous volume for /data"),
+        "{error}"
+    );
+    assert!(vm.anonymous_volumes.is_empty());
+    assert!(vm.created_anonymous_volumes.is_empty());
+}
+
+#[test]
 fn sandbox_rejects_anonymous_plan_drift_before_volume_materialization() {
     let home = tempdir().unwrap();
     let layout_dir = tempdir().unwrap();
