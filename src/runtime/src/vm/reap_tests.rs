@@ -75,6 +75,39 @@ fn test_reap_retains_box_dir_when_host_netdevice_teardown_fails() {
 }
 
 #[test]
+fn test_reap_retains_box_dir_when_file_mount_staging_remove_fails() {
+    // A non-directory staging path makes remove_dir_all fail. Wipe must not
+    // invent a clean orphan reap while that host claim remains (and must not
+    // wipe first, or a later pass would skip staging cleanup).
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "55555555-5555-5555-8555-555555555555";
+    let box_dir = home.path().join("boxes").join(box_id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+
+    let staging = std::env::temp_dir().join(format!("a3s-fs-mount-{box_id}"));
+    std::fs::write(&staging, b"not-a-directory").unwrap();
+    struct StagingGuard(std::path::PathBuf);
+    impl Drop for StagingGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = StagingGuard(staging.clone());
+
+    reap_orphaned_box_in(home.path(), box_id);
+
+    assert!(
+        box_dir.exists(),
+        "orphaned box dir must be retained when file-mount staging cleanup fails"
+    );
+    assert!(
+        staging.exists(),
+        "failed staging claim must remain for a later fail-closed retry"
+    );
+}
+
+#[test]
 fn test_reap_absent_box_is_noop() {
     let home = tempfile::tempdir().unwrap();
     // No boxes/<id> dir at all - must not panic or error.
