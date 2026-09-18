@@ -320,7 +320,10 @@ async fn test_cleanup_boot_failure_retains_ephemeral_dir_for_durable_exit_zero()
         box_dir.exists(),
         "ephemeral box dir with durable guest exit 0 must survive boot-failure cleanup"
     );
-    assert_eq!(std::fs::read(box_dir.join("logs").join("console.log")).unwrap(), b"ok\n");
+    assert_eq!(
+        std::fs::read(box_dir.join("logs").join("console.log")).unwrap(),
+        b"ok\n"
+    );
     assert_eq!(std::fs::read_to_string(&exit_path).unwrap().trim(), "0");
 }
 

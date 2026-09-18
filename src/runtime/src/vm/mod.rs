@@ -630,8 +630,7 @@ impl VmManager {
             // reconciliation even on ephemeral `--rm` boxes. Provider-only
             // nonzero crash codes without guest evidence still wipe ephemeral
             // dirs (exit_code() can re-auth from the cached nonzero).
-            let durable_guest_exit =
-                crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
+            let durable_guest_exit = crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
             if self.config.persistent && self.shim_exit_code.is_some() && completed_before_cleanup {
                 self.preserve_rootfs_on_boot_failure = true;
             }
