@@ -127,9 +127,19 @@ def evaluate_tree(root: Path) -> list[str]:
                         "after CI digests were published"
                     )
             else:
-                pending = f"greening of a {tip_tag} digest remains pending"
-                if pending not in text:
-                    failures.append(f"ROADMAP.md missing {pending!r}")
+                digest = (
+                    "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373"
+                )
+                if digest not in text:
+                    failures.append(
+                        f"ROADMAP.md missing existing-host greened KVM Live v5 "
+                        f"digest {digest}"
+                    )
+                if "greening of a v5 digest remains pending" in text:
+                    failures.append(
+                        "ROADMAP.md still claims KVM Live v5 greening pending "
+                        "after the existing-host digest was published"
+                    )
 
     readme = root / "README.md"
     if not readme.is_file():
@@ -147,6 +157,9 @@ def evaluate_tree(root: Path) -> list[str]:
             "v6 greening pending",
             "greened digests remain v4-scoped",
             "v7 greening pending",
+            "KVM tip v5 greening remains pending",
+            "v5 greening remains pending",
+            "v4 greening pending",
         ):
             if forbidden in text:
                 failures.append(
@@ -160,6 +173,7 @@ def evaluate_tree(root: Path) -> list[str]:
             "a3s.box.linux-kvm-live-session.v5",
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd",
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21",
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373",
         ):
             if required not in text:
                 failures.append(f"README.md missing honesty phrase {required!r}")
@@ -236,7 +250,7 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "greening of a v5 digest remains pending\n",
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
         (root / "README.md").write_text(
@@ -244,7 +258,8 @@ def self_test() -> int:
             "a3s.box.linux-native-live-session.v7\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
-            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n",
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
         (root / ".github/workflows/ci.yml").write_text(
@@ -265,7 +280,8 @@ def self_test() -> int:
             "a3s.box.linux-native-live-session.v7\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
-            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n",
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -277,7 +293,8 @@ def self_test() -> int:
             "a3s.box.linux-native-live-session.v7\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
-            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n",
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
 
@@ -287,7 +304,8 @@ def self_test() -> int:
             "a3s.box.linux-native-live-session.v7\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
-            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n",
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -302,7 +320,8 @@ def self_test() -> int:
             "a3s.box.linux-native-live-session.v7\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
-            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n",
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
 
@@ -313,7 +332,7 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "greening of a v5 digest remains pending\n",
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -329,6 +348,21 @@ def self_test() -> int:
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
             "greening of a v5 digest remains pending\n",
+            encoding="utf-8",
+        )
+        failures = evaluate_tree(root)
+        if not any("v5 greening pending" in failure for failure in failures):
+            print(
+                "self-test: expected ROADMAP v5 greening-pending after digest to fail",
+                file=sys.stderr,
+            )
+            return 1
+        pending_roadmap.write_text(
+            "a3s.box.linux-native-live-session.v7\n"
+            "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
+            "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
+            "a3s.box.linux-kvm-live-session.v5\n"
+            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
             encoding="utf-8",
         )
 

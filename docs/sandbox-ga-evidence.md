@@ -39,7 +39,11 @@ Authoritative hosted gate. Steps that matter for GA:
    `71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd`
    (linux-x86_64) /
    `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
-   (linux-arm64). Does **not** flip B2; KVM tip v5 greening remains pending.
+   (linux-arm64). Does **not** flip B2. KVM tip v5 existing-host greened
+   digest SHA-256
+   `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
+   (WSL2 `/dev/kvm`; Box `d8854a4c…`; OCI `fb390b69…`; tip-rebuilt system
+   image); does **not** flip B2.
 
 ## Operator setuid launcher evidence (self-hosted)
 
@@ -87,8 +91,10 @@ not required to flip B2 or MicroVM cutover.
 - WHPX/KVM MicroVM **production** OCI composition (qualification-only remains).
 - Flipping `b2_process_session_recovery_closed`.
 - Fixture `process_restart` as driver Live evidence.
-- Claiming KVM Live v5 existing-host greening before a matching report digest
-  is published (Native Live v7 is CI-greened; do not invent KVM digests).
+- Inventing KVM Live digests or flipping `b2_process_session_recovery_closed`
+  from observation greening (Native Live v7 is CI-greened; KVM tip v5 is
+  existing-host greened
+  `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`).
 - Cloud `BX0.3` / hardware TEE.
 - CI setpriv as a substitute for an operator setuid install at
   `/usr/local/libexec/a3s-box-sandbox-oci-launcher` (use the self-hosted
