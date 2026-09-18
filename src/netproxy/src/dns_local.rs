@@ -1,31 +1,41 @@
-//! Minimal NetworkStore-local DNS A answers for netproxy.
+//! Minimal NetworkStore-local DNS answers for netproxy / passt_bridge.
 //!
 //! Guests already send UDP/53 to configured upstream AnyIP addresses. Before
-//! forwarding upstream, answer A queries for names registered in Box
+//! forwarding upstream, answer queries for names registered in Box
 //! `networks.json` so late-joining peers are resolvable without rewriting
-//! guest `/etc/hosts`.
+//! guest `/etc/hosts`:
+//! - QTYPE A → A record with the endpoint IPv4
+//! - QTYPE AAAA for a known NetworkStore name → authoritative NODATA (no IPv6
+//!   in NetworkStore; avoid upstream NXDOMAIN/false negatives for dual-stack
+//!   resolvers that query AAAA first)
 
 use std::net::Ipv4Addr;
 use std::path::Path;
 
 const DNS_TYPE_A: u16 = 1;
+const DNS_TYPE_AAAA: u16 = 28;
 const DNS_CLASS_IN: u16 = 1;
 const DNS_TTL_SECS: u32 = 30;
 
-/// If `query` is a single-question A lookup for a NetworkStore name/alias,
+/// If `query` is a single-question A/AAAA lookup for a NetworkStore name/alias,
 /// return a synthesized response. Otherwise `None` (caller forwards upstream).
 pub(crate) fn try_network_a_response(
     query: &[u8],
     networks_json: &Path,
     network_name: &str,
 ) -> Option<Vec<u8>> {
-    let qname = parse_query_a_name(query)?;
+    let (qname, qtype) = parse_query_name_and_type(query)?;
+    // Name must exist in NetworkStore; unknown names always forward.
     let ip = a3s_box_core::network::lookup_network_a(networks_json, network_name, &qname)?;
-    build_a_response(query, ip)
+    match qtype {
+        DNS_TYPE_A => build_a_response(query, ip),
+        DNS_TYPE_AAAA => build_nodata_response(query),
+        _ => None,
+    }
 }
 
-/// Parse a standard DNS query with one question; only QTYPE A is accepted.
-fn parse_query_a_name(query: &[u8]) -> Option<String> {
+/// Parse a standard DNS query with one question; returns (qname, qtype).
+fn parse_query_name_and_type(query: &[u8]) -> Option<(String, u16)> {
     if query.len() < 12 {
         return None;
     }
@@ -60,13 +70,16 @@ fn parse_query_a_name(query: &[u8]) -> Option<String> {
     }
     let qtype = u16::from_be_bytes([query[offset], query[offset + 1]]);
     let qclass = u16::from_be_bytes([query[offset + 2], query[offset + 3]]);
-    if qtype != DNS_TYPE_A || qclass != DNS_CLASS_IN {
+    if qclass != DNS_CLASS_IN {
         return None;
     }
-    Some(labels.join("."))
+    if qtype != DNS_TYPE_A && qtype != DNS_TYPE_AAAA {
+        return None;
+    }
+    Some((labels.join("."), qtype))
 }
 
-fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
+fn build_response_header(query: &[u8], ancount: u16) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
     }
@@ -76,12 +89,17 @@ fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
     let flags = (flags | 0x8400 | 0x0080) & !0x0200;
     out[2] = (flags >> 8) as u8;
     out[3] = (flags & 0xff) as u8;
-    out[6] = 0;
-    out[7] = 1; // ANCOUNT
+    out[6] = (ancount >> 8) as u8;
+    out[7] = (ancount & 0xff) as u8;
     out[8] = 0;
     out[9] = 0; // NSCOUNT
     out[10] = 0;
     out[11] = 0; // ARCOUNT
+    Some(out)
+}
+
+fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
+    let mut out = build_response_header(query, 1)?;
     // Answer: compression pointer to QNAME at offset 12.
     out.extend_from_slice(&[0xC0, 0x0C]);
     out.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
@@ -92,7 +110,12 @@ fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Config for answering NetworkStore DNS A queries on a raw Ethernet path
+/// Authoritative empty answer for AAAA on an IPv4-only NetworkStore name.
+fn build_nodata_response(query: &[u8]) -> Option<Vec<u8>> {
+    build_response_header(query, 0)
+}
+
+/// Config for answering NetworkStore DNS queries on a raw Ethernet path
 /// (Linux passt_bridge). Guests query configured upstream IPs on UDP/53.
 #[derive(Clone)]
 pub struct NetworkDnsConfig {
@@ -215,7 +238,7 @@ mod tests {
     use a3s_box_core::network::NetworkConfig;
     use std::io::Write;
 
-    fn encode_query(name: &str) -> Vec<u8> {
+    fn encode_query_typed(name: &str, qtype: u16) -> Vec<u8> {
         let mut out = vec![
             0x12, 0x34, // ID
             0x01, 0x00, // RD
@@ -229,9 +252,13 @@ mod tests {
             out.extend_from_slice(label.as_bytes());
         }
         out.push(0);
-        out.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+        out.extend_from_slice(&qtype.to_be_bytes());
         out.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
         out
+    }
+
+    fn encode_query(name: &str) -> Vec<u8> {
+        encode_query_typed(name, DNS_TYPE_A)
     }
 
     #[test]
@@ -253,6 +280,40 @@ mod tests {
         assert_eq!(response[2] & 0x80, 0x80); // QR
         assert_eq!(response[7], 1); // ANCOUNT
         assert_eq!(&response[response.len() - 4..], &ep.ip_address.octets());
+    }
+
+    #[test]
+    fn local_aaaa_nodata_for_registered_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let _ = net
+            .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+            .unwrap();
+        let body = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+
+        let query = encode_query_typed("db", DNS_TYPE_AAAA);
+        let response = try_network_a_response(&query, &path, "mynet").unwrap();
+        assert_eq!(response[2] & 0x80, 0x80); // QR
+        assert_eq!(response[2] & 0x04, 0x04); // AA
+        assert_eq!(response[7], 0); // ANCOUNT NODATA
+        assert_eq!(response.len(), query.len());
+    }
+
+    #[test]
+    fn unknown_aaaa_returns_none_for_upstream_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("networks.json");
+        let net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let body = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+        assert!(try_network_a_response(
+            &encode_query_typed("example.com", DNS_TYPE_AAAA),
+            &path,
+            "mynet"
+        )
+        .is_none());
     }
 
     #[test]

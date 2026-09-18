@@ -20,8 +20,9 @@ All notable changes to A3S Box will be documented in this file.
 - Linux passt_bridge answers NetworkStore box names and aliases (UDP/53 A
   from `networks.json`) before forwarding Ethernet frames to passt, matching
   macOS netproxy late-join DNS. Guest `/etc/hosts` now includes the box's own
-  NetworkStore aliases alongside box name and hostname. TCP/53, AAAA, CNI,
-  and the B3 exit gate remain open. Does **not** close ROADMAP B3/B2.
+  NetworkStore aliases alongside box name and hostname. Known names also get
+  authoritative AAAA NODATA (IPv4-only NetworkStore). TCP/53, CNI, and the B3
+  exit gate remain open. Does **not** close ROADMAP B3/B2.
 - Netproxy Bridge DNS answers NetworkStore box names and aliases (A records
   from `networks.json`) before upstream UDP/53 forward so late-joining peers
   resolve without rewriting guest `/etc/hosts`. Unknown names still forward

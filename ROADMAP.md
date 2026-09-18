@@ -933,7 +933,8 @@ open and harness reports still keep
   answer NetworkStore name/alias DNS A queries from `networks.json` before
   upstream UDP/53 forward so late joiners resolve without rewriting guest
   hosts; guest `/etc/hosts` also includes the box's own NetworkStore aliases.
-  TCP/53, AAAA authority, CNI, multi-device, rootless/MicroVM/Windows
+  Known NetworkStore names also receive authoritative AAAA NODATA (IPv4-only
+  store). TCP/53, full AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
