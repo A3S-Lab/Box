@@ -4,6 +4,17 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Publish existing-host WSL2 `/dev/kvm` greened KVM Live
+  `a3s.box.linux-kvm-live-session.v5` report digest
+  `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
+  (Box tip `d8854a4c646e330122a3d338a5b4c736360d8c9b`; OCI tip
+  `fb390b69a2d61b5fd1f7ecdcd79724dc94c876ca`; tip-rebuilt KVM system image with
+  reconnect-capable musl agent). ROADMAP / README / sandbox-ga-evidence and the
+  schema-alignment gate now require that digest and forbid stale “v5 greening
+  pending” claims. Does **not** flip B2 or invent digests.
+
 ### Fixed
 
 - CLI `info` fails closed on box-inventory refresh and image-store open errors
@@ -714,8 +725,8 @@ All notable changes to A3S Box will be documented in this file.
   `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`).
   ROADMAP / README / sandbox-ga-evidence and the schema-alignment gate now
   require those digests and forbid stale “v7 greening pending” /
-  “v4-scoped tip greened digests” claims. KVM Live v5 greening remains
-  pending. Does **not** flip B2 or invent digests.
+  “v4-scoped tip greened digests” claims. Does **not** flip B2 or invent
+  digests.
 
 ### Added
 
@@ -724,8 +735,7 @@ All notable changes to A3S Box will be documented in this file.
   `a3s.box.linux-kvm-live-session.v5`: keyed Move / Remove before owner kill
   plus ListDir/download of the moved tree after reattach. Fail-closed report
   verifiers and schema-alignment gate require the new ids. CI Native Live
-  artifact labels track tip schema v7. Does **not** flip B2; KVM tip digest
-  greening remains pending.
+  artifact labels track tip schema v7. Does **not** flip B2.
 
 - Language SDK Unavailable-retry locks now cover Move / Remove as well as
   MakeDir (Rust SDK + Go / Python / TypeScript), and
