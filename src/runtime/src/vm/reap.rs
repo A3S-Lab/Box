@@ -21,9 +21,10 @@ use std::path::Path;
 /// Idempotent. A box with no leftovers (for example after a graceful shutdown)
 /// is a no-op. Overlay/platform-rootfs unmount, legacy host cgroup removal,
 /// file-mount staging cleanup, and directory removal fail closed: a still-
-/// mounted root claim, busy cgroup, residual staging, or delete error retains
-/// the box directory and does not log a successful reap. Safe to call for
-/// every known sandbox id on startup.
+/// mounted root claim, busy cgroup, residual staging, external socket directory,
+/// legacy Sandbox runtime root, or delete error retains the box directory and
+/// does not log a successful reap. Safe to call for every known sandbox id on
+/// startup.
 #[cfg(target_os = "linux")]
 pub fn reap_orphaned_box(box_id: &str) {
     reap_orphaned_box_in(&a3s_box_core::dirs_home(), box_id);
@@ -188,6 +189,35 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
             box_id,
             %error,
             "Refusing to remove orphaned box directory while file-mount staging cleanup failed"
+        );
+        return;
+    }
+
+    // External runtime sockets live under /tmp/a3s-box-sockets/<id> (and the
+    // legacy home/run/a3s-oci/<id> root). Product remove fails closed on those
+    // host claims; orphan reap must match so a later pass cannot skip them
+    // after boxes/{id} is gone.
+    let external_sockets = crate::vm::runtime_socket_dir(home_dir, box_id);
+    crate::network::terminate_passt(&external_sockets);
+    crate::network::terminate_passt(&box_dir.join("sockets"));
+    if !external_sockets.starts_with(&box_dir) {
+        if let Err(error) = remove_tree_if_present(&external_sockets) {
+            tracing::error!(
+                box_id,
+                path = %external_sockets.display(),
+                %error,
+                "Refusing to remove orphaned box directory while external socket directory remains"
+            );
+            return;
+        }
+    }
+    let legacy_runtime = crate::vm::legacy_sandbox_runtime_root(home_dir, box_id);
+    if let Err(error) = remove_tree_if_present(&legacy_runtime) {
+        tracing::error!(
+            box_id,
+            path = %legacy_runtime.display(),
+            %error,
+            "Refusing to remove orphaned box directory while legacy Sandbox runtime root remains"
         );
         return;
     }

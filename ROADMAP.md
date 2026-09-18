@@ -911,7 +911,8 @@ open and harness reports still keep
   failure); orphan crash-recovery reap fails closed when the log worker
   remains or the bundle/runtime-root/`runtime.json` cannot be removed, and
   retains the box directory when synchronous overlay or platform rootfs
-  unmount, legacy MicroVM host cgroup removal, file-mount staging cleanup, or
+  unmount, legacy MicroVM host cgroup removal, file-mount staging cleanup,
+  external runtime socket directory / legacy Sandbox runtime root cleanup, or
   directory wipe fails (no success claim). Orphan crash-recovery reap, VM destroy,
   SDK/CLI/Compose path cleanup, and foreground `--rm` use the same
   lease-before-wipe contract; veth
