@@ -198,8 +198,23 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     // host claims; orphan reap must match so a later pass cannot skip them
     // after boxes/{id} is gone.
     let external_sockets = crate::vm::runtime_socket_dir(home_dir, box_id);
-    crate::network::terminate_passt(&external_sockets);
-    crate::network::terminate_passt(&box_dir.join("sockets"));
+    if let Err(error) = crate::network::terminate_passt(&external_sockets) {
+        tracing::error!(
+            box_id,
+            path = %external_sockets.display(),
+            %error,
+            "Refusing to remove orphaned box directory while passt terminate failed"
+        );
+        return;
+    }
+    if let Err(error) = crate::network::terminate_passt(&box_dir.join("sockets")) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove orphaned box directory while box-local passt terminate failed"
+        );
+        return;
+    }
     if !external_sockets.starts_with(&box_dir) {
         if let Err(error) = remove_tree_if_present(&external_sockets) {
             tracing::error!(

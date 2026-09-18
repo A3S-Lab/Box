@@ -465,8 +465,12 @@ fn passt_pid_file_alive(socket_dir: &Path) -> bool {
 /// passt outlives the `PasstManager` that launched it (so detached boxes keep
 /// working after the CLI exits), so box teardown cannot rely on a live handle —
 /// the PID file written into the box's runtime socket directory is authoritative.
-pub fn terminate_passt(socket_dir: &Path) {
+///
+/// Fail closed: a still-running passt after SIGTERM, or a residual pid/socket
+/// artifact that cannot be removed, must not invent clean network teardown.
+pub fn terminate_passt(socket_dir: &Path) -> Result<()> {
     let pid_file = socket_dir.join("passt.pid");
+    let mut signaled_pid = None;
     if let Ok(contents) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = contents.trim().parse::<i32>() {
             // Verify the pid is still passt before signalling: the pid file is a
@@ -478,14 +482,41 @@ pub fn terminate_passt(socket_dir: &Path) {
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }
+                signaled_pid = Some(pid);
                 tracing::info!(pid, "Terminated passt daemon");
             }
         }
     }
-    let _ = std::fs::remove_file(&pid_file);
-    let _ = std::fs::remove_file(socket_dir.join("passt.sock"));
-    let _ = std::fs::remove_file(socket_dir.join("passt.pcap"));
-    let _ = std::fs::remove_file(passt_backend_lost_marker(socket_dir));
+    if let Some(pid) = signaled_pid {
+        for _ in 0..50 {
+            if !pid_is_passt(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if pid_is_passt(pid) {
+            return Err(BoxError::NetworkError(format!(
+                "passt pid {pid} remained after SIGTERM under {}; refusing invent-clean network teardown",
+                socket_dir.display()
+            )));
+        }
+    }
+    remove_passt_artifact(&pid_file)?;
+    remove_passt_artifact(&socket_dir.join("passt.sock"))?;
+    remove_passt_artifact(&socket_dir.join("passt.pcap"))?;
+    remove_passt_artifact(&passt_backend_lost_marker(socket_dir))?;
+    Ok(())
+}
+
+fn remove_passt_artifact(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BoxError::NetworkError(format!(
+            "Failed to remove passt artifact {}: {error}; refusing invent-clean network teardown",
+            path.display()
+        ))),
+    }
 }
 
 /// Best-effort check that `pid` is actually a passt process, to avoid SIGTERM-ing
@@ -788,12 +819,32 @@ mod tests {
         std::fs::write(&pcap_path, "fake pcap").unwrap();
         std::fs::write(&marker, "passt\n").unwrap();
 
-        terminate_passt(dir.path());
+        terminate_passt(dir.path()).unwrap();
 
         assert!(!socket_path.exists());
         assert!(!pid_path.exists());
         assert!(!pcap_path.exists());
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn terminate_passt_refuses_invent_clean_when_artifact_remove_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("passt.sock");
+        // A directory where a file is expected: remove_file fails.
+        std::fs::create_dir(&socket_path).unwrap();
+        std::fs::write(socket_path.join("nested"), b"x").unwrap();
+
+        let error = terminate_passt(dir.path())
+            .expect_err("artifact wipe failure must not invent clean passt teardown");
+        assert!(
+            error.to_string().contains("refusing invent-clean"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            socket_path.exists(),
+            "failed passt artifact must remain for a later fail-closed retry"
+        );
     }
 
     #[test]
@@ -821,7 +872,7 @@ mod tests {
         std::fs::write(&pid_path, "not a pid").unwrap();
         std::fs::write(&pcap_path, "fake pcap").unwrap();
 
-        terminate_passt(dir.path());
+        terminate_passt(dir.path()).unwrap();
 
         assert!(!socket_path.exists());
         assert!(!pid_path.exists());

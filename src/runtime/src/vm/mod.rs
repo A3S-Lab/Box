@@ -721,21 +721,38 @@ impl VmManager {
         // "Address already in use" on the next start. terminate_passt reads
         // `socket_dir/passt.pid` and is a no-op when there is no passt.
         #[cfg(target_os = "linux")]
-        crate::network::terminate_passt(&self.socket_dir());
+        let passt_clean = match crate::network::terminate_passt(&self.socket_dir()) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    path = %self.socket_dir().display(),
+                    %error,
+                    "Refusing invent-clean boot-failure cleanup while passt terminate failed"
+                );
+                false
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let passt_clean = true;
 
         let preserve_rootfs_on_boot_failure = self.preserve_rootfs_on_boot_failure
             || self.rootfs_provider.preserve_on_boot_failure(&box_dir);
-        if let Err(error) = self
+        let provider_clean = match self
             .rootfs_provider
             .cleanup(&box_dir, preserve_rootfs_on_boot_failure)
         {
-            tracing::warn!(
-                box_id = %self.box_id,
-                path = %box_dir.display(),
-                error = %error,
-                "Failed to cleanup rootfs provider after boot failure"
-            );
-        }
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    path = %box_dir.display(),
+                    error = %error,
+                    "Refusing invent-clean boot-failure cleanup while rootfs provider cleanup failed"
+                );
+                false
+            }
+        };
 
         match std::fs::remove_dir_all(&socket_dir) {
             Ok(()) => {}
@@ -753,12 +770,15 @@ impl VmManager {
         // A failed restart must never erase a persistent writable rootfs. The
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
-        // Retain the box dir when host-netdevice or :ro alias teardown failed.
+        // Retain the box dir when host-netdevice, :ro alias, passt, or provider
+        // teardown failed.
         if !self.config.persistent
             && mount_aliases_clean
             && host_net_clean
             && virtiofs_ro_clean
             && anon_volumes_clean
+            && passt_clean
+            && provider_clean
         {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}

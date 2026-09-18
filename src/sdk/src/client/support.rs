@@ -731,7 +731,7 @@ fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) -> Resul
         return Ok(());
     };
     #[cfg(target_os = "linux")]
-    a3s_box_runtime::network::terminate_passt(socket_dir);
+    a3s_box_runtime::network::terminate_passt(socket_dir).map_err(ClientError::Runtime)?;
     if socket_dir.starts_with(box_dir) {
         return Ok(());
     }
