@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Non-Linux MicroVM `:ro` volumes fail closed instead of attaching a writable
+  host virtio-fs share under guest-honor-only `MS_RDONLY` (Linux host RO bind
+  aliases remain the only supported path). Does **not** invent Windows/macOS
+  native share denial, close ROADMAP B3/B2, or claim UID/GID storage parity.
 - Managed MicroVM `VmLocalExecutionBackend` anonymous-volume load/remove on
   destroy fails closed (matching OCI managed remove and CLI `#522`) instead of
   warn-and-inventing an empty cleanup set. Does **not** close ROADMAP B3/B2 or

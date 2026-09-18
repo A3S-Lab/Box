@@ -292,19 +292,39 @@ fn test_build_instance_spec_windows_bind_uses_linux_guest_target() {
     oci_config.volumes = vec!["/tests".to_string()];
     let layout = test_layout(layout_dir.path(), Some(oci_config), true);
     let mut vm = test_vm_manager(BoxConfig {
-        volumes: vec![format!(r"{}:/tests:ro", host.path().display())],
+        volumes: vec![format!(r"{}:/tests", host.path().display())],
         ..Default::default()
     });
     vm.home_dir = home.path().to_path_buf();
 
     let spec = vm.build_instance_spec(&layout).unwrap();
 
-    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/tests:ro"));
+    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/tests"));
     assert!(
         vm.anonymous_volumes.is_empty(),
         "the user bind must cover the matching OCI volume"
     );
     assert_eq!(spec.fs_mounts.len(), 2);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_build_instance_spec_windows_refuses_ro_without_host_denial() {
+    let home = tempdir().unwrap();
+    let host = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!(r"{}:/tests:ro", host.path().display())],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+    assert!(
+        error.contains("Linux host-enforced") || error.contains(":ro"),
+        "{error}"
+    );
 }
 
 #[test]
