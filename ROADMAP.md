@@ -969,7 +969,8 @@ guest endpoint.
   network/volume remove errors; failed `compose up` service and network
   rollback also fails closed; partial Compose service wipe/detach fails closed;
   managed create/start `ExecutionResourceGuard` rollback fails closed (no
-  invent-clean undo). Warm-pool, MicroVM Compose cutover, and the B4 exit gate
+  invent-clean undo); CLI `prune`/`system-prune` fail closed on host wipe
+  (SDK parity). Warm-pool, MicroVM Compose cutover, and the B4 exit gate
   remain open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep `a3s-box-cri` only as an optional full product adapter; it must use
   the same execution adapter and must not spawn the Box CLI.

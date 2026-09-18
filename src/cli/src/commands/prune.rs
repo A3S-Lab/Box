@@ -37,18 +37,17 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut removed: usize = 0;
     for record in &to_remove {
-        if let Err(error) = crate::cleanup::cleanup_removed_box(record) {
-            tracing::warn!(
-                box_id = %record.id,
-                error = %error,
-                "Failed to clean pruned Box resources; preserving its state"
-            );
-            continue;
-        }
-        if state.remove(&record.id).is_ok() {
-            removed += 1;
-            println!("Removed box: {}", record.name);
-        }
+        crate::cleanup::cleanup_removed_box(record).map_err(|error| {
+            prune_cleanup_error(&record.id, error)
+        })?;
+        state.remove(&record.id).map_err(|error| {
+            format!(
+                "Failed to remove pruned Box {} from state after host cleanup: {error}",
+                record.id
+            )
+        })?;
+        removed += 1;
+        println!("Removed box: {}", record.name);
     }
 
     println!();
@@ -59,6 +58,16 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
 /// A box is prunable when it is not actively running or paused.
 fn is_prunable_box(record: &crate::state::BoxRecord) -> bool {
     matches!(record.status.as_str(), "stopped" | "dead" | "created")
+}
+
+fn prune_cleanup_error(
+    box_id: &str,
+    error: impl std::fmt::Display,
+) -> Box<dyn std::error::Error> {
+    format!(
+        "Failed to clean pruned Box {box_id}: {error}; preserving its state (refusing prune success)"
+    )
+    .into()
 }
 
 #[cfg(test)]
@@ -87,5 +96,14 @@ mod tests {
         assert!(is_prunable_box(&make_record(
             "e", "created", "created", None
         )));
+    }
+
+    #[test]
+    fn prune_cleanup_error_refuses_invented_success() {
+        let err = prune_cleanup_error("box-1", "lease teardown refused");
+        let message = err.to_string();
+        assert!(message.contains("box-1"));
+        assert!(message.contains("lease teardown refused"));
+        assert!(message.contains("refusing prune success"));
     }
 }
