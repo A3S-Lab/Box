@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Keep-authority host-netdevice veth teardown uses the same present-link
+  delete contract as DNAT/MASQUERADE (`delete_link_if_present` → `Result`;
+  `ip link show` query failures are not treated as absent), so a failed
+  `ip link del` retains the lease instead of orphaning fabric without claim.
+  Staging rollback remains best-effort. Does **not** close ROADMAP B3/B4/B2 or
+  claim UDP publish teardown parity.
 - Boot-failure `cleanup_box_dir` and managed execution path cleanup tear down
   keep-authority SandboxViaOci host-netdevice leases before wiping
   `boxes/{id}` (lease retained when teardown fails) so DNAT/veth/MASQUERADE
