@@ -508,7 +508,7 @@ async fn restart_managed_candidate(
     })?;
 
     if restart_count.is_some() {
-        super::restart::create_baseline_snapshot(&record.id, &record.box_dir).await;
+        super::restart::create_baseline_snapshot(&record.id, &record.box_dir).await?;
         let current = StateFile::load_default()?;
         if let Some(current) = current.find_by_id(&record.id) {
             if let Err(error) = crate::health::spawn_detached_health_checker(current) {

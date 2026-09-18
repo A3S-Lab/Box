@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI boot/start/restart/run baseline creation fails closed (and refuses
+  inventing a baseline when rootfs is unresolved) instead of warn-and-continuing
+  after a successful start, aligning with managed prepare/boot honesty. Does
+  **not** close ROADMAP B3/B2.
 - Non-Linux MicroVM `:ro` volumes fail closed instead of attaching a writable
   host virtio-fs share under guest-honor-only `MS_RDONLY` (Linux host RO bind
   aliases remain the only supported path). Does **not** invent Windows/macOS

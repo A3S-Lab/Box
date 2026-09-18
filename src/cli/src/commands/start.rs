@@ -135,7 +135,6 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             }
 
             let baseline_box_dir = record.box_dir.clone();
-            let baseline_box_id = record.id.clone();
             match tokio::task::spawn_blocking(move || {
                 crate::commands::diff::create_box_baseline_snapshot(&baseline_box_dir)
                     .map_err(|error| error.to_string())
@@ -144,18 +143,16 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    tracing::warn!(
-                        box_id = %baseline_box_id,
-                        %error,
-                        "Failed to create rootfs diff baseline snapshot"
-                    );
+                    return Err(format!(
+                        "started {box_id} but refused to invent success without a rootfs diff baseline: {error}"
+                    )
+                    .into());
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        box_id = %baseline_box_id,
-                        %error,
-                        "Rootfs diff baseline task failed"
-                    );
+                    return Err(format!(
+                        "started {box_id} but rootfs diff baseline task failed: {error}"
+                    )
+                    .into());
                 }
             }
 
