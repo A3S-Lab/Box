@@ -203,8 +203,8 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
     };
 
     remove_published_tcp_dnat(&lease)?;
-    delete_link_if_present(&lease.container_iface);
-    delete_link_if_present(&lease.peer_iface);
+    delete_link_if_present(&lease.container_iface)?;
+    delete_link_if_present(&lease.peer_iface)?;
     // Network-scoped bridge is shared across endpoints; delete only when empty.
     try_delete_bridge_if_idle(&lease.bridge_iface, &lease.subnet)?;
 
@@ -321,8 +321,10 @@ fn stage_veth_pair(
         Ok(())
     })();
     if let Err(error) = staged {
-        delete_link_if_present(&lease.container_iface);
-        delete_link_if_present(&lease.peer_iface);
+        // Best-effort rollback of a partially staged veth pair; primary staging
+        // error is returned. Lease file is not persisted until stage succeeds.
+        let _ = delete_link_if_present(&lease.container_iface);
+        let _ = delete_link_if_present(&lease.peer_iface);
         return Err(error);
     }
     Ok(())
@@ -346,7 +348,7 @@ fn ensure_bridge(
     gateway: std::net::Ipv4Addr,
     prefix_len: u8,
 ) -> ExecutionManagerResult<()> {
-    if !link_exists(bridge_iface) {
+    if !link_exists(bridge_iface)? {
         run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
     }
     if let Err(error) = run_ip(&["link", "set", bridge_iface, "up"]) {
@@ -713,17 +715,35 @@ fn run_iptables(args: &[&str]) -> ExecutionManagerResult<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn link_exists(name: &str) -> bool {
-    Command::new("ip")
+fn link_exists(name: &str) -> ExecutionManagerResult<bool> {
+    let output = Command::new("ip")
         .args(["link", "show", "dev", name])
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to query `ip link show dev {name}`: {error}"
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Missing device is success-absent; other ip failures must not look absent.
+    if stderr.contains("does not exist")
+        || stderr.contains("Cannot find device")
+        || stderr.contains("No such device")
+    {
+        return Ok(false);
+    }
+    Err(ExecutionManagerError::Unavailable(format!(
+        "`ip link show dev {name}` failed: {}",
+        stderr.trim()
+    )))
 }
 
 #[cfg(target_os = "linux")]
 fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) -> ExecutionManagerResult<()> {
-    if !link_exists(bridge_iface) {
+    if !link_exists(bridge_iface)? {
         return remove_bridge_egress_nat(subnet, bridge_iface);
     }
     // `ip -o link show master <br>` lists slaves; empty means idle fabric.
@@ -772,14 +792,18 @@ fn run_ip(args: &[&str]) -> ExecutionManagerResult<()> {
     )))
 }
 
-fn delete_link_if_present(name: &str) {
+fn delete_link_if_present(name: &str) -> ExecutionManagerResult<()> {
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("ip").args(["link", "del", name]).output();
+        if !link_exists(name)? {
+            return Ok(());
+        }
+        run_ip(&["link", "del", name])
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = name;
+        Ok(())
     }
 }
 
