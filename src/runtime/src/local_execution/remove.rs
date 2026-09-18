@@ -134,6 +134,10 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
         .map_err(|error| cleanup_error(record, "detach bounded writable-layer mounts", error))?;
     crate::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
 
+    #[cfg(feature = "vm")]
+    crate::vm::cleanup_virtiofs_ro_shares(&record.box_dir)
+        .map_err(|error| cleanup_error(record, "detach MicroVM :ro virtio-fs aliases", error))?;
+
     remove_tree_if_present(&record.box_dir)
         .map_err(|error| cleanup_error(record, "remove the execution directory", error))?;
     remove_tree_if_present(&socket_dir)

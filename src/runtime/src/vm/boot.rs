@@ -204,7 +204,10 @@ impl VmManager {
         // Guest-native providers capture it inside guest-init after ownership
         // handoff, before any workload or sidecar process can mutate the disk.
         if !self.rootfs_provider.guest_owns_diff_baseline() {
-            self.create_diff_baseline(&layout);
+            if let Err(error) = self.create_diff_baseline(&layout) {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -514,16 +517,32 @@ impl VmManager {
         Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
     }
 
-    pub(super) fn create_diff_baseline(&self, layout: &BoxLayout) {
+    pub(super) fn create_diff_baseline(&self, layout: &BoxLayout) -> Result<()> {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-        if let Err(error) =
-            crate::rootfs::create_diff_baseline_if_absent(&box_dir, &layout.rootfs_path)
-        {
-            tracing::warn!(
-                box_id = %self.box_id,
-                %error,
-                "Failed to create rootfs diff baseline before workload launch"
-            );
-        }
+        crate::rootfs::create_diff_baseline_if_absent(&box_dir, &layout.rootfs_path).map_err(
+            |error| {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    %error,
+                    "Failed to create rootfs diff baseline before workload launch"
+                );
+                error
+            },
+        )
+    }
+
+    /// Capture the SandboxViaOci diff baseline from OCI-mapped rootfs metadata.
+    ///
+    /// Fail closed: a missing or incomplete baseline must not let create succeed
+    /// while later `diff` compares against a host-subordinate walk.
+    #[cfg(target_os = "linux")]
+    pub(super) fn create_sandbox_oci_diff_baseline(
+        &self,
+        layout: &BoxLayout,
+        plan: &crate::sandbox::capability::SandboxIdMappingPlan,
+    ) -> Result<()> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let manifest = crate::sandbox::rootfs::capture_rootfs_metadata(&layout.rootfs_path, plan)?;
+        crate::rootfs::create_diff_baseline_from_metadata_if_absent(&box_dir, &manifest)
     }
 }

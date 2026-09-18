@@ -75,6 +75,7 @@ pub use scale::{
 pub use security::{SeccompMode, SecurityConfig};
 pub use snapshot::{
     SnapshotConfig, SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata,
+    MANAGED_SANDBOX_OCI_CAPTURE_LABEL, MANAGED_SANDBOX_OCI_CAPTURE_VALUE,
 };
 pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};

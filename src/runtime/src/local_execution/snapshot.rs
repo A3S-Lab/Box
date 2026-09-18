@@ -1020,6 +1020,7 @@ fn build_snapshot_metadata(
             ),
         ));
     }
+    metadata.mark_managed_sandbox_oci_capture();
     Ok(metadata)
 }
 

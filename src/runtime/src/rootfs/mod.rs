@@ -36,6 +36,10 @@ pub use baseline::{
     create_diff_baseline_if_absent, guest_diff_baseline_required, publish_guest_diff_baseline,
     walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
 };
+#[cfg(unix)]
+pub use baseline::{
+    create_diff_baseline_from_metadata_if_absent, rootfs_file_info_map_from_metadata,
+};
 pub use builder::RootfsBuilder;
 #[cfg(unix)]
 pub use ext4::{
