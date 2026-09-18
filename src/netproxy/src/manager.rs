@@ -8,9 +8,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use a3s_box_core::error::{BoxError, Result};
 
 use super::device::{BridgePort, NetStats, NetStatsSnapshot};
-use super::{
-    ParsedPortForwards, PortForward, ProxyEngine, ProxyEngineConfig, UdpPortForward,
-};
+use super::{ParsedPortForwards, PortForward, ProxyEngine, ProxyEngineConfig, UdpPortForward};
 
 // ── NetProxyManager lifecycle ─────────────────────────────────────────────────
 
@@ -228,8 +226,9 @@ pub(super) fn parse_port_forwards(
 
         match mapping.protocol {
             a3s_box_core::PortProtocol::Tcp => {
-                let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
-                    .map_err(|e| format!("cannot bind TCP 0.0.0.0:{host_port}: {e}"))?;
+                let listener =
+                    TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
+                        .map_err(|e| format!("cannot bind TCP 0.0.0.0:{host_port}: {e}"))?;
                 listener
                     .set_nonblocking(true)
                     .map_err(|e| format!("set_nonblocking on TCP listener: {e}"))?;

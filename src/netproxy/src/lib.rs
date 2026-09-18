@@ -48,9 +48,9 @@ use smoltcp::wire::{
 use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
+pub use dns_local::NetworkDnsConfig;
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 pub use passt_bridge::spawn_inherited_passt_bridge;
-pub use dns_local::NetworkDnsConfig;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

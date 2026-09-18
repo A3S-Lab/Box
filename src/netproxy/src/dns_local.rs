@@ -159,15 +159,10 @@ pub(crate) fn try_ethernet_network_a_reply(
         return None;
     }
     let query = &udp[8..udp_len];
-    let dns_payload =
-        try_network_a_response(query, &config.networks_json, &config.network_name)?;
+    let dns_payload = try_network_a_response(query, &config.networks_json, &config.network_name)?;
 
-    let src_mac = [
-        frame[6], frame[7], frame[8], frame[9], frame[10], frame[11],
-    ];
-    let dst_mac = [
-        frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
-    ];
+    let src_mac = [frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]];
+    let dst_mac = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
     let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
     let src_port = u16::from_be_bytes([udp[0], udp[1]]);
 
