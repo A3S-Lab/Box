@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI box-resource cleanup fails closed when NetworkStore cannot be opened for
+  disconnect instead of soft-open inventing clean detach while bridge endpoints
+  remain (VolumeStore detach parity). Does **not** close ROADMAP B4/B3/B2 or
+  unlock UDP/`host_port=0`.
 - CLI `rmi --force` only ignores ImageStore not-found remove errors; lock/I/O
   failures refuse inventing rmi success (`image-prune` / `system-prune`
   parity). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.

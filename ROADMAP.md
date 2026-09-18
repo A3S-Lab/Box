@@ -884,8 +884,9 @@ open and harness reports still keep
   cleanup, and foreground `--rm` use the same lease-before-wipe contract; veth
   delete contract as DNAT/MASQUERADE; staging rollback surfaces combined
   present-link / idle-bridge delete failures; idle-bridge MASQUERADE removal
-  uses the same present-rule delete contract. GA default remains delegated
-  rootless/
+  uses the same present-rule delete contract; CLI removal cleanup fails closed
+  when NetworkStore cannot be opened for disconnect (no invent-clean detach).
+  GA default remains delegated rootless/
   `base_v2` loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy,
   multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
