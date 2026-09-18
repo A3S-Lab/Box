@@ -325,9 +325,9 @@ impl VmLocalExecutionBackend {
                 .await;
         }
         if remove_anonymous_volumes {
-            let anonymous_volumes = self.anonymous_volumes_for_record(record).await;
+            let anonymous_volumes = self.anonymous_volumes_for_record(record).await?;
             self.cleanup_anonymous_volumes(&record.id, anonymous_volumes)
-                .await;
+                .await?;
         }
         Ok(LocalExecutionTermination {
             outcome: KillOutcome::Killed,

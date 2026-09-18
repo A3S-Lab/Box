@@ -238,7 +238,7 @@ impl VmLocalExecutionBackend {
                 ))
             })?;
         let anonymous_volumes = if manager.anonymous_volumes().is_empty() {
-            self.anonymous_volumes_for_record(record).await
+            self.anonymous_volumes_for_record(record).await?
         } else {
             manager.anonymous_volumes().to_vec()
         };
@@ -561,10 +561,10 @@ impl VmLocalExecutionBackend {
         result.map_err(|error| runtime_error("kill", record, error))?;
         if remove_anonymous_volumes {
             if anonymous_volumes.is_empty() {
-                anonymous_volumes = self.anonymous_volumes_for_record(record).await;
+                anonymous_volumes = self.anonymous_volumes_for_record(record).await?;
             }
             self.cleanup_anonymous_volumes(&record.id, anonymous_volumes)
-                .await;
+                .await?;
         }
         Ok(LocalExecutionTermination {
             outcome: KillOutcome::Killed,
@@ -572,9 +572,12 @@ impl VmLocalExecutionBackend {
         })
     }
 
-    async fn anonymous_volumes_for_record(&self, record: &BoxRecord) -> Vec<String> {
+    async fn anonymous_volumes_for_record(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<Vec<String>> {
         if !record.anonymous_volumes.is_empty() {
-            return record.anonymous_volumes.clone();
+            return Ok(record.anonymous_volumes.clone());
         }
         let home_dir = self.home_dir.clone();
         let execution_id = record.id.clone();
@@ -601,46 +604,47 @@ impl VmLocalExecutionBackend {
         })
         .await;
         match result {
-            Ok(Ok(names)) => names,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    execution_id = %record.id,
-                    %error,
-                    "Failed to load anonymous volumes during managed cleanup"
-                );
-                Vec::new()
-            }
-            Err(error) => {
-                tracing::warn!(
-                    execution_id = %record.id,
-                    %error,
-                    "Anonymous volume recovery task failed"
-                );
-                Vec::new()
-            }
+            Ok(Ok(names)) => Ok(names),
+            Ok(Err(error)) => Err(ExecutionManagerError::Unavailable(format!(
+                "failed to load anonymous volumes for {}: {error}",
+                record.id
+            ))),
+            Err(error) => Err(ExecutionManagerError::Internal(format!(
+                "anonymous volume recovery task failed for {}: {error}",
+                record.id
+            ))),
         }
     }
 
-    async fn cleanup_anonymous_volumes(&self, owner: &str, names: Vec<String>) {
+    async fn cleanup_anonymous_volumes(
+        &self,
+        owner: &str,
+        names: Vec<String>,
+    ) -> ExecutionManagerResult<()> {
         if names.is_empty() {
-            return;
+            return Ok(());
         }
         let home_dir = self.home_dir.clone();
         let owner = owner.to_string();
-        let task = tokio::task::spawn_blocking(move || {
-            let store = crate::VolumeStore::new(
-                home_dir.join("volumes.json"),
-                home_dir.join("volumes"),
-            );
+        let owner_for_error = owner.clone();
+        let task = tokio::task::spawn_blocking(move || -> a3s_box_core::Result<()> {
+            let store =
+                crate::VolumeStore::new(home_dir.join("volumes.json"), home_dir.join("volumes"));
             for name in names {
-                if let Err(error) = store.remove_anonymous(&name, &owner) {
-                    tracing::warn!(volume = %name, %error, "Failed to remove managed anonymous volume");
-                }
+                // Missing / already-removed anonymous volumes are success (`Ok(false)`).
+                store.remove_anonymous(&name, &owner)?;
             }
+            Ok(())
         })
         .await;
-        if let Err(error) = task {
-            tracing::warn!(%error, "Anonymous volume cleanup task failed");
+        match task {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(ExecutionManagerError::Unavailable(format!(
+                "failed to remove anonymous volumes for {owner_for_error}: {error}"
+            ))),
+            Err(error) => Err(ExecutionManagerError::Internal(format!(
+                "anonymous volume cleanup task failed for {owner_for_error}: {error}"
+            ))),
         }
     }
 

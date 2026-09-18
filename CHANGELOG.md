@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Managed MicroVM `VmLocalExecutionBackend` anonymous-volume load/remove on
+  destroy fails closed (matching OCI managed remove and CLI `#522`) instead of
+  warn-and-inventing an empty cleanup set. Does **not** close ROADMAP B3/B2 or
+  invent MicroVM Compose cutover.
 - `VolumeStore::prune` only reports volumes that were actually removed and
   fails closed on non-idempotent remove errors instead of soft-discarding
   `remove` failures while claiming prune success. Does **not** close ROADMAP
