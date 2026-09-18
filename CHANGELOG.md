@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `rmi --force` only ignores ImageStore not-found remove errors; lock/I/O
+  failures refuse inventing rmi success (`image-prune` / `system-prune`
+  parity). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - CLI `rmi` fails closed on box-state load instead of inventing an empty protect
   set that can remove in-use images (`image-prune` / `system-prune` parity).
   Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
