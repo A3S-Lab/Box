@@ -231,13 +231,17 @@ fn parse_port_mappings(config: &PodSandboxConfig) -> Result<Vec<String>> {
                 mapping.protocol, mapping.container_port
             ))
         })?;
-        if protocol != port_mapping::Protocol::Tcp {
-            return Err(BoxError::ConfigError(format!(
-                "Unsupported CRI port mapping protocol {} for container port {}; only TCP is supported",
-                protocol.as_str_name(),
-                mapping.container_port
-            )));
-        }
+        let protocol_suffix = match protocol {
+            port_mapping::Protocol::Tcp => "",
+            port_mapping::Protocol::Udp => "/udp",
+            other => {
+                return Err(BoxError::ConfigError(format!(
+                    "Unsupported CRI port mapping protocol {} for container port {}; only TCP and UDP are supported",
+                    other.as_str_name(),
+                    mapping.container_port
+                )));
+            }
+        };
 
         if !(1..=u16::MAX as i32).contains(&mapping.container_port) {
             return Err(BoxError::ConfigError(format!(
@@ -265,13 +269,17 @@ fn parse_port_mappings(config: &PodSandboxConfig) -> Result<Vec<String>> {
         // the container port on the same host port (Docker/containerd style), so
         // the pod's port becomes reachable at the node — TSI binds 0.0.0.0:<port>
         // and forwards to the guest. Without this the entry is dropped and the
-        // port is never published.
+        // port is never published. UDP keeps `/udp` so passt/DNAT cannot treat
+        // it as TCP; netproxy still refuses UDP at its own boundary.
         let host_port = if mapping.host_port == 0 {
             mapping.container_port
         } else {
             mapping.host_port
         };
-        port_map.push(format!("{}:{}", host_port, mapping.container_port));
+        port_map.push(format!(
+            "{}:{}{protocol_suffix}",
+            host_port, mapping.container_port
+        ));
     }
 
     Ok(port_map)
@@ -430,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn test_udp_port_mapping_is_rejected() {
+    fn test_udp_port_mapping_becomes_box_port_map() {
         let mut config = make_config(HashMap::new());
         config.port_mappings = vec![PortMapping {
             protocol: port_mapping::Protocol::Udp.into(),
@@ -439,9 +447,24 @@ mod tests {
             host_ip: String::new(),
         }];
 
+        let box_config = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE).unwrap();
+
+        assert_eq!(box_config.port_map, vec!["5353:53/udp"]);
+    }
+
+    #[test]
+    fn test_sctp_port_mapping_is_rejected() {
+        let mut config = make_config(HashMap::new());
+        config.port_mappings = vec![PortMapping {
+            protocol: port_mapping::Protocol::Sctp.into(),
+            container_port: 80,
+            host_port: 8080,
+            host_ip: String::new(),
+        }];
+
         let err = pod_sandbox_config_to_box_config(&config, DEFAULT_AGENT_IMAGE).unwrap_err();
 
-        assert!(err.to_string().contains("only TCP is supported"));
+        assert!(err.to_string().contains("only TCP and UDP are supported"));
     }
 
     #[test]
