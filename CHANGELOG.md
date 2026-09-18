@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Short Sandbox/MicroVM tasks that exit before the exec server heartbeat
+  keep their in-process owner so startup reconciliation can persist the
+  authenticated exit instead of reporting ProviderUnavailable. OnFailure
+  restart can then observe that exit. Does **not** close ROADMAP B3/B2.
 - MicroVM `:ro` bind remount verification reads VFS mount options before
   super_opts (bind remounts keep the underlying superblock `rw`). Unblocks
   R17 mounts profile on hosts where remount succeeds. Does **not** close

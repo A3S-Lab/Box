@@ -828,18 +828,21 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             // Sandbox boot cleanup synchronously asks the authoritative OCI
             // handler for its exit status before tearing down transient host
             // artifacts. A very short task can therefore complete while boot
-            // is still establishing readiness. Keep the manager whenever that
-            // cleanup captured an exact status so the normal inspect path can
-            // project it into the durable managed record.
+            // is still establishing readiness. Keep the in-process owner so
+            // `resolve_start_error` can inspect that authenticated exit and
+            // project it into the durable record. Dropping the owner here
+            // turns a finished one-shot into ProviderUnavailable.
             if guard.exit_code().is_some() {
                 tracing::debug!(
                     execution_id = %record.id,
                     %error,
                     "Runtime completed while startup was establishing readiness"
                 );
+                // cleanup_boot_failure already stopped the provider. Mark
+                // Stopped so the follow-up inspect does not destroy again.
+                *guard.state.write().await = crate::BoxState::Stopped;
                 resources.disarm();
                 drop(guard);
-                self.remove_manager(&record.id, &manager);
                 return Err(ExecutionManagerError::Unavailable(format!(
                     "execution {} completed during startup ({error})",
                     record.id
@@ -875,13 +878,12 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             tracing::debug!(
                 execution_id = %record.id,
                 ?exit_code,
-                "execution completed during startup; releasing runtime owner for retry"
+                "execution completed during startup; inspect will publish the exit"
             );
             drop(guard);
-            // Short --rm workloads keep an inspectable exit through the durable
-            // record path. Drop the in-process owner so a scale/retry start cannot
-            // dead-end on "already has an in-process runtime owner".
-            self.remove_manager(&record.id, &manager);
+            // Leave the owner registered. resolve_start_error inspects it and
+            // finish_registered_terminal drops it after the exit is durable.
+            // Removing it first loses the status and blocks OnFailure restart.
             return Err(ExecutionManagerError::Unavailable(format!(
                 "execution {} completed during startup (exit_code={exit_code:?})",
                 record.id
