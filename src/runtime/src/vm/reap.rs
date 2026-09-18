@@ -129,6 +129,16 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
+    // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe.
+    if let Err(error) = crate::vm::cleanup_virtiofs_ro_shares(&box_dir) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove orphaned box directory while MicroVM :ro virtio-fs alias detach failed"
+        );
+        return;
+    }
+
     // Unmount the box overlay; MNT_DETACH (lazy) inside overlay_unmount handles
     // a mount that is somehow still busy.
     let merged = box_dir.join("merged");
