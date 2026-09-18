@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `info` fails closed on box-inventory refresh and image-store open errors
+  instead of inventing empty `Boxes: 0` / `Images: 0` counts (`ps` / `df`
+  parity). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - CLI box-resource cleanup fails closed when NetworkStore cannot be opened for
   disconnect instead of soft-open inventing clean detach while bridge endpoints
   remain (VolumeStore detach parity). Does **not** close ROADMAP B4/B3/B2 or
