@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `prune` / `system-prune` fail closed on host `cleanup_removed_box` and
+  state-remove errors instead of warn-and-claiming prune success while lease/
+  `:ro`/wipe failed (SDK `#530` parity). Does **not** close ROADMAP B4/B3/B2 or
+  unlock UDP/`host_port=0`.
 - CLI `a3s-box run` startup rollback uses `remove_execution` and fails closed,
   chaining cleanup Err with the start failure instead of warn-and-void legacy
   wipe (Compose sandbox parity). Does **not** close ROADMAP B4/B3/B2 or unlock
