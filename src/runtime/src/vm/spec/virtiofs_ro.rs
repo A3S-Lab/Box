@@ -3,8 +3,8 @@
 //! Guest `MS_RDONLY` alone is not host write denial: libkrun's virtio-fs path
 //! shares the host directory writable. Linux stages a private bind remounted
 //! `MS_RDONLY` (same honesty contract as SandboxViaOci attachment aliases) and
-//! points virtio-fs at that alias. Non-Linux keeps guest-honor-only until a
-//! native host denial exists; that gap stays explicit in ROADMAP.
+//! points virtio-fs at that alias. Non-Linux refuses `:ro` until a native host
+//! denial exists (guest-honor-only is not production-honest).
 
 use std::path::{Path, PathBuf};
 
@@ -129,9 +129,14 @@ pub(super) fn stage_virtiofs_ro_share(
     _filemounts_dir: &Path,
     _index: usize,
 ) -> Result<PathBuf> {
-    // Guest MS_RDONLY remains; host virtio-fs write denial is Linux-only until
-    // a native share flag exists. Do not pretend the host path is RO.
-    Ok(source.to_path_buf())
+    // Guest MS_RDONLY alone is not host write denial. Refuse MicroVM :ro until
+    // a native virtio-fs share flag exists (same honesty class as Sandbox
+    // attachment aliases requiring Linux host RO enforcement).
+    Err(BoxError::ConfigError(format!(
+        "MicroVM :ro volume requires Linux host-enforced virtio-fs write denial; \
+         refusing guest-honor-only attach for {}",
+        source.display()
+    )))
 }
 
 /// Detach every MicroVM `:ro` alias under `.filemounts` before deleting the box.
