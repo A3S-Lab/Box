@@ -21,10 +21,15 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
     let store = super::open_image_store()?;
 
     // `image-prune` never removes images referenced by any existing box.
-    let protected_images = match StateFile::load_default() {
-        Ok(state) => image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes),
-        Err(_) => Default::default(),
-    };
+    // Fail closed on state load so we cannot invent an empty protect set and
+    // delete in-use images (system-prune image-phase parity).
+    let state = StateFile::load_default().map_err(|error| {
+        format!(
+            "Failed to load box state for image-prune: {error}; refusing image-prune success"
+        )
+    })?;
+    let protected_images =
+        image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
     let prune_mode = prune_mode(args.all);
 
     let all_images = store.list().await;
@@ -87,6 +92,7 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
         for err in &errors {
             eprintln!("  {err}");
         }
+        return Err(image_prune_errors(errors));
     }
 
     Ok(())
@@ -105,6 +111,14 @@ fn empty_message(mode: ImagePruneMode) -> &'static str {
         ImagePruneMode::Dangling => "No dangling images to remove.",
         ImagePruneMode::Unused => "No unused images to remove.",
     }
+}
+
+fn image_prune_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
+    format!(
+        "Failed to prune image(s): {}; refusing image-prune success",
+        errors.join("; ")
+    )
+    .into()
 }
 
 #[cfg(test)]
@@ -127,5 +141,27 @@ mod tests {
             empty_message(ImagePruneMode::Unused),
             "No unused images to remove."
         );
+    }
+
+    #[test]
+    fn image_prune_errors_refuse_invented_success() {
+        let err = image_prune_errors(vec![
+            "alpine:latest: busy".to_string(),
+            "redis:latest: io error".to_string(),
+        ]);
+        let message = err.to_string();
+        assert!(message.contains("alpine:latest: busy"));
+        assert!(message.contains("redis:latest: io error"));
+        assert!(message.contains("refusing image-prune success"));
+    }
+
+    #[test]
+    fn image_prune_state_load_error_message_refuses_invented_success() {
+        let message = format!(
+            "Failed to load box state for image-prune: {}; refusing image-prune success",
+            "permission denied"
+        );
+        assert!(message.contains("permission denied"));
+        assert!(message.contains("refusing image-prune success"));
     }
 }
