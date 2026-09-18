@@ -224,8 +224,8 @@
         let _ = child.wait();
     }
 
-    #[test]
-    fn removes_inactive_box_and_runtime_resources_without_cli() {
+    #[tokio::test]
+    async fn removes_inactive_box_and_runtime_resources_without_cli() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
         let mut record = box_record("15151515-1515-4151-8151-151515151515", "api", "stopped");
@@ -270,7 +270,7 @@
             .unwrap();
         client.connect_network("dev", "api").unwrap();
 
-        let removed = client.remove_box("api", RemoveBox::new()).unwrap();
+        let removed = client.remove_box("api", RemoveBox::new()).await.unwrap();
 
         assert_eq!(removed.id, record.id);
         assert_eq!(removed.name, "api");
@@ -290,14 +290,17 @@
         );
     }
 
-    #[test]
-    fn remove_box_rejects_active_box_without_force() {
+    #[tokio::test]
+    async fn remove_box_rejects_active_box_without_force() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
         let record = box_record("16161616-1616-4161-8161-161616161616", "api", "running");
         write_boxes(&client, &[record]);
 
-        let error = client.remove_box("api", RemoveBox::new()).unwrap_err();
+        let error = client
+            .remove_box("api", RemoveBox::new())
+            .await
+            .unwrap_err();
 
         assert!(format!("{error}").contains("Stop it before removing it"));
         assert!(client.get_box("api").unwrap().is_some());

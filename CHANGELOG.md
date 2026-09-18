@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- SDK product `remove_box` / `prune_boxes` / `stop_box` route managed
+  executions through the canonical execution manager (CLI `rm`/`stop`/`prune`
+  parity) instead of inventing legacy PID teardown for `managed_execution`
+  records. APIs are async. Does **not** close ROADMAP B4/B3/B2 or unlock
+  UDP/`host_port=0`.
 - Product stop/remove wipe (CLI / SDK / Compose partial / managed remove) fails
   closed on synchronous overlay `merged` unmount instead of void best-effort
   inventing clean teardown while a live mount may remain. Drop/cache paths keep

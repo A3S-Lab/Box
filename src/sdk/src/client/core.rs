@@ -20,11 +20,39 @@ impl A3sBoxClient {
     /// Remove a box record and its host-side runtime resources.
     ///
     /// By default active boxes are rejected. Pass [`RemoveBox::force`] to mirror
-    /// CLI-style forced removal, which only signals a recorded PID after the
-    /// PID identity check still matches the original box process.
-    pub fn remove_box(&self, query: &str, request: RemoveBox) -> Result<RemoveBoxSummary> {
+    /// CLI-style forced removal. Managed executions route through the canonical
+    /// execution manager (kill then remove); legacy records only signal a recorded
+    /// PID after the PID identity check still matches the original box process.
+    pub async fn remove_box(&self, query: &str, request: RemoveBox) -> Result<RemoveBoxSummary> {
         let state = self.load_state()?;
         let record = resolve_required_record(&state, query)?.clone();
+
+        if let Some(ManagedRemovePlan {
+            execution_id,
+            generation,
+            terminate,
+        }) = managed_remove_plan(&record, request.force)?
+        {
+            if terminate {
+                self.execution_manager
+                    .kill_with_options(
+                        &execution_id,
+                        generation,
+                        KillExecutionOptions {
+                            signal: Some(9),
+                            timeout_secs: Some(0),
+                        },
+                    )
+                    .await?;
+            }
+            self.execution_manager
+                .remove(&execution_id, generation)
+                .await?;
+            return Ok(RemoveBoxSummary {
+                id: record.id,
+                name: record.name,
+            });
+        }
 
         if record.is_active() {
             if !request.force {
@@ -51,10 +79,11 @@ impl A3sBoxClient {
 
     /// Remove all created, stopped, and dead boxes from SDK-managed state.
     ///
-    /// Running and paused boxes are kept. Host-side cleanup runs before state
+    /// Running and paused boxes are kept. Managed prunable records route through
+    /// the execution manager; legacy records run host-side cleanup before state
     /// deletion so a failed lease/:ro detach cannot invent prune success while
     /// host fabric remains.
-    pub fn prune_boxes(&self) -> Result<Vec<RemoveBoxSummary>> {
+    pub async fn prune_boxes(&self) -> Result<Vec<RemoveBoxSummary>> {
         let records = StateFile::modify(&self.paths.boxes_file, |state| {
             Ok(state
                 .list(true)
@@ -64,24 +93,32 @@ impl A3sBoxClient {
                 .collect::<Vec<_>>())
         })?;
 
+        let mut removed = Vec::with_capacity(records.len());
         for record in &records {
-            cleanup_removed_box(&self.paths, record)?;
+            if let Some(ManagedRemovePlan {
+                execution_id,
+                generation,
+                terminate,
+            }) = managed_remove_plan(record, false)?
+            {
+                debug_assert!(!terminate);
+                self.execution_manager
+                    .remove(&execution_id, generation)
+                    .await?;
+            } else {
+                cleanup_removed_box(&self.paths, record)?;
+                StateFile::modify(&self.paths.boxes_file, |state| {
+                    state.remove_by_id(&record.id);
+                    Ok(())
+                })?;
+            }
+            removed.push(RemoveBoxSummary {
+                id: record.id.clone(),
+                name: record.name.clone(),
+            });
         }
 
-        StateFile::modify(&self.paths.boxes_file, |state| {
-            for record in &records {
-                state.remove_by_id(&record.id);
-            }
-            Ok(())
-        })?;
-
-        Ok(records
-            .into_iter()
-            .map(|record| RemoveBoxSummary {
-                id: record.id,
-                name: record.name,
-            })
-            .collect())
+        Ok(removed)
     }
 
     /// Pause a running box by stopping its host shim process and updating state.
@@ -99,10 +136,53 @@ impl A3sBoxClient {
     }
 
     /// Stop a running or paused box with guest-first graceful shutdown.
+    ///
+    /// Managed executions route through the canonical execution manager kill
+    /// path (CLI `stop` parity). Legacy records keep guest-first PID stop.
     #[cfg(unix)]
     pub async fn stop_box(&self, query: &str, request: StopBox) -> Result<StopBoxSummary> {
         let state = self.load_state()?;
         let record = resolve_required_record(&state, query)?.clone();
+
+        if let Some(ManagedStopPlan {
+            execution_id,
+            generation,
+            options,
+        }) = managed_stop_plan(&record, request.timeout_secs)?
+        {
+            let record_id = record.id.clone();
+            let auto_removed = record.auto_remove;
+            let name = record.name.clone();
+            self.execution_manager
+                .kill_with_options(&execution_id, generation, options)
+                .await?;
+            if auto_removed {
+                self.execution_manager
+                    .remove(&execution_id, generation)
+                    .await?;
+                return Ok(StopBoxSummary {
+                    id: record_id,
+                    name,
+                    outcome: StopOutcome::GracefulExit,
+                    exit_code: None,
+                    auto_removed: true,
+                    box_summary: None,
+                });
+            }
+            let refreshed = self.load_state()?;
+            let refreshed = resolve_required_record(&refreshed, &record_id)?;
+            let exit_code = refreshed.exit_code;
+            let box_summary = BoxSummary::from_record(refreshed);
+            return Ok(StopBoxSummary {
+                id: record_id,
+                name,
+                outcome: StopOutcome::GracefulExit,
+                exit_code,
+                auto_removed: false,
+                box_summary: Some(box_summary),
+            });
+        }
+
         require_active(&record, "stop")?;
         let pid = require_live_pid(&record, "stop")?;
         if record.status == "paused" {

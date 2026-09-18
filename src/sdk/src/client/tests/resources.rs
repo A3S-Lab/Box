@@ -373,8 +373,8 @@
         assert!(format!("{error}").contains("matched multiple snapshots"));
     }
 
-    #[test]
-    fn prunes_only_created_stopped_and_dead_boxes_without_cli() {
+    #[tokio::test]
+    async fn prunes_only_created_stopped_and_dead_boxes_without_cli() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
         let mut created = box_record("51515151-5151-4151-8151-515151515151", "created", "created");
@@ -405,7 +405,7 @@
             ],
         );
 
-        let removed = client.prune_boxes().unwrap();
+        let removed = client.prune_boxes().await.unwrap();
         let removed_names = removed
             .iter()
             .map(|summary| summary.name.as_str())

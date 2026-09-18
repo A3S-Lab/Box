@@ -259,7 +259,7 @@ let logs = client.read_box_logs("web", ReadBoxLogsOptions::tail(20))?;
 let stopped = client.stop_box("web", StopBox::new()).await?;
 let snapshot = client.create_snapshot("web", CreateSnapshot::new().name("web-snapshot"))?;
 let restored = client.restore_snapshot(&snapshot.id, RestoreSnapshot::new())?;
-let removed = client.remove_box("web", RemoveBox::new())?;
+let removed = client.remove_box("web", RemoveBox::new()).await?;
 
 let pulled = client.pull_image(PullImage::new("alpine:latest")).await?;
 let inspect = client.inspect_image("alpine:latest").await?;
