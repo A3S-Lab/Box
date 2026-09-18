@@ -22,23 +22,9 @@ fn runtime_socket_dir(home_dir: &Path, execution_id: &str) -> PathBuf {
     crate::vm::runtime_socket_dir(home_dir, execution_id)
 }
 
-#[cfg(all(not(feature = "vm"), unix, target_os = "macos"))]
-fn runtime_socket_dir(_home_dir: &Path, execution_id: &str) -> PathBuf {
-    PathBuf::from("/private/tmp")
-        .join("a3s-box-sockets")
-        .join(execution_id)
-}
-
-#[cfg(all(not(feature = "vm"), unix, not(target_os = "macos")))]
-fn runtime_socket_dir(_home_dir: &Path, execution_id: &str) -> PathBuf {
-    PathBuf::from("/tmp")
-        .join("a3s-box-sockets")
-        .join(execution_id)
-}
-
-#[cfg(all(not(feature = "vm"), not(unix)))]
+#[cfg(not(feature = "vm"))]
 fn runtime_socket_dir(home_dir: &Path, execution_id: &str) -> PathBuf {
-    home_dir.join("boxes").join(execution_id).join("sockets")
+    crate::host_sockets::runtime_socket_dir(home_dir, execution_id)
 }
 
 impl LocalExecutionManager {

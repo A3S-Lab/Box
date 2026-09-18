@@ -58,21 +58,23 @@ impl A3sOciController {
         let runtime_parent = launch.runtime_root.parent().ok_or_else(|| {
             BoxError::ConfigError("A3S OCI runtime root has no parent".to_string())
         })?;
-        create_private_dir(runtime_parent)?;
-        // Effective-root CI / setuid launchers create paths as euid 0. After
-        // RootlessDevicePolicyBootstrap drops to the real UID, native-linux-service
-        // requires the service root parent to be owned by that UID (mode 0700).
-        // Chown the sockets root too: create_dir_all leaves it root:0700 and the
-        // post-drop controller cannot traverse or remove children otherwise.
-        chown_to_real_owner(runtime_parent)?;
+        // Host-global `/tmp/a3s-box-sockets` must stay sticky world-writable so a
+        // root-lane Sandbox cannot brick later unprivileged MicroVM/Sandbox boots
+        // (#560). Per-box children remain private via create_private_dir below.
         if let Some(sockets_root) = runtime_parent.parent() {
             if sockets_root
                 .file_name()
                 .is_some_and(|name| name == "a3s-box-sockets")
             {
-                chown_to_real_owner(sockets_root)?;
+                crate::host_sockets::ensure_shared_runtime_socket_root(sockets_root)?;
             }
         }
+        create_private_dir(runtime_parent)?;
+        // Effective-root CI / setuid launchers create paths as euid 0. After
+        // RootlessDevicePolicyBootstrap drops to the real UID, native-linux-service
+        // requires the service root parent to be owned by that UID (mode 0700).
+        // Chown the per-box socket dir only — never privatize the shared root.
+        chown_to_real_owner(runtime_parent)?;
 
         let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
         let pty_listener = bind_control_listener(&launch.pty_socket_path)?;

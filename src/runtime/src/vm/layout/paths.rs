@@ -2,26 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-pub(crate) fn runtime_socket_dir(home_dir: &Path, box_id: &str) -> PathBuf {
-    #[cfg(all(unix, target_os = "macos"))]
-    {
-        let _ = home_dir;
-        PathBuf::from("/private/tmp")
-            .join("a3s-box-sockets")
-            .join(box_id)
-    }
+pub(crate) use crate::host_sockets::{ensure_runtime_socket_dir, runtime_socket_dir};
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = home_dir;
-        PathBuf::from("/tmp").join("a3s-box-sockets").join(box_id)
-    }
-
-    #[cfg(not(unix))]
-    {
-        home_dir.join("boxes").join(box_id).join("sockets")
-    }
-}
+#[cfg(unix)]
+pub(crate) use crate::host_sockets::{
+    ensure_shared_runtime_socket_root, shared_runtime_socket_root,
+};
 
 /// Short host path for one Sandbox runtime owner and its private control socket.
 ///

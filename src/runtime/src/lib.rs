@@ -27,6 +27,7 @@ pub(crate) mod file_lock;
 pub mod fs;
 pub mod grpc;
 pub mod host_check;
+pub mod host_sockets;
 pub mod local_execution;
 pub mod log;
 pub mod managed_execution_store;

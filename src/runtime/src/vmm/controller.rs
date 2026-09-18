@@ -499,16 +499,47 @@ impl VmmProvider for VmController {
 
         tracing::trace!(config = %config_json, "VM configuration");
 
-        // Ensure socket directory exists
+        // Ensure socket directory exists. On Unix the host-global parent must stay
+        // sticky world-writable so a prior root-lane create cannot brick user boots.
         if let Some(socket_dir) = spec.exec_socket_path.parent() {
-            std::fs::create_dir_all(socket_dir).map_err(|e| BoxError::BoxBootError {
-                message: format!(
-                    "Failed to create socket directory {}: {}",
-                    socket_dir.display(),
-                    e
-                ),
-                hint: None,
-            })?;
+            #[cfg(unix)]
+            if socket_dir
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|name| name == "a3s-box-sockets")
+            {
+                let box_id = socket_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| BoxError::BoxBootError {
+                        message: format!(
+                            "Socket directory {} has no usable box id component",
+                            socket_dir.display()
+                        ),
+                        hint: None,
+                    })?;
+                crate::host_sockets::ensure_runtime_socket_dir(std::path::Path::new("/"), box_id)?;
+            } else {
+                std::fs::create_dir_all(socket_dir).map_err(|e| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to create socket directory {}: {}",
+                        socket_dir.display(),
+                        e
+                    ),
+                    hint: None,
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::create_dir_all(socket_dir).map_err(|e| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to create socket directory {}: {}",
+                        socket_dir.display(),
+                        e
+                    ),
+                    hint: None,
+                })?;
+            }
         }
 
         // Spawn shim subprocess
