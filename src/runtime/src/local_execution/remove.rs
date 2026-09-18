@@ -121,6 +121,13 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
             .map_err(|error| cleanup_error(record, "delete the recorded Sandbox runtime", error))?;
         crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, &record.id)
             .map_err(|error| cleanup_error(record, "detach Sandbox attachment aliases", error))?;
+        // Tear down keep-authority DNAT/veth/MASQUERADE before wiping the box
+        // dir (lease lives under boxes/{id}/sandbox/). Fail closed so a present
+        // publish rule cannot outlive durable lease claim.
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        crate::local_execution::oci_host_netdevice::teardown_lease(home_dir, &record.id).map_err(
+            |error| cleanup_error(record, "tear down Sandbox host netdevice lease", error),
+        )?;
     }
 
     remove_anonymous_volumes(home_dir, record)?;

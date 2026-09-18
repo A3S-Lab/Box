@@ -672,6 +672,31 @@ impl VmManager {
             }
         };
 
+        // Keep-authority host DNAT/veth/MASQUERADE must be torn down before the
+        // lease file under boxes/{id}/sandbox/ is wiped. Soft-deleting the box
+        // dir first would drop durable claim while host publish rules remain.
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        let host_net_clean = if self.config.isolation.is_sandbox() {
+            match crate::local_execution::oci_host_netdevice::teardown_lease(
+                &self.home_dir,
+                &self.box_id,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!(
+                        box_id = %self.box_id,
+                        %error,
+                        "Refusing to remove box directory after boot failure while host netdevice lease teardown failed"
+                    );
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        let host_net_clean = true;
+
         // Reap the box's passt daemon (Linux bridge mode) BEFORE removing its
         // socket dir. A boot that fails after passt spawned but before
         // `self.net_manager` was assigned leaves `net_manager.stop()` a no-op, so
@@ -711,7 +736,9 @@ impl VmManager {
         // A failed restart must never erase a persistent writable rootfs. The
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
-        if !self.config.persistent && mount_aliases_clean {
+        // Retain the box dir when host-netdevice teardown failed so the lease
+        // file remains for a later fail-closed retry.
+        if !self.config.persistent && mount_aliases_clean && host_net_clean {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

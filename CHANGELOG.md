@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Boot-failure `cleanup_box_dir` and managed execution path cleanup tear down
+  keep-authority SandboxViaOci host-netdevice leases before wiping
+  `boxes/{id}` (lease retained when teardown fails) so DNAT/veth/MASQUERADE
+  cannot outlive durable claim after a partial prepare or remove. Does **not**
+  close ROADMAP B3/B4/B2 or claim UDP publish teardown parity.
 - Keep-authority SandboxViaOci host-netdevice prepare propagates stale-lease
   teardown failures instead of `let _ = teardown_lease`, and Sandbox cleanup
   fails closed on lease teardown instead of warn-and-continue; bridge
