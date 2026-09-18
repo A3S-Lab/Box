@@ -100,7 +100,7 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     // (and a later restart re-mounts cleanly instead of stacking). Fail closed:
     // do not invent a clean stop while merged remains mounted.
     a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))?;
-    a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
+    a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))?;
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
     remove_host_cgroup(record)?;
     Ok(())
@@ -219,7 +219,7 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
         // into the live mount ("Stale file handle") and leaks it. Fail closed so
         // wipe cannot invent success while merged remains mounted.
         a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))?;
-        a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
+        a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))?;
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

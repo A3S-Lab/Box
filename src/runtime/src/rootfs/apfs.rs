@@ -166,7 +166,7 @@ impl RootfsProvider for CaseSensitiveApfsProvider {
     }
 
     fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
-        super::unmount_box_rootfs(&box_dir.join("rootfs"));
+        super::unmount_box_rootfs_for_reuse(&box_dir.join("rootfs"))?;
         if !persistent {
             let image = Self::image_path(box_dir);
             if image.exists() {

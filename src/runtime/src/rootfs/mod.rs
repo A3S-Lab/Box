@@ -32,13 +32,13 @@ pub(crate) mod overlay;
 mod provider;
 mod staging_path;
 
-pub use baseline::{
-    create_diff_baseline_if_absent, guest_diff_baseline_required, publish_guest_diff_baseline,
-    walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
-};
 #[cfg(unix)]
 pub use baseline::{
     create_diff_baseline_from_metadata_if_absent, rootfs_file_info_map_from_metadata,
+};
+pub use baseline::{
+    create_diff_baseline_if_absent, guest_diff_baseline_required, publish_guest_diff_baseline,
+    walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
 };
 pub use builder::RootfsBuilder;
 #[cfg(unix)]
@@ -493,42 +493,68 @@ pub fn unmount_box_overlay_for_reuse(merged: &Path) -> a3s_box_core::error::Resu
 }
 
 /// Unmount a platform-specific writable rootfs mount.
+///
+/// Best-effort for Drop / cache helpers. Product stop/remove wipe must use
+/// [`unmount_box_rootfs_for_reuse`] so a still-attached APFS image cannot invent
+/// clean teardown.
 pub fn unmount_box_rootfs(rootfs: &Path) {
+    if let Err(error) = unmount_box_rootfs_for_reuse(rootfs) {
+        tracing::warn!(
+            path = %rootfs.display(),
+            %error,
+            "Failed to detach platform rootfs mount"
+        );
+    }
+}
+
+/// Fully detach a platform-specific writable rootfs before wipe or reuse.
+///
+/// Absent mounts are success. A still-attached macOS APFS volume fails closed
+/// so stop/remove cannot invent clean teardown while the host mount remains.
+pub fn unmount_box_rootfs_for_reuse(rootfs: &Path) -> a3s_box_core::error::Result<()> {
     #[cfg(target_os = "macos")]
     {
         // The case-sensitive provider returns `<mount>/.a3s-rootfs`, keeping
         // APFS-created volume metadata outside the Linux tree. Accept either
         // that data path or the mountpoint itself at cleanup call sites.
-        let mountpoint = if rootfs.file_name().is_some_and(|name| name == ".a3s-rootfs") {
-            rootfs.parent().unwrap_or(rootfs)
-        } else {
-            rootfs
-        };
+        let mountpoint = rootfs_detach_mountpoint(rootfs);
         if !is_mountpoint(mountpoint) {
-            return;
+            return Ok(());
         }
-        match std::process::Command::new("hdiutil")
+        let status = std::process::Command::new("hdiutil")
             .arg("detach")
             .arg("-quiet")
             .arg(mountpoint)
             .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::warn!(
-                path = %mountpoint.display(),
-                ?status,
-                "Failed to detach case-sensitive rootfs image"
-            ),
-            Err(error) => tracing::warn!(
-                path = %mountpoint.display(),
-                %error,
-                "Failed to run hdiutil detach"
-            ),
+            .map_err(|error| {
+                a3s_box_core::error::BoxError::BuildError(format!(
+                    "Failed to run hdiutil detach for {}: {error}",
+                    mountpoint.display()
+                ))
+            })?;
+        if !status.success() || is_mountpoint(mountpoint) {
+            return Err(a3s_box_core::error::BoxError::BuildError(format!(
+                "Rootfs filesystem remained attached at {} after synchronous cleanup",
+                mountpoint.display()
+            )));
         }
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
-    let _ = rootfs;
+    {
+        let _ = rootfs;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rootfs_detach_mountpoint(rootfs: &Path) -> &Path {
+    if rootfs.file_name().is_some_and(|name| name == ".a3s-rootfs") {
+        rootfs.parent().unwrap_or(rootfs)
+    } else {
+        rootfs
+    }
 }
 
 /// Synchronously detach a macOS staging filesystem before a block artifact is
@@ -537,29 +563,15 @@ pub fn unmount_box_rootfs(rootfs: &Path) {
 /// aborts the boot.
 #[cfg(target_os = "macos")]
 pub(crate) fn unmount_box_rootfs_for_handoff(rootfs: &Path) -> a3s_box_core::error::Result<()> {
-    let mountpoint = if rootfs.file_name().is_some_and(|name| name == ".a3s-rootfs") {
-        rootfs.parent().unwrap_or(rootfs)
-    } else {
-        rootfs
-    };
+    let mountpoint = rootfs_detach_mountpoint(rootfs);
     if !is_mountpoint(mountpoint) {
         return Err(a3s_box_core::error::BoxError::BuildError(format!(
             "Expected a mounted rootfs staging filesystem at {}",
             mountpoint.display()
         )));
     }
-    let status = std::process::Command::new("hdiutil")
-        .arg("detach")
-        .arg("-quiet")
-        .arg(mountpoint)
-        .status()
-        .map_err(|error| {
-            a3s_box_core::error::BoxError::BuildError(format!(
-                "Failed to run hdiutil detach for {}: {error}",
-                mountpoint.display()
-            ))
-        })?;
-    if !status.success() || is_mountpoint(mountpoint) {
+    unmount_box_rootfs_for_reuse(rootfs)?;
+    if is_mountpoint(mountpoint) {
         return Err(a3s_box_core::error::BoxError::BuildError(format!(
             "Rootfs staging filesystem remained attached at {} after handoff",
             mountpoint.display()
@@ -571,6 +583,15 @@ pub(crate) fn unmount_box_rootfs_for_handoff(rootfs: &Path) -> a3s_box_core::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rootfs_unmount_for_reuse_is_ok_when_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        unmount_box_rootfs_for_reuse(&rootfs).unwrap();
+        unmount_box_rootfs_for_reuse(&rootfs.join(".a3s-rootfs")).unwrap();
+    }
 
     #[test]
     fn persisted_exit_code_supports_each_rootfs_provider_layout() {

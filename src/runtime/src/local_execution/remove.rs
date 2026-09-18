@@ -140,7 +140,8 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
         .map_err(|error| cleanup_error(record, "unmount the overlay merged view", error))?;
     crate::rootfs::cleanup_bounded_writable_layer_for_removal(&record.box_dir)
         .map_err(|error| cleanup_error(record, "detach bounded writable-layer mounts", error))?;
-    crate::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
+    crate::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))
+        .map_err(|error| cleanup_error(record, "unmount the platform rootfs", error))?;
 
     #[cfg(feature = "vm")]
     crate::vm::cleanup_virtiofs_ro_shares(&record.box_dir)
