@@ -85,15 +85,16 @@ impl ExecutionResourceGuard {
         self.armed = false;
     }
 
-    pub(super) fn rollback(mut self) {
-        self.rollback_inner();
+    pub(super) fn rollback(mut self) -> ExecutionManagerResult<()> {
+        self.rollback_inner()
     }
 
-    fn rollback_inner(&mut self) {
+    fn rollback_inner(&mut self) -> ExecutionManagerResult<()> {
         if !self.armed {
-            return;
+            return Ok(());
         }
 
+        let mut errors = Vec::new();
         let volume_store = VolumeStore::new(
             self.home_dir.join("volumes.json"),
             self.home_dir.join("volumes"),
@@ -102,12 +103,7 @@ impl ExecutionResourceGuard {
             if let Err(error) = volume_store.modify(volume_name, |volume| {
                 volume.detach(&self.execution_id);
             }) {
-                tracing::warn!(
-                    execution_id = %self.execution_id,
-                    volume = %volume_name,
-                    %error,
-                    "Failed to roll back managed volume attachment"
-                );
+                errors.push(format!("volume {volume_name}: {error}"));
             }
         }
 
@@ -115,16 +111,12 @@ impl ExecutionResourceGuard {
             let network_store = NetworkStore::new(self.home_dir.join("networks.json"));
             if let Err(error) = network_store.with_write_lock(|networks| -> Result<(), BoxError> {
                 if let Some(network) = networks.get_mut(network_name) {
+                    // Absent endpoint is idempotent success.
                     let _ = network.disconnect(&self.execution_id);
                 }
                 Ok(())
             }) {
-                tracing::warn!(
-                    execution_id = %self.execution_id,
-                    network = %network_name,
-                    %error,
-                    "Failed to roll back managed network attachment"
-                );
+                errors.push(format!("network {network_name}: {error}"));
             }
         }
 
@@ -134,19 +126,25 @@ impl ExecutionResourceGuard {
                 .join("boxes")
                 .join(&self.execution_id)
                 .join(".snapshot-lower");
-            if let Err(error) = std::fs::remove_file(&marker) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        execution_id = %self.execution_id,
-                        path = %marker.display(),
-                        %error,
-                        "Failed to roll back managed snapshot marker"
-                    );
+            match std::fs::remove_file(&marker) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    errors.push(format!("snapshot marker {}: {error}", marker.display()));
                 }
             }
         }
 
         self.armed = false;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExecutionManagerError::Unavailable(format!(
+                "failed to roll back managed resources for {}: {}",
+                self.execution_id,
+                errors.join("; ")
+            )))
+        }
     }
 }
 
@@ -273,7 +271,14 @@ impl ExecutionResourceGuard {
 
 impl Drop for ExecutionResourceGuard {
     fn drop(&mut self) {
-        self.rollback_inner();
+        // Drop cannot fail closed; explicit rollback() call sites must use Result.
+        if let Err(error) = self.rollback_inner() {
+            tracing::warn!(
+                execution_id = %self.execution_id,
+                %error,
+                "Failed to roll back managed resources on drop"
+            );
+        }
     }
 }
 
@@ -465,6 +470,38 @@ mod tests {
             .unwrap()
             .endpoints
             .contains_key(&record.id));
+    }
+
+    #[test]
+    fn rollback_fails_closed_when_volume_detach_cannot_persist() {
+        let temporary = tempfile::tempdir().unwrap();
+        let record = record(temporary.path());
+        let (volumes, _networks) = stores(temporary.path());
+        let guard = ExecutionResourceGuard::prepare(temporary.path(), &record).unwrap();
+
+        let volumes_path = temporary.path().join("volumes.json");
+        let mut perms = std::fs::metadata(&volumes_path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&volumes_path, perms).unwrap();
+
+        let err = guard
+            .rollback()
+            .expect_err("unwritable VolumeStore must surface managed rollback failure");
+        assert!(
+            volumes
+                .get("workspace")
+                .unwrap()
+                .unwrap()
+                .in_use_by
+                .contains(&record.id),
+            "failed rollback must leave the volume claim intact"
+        );
+        assert!(err.to_string().contains("failed to roll back managed resources"));
+        let _ = err;
+
+        let mut perms = std::fs::metadata(&volumes_path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&volumes_path, perms).unwrap();
     }
 
     #[test]

@@ -847,15 +847,20 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             }
             drop(guard);
             self.remove_manager(&record.id, &manager);
-            let rollback = tokio::task::spawn_blocking(move || resources.rollback()).await;
-            if let Err(rollback_error) = rollback {
-                tracing::warn!(
-                    execution_id = %record.id,
-                    %rollback_error,
-                    "Managed resource rollback task failed"
-                );
-            }
-            return Err(runtime_error("start", record, error));
+            let rollback = match tokio::task::spawn_blocking(move || resources.rollback()).await {
+                Ok(result) => result,
+                Err(rollback_error) => Err(ExecutionManagerError::Internal(format!(
+                    "managed resource rollback task failed for {}: {rollback_error}",
+                    record.id
+                ))),
+            };
+            let primary = runtime_error("start", record, error);
+            return Err(match rollback {
+                Ok(()) => primary,
+                Err(rollback) => ExecutionManagerError::Internal(format!(
+                    "{primary}; managed resource rollback also failed: {rollback}"
+                )),
+            });
         }
         guard.config.persistent = requested_persistence;
         resources.disarm();
