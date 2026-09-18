@@ -505,17 +505,18 @@ async fn wait_for_exit_or_kill(pid: u32, timeout_secs: u64) -> StopOutcome {
 }
 
 #[cfg(unix)]
-fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) {
-    detach_volumes(paths, &record.volume_names, &record.id);
+fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
+    detach_volumes(paths, &record.volume_names, &record.id)?;
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(record);
+    Ok(())
 }
 
-fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) {
-    detach_volumes(paths, &record.volume_names, &record.id);
-    cleanup_network_endpoint(paths, record);
-    cleanup_anonymous_volumes(paths, &record.id, &record.anonymous_volumes);
+fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
+    detach_volumes(paths, &record.volume_names, &record.id)?;
+    cleanup_network_endpoint(paths, record)?;
+    cleanup_anonymous_volumes(paths, &record.id, &record.anonymous_volumes)?;
     remove_host_cgroup(record);
     if record.box_dir.exists() {
         // Tear down keep-authority host-netdevice before wiping boxes/{id}.
@@ -527,7 +528,7 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) {
             // Retain boxes/{id} (and the lease claim) for a later fail-closed
             // retry; do not wipe durable claim while host NAT may remain.
             cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-            return;
+            return Ok(());
         }
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
         let _ = std::fs::remove_dir_all(&record.box_dir);
@@ -538,37 +539,51 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) {
     if fs_mount_dir.exists() {
         let _ = std::fs::remove_dir_all(fs_mount_dir);
     }
+    Ok(())
 }
 
-fn detach_volumes(paths: &A3sBoxPaths, volume_names: &[String], box_id: &str) {
+fn detach_volumes(paths: &A3sBoxPaths, volume_names: &[String], box_id: &str) -> Result<()> {
     let store = VolumeStore::new(&paths.volumes_file, &paths.volumes_dir);
     for volume_name in volume_names {
-        let _ = store.modify(volume_name, |config| {
-            config.in_use_by.retain(|id| id != box_id);
-        });
+        store
+            .modify(volume_name, |config| {
+                config.in_use_by.retain(|id| id != box_id);
+            })
+            .map_err(ClientError::Runtime)?;
     }
+    Ok(())
 }
 
-fn cleanup_anonymous_volumes(paths: &A3sBoxPaths, owner: &str, volume_names: &[String]) {
+fn cleanup_anonymous_volumes(
+    paths: &A3sBoxPaths,
+    owner: &str,
+    volume_names: &[String],
+) -> Result<()> {
     let store = VolumeStore::new(&paths.volumes_file, &paths.volumes_dir);
     for volume_name in volume_names {
-        let _ = store.remove_anonymous(volume_name, owner);
+        store
+            .remove_anonymous(volume_name, owner)
+            .map_err(ClientError::Runtime)?;
     }
+    Ok(())
 }
 
-fn cleanup_network_endpoint(paths: &A3sBoxPaths, record: &BoxRecord) {
+fn cleanup_network_endpoint(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     let Some(network_name) = record_network_name(record).map(str::to_string) else {
-        return;
+        return Ok(());
     };
     let store = NetworkStore::new(&paths.networks_file);
-    let _ = store.with_write_lock(
-        |networks| -> std::result::Result<(), a3s_box_core::error::BoxError> {
-            if let Some(network) = networks.get_mut(&network_name) {
-                let _ = network.disconnect(&record.id);
-            }
-            Ok(())
-        },
-    );
+    store
+        .with_write_lock(
+            |networks| -> std::result::Result<(), a3s_box_core::error::BoxError> {
+                if let Some(network) = networks.get_mut(&network_name) {
+                    let _ = network.disconnect(&record.id);
+                }
+                Ok(())
+            },
+        )
+        .map_err(ClientError::Runtime)?;
+    Ok(())
 }
 
 fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {

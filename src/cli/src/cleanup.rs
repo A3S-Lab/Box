@@ -20,9 +20,13 @@ pub(crate) fn record_network_name(record: &BoxRecord) -> Option<&str> {
 /// a stopped (non---rm) box retains its IP/MAC across stop/start (matching Docker
 /// and `restart.rs`), so the endpoint is released only on actual removal. See
 /// [`cleanup_stopped_box`] vs [`cleanup_removed_box`].
-pub fn cleanup_box_resources(box_id: &str, volume_names: &[String], network_name: Option<&str>) {
+pub fn cleanup_box_resources(
+    box_id: &str,
+    volume_names: &[String],
+    network_name: Option<&str>,
+) -> a3s_box_core::error::Result<()> {
     let store = a3s_box_runtime::NetworkStore::default_path().ok();
-    cleanup_box_resources_in(store.as_ref(), box_id, volume_names, network_name);
+    cleanup_box_resources_in(store.as_ref(), box_id, volume_names, network_name)
 }
 
 /// Inner [`cleanup_box_resources`] over an explicit network store (testable
@@ -32,32 +36,33 @@ fn cleanup_box_resources_in(
     box_id: &str,
     volume_names: &[String],
     network_name: Option<&str>,
-) {
-    // Detach named volumes
-    super::commands::volume::detach_volumes(volume_names, box_id);
+) -> a3s_box_core::error::Result<()> {
+    // Detach named volumes — fail closed so ownership metadata cannot linger.
+    super::commands::volume::detach_volumes(volume_names, box_id)?;
 
     // Disconnect from network only when a name is given. Release the endpoint
     // under the store's cross-process lock with a fresh read, so a concurrent
     // connect to the same network is not lost (a get → disconnect → update
     // reads outside the lock and would clobber it).
     if let (Some(net_name), Some(net_store)) = (network_name, net_store) {
-        let _ =
-            net_store.with_write_lock(|networks| -> Result<(), a3s_box_core::error::BoxError> {
-                if let Some(net_config) = networks.get_mut(net_name) {
-                    net_config.disconnect(box_id).ok();
-                }
-                Ok(())
-            });
+        net_store.with_write_lock(|networks| -> Result<(), a3s_box_core::error::BoxError> {
+            if let Some(net_config) = networks.get_mut(net_name) {
+                // Absent endpoint is idempotent success.
+                let _ = net_config.disconnect(box_id);
+            }
+            Ok(())
+        })?;
     }
+    Ok(())
 }
 
 /// Detach named volumes and disconnect the persisted network for a box record.
-pub fn cleanup_record_resources(record: &BoxRecord) {
+pub fn cleanup_record_resources(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
     cleanup_box_resources(
         &record.id,
         &record.volume_names,
         record_network_name(record),
-    );
+    )
 }
 
 /// Remove a MicroVM's host cgroup `/sys/fs/cgroup/a3s-box/<id>`. The shim creates
@@ -87,7 +92,7 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     // meant the next `start` re-allocated the LOWEST free IP — not necessarily
     // the original — silently changing the box's IP (and derived MAC), unlike
     // Docker. The endpoint is released only on actual removal (cleanup_removed_box).
-    cleanup_box_resources(&record.id, &record.volume_names, None);
+    cleanup_box_resources(&record.id, &record.volume_names, None)?;
     // Release the overlayfs mount so a stopped box never leaves a live mount
     // (and a later restart re-mounts cleanly instead of stacking).
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
@@ -98,22 +103,20 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
 }
 
 /// Remove anonymous volumes created from OCI `VOLUME` declarations.
-pub fn cleanup_anonymous_volumes(box_id: &str, anonymous_volumes: &[String]) {
+pub fn cleanup_anonymous_volumes(
+    box_id: &str,
+    anonymous_volumes: &[String],
+) -> a3s_box_core::error::Result<()> {
     if anonymous_volumes.is_empty() {
-        return;
+        return Ok(());
     }
 
-    if let Ok(vol_store) = a3s_box_runtime::VolumeStore::default_path() {
-        for volume_name in anonymous_volumes {
-            if let Err(err) = vol_store.remove_anonymous(volume_name, box_id) {
-                tracing::debug!(
-                    volume = volume_name,
-                    error = %err,
-                    "Failed to remove anonymous volume"
-                );
-            }
-        }
+    let vol_store = a3s_box_runtime::VolumeStore::default_path()?;
+    for volume_name in anonymous_volumes {
+        // Missing / already-removed anonymous volumes are success (`Ok(false)`).
+        vol_store.remove_anonymous(volume_name, box_id)?;
     }
+    Ok(())
 }
 
 /// Remove a Compose-owned transient Secret set before its durable record is
@@ -175,8 +178,8 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
             .get(crate::commands::compose::LABEL_SECRET_ID)
             .map(String::as_str),
     )?;
-    cleanup_record_resources(record);
-    cleanup_anonymous_volumes(&record.id, &record.anonymous_volumes);
+    cleanup_record_resources(record)?;
+    cleanup_anonymous_volumes(&record.id, &record.anonymous_volumes)?;
     remove_host_cgroup(record);
 
     if record.box_dir.exists() {
@@ -352,7 +355,7 @@ mod tests {
 
         // stop-style cleanup (network = None): the endpoint MUST be kept so the
         // box's IP/MAC is stable across stop/start.
-        cleanup_box_resources_in(Some(&store), "box-1", &[], None);
+        cleanup_box_resources_in(Some(&store), "box-1", &[], None).unwrap();
         assert_eq!(
             store.get("dev").unwrap().unwrap().endpoints.len(),
             1,
@@ -360,7 +363,7 @@ mod tests {
         );
 
         // removal-style cleanup (network = Some): the endpoint is released.
-        cleanup_box_resources_in(Some(&store), "box-1", &[], Some("dev"));
+        cleanup_box_resources_in(Some(&store), "box-1", &[], Some("dev")).unwrap();
         assert_eq!(
             store.get("dev").unwrap().unwrap().endpoints.len(),
             0,

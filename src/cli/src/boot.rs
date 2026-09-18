@@ -63,7 +63,14 @@ impl BootResourceGuard {
             &self.box_id,
             &self.volume_names,
             self.network_name.as_deref(),
-        );
+        )
+        .unwrap_or_else(|error| {
+            tracing::error!(
+                box_id = %self.box_id,
+                %error,
+                "Failed to detach volumes/network during boot resource rollback"
+            );
+        });
         self.armed = false;
     }
 

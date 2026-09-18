@@ -79,8 +79,26 @@ pub(super) fn cleanup_partial_service_box(
     volume_names: &[String],
     anonymous_volumes: &[String],
 ) {
-    crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name);
-    crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes);
+    if let Err(error) =
+        crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name)
+    {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove partial Compose box directory while volume/network detach failed"
+        );
+        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+        return;
+    }
+    if let Err(error) = crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove partial Compose box directory while anonymous volume cleanup failed"
+        );
+        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+        return;
+    }
     // Keep-authority host-netdevice lease may exist after a partial prepare.
     // Tear down before wiping boxes/{id}; retain the dir when teardown fails.
     let home = a3s_box_core::dirs_home();

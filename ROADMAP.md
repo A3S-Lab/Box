@@ -851,9 +851,10 @@ open and harness reports still keep
   staged caller bind aliases under `sandbox/attachments/{slot}`
   (`a3s.box.bind.{slot}`) into `a3s.oci.attachments.v2` (caller-owned
   DetachOnly). Remaining unclassified external binds fail closed at create.
-  Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
-  parity, and the B3 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  Legacy CLI/SDK stop/remove volume detach and anonymous volume removal fail
+  closed like managed cleanup. Image/build/snapshot/commit descriptor handoff,
+  network v3, Windows volume parity, and the B3 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep network objects, IPAM, DNS, aliases, and publication policy in Box;
   delegate namespace, VM NIC, and guest transport attachment to OCI Runtime.
   **Partial:** Native Linux SandboxViaOci prepare classifies prepared
