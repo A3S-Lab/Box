@@ -443,15 +443,28 @@ impl VmManager {
         // a later managed remove cannot find the daemon and it keeps published
         // ports bound indefinitely.
         #[cfg(target_os = "linux")]
-        crate::network::terminate_passt(&socket_dir);
+        if let Err(error) = crate::network::terminate_passt(&socket_dir) {
+            tracing::error!(
+                box_id = %self.box_id,
+                path = %socket_dir.display(),
+                %error,
+                "Failed to terminate passt during destroy"
+            );
+            if stop_error.is_none() {
+                stop_error = Some(error);
+            }
+        }
 
         // Cleanup rootfs provider (unmount overlay if applicable)
-        if let Err(e) = self.rootfs_provider.cleanup(&box_dir, preserve_rootfs) {
-            tracing::warn!(
+        if let Err(error) = self.rootfs_provider.cleanup(&box_dir, preserve_rootfs) {
+            tracing::error!(
                 box_id = %self.box_id,
-                error = %e,
+                error = %error,
                 "Failed to cleanup rootfs provider"
             );
+            if stop_error.is_none() {
+                stop_error = Some(error);
+            }
         }
 
         if let Err(e) = std::fs::remove_dir_all(&socket_dir) {

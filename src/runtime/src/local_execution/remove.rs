@@ -134,7 +134,8 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
 
     let socket_dir = runtime_socket_dir(home_dir, &record.id);
     #[cfg(target_os = "linux")]
-    crate::network::terminate_passt(&socket_dir);
+    crate::network::terminate_passt(&socket_dir)
+        .map_err(|error| cleanup_error(record, "terminate passt", error))?;
 
     crate::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
         .map_err(|error| cleanup_error(record, "unmount the overlay merged view", error))?;

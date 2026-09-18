@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `terminate_passt` fails closed: wait for SIGTERM exit and refuse invent-clean
+  teardown when passt remains or pid/socket artifacts cannot be removed. CLI,
+  SDK, managed remove, orphan reap, destroy, and boot-failure cleanup
+  propagate that contract; VM destroy also fails closed on rootfs provider
+  cleanup errors. Does **not** close ROADMAP B3/B2 or unlock CNI/DNS.
 - Overlay rootfs provider cleanup fails closed on synchronous overlay unmount
   and directory wipe (no warn-and-Ok / lazy detach invent-clean). Does **not**
   close ROADMAP B3/B2 or unlock CNI/DNS/Windows/macOS `:ro`.
