@@ -156,20 +156,34 @@ pub(super) async fn rollback_compose_up<T>(
     created_networks: &[String],
     error: impl Into<Box<dyn std::error::Error>>,
 ) -> Result<T, Box<dyn std::error::Error>> {
-    rollback_started_services(state, started_services).await;
     let primary = error.into();
-    match cleanup_created_networks(created_networks) {
-        Ok(()) => Err(primary),
-        Err(cleanup) => Err(format!(
-            "{primary}; also failed to roll back compose networks: {cleanup}"
-        )
-        .into()),
+    let service_cleanup = rollback_started_services(state, started_services).await;
+    let network_cleanup = cleanup_created_networks(created_networks);
+    match (service_cleanup, network_cleanup) {
+        (Ok(()), Ok(())) => Err(primary),
+        (svc, net) => {
+            let mut message = primary.to_string();
+            if let Err(cleanup) = svc {
+                message.push_str(&format!(
+                    "; also failed to roll back compose services: {cleanup}"
+                ));
+            }
+            if let Err(cleanup) = net {
+                message.push_str(&format!(
+                    "; also failed to roll back compose networks: {cleanup}"
+                ));
+            }
+            Err(message.into())
+        }
     }
 }
 
-async fn rollback_started_services(state: &mut StateFile, started_services: &[ServiceBox]) {
+async fn rollback_started_services(
+    state: &mut StateFile,
+    started_services: &[ServiceBox],
+) -> Result<(), Box<dyn std::error::Error>> {
     if started_services.is_empty() {
-        return;
+        return Ok(());
     }
 
     eprintln!(
@@ -177,13 +191,27 @@ async fn rollback_started_services(state: &mut StateFile, started_services: &[Se
         started_services.len()
     );
 
+    let mut errors = Vec::new();
     for svc in started_services.iter().rev() {
         if let Err(error) = teardown_service_box_inner(state, svc, true).await {
-            eprintln!(
-                "  Warning: failed to remove rolled-back service {} from state: {}",
-                svc.svc_name, error
-            );
+            errors.push(format!("{}: {error}", svc.svc_name));
         }
+    }
+    compose_up_service_rollback_result(errors)
+}
+
+/// Collapse per-service teardown failures into a single fail-closed rollback Err.
+fn compose_up_service_rollback_result(
+    errors: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to roll back compose service(s): {}",
+            errors.join("; ")
+        )
+        .into())
     }
 }
 
@@ -543,5 +571,18 @@ mod tests {
         let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
         perms.set_readonly(false);
         std::fs::set_permissions(store.path(), perms).unwrap();
+    }
+
+    #[test]
+    fn compose_up_service_rollback_fails_closed_on_teardown_errors() {
+        assert!(compose_up_service_rollback_result(Vec::new()).is_ok());
+        let err = compose_up_service_rollback_result(vec![
+            "api: lock busy".to_string(),
+            "db: wipe refused".to_string(),
+        ])
+        .expect_err("teardown errors must not invent clean service rollback");
+        let message = err.to_string();
+        assert!(message.contains("api: lock busy"));
+        assert!(message.contains("db: wipe refused"));
     }
 }
