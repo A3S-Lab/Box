@@ -208,12 +208,15 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
         // into the live mount ("Stale file handle") and leaks it.
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
         a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
-        if let Err(err) = std::fs::remove_dir_all(&record.box_dir) {
-            tracing::debug!(
-                path = %record.box_dir.display(),
-                error = %err,
-                "Failed to remove box directory"
-            );
+        match std::fs::remove_dir_all(&record.box_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(a3s_box_core::error::BoxError::Other(format!(
+                    "Failed to remove box directory {}: {err}",
+                    record.box_dir.display()
+                )));
+            }
         }
     }
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
