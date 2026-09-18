@@ -44,40 +44,39 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     print_capabilities(&capabilities);
 
     // Present-tense counts: retire/resume abandoned managed transitional claims
-    // before aggregating (same home-scoped observe path as `ps`).
-    match super::observe_inventory::refresh_default_home_after_inventory_observation().await {
-        Ok(state) => {
-            let counts = box_counts(&state);
-            println!(
-                "Boxes: {} total, {} active ({} running, {} paused)",
-                counts.total, counts.active, counts.running, counts.paused
-            );
-        }
-        Err(_) => {
-            println!("Boxes: 0 total, 0 active (0 running, 0 paused)");
-        }
-    }
+    // before aggregating (same home-scoped observe path as `ps`). Fail closed so
+    // we cannot invent an empty inventory when observation/store load fails.
+    let state = super::observe_inventory::refresh_default_home_after_inventory_observation()
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to refresh box inventory for info: {error}; refusing to invent empty box inventory"
+            )
+        })?;
+    let counts = box_counts(&state);
+    println!(
+        "Boxes: {} total, {} active ({} running, {} paused)",
+        counts.total, counts.active, counts.running, counts.paused
+    );
 
-    // Image cache stats
+    // Image cache stats — absent cache dir is honest zero; open failure is not.
     let images_dir = images_dir();
     if images_dir.exists() {
-        match super::open_image_store() {
-            Ok(store) => {
-                let images = store.list().await;
-                // Tags and digest-pinned aliases share one content directory;
-                // use the store's content-level total instead of summing index
-                // rows and reporting the same bytes multiple times.
-                let total_size = store.total_size().await;
-                println!(
-                    "Images: {} cached ({})",
-                    images.len(),
-                    crate::output::format_bytes(total_size)
-                );
-            }
-            Err(_) => {
-                println!("Images: 0 cached");
-            }
-        }
+        let store = super::open_image_store().map_err(|error| {
+            format!(
+                "Failed to open image store for info: {error}; refusing to invent empty image inventory"
+            )
+        })?;
+        let images = store.list().await;
+        // Tags and digest-pinned aliases share one content directory;
+        // use the store's content-level total instead of summing index
+        // rows and reporting the same bytes multiple times.
+        let total_size = store.total_size().await;
+        println!(
+            "Images: {} cached ({})",
+            images.len(),
+            crate::output::format_bytes(total_size)
+        );
     } else {
         println!("Images: 0 cached");
     }
@@ -484,5 +483,22 @@ mod tests {
             ),
             vec!["/tmp/runtime.sock".to_string()]
         );
+    }
+
+    #[test]
+    fn info_inventory_error_messages_refuse_invented_empty_counts() {
+        let boxes = format!(
+            "Failed to refresh box inventory for info: {}; refusing to invent empty box inventory",
+            "observe failed"
+        );
+        assert!(boxes.contains("observe failed"));
+        assert!(boxes.contains("refusing to invent empty box inventory"));
+
+        let images = format!(
+            "Failed to open image store for info: {}; refusing to invent empty image inventory",
+            "permission denied"
+        );
+        assert!(images.contains("permission denied"));
+        assert!(images.contains("refusing to invent empty image inventory"));
     }
 }
