@@ -894,8 +894,12 @@ open and harness reports still keep
   (lease retained); prepare and Sandbox cleanup propagate lease teardown
   failures instead of soft-skip/warn; boot-failure and managed path cleanup
   tear down the lease before wiping `boxes/{id}` (retain dir on teardown
-  failure); orphan crash-recovery reap, VM destroy, SDK/CLI/Compose path
-  cleanup, and foreground `--rm` use the same lease-before-wipe contract; veth
+  failure); orphan crash-recovery reap fails closed when the log worker
+  remains or the bundle/runtime-root/`runtime.json` cannot be removed, and
+  retains the box directory when synchronous overlay unmount or directory
+  wipe fails (no success claim). Orphan crash-recovery reap, VM destroy,
+  SDK/CLI/Compose path cleanup, and foreground `--rm` use the same
+  lease-before-wipe contract; veth
   delete contract as DNAT/MASQUERADE; staging rollback surfaces combined
   present-link / idle-bridge delete failures; idle-bridge MASQUERADE removal
   uses the same present-rule delete contract; CLI removal cleanup fails closed
