@@ -497,3 +497,88 @@ impl smoltcp::phy::Device for UnixgramDevice {
         caps
     }
 }
+
+/// In-memory Ethernet device for Linux passt_bridge TCP/53 ownership.
+///
+/// Guest frames diverted from passt land in `rx_queue`; smoltcp transmits land
+/// in `tx_queue` for the bridge loop to push back to the guest.
+pub(crate) struct FrameDevice {
+    pub(crate) rx_queue: VecDeque<Vec<u8>>,
+    tx_queue: VecDeque<Vec<u8>>,
+}
+
+impl FrameDevice {
+    pub(crate) fn new() -> Self {
+        Self {
+            rx_queue: VecDeque::new(),
+            tx_queue: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn drain_tx(&mut self) -> Vec<Vec<u8>> {
+        self.tx_queue.drain(..).collect()
+    }
+}
+
+pub(crate) struct FrameTxToken<'a> {
+    tx_queue: &'a mut VecDeque<Vec<u8>>,
+}
+
+impl smoltcp::phy::TxToken for FrameTxToken<'_> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buf = vec![0u8; len];
+        let result = f(&mut buf);
+        if self.tx_queue.len() < MAX_PENDING_TX_FRAMES {
+            self.tx_queue.push_back(buf);
+        } else {
+            tracing::warn!(
+                limit = MAX_PENDING_TX_FRAMES,
+                "FrameDevice tx queue full; dropping DNS TCP frame"
+            );
+        }
+        result
+    }
+}
+
+impl smoltcp::phy::Device for FrameDevice {
+    type RxToken<'a>
+        = OwnedRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = FrameTxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if self.tx_queue.len() >= MAX_PENDING_TX_FRAMES {
+            return None;
+        }
+        let frame = self.rx_queue.pop_front()?;
+        Some((
+            OwnedRxToken(frame),
+            FrameTxToken {
+                tx_queue: &mut self.tx_queue,
+            },
+        ))
+    }
+
+    fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
+        if self.tx_queue.len() >= MAX_PENDING_TX_FRAMES {
+            return None;
+        }
+        Some(FrameTxToken {
+            tx_queue: &mut self.tx_queue,
+        })
+    }
+
+    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
+        let mut caps = smoltcp::phy::DeviceCapabilities::default();
+        caps.medium = smoltcp::phy::Medium::Ethernet;
+        caps.max_transmission_unit = MAX_FRAME;
+        caps
+    }
+}

@@ -8,9 +8,9 @@
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries answered for NetworkStore names/aliases when a
 //!   bridge `networks.json` is configured (macOS netproxy and Linux
-//!   passt_bridge). macOS netproxy also answers those names on TCP/53 before
-//!   the upstream TCP proxy. Linux passt_bridge still forwards TCP/53
-//!   unmodified. Unknown names are forwarded upstream.
+//!   passt_bridge). Both platforms also answer those names on TCP/53 with real
+//!   TCP termination; unknown names use host `TcpStream` upstream (Linux does
+//!   not forward TCP/53 mid-stream to passt).
 //! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
 //!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
 //!   `"5353:53/udp"`).
@@ -24,6 +24,7 @@
 
 mod device;
 mod dns_local;
+mod dns_tcp;
 mod egress;
 mod manager;
 mod passt_bridge;
@@ -60,7 +61,7 @@ pub use passt_bridge::spawn_inherited_passt_bridge;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Returns the current time as a smoltcp `Instant` (microseconds since Unix epoch).
-fn smoltcp_now() -> Instant {
+pub(crate) fn smoltcp_now() -> Instant {
     use std::time::{SystemTime, UNIX_EPOCH};
     let us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -70,7 +71,7 @@ fn smoltcp_now() -> Instant {
 }
 
 /// Convert `std::net::Ipv4Addr` to `smoltcp::wire::Ipv4Address`.
-fn to_smoltcp_ipv4(ip: Ipv4Addr) -> Ipv4Address {
+pub(crate) fn to_smoltcp_ipv4(ip: Ipv4Addr) -> Ipv4Address {
     Ipv4Address::from(ip)
 }
 

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::device::BridgePort;
 use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
+use crate::dns_tcp::DnsTcpOwner;
 use crate::egress::{default_untrusted_egress_denied, ethernet_ipv4_destination};
 use std::net::Ipv4Addr;
 
@@ -25,9 +26,10 @@ const POLL_TIMEOUT_MS: libc::c_int = 100;
 
 /// Start a shim-owned adapter for an inherited libkrun stream socket.
 ///
-/// When `dns` is set, guest UDP/53 queries to configured upstream DNS servers
-/// for NetworkStore names/aliases are answered locally (same contract as
-/// macOS netproxy) before the frame is forwarded to passt.
+/// When `dns` is set, guest UDP/53 and TCP/53 queries to configured upstream
+/// DNS servers for NetworkStore names/aliases are answered locally (same
+/// contract as macOS netproxy) before the frame is forwarded to passt. TCP/53
+/// uses smoltcp termination; unknown names use host `TcpStream` upstream.
 ///
 /// `attached_cidr` is `(guest_ip, prefix_len)` used by the default untrusted
 /// egress filter before passt. Peer L2 frames are unaffected.
@@ -107,6 +109,7 @@ fn run_passt_bridge(
     let mut passt_input = Vec::new();
     let mut to_guest = PendingBytes::default();
     let mut to_passt = PendingBytes::default();
+    let mut dns_tcp = dns.as_ref().map(|config| DnsTcpOwner::new(config.clone()));
 
     loop {
         let mut progressed = false;
@@ -120,6 +123,13 @@ fn run_passt_bridge(
         }
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
+            if let Some(owner) = dns_tcp.as_mut() {
+                if owner.should_divert(&frame) {
+                    owner.push_guest_frame(frame.clone());
+                    let _ = bridge.forward_from_guest(&frame);
+                    continue;
+                }
+            }
             // NetworkStore-local DNS A before passt upstream forward (#572 parity).
             if let Some(config) = dns.as_ref() {
                 if let Some(reply) = try_ethernet_network_a_reply(&frame, config) {
@@ -144,6 +154,13 @@ fn run_passt_bridge(
             }
         }
 
+        if let Some(owner) = dns_tcp.as_mut() {
+            for reply in owner.poll_and_drain_tx() {
+                progressed = true;
+                to_guest.push_frame(&reply)?;
+            }
+        }
+
         match read_available(&mut passt, &mut passt_input)? {
             ReadState::Progress => progressed = true,
             ReadState::Eof => {
@@ -162,7 +179,7 @@ fn run_passt_bridge(
                 }
                 // Drain any pending guest-bound bytes, then peer-only.
                 let _ = to_guest.flush(&mut guest);
-                return run_peer_only_bridge(guest, bridge, guest_input, to_guest);
+                return run_peer_only_bridge(guest, bridge, guest_input, to_guest, dns_tcp);
             }
             ReadState::Idle => {}
         }
@@ -199,11 +216,13 @@ fn run_passt_bridge(
 ///
 /// Guest frames that previously needed the gateway/passt path are dropped;
 /// unicast/broadcast frames that `BridgePort` can deliver locally keep flowing.
+/// In-flight NetworkStore TCP/53 sessions keep polling on the local owner.
 fn run_peer_only_bridge(
     mut guest: UnixStream,
     bridge: BridgePort,
     mut guest_input: Vec<u8>,
     mut to_guest: PendingBytes,
+    mut dns_tcp: Option<DnsTcpOwner>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
 
@@ -218,10 +237,24 @@ fn run_peer_only_bridge(
         }
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
+            if let Some(owner) = dns_tcp.as_mut() {
+                if owner.should_divert(&frame) {
+                    owner.push_guest_frame(frame.clone());
+                    let _ = bridge.forward_from_guest(&frame);
+                    continue;
+                }
+            }
             // forward_from_guest returns true when the gateway would also need
             // the frame. With passt gone we still deliver peer copies via the
             // switch, then drop the gateway leg.
             let _needs_gateway = bridge.forward_from_guest(&frame);
+        }
+
+        if let Some(owner) = dns_tcp.as_mut() {
+            for reply in owner.poll_and_drain_tx() {
+                progressed = true;
+                to_guest.push_frame(&reply)?;
+            }
         }
 
         let mut peer_frames = Vec::new();

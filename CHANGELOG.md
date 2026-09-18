@@ -27,6 +27,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux passt_bridge answers NetworkStore name/alias A and AAAA NODATA on
+  TCP/53 with smoltcp TCP termination (parity with macOS netproxy). Unknown
+  names connect via host `TcpStream` with bytes already read prefetched;
+  TCP/53 is not forwarded to passt mid-stream. Does **not** close ROADMAP
+  B3/B2, invent full AAAA RRs, or claim CNI.
 - MicroVM default untrusted egress (Axis C): macOS netproxy and Linux
   passt_bridge deny guest IPv4 to loopback, link-local/cloud metadata
   (`169.254.0.0/16`), foreign RFC1918, and CGNAT `100.64/10`, while allowing
@@ -42,8 +47,9 @@ All notable changes to A3S Box will be documented in this file.
   under `lib64` (Linux) or `lib` (macOS), including release profiles (#575).
 - macOS netproxy answers NetworkStore name/alias A and AAAA NODATA on
   TCP/53 before opening the upstream TCP proxy. Unknown names still use that
-  proxy, with the bytes already read prefetched. Linux passt_bridge still
-  forwards TCP/53 unmodified. Does **not** close ROADMAP B3/B2.
+  proxy, with the bytes already read prefetched. Linux passt_bridge uses the
+  same real TCP termination contract (not mid-stream passt handoff). Does
+  **not** close ROADMAP B3/B2.
 - Short Sandbox/MicroVM tasks that exit before the exec server heartbeat
   keep their in-process owner so startup reconciliation can persist the
   authenticated exit instead of reporting ProviderUnavailable. OnFailure
