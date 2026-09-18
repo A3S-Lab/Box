@@ -128,7 +128,9 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 
 1. **Default egress profile** for untrusted MicroVM workloads: allow public internet optionally; deny private, link-local, cloud metadata, and host pivot unless explicitly allowed.
 2. **First-match policy** (CIDR / domain / proto / port) enforced on the host side of smoltcp or L2 mux.
-3. **DNS completeness without lying:** UDP A + AAAA NODATA already; finish Linux TCP/53 only with a real TCP owner (same honesty bar as macOS `#577`); no fake one-packet TCP answers.
+3. **DNS completeness without lying:** UDP A + AAAA NODATA already; Linux TCP/53
+   now uses a real smoltcp TCP owner on passt_bridge (same honesty bar as macOS
+   `#577`); no fake one-packet TCP answers. Full AAAA RRs still open.
 4. **Host-held secrets (optional path):** placeholders in guest; substitution only on host-terminated TLS to allow-listed SNI/DNS — complementary to today’s Compose `secret_environment` tmpfs (which *does* place secret bytes in the guest). Do not deprecate tmpfs secrets until the TLS path is proven; do not claim MITM where pin-bypass exists.
 
 **Evidence required:** Packet-level tests for deny defaults; policy unit tests; platform-scoped integration; CHANGELOG/ROADMAP non-claims for incomplete platforms.
@@ -287,8 +289,8 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | Priority | Slice | Axis | Out of scope in the same PR |
 | --- | --- | --- | --- |
 | P0 | Keep B2 evidence honest; fix real Live/recovery failures only | A | Flipping `b2_process_session_recovery_closed` |
-| P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) | C | CNI; Sandbox bridge GA |
-| P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination | C | Full AAAA RRs |
+| P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580` | C | CNI; Sandbox bridge GA |
+| P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
 | P1 | Design-only host-held secret substitution on netproxy TLS (spike + threat notes) | C | Replacing Compose tmpfs secrets |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM | B | Deleting libkrun before §4.5 |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |

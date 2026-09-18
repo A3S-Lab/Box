@@ -435,6 +435,9 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                             networks_json,
                             network_name,
                             dns_servers: net_config.dns_servers.clone(),
+                            guest_ip: net_config.ip_address,
+                            gateway_ip: net_config.gateway,
+                            prefix_len: net_config.prefix_len,
                         })
                     }
                     _ => None,

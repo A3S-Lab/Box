@@ -934,9 +934,10 @@ open and harness reports still keep
   upstream UDP/53 forward so late joiners resolve without rewriting guest
   hosts; guest `/etc/hosts` also includes the box's own NetworkStore aliases.
   Known NetworkStore names also receive authoritative AAAA NODATA (IPv4-only
-  store). macOS netproxy answers those names on TCP/53 before the upstream
-  TCP proxy; unknown names still proxy, and Linux passt_bridge still forwards
-  TCP/53 unmodified. Default MicroVM egress on netproxy / passt_bridge denies
+  store). macOS netproxy and Linux passt_bridge answer those names on TCP/53
+  with real TCP termination; unknown names still use host TCP upstream with
+  prefetch (Linux does not forward TCP/53 mid-stream to passt). Default
+  MicroVM egress on netproxy / passt_bridge denies
   loopback, link-local/metadata, foreign RFC1918, and CGNAT outside the
   attached bridge CIDR (public and same-CIDR peers remain). Full AAAA records,
   CNI, multi-device, first-match operator policy DSL, rootless/MicroVM/Windows

@@ -131,12 +131,19 @@ fn build_nodata_response(query: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Config for answering NetworkStore DNS queries on a raw Ethernet path
-/// (Linux passt_bridge). Guests query configured upstream IPs on UDP/53.
+/// (Linux passt_bridge). Guests query configured upstream IPs on UDP/53 and
+/// TCP/53; TCP/53 is terminated locally by [`crate::dns_tcp::DnsTcpOwner`].
 #[derive(Clone)]
 pub struct NetworkDnsConfig {
     pub networks_json: std::path::PathBuf,
     pub network_name: String,
     pub dns_servers: Vec<Ipv4Addr>,
+    /// Guest IPv4 on the attached bridge (TCP/53 diversion key).
+    pub guest_ip: Ipv4Addr,
+    /// Gateway IPv4 presented to the guest.
+    pub gateway_ip: Ipv4Addr,
+    /// Attached bridge prefix length for the gateway CIDR on the TCP owner.
+    pub prefix_len: u8,
 }
 
 /// If `frame` is IPv4 UDP/53 to a configured DNS server for a NetworkStore name,
@@ -377,6 +384,9 @@ mod tests {
             networks_json: path,
             network_name: "mynet".into(),
             dns_servers: vec![dns_server],
+            guest_ip,
+            gateway_ip: Ipv4Addr::new(10, 88, 0, 1),
+            prefix_len: 24,
         };
         let reply = try_ethernet_network_a_reply(&frame, &config).unwrap();
         assert_eq!(&reply[0..6], &frame[6..12]); // dst = guest
