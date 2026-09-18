@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `rmi` fails closed on box-state load instead of inventing an empty protect
+  set that can remove in-use images (`image-prune` / `system-prune` parity).
+  Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - CLI `image-prune` fails closed on box-state load and image remove errors
   instead of inventing an empty protect set / exit-0 with residual claims
   (`system-prune` image-phase / `rmi` parity). Does **not** close ROADMAP
