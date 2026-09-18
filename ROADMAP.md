@@ -847,9 +847,10 @@ open and harness reports still keep
 - [ ] Keep image distribution, builds, named volumes, snapshots, and commits in
   Box while passing immutable, descriptor-bound attachments to OCI Runtime.
   **Partial:** Native Linux SandboxViaOci prepare now binds Box-owned named and
-  anonymous volumes, plus the Box-owned `/workspace` bind
-  (`a3s.box.workspace`), into `a3s.oci.attachments.v2` (caller-owned
-  DetachOnly). External caller binds stay unclassified.
+  anonymous volumes, the Box-owned `/workspace` bind (`a3s.box.workspace`), and
+  staged caller bind aliases under `sandbox/attachments/{slot}`
+  (`a3s.box.bind.{slot}`) into `a3s.oci.attachments.v2` (caller-owned
+  DetachOnly). Remaining unclassified external binds fail closed at create.
   Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
   parity, and the B3 exit gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
@@ -886,9 +887,13 @@ open and harness reports still keep
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
-  managed quiesce/host-rootfs surface; Windows stopped snapshots retain guest
-  metadata via `save_managed`; stopped directory MicroVM export/diff retain
-  guest metadata; MicroVM live host-path snapshots and the full B3
+  managed quiesce/host-rootfs surface; SandboxViaOci `diff` baselines use the
+  same OCI-mapped metadata contract as live/stopped capture; Windows stopped
+  snapshots retain guest metadata via `save_managed`; stopped directory MicroVM
+  export/diff retain guest metadata; managed SandboxViaOci captures are labeled
+  and refuse MicroVM-shaped CLI/SDK `snapshot restore`; missing
+  `rootfs_snapshot.json` fails closed on `diff` and baseline-create errors abort
+  boot instead of soft success; MicroVM live host-path snapshots and the full B3
   storage/network qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI

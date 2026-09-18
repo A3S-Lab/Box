@@ -50,11 +50,7 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Snapshot the original image to compare against
     let snapshot_path = record.box_dir.join(DIFF_BASELINE_FILE);
-    if !snapshot_path.exists() {
-        println!("No baseline snapshot found — cannot compute diff.");
-        println!("(Snapshot is created at box creation time.)");
-        return Ok(());
-    }
+    ensure_diff_baseline_present(&snapshot_path)?;
 
     let snapshot_data = std::fs::read_to_string(&snapshot_path)
         .map_err(|e| format!("Failed to read snapshot: {e}"))?;
@@ -412,18 +408,42 @@ fn archive_rootfs_key(path: &Path) -> Result<Option<String>, String> {
     Ok((!segments.is_empty()).then(|| format!("/{}", segments.join("/"))))
 }
 
+/// Fail closed when `a3s-box diff` has no durable baseline to compare against.
+fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if snapshot_path.exists() {
+        return Ok(());
+    }
+    Err(format!(
+        "No baseline snapshot found at {} — cannot compute diff \
+         (baseline is created at box creation/boot; refusing soft success)",
+        snapshot_path.display()
+    )
+    .into())
+}
+
 /// Create the per-box baseline snapshot used by `a3s-box diff`.
 ///
 /// The caller should invoke this after the rootfs is prepared and before user
-/// mutations that should appear in later diff output.
+/// mutations that should appear in later diff output. Managed Linux
+/// SandboxViaOci prefers an OCI-mapped metadata baseline when mapping
+/// artifacts exist (same contract as live/stopped `diff`); otherwise falls
+/// back to a host walk for compatibility roots.
 pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve the provider's rootfs: `merged` (overlay) is the freshly-mounted
-    // pristine image at boot time; `rootfs` (plain provider) likewise.
-    if let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) {
-        a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
+    let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    {
+        if a3s_box_runtime::sandbox::rootfs::try_create_managed_sandbox_diff_baseline_if_absent(
+            box_dir,
+            &rootfs_dir,
+        )? {
+            return Ok(());
+        }
     }
+    a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
     Ok(())
 }
 
@@ -450,6 +470,30 @@ pub fn create_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_diff_baseline_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join(DIFF_BASELINE_FILE);
+        let err = ensure_diff_baseline_present(&missing).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("No baseline snapshot found"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("refusing soft success"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn present_diff_baseline_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join(DIFF_BASELINE_FILE);
+        std::fs::write(&present, "{}").unwrap();
+        ensure_diff_baseline_present(&present).unwrap();
+    }
 
     #[test]
     fn live_sandbox_host_rootfs_accepts_running_and_paused() {

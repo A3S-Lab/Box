@@ -260,7 +260,7 @@ impl VmManager {
             prom.record_vm_boot_phase("prepare", prepare_start.elapsed().as_secs_f64());
         }
 
-        let (instance_spec, _bundle_spec) = match prepare {
+        let (instance_spec, bundle_spec) = match prepare {
             Ok(value) => value,
             Err(error) => {
                 self.cleanup_boot_failure().await;
@@ -269,9 +269,23 @@ impl VmManager {
         };
 
         // `controller.start` launches PID 1 and the user command. Preserve the
-        // pristine baseline before that boundary so short-lived filesystem
-        // mutations cannot win a race against the CLI's post-start bookkeeping.
-        self.create_diff_baseline(&layout);
+        // pristine OCI-mapped baseline before that boundary so short-lived
+        // filesystem mutations cannot win a race against post-start bookkeeping.
+        #[cfg(target_os = "linux")]
+        if let Err(error) =
+            self.create_sandbox_oci_diff_baseline(&layout, &bundle_spec.id_mappings)
+        {
+            self.cleanup_boot_failure().await;
+            return Err(error);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &bundle_spec;
+            if let Err(error) = self.create_diff_baseline(&layout) {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
+        }
 
         let console_output = instance_spec
             .console_output
@@ -526,7 +540,10 @@ impl VmManager {
             )?;
             #[cfg(target_os = "linux")]
             persist_rootfs_id_mappings(&box_dir, &bundle_spec.id_mappings)?;
-            self.create_diff_baseline(&layout);
+            #[cfg(target_os = "linux")]
+            self.create_sandbox_oci_diff_baseline(&layout, &bundle_spec.id_mappings)?;
+            #[cfg(not(target_os = "linux"))]
+            self.create_diff_baseline(&layout)?;
 
             Ok(RuntimeOwnedSandboxBundle {
                 bundle_dir,
