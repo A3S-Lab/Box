@@ -167,12 +167,20 @@ pub(super) async fn boot_sandbox_service(
     let reservation = manager.create(create_request, &operation_id).await?;
     let execution_id = reservation.execution_id.clone();
     if let Err(error) = manager.start(&execution_id, reservation.generation).await {
-        let _ = manager
+        // Prefer surfacing remove failure when start already failed — a partial
+        // Created/network lease must not be soft-discarded behind the start Err.
+        return Err(match manager
             .remove_execution(&execution_id, reservation.generation)
-            .await;
-        return Err(
-            format!("Failed to start Compose sandbox service '{svc_name}': {error}").into(),
-        );
+            .await
+        {
+            Ok(_) => {
+                format!("Failed to start Compose sandbox service '{svc_name}': {error}").into()
+            }
+            Err(cleanup) => format!(
+                "Failed to start Compose sandbox service '{svc_name}': {error}; cleanup also failed: {cleanup}"
+            )
+            .into(),
+        });
     }
 
     let box_id = execution_id.to_string();

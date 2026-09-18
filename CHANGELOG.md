@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose `--isolation sandbox` start failure no longer soft-discards
+  `remove_execution` errors; when cleanup also fails the combined error is
+  returned so a partial Created/network lease is not hidden behind the start
+  Err. Does **not** close ROADMAP B4/B3/B2 or claim UDP/`host_port=0` publish.
 - Keep-authority host-netdevice veth teardown uses the same present-link
   delete contract as DNAT/MASQUERADE (`delete_link_if_present` → `Result`;
   `ip link show` query failures are not treated as absent), so a failed
