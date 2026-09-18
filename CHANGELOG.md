@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Keep-authority host-netdevice veth/bridge staging surfaces rollback failures
+  (present-link / idle-bridge delete) combined with the primary staging error
+  instead of soft-discarding them when no lease file exists yet. Does **not**
+  close ROADMAP B3/B4/B2 or claim UDP publish teardown parity.
 - Legacy CLI/SDK stop and remove detach named volumes and remove anonymous
   volumes fail closed (matching managed `release_resources` /
   `remove_anonymous_volumes`) instead of soft-discarding VolumeStore errors
