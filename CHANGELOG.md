@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI pod sandbox port mappings admit static UDP and persist them as
+  `host:guest/udp`, matching CLI/passt/keep-authority DNAT. Netproxy and
+  Service UDP still fail closed. Does **not** close ROADMAP B3/B4 or unlock
+  CNI/DNS.
 - Bridge publish accepts static UDP (`host:guest/udp`). Passt forwards it with
   `--udp-ports`, and keep-authority Sandbox DNAT installs matching UDP rules.
   CLI/SDK auto-assign (`0:guest/udp`) allocates a UDP port. Netproxy, CRI, and
