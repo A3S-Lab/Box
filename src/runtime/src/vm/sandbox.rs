@@ -281,7 +281,10 @@ impl VmManager {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = &bundle_spec;
-            self.create_diff_baseline(&layout);
+            if let Err(error) = self.create_diff_baseline(&layout) {
+                self.cleanup_boot_failure().await;
+                return Err(error);
+            }
         }
 
         let console_output = instance_spec
@@ -540,7 +543,7 @@ impl VmManager {
             #[cfg(target_os = "linux")]
             self.create_sandbox_oci_diff_baseline(&layout, &bundle_spec.id_mappings)?;
             #[cfg(not(target_os = "linux"))]
-            self.create_diff_baseline(&layout);
+            self.create_diff_baseline(&layout)?;
 
             Ok(RuntimeOwnedSandboxBundle {
                 bundle_dir,
