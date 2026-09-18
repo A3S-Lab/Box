@@ -11,6 +11,16 @@ All notable changes to A3S Box will be documented in this file.
   aliases (`a3s.box.bind.{slot}`), and managed Secret classification. Does
   **not** invent MicroVM bind-alias attachments, close ROADMAP B3/B2, or claim
   Windows volume parity.
+- CLI/SDK `snapshot restore` fails closed for managed SandboxViaOci captures
+  labeled `a3s.box.snapshot.capture=managed-sandbox-oci` instead of inventing a
+  MicroVM box with `managed_execution: None`. Live/stopped managed Sandbox
+  `save_managed` paths stamp the label. Does **not** invent SandboxViaOci
+  restore parity, close ROADMAP B3/B2, or rewrite unlabeled historical captures.
+- `a3s-box diff` fails closed when `rootfs_snapshot.json` is absent instead of
+  printing a soft message and exiting 0; MicroVM/Sandbox boot propagates
+  baseline-create failures before workload launch instead of warn-and-continue.
+  Does **not** close ROADMAP B3/B2, invent live digests, or claim SandboxViaOci
+  OCI-map baseline parity.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
