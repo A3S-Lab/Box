@@ -6,19 +6,24 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionPortConnector, ExecutionPortStream};
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionPortConnector, ExecutionPortStream, ExecutionUdpPort,
+};
 use a3s_runtime::contract::{
     NetworkMode, RuntimeEvidence, RuntimeObservation, RuntimeServiceEndpoint, RuntimeUnitClass,
     RuntimeUnitSpec, RuntimeUnitState, TransportProtocol,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
 const SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SERVICE_CONNECTIONS: usize = 64;
+const MAX_UDP_ASSOCIATIONS: usize = 64;
+const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const UDP_PROBE_PAYLOAD: &[u8] = b"a3s-runtime-service-udp-probe";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RuntimeEndpointKey {
@@ -40,7 +45,7 @@ struct EndpointIdentity {
     execution_id: ExecutionId,
     execution_generation: ExecutionGeneration,
     spec_digest: String,
-    ports: Vec<(String, u16)>,
+    ports: Vec<(String, u16, TransportProtocol)>,
 }
 
 struct EndpointLease {
@@ -55,6 +60,19 @@ impl Drop for EndpointLease {
             task.abort();
         }
     }
+}
+
+enum StagedListener {
+    Tcp {
+        listener: TcpListener,
+        endpoint: RuntimeServiceEndpoint,
+        guest_port: NonZeroU16,
+    },
+    Udp {
+        socket: Arc<UdpSocket>,
+        endpoint: RuntimeServiceEndpoint,
+        guest_port: NonZeroU16,
+    },
 }
 
 /// Owns only live listeners and relay tasks. Runtime observations remain the
@@ -105,29 +123,29 @@ impl ServiceEndpointOwner {
                 .network
                 .ports
                 .iter()
-                .map(|port| (port.name.clone(), port.container_port))
+                .map(|port| (port.name.clone(), port.container_port, port.protocol))
                 .collect(),
         };
-        let retained_addrs = {
+        let retained = {
             let leases = self.leases.lock().await;
             leases.get(&key).and_then(|existing| {
-                (existing.identity == identity).then(|| {
-                    existing
-                        .endpoints
-                        .iter()
-                        .map(|endpoint| (endpoint.port_name.clone(), endpoint.socket_addr()))
-                        .collect::<Vec<_>>()
-                })
+                (existing.identity == identity).then(|| existing.endpoints.clone())
             })
         };
-        if let Some(addrs) = retained_addrs {
+        if let Some(endpoints) = retained {
             let mut reachable = true;
-            for (port_name, address) in &addrs {
-                if let Err(error) = probe_advertised_tcp_endpoint(*address).await {
+            for endpoint in &endpoints {
+                let address = endpoint.socket_addr();
+                let probe = match endpoint.protocol {
+                    TransportProtocol::Tcp => probe_advertised_tcp_endpoint(address).await,
+                    TransportProtocol::Udp => probe_advertised_udp_endpoint(address).await,
+                };
+                if let Err(error) = probe {
                     tracing::warn!(
                         unit_id = %spec.unit_id,
-                        port_name,
+                        port_name = %endpoint.port_name,
                         %address,
+                        protocol = endpoint.protocol.as_str(),
                         %error,
                         "Runtime Service advertised endpoint stopped answering; withdrawing lease"
                     );
@@ -154,32 +172,62 @@ impl ServiceEndpointOwner {
         // validated. A partial bind is never published into Runtime evidence.
         let mut staged = Vec::with_capacity(spec.network.ports.len());
         for port in &spec.network.ports {
-            if port.protocol != TransportProtocol::Tcp {
-                return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
-                    "feature:Service{:?}",
-                    port.protocol
-                )]));
-            }
-            let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-                .await
-                .map_err(|error| {
-                    RuntimeError::ProviderUnavailable(format!(
-                        "Box could not bind Runtime Service port {:?}: {error}",
-                        port.name
-                    ))
-                })?;
-            let address = listener.local_addr().map_err(|error| {
-                RuntimeError::ProviderUnavailable(format!(
-                    "Box could not inspect Runtime Service port {:?}: {error}",
-                    port.name
-                ))
-            })?;
-            let endpoint = RuntimeServiceEndpoint::node_local_tcp(&port.name, address.port())
-                .map_err(RuntimeError::Protocol)?;
             let guest_port = NonZeroU16::new(port.container_port).ok_or_else(|| {
-                RuntimeError::Protocol("Runtime Service declared a zero TCP port".into())
+                RuntimeError::Protocol("Runtime Service declared a zero container port".into())
             })?;
-            staged.push((listener, endpoint, guest_port));
+            match port.protocol {
+                TransportProtocol::Tcp => {
+                    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                        .await
+                        .map_err(|error| {
+                            RuntimeError::ProviderUnavailable(format!(
+                                "Box could not bind Runtime Service TCP port {:?}: {error}",
+                                port.name
+                            ))
+                        })?;
+                    let address = listener.local_addr().map_err(|error| {
+                        RuntimeError::ProviderUnavailable(format!(
+                            "Box could not inspect Runtime Service TCP port {:?}: {error}",
+                            port.name
+                        ))
+                    })?;
+                    let endpoint = RuntimeServiceEndpoint::node_local_tcp(&port.name, address.port())
+                        .map_err(RuntimeError::Protocol)?;
+                    staged.push(StagedListener::Tcp {
+                        listener,
+                        endpoint,
+                        guest_port,
+                    });
+                }
+                TransportProtocol::Udp => {
+                    let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                        .await
+                        .map_err(|error| {
+                            RuntimeError::ProviderUnavailable(format!(
+                                "Box could not bind Runtime Service UDP port {:?}: {error}",
+                                port.name
+                            ))
+                        })?;
+                    let address = socket.local_addr().map_err(|error| {
+                        RuntimeError::ProviderUnavailable(format!(
+                            "Box could not inspect Runtime Service UDP port {:?}: {error}",
+                            port.name
+                        ))
+                    })?;
+                    let endpoint = RuntimeServiceEndpoint::new(
+                        &port.name,
+                        TransportProtocol::Udp,
+                        std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        address.port(),
+                    )
+                    .map_err(RuntimeError::Protocol)?;
+                    staged.push(StagedListener::Udp {
+                        socket: Arc::new(socket),
+                        endpoint,
+                        guest_port,
+                    });
+                }
+            }
         }
 
         // Bind and serve first, then probe each advertised host URL through the
@@ -187,26 +235,58 @@ impl ServiceEndpointOwner {
         // advertise dead MicroVM relays (same honesty class as Box#370).
         let mut prepared = staged
             .into_iter()
-            .map(|(listener, endpoint, guest_port)| {
-                let task = tokio::spawn(serve_endpoint(
+            .map(|staged| match staged {
+                StagedListener::Tcp {
                     listener,
-                    Arc::clone(&self.connector),
-                    Arc::clone(&self.connection_limit),
-                    execution_id.clone(),
-                    execution_generation,
+                    endpoint,
                     guest_port,
-                    endpoint.port_name.clone(),
-                ));
-                (endpoint, task)
+                } => {
+                    let task = tokio::spawn(serve_tcp_endpoint(
+                        listener,
+                        Arc::clone(&self.connector),
+                        Arc::clone(&self.connection_limit),
+                        execution_id.clone(),
+                        execution_generation,
+                        guest_port,
+                        endpoint.port_name.clone(),
+                    ));
+                    (endpoint, task)
+                }
+                StagedListener::Udp {
+                    socket,
+                    endpoint,
+                    guest_port,
+                } => {
+                    let task = tokio::spawn(serve_udp_endpoint(
+                        socket,
+                        Arc::clone(&self.connector),
+                        Arc::clone(&self.connection_limit),
+                        execution_id.clone(),
+                        execution_generation,
+                        guest_port,
+                        endpoint.port_name.clone(),
+                    ));
+                    (endpoint, task)
+                }
             })
             .collect::<Vec<_>>();
 
         let probe_targets = prepared
             .iter()
-            .map(|(endpoint, _)| (endpoint.port_name.clone(), endpoint.socket_addr()))
+            .map(|(endpoint, _)| {
+                (
+                    endpoint.port_name.clone(),
+                    endpoint.protocol,
+                    endpoint.socket_addr(),
+                )
+            })
             .collect::<Vec<_>>();
-        for (port_name, address) in probe_targets {
-            if let Err(error) = probe_advertised_tcp_endpoint(address).await {
+        for (port_name, protocol, address) in probe_targets {
+            let probe = match protocol {
+                TransportProtocol::Tcp => probe_advertised_tcp_endpoint(address).await,
+                TransportProtocol::Udp => probe_advertised_udp_endpoint(address).await,
+            };
+            if let Err(error) = probe {
                 for (_, task) in prepared.drain(..) {
                     task.abort();
                     let _ = task.await;
@@ -328,7 +408,29 @@ async fn probe_advertised_tcp_endpoint(address: SocketAddr) -> Result<(), String
     .map_err(|_| format!("timed out probing advertised endpoint {address}"))?
 }
 
-async fn serve_endpoint(
+/// Prove the advertised UDP URL can accept a datagram without immediate error.
+///
+/// Unlike TCP there is no accept handshake; a successful send into the live
+/// socket is the host-side proof that the listener is still bound.
+async fn probe_advertised_udp_endpoint(address: SocketAddr) -> Result<(), String> {
+    tokio::time::timeout(SERVICE_CONNECT_TIMEOUT, async {
+        let probe = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .map_err(|error| error.to_string())?;
+        probe
+            .send_to(UDP_PROBE_PAYLOAD, address)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Brief settle so a bind race cannot invent reachability while the
+        // serve task is still aborting after a failed sibling probe.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(())
+    })
+    .await
+    .map_err(|_| format!("timed out probing advertised UDP endpoint {address}"))?
+}
+
+async fn serve_tcp_endpoint(
     listener: TcpListener,
     connector: Arc<dyn ExecutionPortConnector>,
     connection_limit: Arc<Semaphore>,
@@ -352,9 +454,6 @@ async fn serve_endpoint(
                 continue;
             }
         };
-        // Each listener holds at most one accepted stream while waiting for
-        // the driver-wide relay budget. Idle declared ports do not reserve a
-        // permit and therefore cannot starve an active endpoint.
         let permit = match Arc::clone(&connection_limit).acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => return,
@@ -373,7 +472,7 @@ async fn serve_endpoint(
         let relay_port_name = port_name.clone();
         relays.spawn(async move {
             let _permit = permit;
-            if let Err(error) = relay_connection(
+            if let Err(error) = relay_tcp_connection(
                 connector.as_ref(),
                 &relay_execution_id,
                 execution_generation,
@@ -404,7 +503,7 @@ async fn serve_endpoint(
     }
 }
 
-async fn relay_connection(
+async fn relay_tcp_connection(
     connector: &dyn ExecutionPortConnector,
     execution_id: &ExecutionId,
     execution_generation: ExecutionGeneration,
@@ -423,4 +522,142 @@ async fn relay_connection(
         .await
         .map_err(|error| format!("failed to relay Runtime Service TCP traffic: {error}"))?;
     Ok(())
+}
+
+async fn serve_udp_endpoint(
+    socket: Arc<UdpSocket>,
+    connector: Arc<dyn ExecutionPortConnector>,
+    connection_limit: Arc<Semaphore>,
+    execution_id: ExecutionId,
+    execution_generation: ExecutionGeneration,
+    guest_port: NonZeroU16,
+    port_name: String,
+) {
+    let associations: Arc<Mutex<BTreeMap<SocketAddr, tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+        Arc::new(Mutex::new(BTreeMap::new()));
+    let mut buf = vec![0_u8; 65_535];
+    loop {
+        let (n, client) = match socket.recv_from(&mut buf).await {
+            Ok(received) => received,
+            Err(error) => {
+                tracing::warn!(
+                    execution_id = %execution_id,
+                    port_name,
+                    error = %error,
+                    "Runtime Service UDP endpoint recv failed"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let payload = buf[..n].to_vec();
+        // Drop probe-only traffic after proving the socket is live; do not open
+        // a guest association for the synthetic probe payload.
+        if payload == UDP_PROBE_PAYLOAD {
+            continue;
+        }
+
+        {
+            let mut guard = associations.lock().await;
+            guard.retain(|_, tx| !tx.is_closed());
+            if let Some(tx) = guard.get(&client) {
+                let _ = tx.try_send(payload);
+                continue;
+            }
+            if guard.len() >= MAX_UDP_ASSOCIATIONS {
+                tracing::warn!(
+                    execution_id = %execution_id,
+                    port_name,
+                    limit = MAX_UDP_ASSOCIATIONS,
+                    "Runtime Service UDP association limit reached"
+                );
+                continue;
+            }
+
+            let permit = match Arc::clone(&connection_limit).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(
+                        execution_id = %execution_id,
+                        port_name,
+                        "Runtime Service UDP connection budget exhausted"
+                    );
+                    continue;
+                }
+            };
+            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            let _ = tx.try_send(payload);
+            guard.insert(client, tx);
+
+            let connector = Arc::clone(&connector);
+            let host_socket = Arc::clone(&socket);
+            let relay_execution_id = execution_id.clone();
+            let relay_port_name = port_name.clone();
+            let associations_for_task = Arc::clone(&associations);
+            tokio::spawn(async move {
+                let _permit = permit;
+                let result = relay_udp_association(
+                    connector.as_ref(),
+                    &relay_execution_id,
+                    execution_generation,
+                    guest_port,
+                    host_socket,
+                    client,
+                    rx,
+                )
+                .await;
+                associations_for_task.lock().await.remove(&client);
+                if let Err(error) = result {
+                    tracing::warn!(
+                        execution_id = %relay_execution_id,
+                        port_name = relay_port_name,
+                        peer = %client,
+                        error = %error,
+                        "Runtime Service UDP association failed"
+                    );
+                }
+            });
+        }
+    }
+}
+
+async fn relay_udp_association(
+    connector: &dyn ExecutionPortConnector,
+    execution_id: &ExecutionId,
+    execution_generation: ExecutionGeneration,
+    guest_port: NonZeroU16,
+    host_socket: Arc<UdpSocket>,
+    client: SocketAddr,
+    mut host_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut guest: ExecutionUdpPort = connector
+        .connect_udp_port(
+            execution_id,
+            execution_generation,
+            guest_port,
+            SERVICE_CONNECT_TIMEOUT,
+        )
+        .await?;
+    let mut last_activity = std::time::Instant::now();
+    loop {
+        if last_activity.elapsed() > UDP_IDLE_TIMEOUT {
+            return Ok(());
+        }
+        tokio::select! {
+            biased;
+            host = host_rx.recv() => {
+                let Some(payload) = host else {
+                    return Ok(());
+                };
+                guest.send_datagram(&payload).await?;
+                last_activity = std::time::Instant::now();
+            }
+            guest_datagram = guest.recv_datagram(65_535) => {
+                let payload = guest_datagram?;
+                host_socket.send_to(&payload, client).await?;
+                last_activity = std::time::Instant::now();
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+    }
 }

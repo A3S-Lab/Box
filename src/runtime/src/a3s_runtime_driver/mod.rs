@@ -542,6 +542,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             RuntimeFeature::Stop,
             RuntimeFeature::Remove,
             RuntimeFeature::ServiceTcp,
+            RuntimeFeature::ServiceUdp,
             RuntimeFeature::Logs,
             RuntimeFeature::Exec,
             RuntimeFeature::ServiceLifecycle,

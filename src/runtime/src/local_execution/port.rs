@@ -7,7 +7,7 @@ use std::time::Duration;
 use a3s_box_core::ExecutionBackend;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionPortConnector, ExecutionPortStream,
+    ExecutionPortConnector, ExecutionPortStream, ExecutionUdpPort, ExecutionUdpPortIo,
 };
 use async_trait::async_trait;
 #[cfg(target_os = "linux")]
@@ -29,6 +29,8 @@ const PORT_FORWARD_FRAME_OPEN_ACK: u8 = 2;
 const PORT_FORWARD_FRAME_DATA: u8 = 3;
 #[cfg(target_os = "linux")]
 const PORT_FORWARD_FRAME_CLOSE: u8 = 4;
+#[cfg(target_os = "linux")]
+const PORT_FORWARD_FRAME_OPEN_UDP: u8 = 5;
 #[cfg(target_os = "linux")]
 const PORT_FORWARD_BUFFER_BYTES: usize = 16 * 1024;
 #[cfg(target_os = "linux")]
@@ -100,6 +102,72 @@ impl ExecutionPortConnector for LocalExecutionManager {
             let _ = (execution_id, generation, port, timeout);
             Err(ExecutionManagerError::Unavailable(
                 "Sandbox port connections require Linux network namespaces".to_string(),
+            ))
+        }
+    }
+
+    async fn connect_udp_port(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        port: NonZeroU16,
+        timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionUdpPort> {
+        if timeout.is_zero() {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "UDP port connection timeout must be non-zero".to_string(),
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let (record, backend) = self.require_connectable(execution_id, generation).await?;
+            let pid = record
+                .pid
+                .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+            let pid_start_time = record.pid_start_time;
+            if !crate::process::is_process_alive_with_identity(pid, pid_start_time) {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()));
+            }
+
+            let session: ExecutionUdpPort = if backend.is_sandbox() {
+                Box::new(
+                    connect_udp_in_network_namespace(
+                        execution_id.clone(),
+                        pid,
+                        pid_start_time,
+                        port,
+                        timeout,
+                    )
+                    .await?,
+                )
+            } else {
+                let socket_path = record.exec_socket_path.with_file_name("portfwd.sock");
+                connect_microvm_udp_port(execution_id, &socket_path, port, timeout).await?
+            };
+
+            let (current, current_backend) =
+                self.require_connectable(execution_id, generation).await?;
+            if current.pid != Some(pid)
+                || current.pid_start_time != pid_start_time
+                || current_backend != backend
+                || current.exec_socket_path != record.exec_socket_path
+                || !crate::process::is_process_alive_with_identity(pid, pid_start_time)
+            {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: "runtime generation changed while connecting its UDP data plane"
+                        .to_string(),
+                });
+            }
+            return Ok(session);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (execution_id, generation, port, timeout);
+            Err(ExecutionManagerError::Unavailable(
+                "UDP port connections require Linux".to_string(),
             ))
         }
     }
@@ -401,6 +469,292 @@ fn connect_in_network_namespace_blocking(
         ))
     })?;
     Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+struct NamespaceUdpPort {
+    socket: tokio::net::UdpSocket,
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl ExecutionUdpPortIo for NamespaceUdpPort {
+    async fn send_datagram(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        self.socket.send(payload).await.map(|_| ())
+    }
+
+    async fn recv_datagram(&mut self, max_len: usize) -> std::io::Result<Vec<u8>> {
+        let mut buf = vec![0_u8; max_len];
+        let n = self.socket.recv(&mut buf).await?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn connect_udp_in_network_namespace(
+    execution_id: ExecutionId,
+    pid: u32,
+    pid_start_time: Option<u64>,
+    port: NonZeroU16,
+    timeout: Duration,
+) -> ExecutionManagerResult<NamespaceUdpPort> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name(format!("a3s-udp-{pid}-{}", port.get()))
+        .spawn(move || {
+            let result = connect_udp_in_network_namespace_blocking(
+                &execution_id,
+                pid,
+                pid_start_time,
+                port,
+                timeout,
+            );
+            let _ = sender.send(result);
+        })
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to start Sandbox UDP connector: {error}"
+            ))
+        })?;
+
+    let socket = receiver.await.map_err(|_| {
+        ExecutionManagerError::Internal(
+            "Sandbox UDP connector exited without a result".to_string(),
+        )
+    })??;
+    let socket = tokio::net::UdpSocket::from_std(socket).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to register Sandbox UDP socket with Tokio: {error}"
+        ))
+    })?;
+    Ok(NamespaceUdpPort { socket })
+}
+
+#[cfg(target_os = "linux")]
+fn connect_udp_in_network_namespace_blocking(
+    execution_id: &ExecutionId,
+    pid: u32,
+    pid_start_time: Option<u64>,
+    port: NonZeroU16,
+    timeout: Duration,
+) -> ExecutionManagerResult<std::net::UdpSocket> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+
+    if !crate::process::is_process_alive_with_identity(pid, pid_start_time) {
+        return Err(ExecutionManagerError::NotFound(execution_id.clone()));
+    }
+    let namespace_path = format!("/proc/{pid}/ns/net");
+    let namespace = File::open(&namespace_path).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to open Sandbox network namespace {namespace_path}: {error}"
+        ))
+    })?;
+    let result = unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNET) };
+    if result != 0 {
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to enter Sandbox network namespace for PID {pid}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if !crate::process::is_process_alive_with_identity(pid, pid_start_time) {
+        return Err(ExecutionManagerError::Unavailable(
+            "Sandbox runtime exited while entering its network namespace".to_string(),
+        ));
+    }
+
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port.get()));
+    let socket = std::net::UdpSocket::bind(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::UNSPECIFIED,
+        0,
+    )))
+    .map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to bind Sandbox UDP client socket: {error}"
+        ))
+    })?;
+    socket.set_read_timeout(Some(timeout)).ok();
+    socket.set_write_timeout(Some(timeout)).ok();
+    socket.connect(address).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to connect Sandbox UDP to loopback port {}: {error}",
+            port.get()
+        ))
+    })?;
+    socket.set_nonblocking(true).map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to configure Sandbox UDP socket: {error}"
+        ))
+    })?;
+    Ok(socket)
+}
+
+#[cfg(target_os = "linux")]
+struct MicroVmUdpPort {
+    to_guest: tokio::sync::mpsc::Sender<Vec<u8>>,
+    from_guest: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl ExecutionUdpPortIo for MicroVmUdpPort {
+    async fn send_datagram(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        self.to_guest.send(payload.to_vec()).await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "MicroVM UDP association closed",
+            )
+        })
+    }
+
+    async fn recv_datagram(&mut self, max_len: usize) -> std::io::Result<Vec<u8>> {
+        let payload = self.from_guest.recv().await.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "MicroVM UDP association closed",
+            )
+        })?;
+        if payload.len() > max_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MicroVM UDP datagram exceeds receiver bound",
+            ));
+        }
+        Ok(payload)
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn connect_microvm_udp_port(
+    execution_id: &ExecutionId,
+    socket_path: &Path,
+    port: NonZeroU16,
+    timeout: Duration,
+) -> ExecutionManagerResult<ExecutionUdpPort> {
+    let connect = async {
+        let mut control = UnixStream::connect(socket_path).await.map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to connect to MicroVM UDP port channel for {execution_id}: {error}"
+            ))
+        })?;
+        write_port_forward_frame(
+            &mut control,
+            PORT_FORWARD_FRAME_OPEN_UDP,
+            PORT_FORWARD_STREAM_ID,
+            &port.get().to_be_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to request MicroVM UDP port {} for {execution_id}: {error}",
+                port.get()
+            ))
+        })?;
+        let acknowledgement = read_port_forward_frame(&mut control)
+            .await
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to open MicroVM UDP port {} for {execution_id}: {error}",
+                    port.get()
+                ))
+            })?;
+        let accepted = acknowledgement.as_ref().is_some_and(|frame| {
+            frame.kind == PORT_FORWARD_FRAME_OPEN_ACK
+                && frame.stream_id == PORT_FORWARD_STREAM_ID
+                && frame.payload.as_slice() == [0]
+        });
+        if !accepted {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "MicroVM UDP port {} rejected the association for {execution_id}",
+                port.get()
+            )));
+        }
+
+        let (to_guest_tx, mut to_guest_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        let (from_guest_tx, from_guest_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        let relay_execution_id = execution_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                relay_microvm_udp(control, &mut to_guest_rx, from_guest_tx).await
+            {
+                tracing::warn!(
+                    execution_id = %relay_execution_id,
+                    guest_port = port.get(),
+                    error = %error,
+                    "MicroVM UDP relay failed"
+                );
+            }
+        });
+        Ok(Box::new(MicroVmUdpPort {
+            to_guest: to_guest_tx,
+            from_guest: from_guest_rx,
+        }) as ExecutionUdpPort)
+    };
+
+    tokio::time::timeout(timeout, connect).await.map_err(|_| {
+        ExecutionManagerError::Unavailable(format!(
+            "timed out connecting MicroVM UDP port {} for {execution_id}",
+            port.get()
+        ))
+    })?
+}
+
+#[cfg(target_os = "linux")]
+async fn relay_microvm_udp(
+    control: UnixStream,
+    to_guest: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    from_guest: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> std::io::Result<()> {
+    let (mut control_read, mut control_write) = control.into_split();
+    loop {
+        tokio::select! {
+            host = to_guest.recv() => {
+                let Some(payload) = host else {
+                    write_port_forward_frame(
+                        &mut control_write,
+                        PORT_FORWARD_FRAME_CLOSE,
+                        PORT_FORWARD_STREAM_ID,
+                        &[],
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                write_port_forward_frame(
+                    &mut control_write,
+                    PORT_FORWARD_FRAME_DATA,
+                    PORT_FORWARD_STREAM_ID,
+                    &payload,
+                )
+                .await?;
+            }
+            frame = read_port_forward_frame(&mut control_read) => {
+                let Some(frame) = frame? else {
+                    return Ok(());
+                };
+                if frame.stream_id != PORT_FORWARD_STREAM_ID {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "MicroVM UDP channel returned an unexpected stream ID",
+                    ));
+                }
+                match frame.kind {
+                    PORT_FORWARD_FRAME_DATA => {
+                        if from_guest.send(frame.payload).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    PORT_FORWARD_FRAME_CLOSE => return Ok(()),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "MicroVM UDP channel returned an unexpected frame",
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
