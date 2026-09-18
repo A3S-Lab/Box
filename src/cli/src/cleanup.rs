@@ -76,21 +76,14 @@ pub fn cleanup_record_resources(record: &BoxRecord) -> a3s_box_core::error::Resu
 }
 
 /// Remove a MicroVM's host cgroup `/sys/fs/cgroup/a3s-box/<id>`. The shim creates
-/// it for `--cpu-shares`/`--cpu-quota`/`--memory-reservation`/`--memory-swap`
-/// and — taking over the process via libkrun — can never remove it; an empty-dir
-/// `rmdir` on cgroupfs removes the cgroup once the shim PID is gone. Best-effort:
-/// absent (no host cgroup limits were set) or non-empty is fine. A3S OCI Runtime
-/// exclusively owns Sandbox cgroups and removes them through its delete path.
-pub(crate) fn remove_host_cgroup(record: &BoxRecord) {
+/// it for CPU/memory limits and, taking over the process via libkrun, cannot
+/// remove it. Absent is success. A still-busy cgroup fails closed after a short
+/// retry. A3S OCI Runtime owns Sandbox cgroups and removes them through delete.
+pub(crate) fn remove_host_cgroup(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
     if record.isolation.is_sandbox() {
-        return;
+        return Ok(());
     }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{}", record.id));
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = record;
+    a3s_box_runtime::process::remove_legacy_microvm_cgroup(&record.id)
 }
 
 /// Remove transient host resources for a stopped box while keeping its state.
@@ -108,8 +101,8 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     // do not invent a clean stop while merged remains mounted.
     a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
-    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-    remove_host_cgroup(record);
+    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
+    remove_host_cgroup(record)?;
     Ok(())
 }
 
@@ -146,23 +139,30 @@ pub(crate) fn cleanup_transient_secret_identity(
 }
 
 /// Remove the host-side socket directory when it lives outside the box dir.
-pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
+///
+/// Absent is success. A delete error fails closed so stop/remove cannot invent
+/// a clean host while the socket directory remains.
+pub fn cleanup_external_socket_dir(
+    box_dir: &Path,
+    exec_socket_path: &Path,
+) -> a3s_box_core::error::Result<()> {
     let Some(socket_dir) = exec_socket_path.parent() else {
-        return;
+        return Ok(());
     };
     // Reap the box's passt daemon (Linux bridge mode). passt outlives the
     // process that launched it, so box teardown terminates it via its PID file.
     #[cfg(target_os = "linux")]
     a3s_box_runtime::network::terminate_passt(socket_dir);
     if socket_dir.starts_with(box_dir) {
-        return;
+        return Ok(());
     }
-    if let Err(err) = std::fs::remove_dir_all(socket_dir) {
-        tracing::debug!(
-            path = %socket_dir.display(),
-            error = %err,
-            "Failed to remove external socket directory"
-        );
+    match std::fs::remove_dir_all(socket_dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(a3s_box_core::error::BoxError::Other(format!(
+            "Failed to remove external socket directory {}: {err}",
+            socket_dir.display()
+        ))),
     }
 }
 
@@ -191,7 +191,7 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     )?;
     cleanup_record_resources(record)?;
     cleanup_anonymous_volumes(&record.id, &record.anonymous_volumes)?;
-    remove_host_cgroup(record);
+    remove_host_cgroup(record)?;
 
     if record.box_dir.exists() {
         // Keep-authority DNAT/veth/MASQUERADE leases live under boxes/{id}/sandbox/.
@@ -231,15 +231,12 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
             }
         }
     }
-    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
+    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
 
-    // The shim stages single-file bind mounts in $TMPDIR/a3s-fs-mount-<box_id>
-    // and can never clean it up itself (it takes over the process via libkrun
-    // and never returns). Remove it here on box teardown.
-    let fs_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
-    if fs_mount_dir.exists() {
-        let _ = std::fs::remove_dir_all(&fs_mount_dir);
-    }
+    // The shim stages single-file virtio-fs binds as
+    // `$TMPDIR/a3s-fs-mount-<box_id>-<tag>` and cannot clean them up after
+    // libkrun takes over. Match that identity and fail closed if any remain.
+    a3s_box_runtime::fs::remove_file_mount_staging(&record.id)?;
     Ok(())
 }
 

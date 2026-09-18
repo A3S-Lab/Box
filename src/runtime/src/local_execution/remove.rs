@@ -161,8 +161,7 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
         })?;
     }
 
-    let bind_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
-    remove_tree_if_present(&bind_mount_dir)
+    crate::fs::remove_file_mount_staging(&record.id)
         .map_err(|error| cleanup_error(record, "remove temporary bind-mount staging", error))?;
 
     remove_host_cgroup(record)?;
@@ -227,26 +226,8 @@ fn remove_host_cgroup(record: &BoxRecord) -> ExecutionManagerResult<()> {
     if record.isolation.is_sandbox() {
         return Ok(());
     }
-    #[cfg(target_os = "linux")]
-    {
-        let path = PathBuf::from("/sys/fs/cgroup/a3s-box").join(&record.id);
-        for attempt in 0..50 {
-            match std::fs::remove_dir(&path) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) if attempt + 1 < 50 => {
-                    let _ = error;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(error) => {
-                    return Err(cleanup_error(record, "remove the host cgroup", error));
-                }
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = record;
-    Ok(())
+    crate::process::remove_legacy_microvm_cgroup(&record.id)
+        .map_err(|error| cleanup_error(record, "remove the host cgroup", error))
 }
 
 fn cleanup_error(

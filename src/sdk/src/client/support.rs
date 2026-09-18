@@ -392,10 +392,7 @@ struct ManagedStopPlan {
 }
 
 #[cfg(unix)]
-fn managed_stop_plan(
-    record: &BoxRecord,
-    timeout: Option<u64>,
-) -> Result<Option<ManagedStopPlan>> {
+fn managed_stop_plan(record: &BoxRecord, timeout: Option<u64>) -> Result<Option<ManagedStopPlan>> {
     let Some(metadata) = record.managed_execution.as_ref() else {
         return Ok(None);
     };
@@ -622,8 +619,8 @@ fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
         .map_err(ClientError::Runtime)?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
-    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-    remove_host_cgroup(record);
+    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
+    remove_host_cgroup(record)?;
     Ok(())
 }
 
@@ -635,7 +632,7 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     detach_volumes(paths, &record.volume_names, &record.id)?;
     cleanup_network_endpoint(paths, record)?;
     cleanup_anonymous_volumes(paths, &record.id, &record.anonymous_volumes)?;
-    remove_host_cgroup(record);
+    remove_host_cgroup(record)?;
     if record.box_dir.exists() {
         // Tear down keep-authority host-netdevice before wiping boxes/{id}.
         // Fail closed: retain dir and return Err so callers do not drop state
@@ -670,12 +667,8 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
             }
         }
     }
-    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-
-    let fs_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
-    if fs_mount_dir.exists() {
-        let _ = std::fs::remove_dir_all(fs_mount_dir);
-    }
+    cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
+    a3s_box_runtime::fs::remove_file_mount_staging(&record.id).map_err(ClientError::Runtime)?;
     Ok(())
 }
 
@@ -731,28 +724,32 @@ fn cleanup_network_endpoint(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<(
     Ok(())
 }
 
-fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
+fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) -> Result<()> {
     let Some(socket_dir) = exec_socket_path.parent() else {
-        return;
+        return Ok(());
     };
     #[cfg(target_os = "linux")]
     a3s_box_runtime::network::terminate_passt(socket_dir);
     if socket_dir.starts_with(box_dir) {
-        return;
+        return Ok(());
     }
-    let _ = std::fs::remove_dir_all(socket_dir);
+    match std::fs::remove_dir_all(socket_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ClientError::Runtime(a3s_box_core::error::BoxError::Other(
+            format!(
+                "Failed to remove external socket directory {}: {error}",
+                socket_dir.display()
+            ),
+        ))),
+    }
 }
 
-fn remove_host_cgroup(record: &BoxRecord) {
+fn remove_host_cgroup(record: &BoxRecord) -> Result<()> {
     if record.isolation.is_sandbox() {
-        return;
+        return Ok(());
     }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{}", record.id));
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = record;
+    a3s_box_runtime::process::remove_legacy_microvm_cgroup(&record.id).map_err(ClientError::Runtime)
 }
 
 #[cfg(unix)]

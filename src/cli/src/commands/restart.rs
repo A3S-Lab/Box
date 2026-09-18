@@ -130,7 +130,7 @@ async fn restart_one(
         // Update state to stopped — atomically (load-fresh + mutate + save under
         // the lock) so the post-await write cannot clobber a concurrent
         // monitor/run/command writer with our pre-await snapshot.
-        crate::cleanup::cleanup_external_socket_dir(&box_dir, &exec_socket_path);
+        crate::cleanup::cleanup_external_socket_dir(&box_dir, &exec_socket_path)?;
         let expected_pid_start_time = record.pid_start_time;
         let persisted = StateFile::modify(|s| {
             let updated = match s.find_by_id_mut(&box_id) {
