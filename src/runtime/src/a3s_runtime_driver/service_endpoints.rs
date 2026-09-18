@@ -191,8 +191,9 @@ impl ServiceEndpointOwner {
                             port.name
                         ))
                     })?;
-                    let endpoint = RuntimeServiceEndpoint::node_local_tcp(&port.name, address.port())
-                        .map_err(RuntimeError::Protocol)?;
+                    let endpoint =
+                        RuntimeServiceEndpoint::node_local_tcp(&port.name, address.port())
+                            .map_err(RuntimeError::Protocol)?;
                     staged.push(StagedListener::Tcp {
                         listener,
                         endpoint,

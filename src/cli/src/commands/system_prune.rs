@@ -60,9 +60,8 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
         .collect();
 
     for record in &to_remove {
-        crate::cleanup::cleanup_removed_box(record).map_err(|error| {
-            system_prune_box_cleanup_error(&record.id, error)
-        })?;
+        crate::cleanup::cleanup_removed_box(record)
+            .map_err(|error| system_prune_box_cleanup_error(&record.id, error))?;
         state.remove(&record.id).map_err(|error| {
             format!(
                 "Failed to remove system-pruned Box {} from state after host cleanup: {error}",
@@ -92,11 +91,8 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
         let image_size_before = store.total_size().await;
 
         for image in &all_images {
-            if !image_usage::is_prunable_reference(
-                &image.reference,
-                &protected_images,
-                prune_mode,
-            ) {
+            if !image_usage::is_prunable_reference(&image.reference, &protected_images, prune_mode)
+            {
                 continue;
             }
             match store.remove(&image.reference).await {
@@ -111,8 +107,8 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
         }
         // Multiple references can share one content directory.  Account
         // for the actual content delta, not one image size per tag.
-        space_freed = space_freed
-            .saturating_add(image_size_before.saturating_sub(store.total_size().await));
+        space_freed =
+            space_freed.saturating_add(image_size_before.saturating_sub(store.total_size().await));
     }
     if !image_errors.is_empty() {
         return Err(system_prune_image_errors(image_errors));

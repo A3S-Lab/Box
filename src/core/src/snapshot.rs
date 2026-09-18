@@ -245,7 +245,9 @@ impl SnapshotMetadata {
 
     /// True when restore must not invent a MicroVM box from a managed Sandbox capture.
     pub fn is_managed_sandbox_oci_capture(&self) -> bool {
-        self.labels.get(MANAGED_SANDBOX_OCI_CAPTURE_LABEL).map(String::as_str)
+        self.labels
+            .get(MANAGED_SANDBOX_OCI_CAPTURE_LABEL)
+            .map(String::as_str)
             == Some(MANAGED_SANDBOX_OCI_CAPTURE_VALUE)
     }
 
@@ -501,10 +503,7 @@ mod tests {
             error.to_string().contains("managed SandboxViaOci capture"),
             "{error}"
         );
-        assert!(
-            error.to_string().contains("rootfs_snapshot_id"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("rootfs_snapshot_id"), "{error}");
     }
 
     #[test]

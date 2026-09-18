@@ -587,10 +587,7 @@ pub fn try_create_managed_sandbox_diff_baseline_if_absent(
 ///
 /// Requires a retained ID-mapping artifact under `box_dir`. First-writer-wins.
 #[cfg(target_os = "linux")]
-pub fn create_managed_sandbox_diff_baseline_if_absent(
-    box_dir: &Path,
-    rootfs: &Path,
-) -> Result<()> {
+pub fn create_managed_sandbox_diff_baseline_if_absent(box_dir: &Path, rootfs: &Path) -> Result<()> {
     if try_create_managed_sandbox_diff_baseline_if_absent(box_dir, rootfs)? {
         return Ok(());
     }

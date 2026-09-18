@@ -12,7 +12,8 @@ use super::{BoxLayout, VmManager};
 
 mod paths;
 pub(crate) use paths::{
-    ensure_runtime_socket_dir, legacy_sandbox_runtime_root, runtime_socket_dir, sandbox_runtime_root,
+    ensure_runtime_socket_dir, legacy_sandbox_runtime_root, runtime_socket_dir,
+    sandbox_runtime_root,
 };
 
 mod image;

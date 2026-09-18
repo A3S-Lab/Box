@@ -316,7 +316,8 @@ impl OciBundleProvider for NativeLinuxOciBundleProvider {
             }
         };
         let attachments = match super::oci_storage_attachments::reject_unclassified_bind_mounts(
-            &bundle, attachments,
+            &bundle,
+            attachments,
         ) {
             Ok(attachments) => attachments,
             Err(error) => {

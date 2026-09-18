@@ -592,7 +592,9 @@ fn microvm_fails_closed_when_anonymous_volume_claim_is_rejected() {
         "default isolation must exercise the MicroVM fail-closed path"
     );
 
-    let planned = vm.plan_anonymous_volumes(layout.oci_config.as_ref().unwrap()).unwrap();
+    let planned = vm
+        .plan_anonymous_volumes(layout.oci_config.as_ref().unwrap())
+        .unwrap();
     assert_eq!(planned.len(), 1);
     let store = crate::volume::VolumeStore::new(
         home.path().join("volumes.json"),

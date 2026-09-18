@@ -24,12 +24,9 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
     // Fail closed on state load so we cannot invent an empty protect set and
     // delete in-use images (system-prune image-phase parity).
     let state = StateFile::load_default().map_err(|error| {
-        format!(
-            "Failed to load box state for image-prune: {error}; refusing image-prune success"
-        )
+        format!("Failed to load box state for image-prune: {error}; refusing image-prune success")
     })?;
-    let protected_images =
-        image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
+    let protected_images = image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
     let prune_mode = prune_mode(args.all);
 
     let all_images = store.list().await;

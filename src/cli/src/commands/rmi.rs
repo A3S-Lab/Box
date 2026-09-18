@@ -23,8 +23,7 @@ pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default().map_err(|error| {
         format!("Failed to load box state for rmi: {error}; refusing rmi success")
     })?;
-    let protected_images =
-        image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
+    let protected_images = image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
 
     let mut errors: Vec<String> = Vec::new();
 
