@@ -51,26 +51,29 @@ impl A3sBoxClient {
 
     /// Remove all created, stopped, and dead boxes from SDK-managed state.
     ///
-    /// Running and paused boxes are kept. Host-side runtime resources for each
-    /// removed box are cleaned up after the records are removed under the state
-    /// lock, so concurrent readers no longer observe pruned boxes.
+    /// Running and paused boxes are kept. Host-side cleanup runs before state
+    /// deletion so a failed lease/:ro detach cannot invent prune success while
+    /// host fabric remains.
     pub fn prune_boxes(&self) -> Result<Vec<RemoveBoxSummary>> {
         let records = StateFile::modify(&self.paths.boxes_file, |state| {
-            let records = state
+            Ok(state
                 .list(true)
                 .into_iter()
                 .filter(|record| is_prunable_box_record(record))
                 .cloned()
-                .collect::<Vec<_>>();
-            for record in &records {
-                state.remove_by_id(&record.id);
-            }
-            Ok(records)
+                .collect::<Vec<_>>())
         })?;
 
         for record in &records {
             cleanup_removed_box(&self.paths, record)?;
         }
+
+        StateFile::modify(&self.paths.boxes_file, |state| {
+            for record in &records {
+                state.remove_by_id(&record.id);
+            }
+            Ok(())
+        })?;
 
         Ok(records
             .into_iter()

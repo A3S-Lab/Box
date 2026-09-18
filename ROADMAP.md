@@ -852,7 +852,9 @@ open and harness reports still keep
   (`a3s.box.bind.{slot}`) into `a3s.oci.attachments.v2` (caller-owned
   DetachOnly). Remaining unclassified external binds fail closed at create.
   Legacy CLI/SDK stop/remove volume detach and anonymous volume removal fail
-  closed like managed cleanup; `VolumeStore::prune` only reports actually
+  closed like managed cleanup; SDK remove/prune also fail closed on
+  host-netdevice / MicroVM `:ro` detach and box-dir wipe (no invent-Ok while
+  retaining host claim); `VolumeStore::prune` only reports actually
   removed volumes and fails closed on non-idempotent remove errors; managed
   MicroVM destroy anonymous-volume cleanup fails closed like OCI remove.
   Image/build/snapshot/commit descriptor handoff, network v3, Windows volume

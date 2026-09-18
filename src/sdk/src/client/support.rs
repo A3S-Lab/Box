@@ -520,24 +520,35 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     remove_host_cgroup(record);
     if record.box_dir.exists() {
         // Tear down keep-authority host-netdevice before wiping boxes/{id}.
-        // On teardown failure retain the dir so durable claim is not dropped
-        // while host DNAT/veth/MASQUERADE may remain.
-        if let Err(_error) =
-            a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&paths.home, &record.id)
-        {
-            // Retain boxes/{id} (and the lease claim) for a later fail-closed
-            // retry; do not wipe durable claim while host NAT may remain.
-            cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-            return Ok(());
-        }
-        if let Err(_error) =
-            a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&record.box_dir)
-        {
-            cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-            return Ok(());
-        }
+        // Fail closed: retain dir and return Err so callers do not drop state
+        // while DNAT/veth/MASQUERADE may remain (CLI parity).
+        a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&paths.home, &record.id).map_err(
+            |error| {
+                ClientError::Runtime(a3s_box_core::error::BoxError::Other(format!(
+                    "Failed to tear down SandboxViaOci host netdevice lease for {}: {error}",
+                    record.id
+                )))
+            },
+        )?;
+        a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&record.box_dir).map_err(|error| {
+            ClientError::Runtime(a3s_box_core::error::BoxError::Other(format!(
+                "Failed to detach MicroVM :ro virtio-fs aliases for {}: {error}",
+                record.id
+            )))
+        })?;
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
-        let _ = std::fs::remove_dir_all(&record.box_dir);
+        match std::fs::remove_dir_all(&record.box_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ClientError::Runtime(a3s_box_core::error::BoxError::Other(
+                    format!(
+                        "Failed to remove box directory {}: {error}",
+                        record.box_dir.display()
+                    ),
+                )));
+            }
+        }
     }
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
 

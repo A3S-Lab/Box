@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- SDK `cleanup_removed_box` fails closed on host-netdevice / MicroVM `:ro`
+  detach and box-dir wipe (CLI parity) instead of retaining the dir while
+  returning `Ok` and dropping state; `prune_boxes` cleans host resources before
+  deleting state. Does **not** close ROADMAP B3/B2.
 - Orphan crash-recovery reap detaches MicroVM `:ro` virtio-fs host RO-bind
   aliases before wiping `boxes/{id}` (retain dir on detach failure), matching
   destroy/boot-failure/#528. Does **not** close ROADMAP B3/B2.
