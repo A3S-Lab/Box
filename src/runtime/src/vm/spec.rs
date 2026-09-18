@@ -178,13 +178,14 @@ impl VmManager {
         }
 
         for (planned, anon_name) in materialization_plan {
-            // Create the volume via VolumeStore (best-effort)
+            // Image-declared anonymous volumes are part of the durable Box
+            // ownership contract for every isolation. Soft-skipping on MicroVM
+            // would boot without the planned VOLUME persistence surface.
             match self.create_anonymous_volume(&anon_name) {
                 Ok((host_path, created)) => {
                     // `workspace` is the only non-volume mount before this
                     // sequence, so the next fs-mount position is the exact
-                    // contiguous volume tag even when a MicroVM best-effort
-                    // anonymous claim was skipped.
+                    // contiguous volume tag.
                     let tag = format!("vol{}", fs_mounts.len().saturating_sub(1));
                     fs_mounts.push(FsMount {
                         tag: tag.clone(),
@@ -206,20 +207,13 @@ impl VmManager {
                     );
                 }
                 Err(e) => {
-                    if self.config.isolation.is_sandbox() {
-                        return Err(BoxError::BoxBootError {
-                            message: format!(
-                                "Failed to create required Sandbox anonymous volume for {}: {e}",
-                                planned.guest_path
-                            ),
-                            hint: None,
-                        });
-                    }
-                    tracing::warn!(
-                        path = %planned.guest_path,
-                        error = %e,
-                        "Failed to create anonymous volume, skipping"
-                    );
+                    return Err(BoxError::BoxBootError {
+                        message: format!(
+                            "Failed to create required anonymous volume for {}: {e}",
+                            planned.guest_path
+                        ),
+                        hint: None,
+                    });
                 }
             }
         }

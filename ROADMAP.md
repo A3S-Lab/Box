@@ -906,7 +906,7 @@ The production provider accepts explicit bind/named/tmpfs mounts and now plans
 image-declared anonymous volumes without creating execution artifacts. Bundle
 preparation must reproduce the exact persisted plan before Runtime mutation;
 name collisions, ownership drift, duplicate destinations, and unsafe identities
-fail closed. Image content accounting, cross-process index refresh, per-digest
+fail closed for Sandbox and MicroVM materialization alike. Image content accounting, cross-process index refresh, per-digest
 content publication/removal locking, cache-key confinement, and volume cleanup
 are now covered by focused race and recovery tests. Warm-pool initial fill and
 replenishment share a configurable `max_concurrent_boots` limit (default `2`),
