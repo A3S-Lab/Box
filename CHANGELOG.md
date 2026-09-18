@@ -6,14 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
-<<<<<<< HEAD
 - Linux MicroVM `:ro` volumes stage a private host bind remounted `MS_RDONLY`
   before virtio-fs attach (guest `MS_RDONLY` alone is not host write denial).
   Aligns with SandboxViaOci RO attachment aliases. Non-Linux remains
   guest-honor-only until native share denial exists. Does **not** invent
   Windows durable POSIX UID/GID on virtio-fs, close ROADMAP B3/B2, or claim
   UDP/publish gates.
-=======
 - Managed Linux SandboxViaOci `diff` baseline is captured from OCI-mapped rootfs
   metadata (same mode/size contract as live/stopped host-rootfs `diff`) and
   fails closed on prepare instead of silently installing a host-subordinate
@@ -34,7 +32,6 @@ All notable changes to A3S Box will be documented in this file.
   baseline-create failures before workload launch instead of warn-and-continue.
   Does **not** close ROADMAP B3/B2, invent live digests, or claim SandboxViaOci
   OCI-map baseline parity.
->>>>>>> origin/main
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
@@ -49,6 +46,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Compose `--isolation sandbox` admits static TCP published ports under
+  keep-authority Bridge (same DNAT contract as CLI/SDK). Still rejects UDP and
+  `host_port=0`; without keep-authority ports stay fail-closed. Does **not**
+  close ROADMAP B4/B3/B2 or claim UDP/auto-assign/rootless/Windows Compose
+  publish.
 - Native Linux SandboxViaOci prepare classifies staged caller bind aliases under
   `sandbox/attachments/{slot}` into `a3s.oci.attachments.v2` as
   `a3s.box.bind.{slot}` (Caller + DetachOnly), so prepare-rewritten `-v` binds
@@ -73,9 +75,9 @@ All notable changes to A3S Box will be documented in this file.
 - Keep-authority SandboxViaOci Bridge static TCP published ports (CLI/SDK):
   admit `port_map` only with Bridge + keep-authority; install per-box iptables
   DNAT (PREROUTING + localhost OUTPUT) and FORWARD accept to the NetworkStore
-  endpoint IP. Rejects `host_port=0`. Compose sandbox published ports stay
-  fail-closed. Does **not** close ROADMAP B3/B4/B2 or claim UDP/auto-assign/
-  rootless publish.
+  endpoint IP. Rejects `host_port=0`. Compose sandbox published ports use the
+  same keep-authority Bridge admission (see above). Does **not** close ROADMAP
+  B3/B4/B2 or claim UDP/auto-assign/rootless publish.
 
 ### Fixed
 
@@ -98,8 +100,9 @@ All notable changes to A3S Box will be documented in this file.
   `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` is set: create
   NetworkStore networks and preserve Bridge on service configs so SandboxViaOci
   host netDevices staging can run. Without the env, named networks still
-  fail-closed (loopback-only GA). Published ports remain fail-closed. Does
-  **not** close ROADMAP B4/B3/B2 or claim NAT/DNS/publish parity.
+  fail-closed (loopback-only GA). Keep-authority published TCP ports are
+  unlocked separately (see Added). Does **not** close ROADMAP B4/B3/B2 or claim
+  NAT/DNS/UDP/auto-assign Compose publish parity.
 - Keep-authority SandboxViaOci Bridge gateway: assign NetworkStore gateway/CIDR
   on the Box Linux bridge and install a default route via that gateway on the
   container veth end (moves with Create into the runtime netns). Does **not**

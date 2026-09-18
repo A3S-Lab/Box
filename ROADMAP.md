@@ -865,14 +865,15 @@ open and harness reports still keep
   and installs the NetworkStore gateway on the bridge plus a default route on
   the container end, with host `ip_forward` + per-subnet iptables MASQUERADE for
   egress and NetworkStore peer `/etc/hosts` discovery, plus optional static TCP
-  DNAT publication (CLI/SDK; Compose ports still fail-closed). Product
-  admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a concrete
-  ephemeral host port before boot so backends do not silently drop unresolved
-  auto-assign. MicroVM bridge `passt` likewise rejects unresolved
+  DNAT publication (CLI/SDK and Compose sandbox under keep-authority Bridge).
+  Product admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a
+  concrete ephemeral host port before boot so backends do not silently drop
+  unresolved auto-assign. MicroVM bridge `passt` rejects unresolved
   `host_port=0` / invalid publish entries instead of silent skip. GA default
-  remains delegated rootless/`base_v2` loopback-only. CNI, UDP publish, DNS
-  server/proxy, multi-device, rootless/MicroVM/Windows parity, and the B3 exit
-  gate remain open. Does **not** flip `b2_process_session_recovery_closed`.
+  remains delegated rootless/`base_v2` loopback-only. CNI, UDP/auto-assign
+  publish, DNS server/proxy, multi-device, rootless/MicroVM/Windows parity, and
+  the B3 exit gate remain open. Does **not** flip
+  `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata
@@ -939,9 +940,10 @@ guest endpoint.
   `LocalExecutionManager` / SandboxViaOci (same create/start/remove path as
   CLI/SDK), including session-exec health probes and `service_healthy` waits.
   Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` also creates
-  NetworkStore named bridges for Sandbox Compose. Published ports, warm-pool,
-  MicroVM Compose cutover, and the B4 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  NetworkStore named bridges for Sandbox Compose and admits static TCP
+  published ports (CLI/SDK DNAT contract; UDP/`host_port=0` still refused).
+  Warm-pool, MicroVM Compose cutover, and the B4 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep `a3s-box-cri` only as an optional full product adapter; it must use
   the same execution adapter and must not spawn the Box CLI.
 - [ ] Make the OCI Runtime-owned containerd shim the preferred Kubernetes
