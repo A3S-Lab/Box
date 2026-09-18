@@ -574,6 +574,47 @@ fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMeta
     Ok(result)
 }
 
+/// Refuse unprivileged directory MicroVM boots whose image metadata declares
+/// ownership the host virtio-fs share cannot represent or `chown` (#562).
+///
+/// Layer UID/GID restore is root-only. Under `geteuid() != 0`, extract collapses
+/// on-disk ownership to the host identity while metadata still records tar
+/// UIDs/GIDs. Guest `chown` to those foreign IDs returns `EPERM` on same-UID
+/// virtio-fs, so nginx/postgres-class images die after create. Fail closed here
+/// instead of inventing a live-then-dead box.
+///
+/// Allowed when every recorded uid is in `{0, euid}` and every gid is in
+/// `{0, egid}`. Guest-native ext4 / Sandbox userns paths must not call this.
+/// Missing metadata is treated as empty (admit).
+#[cfg(unix)]
+pub(crate) fn admit_unprivileged_same_uid_directory_rootfs(rootfs: &Path) -> Result<()> {
+    // SAFETY: geteuid/getegid have no pointer arguments.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        return Ok(());
+    }
+    let egid = unsafe { libc::getegid() } as u64;
+    let euid = euid as u64;
+    let metadata = load_image_metadata(rootfs)?;
+    let foreign = metadata.values().any(|entry| {
+        (entry.uid != 0 && entry.uid != euid) || (entry.gid != 0 && entry.gid != egid)
+    });
+    if !foreign {
+        return Ok(());
+    }
+    Err(BoxError::BoxBootError {
+        message: "unprivileged MicroVM rejected: Linux directory rootfs is same-UID virtio-fs only; this image declares UIDs/GIDs outside {0, host euid/egid}".into(),
+        hint: Some(
+            "Guest chown to those IDs returns EPERM, and unprivileged extract cannot restore layer ownership. Re-run as root (e.g. sudo a3s-box run), use a same-UID image, or a transport that stores Linux ownership (macOS guest-native ext4 / Windows WHPX portable metadata).".into(),
+        ),
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn admit_unprivileged_same_uid_directory_rootfs(_rootfs: &Path) -> Result<()> {
+    Ok(())
+}
+
 pub(crate) fn finalize_rootfs_metadata(target_dir: &Path) -> Result<()> {
     let mut metadata = load_image_metadata(target_dir)?;
     let mut directory_guards = LayerParentWriteGuards::default();
@@ -2306,5 +2347,82 @@ mod tests {
             fs::read_to_string(target_dir.join("p.txt")).unwrap(),
             "plain"
         );
+    }
+
+    #[cfg(unix)]
+    fn write_image_metadata_for_admit(target: &Path, uid: u64, gid: u64) {
+        let entry = RootfsMetadataEntry {
+            path_base64: base64::engine::general_purpose::STANDARD
+                .encode(archive_metadata_path_bytes(Path::new("var/lib/app"))),
+            kind: RootfsEntryKind::Directory,
+            mode: 0o755,
+            uid,
+            gid,
+            mtime: 0,
+            size: 0,
+            link_target_base64: None,
+        };
+        let manifest = RootfsMetadataManifest::new(vec![entry]);
+        let path = target.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admit_same_uid_allows_root_owned_metadata_when_unprivileged() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        write_image_metadata_for_admit(&target, 0, 0);
+        admit_unprivileged_same_uid_directory_rootfs(&target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admit_same_uid_allows_host_owned_metadata_when_unprivileged() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        let euid = unsafe { libc::geteuid() } as u64;
+        let egid = unsafe { libc::getegid() } as u64;
+        write_image_metadata_for_admit(&target, euid, egid);
+        admit_unprivileged_same_uid_directory_rootfs(&target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admit_same_uid_rejects_foreign_uid_metadata_when_unprivileged() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        write_image_metadata_for_admit(&target, 101, 101);
+        let error = admit_unprivileged_same_uid_directory_rootfs(&target).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("same-UID virtio-fs"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admit_same_uid_is_noop_for_effective_root() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        write_image_metadata_for_admit(&target, 101, 101);
+        admit_unprivileged_same_uid_directory_rootfs(&target).unwrap();
     }
 }

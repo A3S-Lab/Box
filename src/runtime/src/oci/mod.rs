@@ -56,6 +56,7 @@ pub use image::{OciHealthCheck, OciImage, OciImageConfig};
 pub use layers::extract_layer;
 #[cfg(test)]
 pub(crate) use layers::extract_layer_with_metadata;
+pub(crate) use layers::admit_unprivileged_same_uid_directory_rootfs;
 pub use pull::{prune_stale_pull_temp_dirs, ImagePuller, PullTempPruneResult};
 pub use reference::ImageReference;
 pub use registry::{
