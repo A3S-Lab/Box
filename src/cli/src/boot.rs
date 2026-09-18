@@ -309,14 +309,9 @@ pub async fn boot_from_record(
     }
     resource_guard.disarm();
 
-    // Create rootfs baseline snapshot for `diff` command (best-effort).
-    if let Err(error) = crate::commands::diff::create_box_baseline_snapshot(&record.box_dir) {
-        tracing::warn!(
-            box_id = %record.id,
-            error = %error,
-            "Failed to create rootfs diff baseline snapshot"
-        );
-    }
+    // Create rootfs baseline snapshot for `diff` — fail closed so boot cannot
+    // claim success without a durable baseline (ROADMAP B3 honesty).
+    crate::commands::diff::create_box_baseline_snapshot(&record.box_dir)?;
 
     // Ensure the log dir exists so the shim's container.json (and console.log)
     // have a home; the shim itself runs the log processor.

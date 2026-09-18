@@ -432,7 +432,11 @@ pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) else {
-        return Ok(());
+        return Err(format!(
+            "refusing to invent a rootfs diff baseline without a resolved rootfs under {}",
+            box_dir.display()
+        )
+        .into());
     };
     #[cfg(target_os = "linux")]
     {

@@ -205,13 +205,7 @@ pub(super) async fn setup_and_boot(
     let anonymous_volumes = record.anonymous_volumes.clone();
 
     if should_create_diff_baseline(args) {
-        if let Err(error) = crate::commands::diff::create_box_baseline_snapshot(&box_dir) {
-            tracing::warn!(
-                box_id = %box_id,
-                error = %error,
-                "Failed to create rootfs diff baseline snapshot"
-            );
-        }
+        crate::commands::diff::create_box_baseline_snapshot(&box_dir)?;
     } else {
         tracing::debug!(
             box_id = %box_id,

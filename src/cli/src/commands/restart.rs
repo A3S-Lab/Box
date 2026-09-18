@@ -95,7 +95,7 @@ async fn restart_one(
                 RestartExecutionOptions { stop_timeout_secs },
             )
             .await?;
-        create_baseline_snapshot(&box_id, &box_dir).await;
+        create_baseline_snapshot(&box_id, &box_dir).await?;
 
         let current = StateFile::load_default()?;
         let record = current
@@ -176,7 +176,10 @@ async fn restart_one(
     Ok(())
 }
 
-pub(crate) async fn create_baseline_snapshot(box_id: &str, box_dir: &std::path::Path) {
+pub(crate) async fn create_baseline_snapshot(
+    box_id: &str,
+    box_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let baseline_box_dir = box_dir.to_path_buf();
     let baseline_box_id = box_id.to_string();
     match tokio::task::spawn_blocking(move || {
@@ -185,21 +188,15 @@ pub(crate) async fn create_baseline_snapshot(box_id: &str, box_dir: &std::path::
     })
     .await
     {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(
-                box_id = %baseline_box_id,
-                %error,
-                "Failed to create rootfs diff baseline snapshot after restart"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                box_id = %baseline_box_id,
-                %error,
-                "Rootfs diff baseline task failed after restart"
-            );
-        }
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!(
+            "restarted {baseline_box_id} but refused to invent success without a rootfs diff baseline: {error}"
+        )
+        .into()),
+        Err(error) => Err(format!(
+            "restarted {baseline_box_id} but rootfs diff baseline task failed: {error}"
+        )
+        .into()),
     }
 }
 
