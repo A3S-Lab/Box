@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Keep-authority SandboxViaOci published TCP DNAT teardown fails closed when
+  `iptables -D` cannot remove a still-present rule (lease file retained for
+  retry) instead of swallowing delete failures and dropping durable lease
+  state. Missing rules remain success. Does **not** close ROADMAP B3/B4/B2 or
+  claim UDP/Compose publish teardown parity.
 - Linux MicroVM `:ro` volumes stage a private host bind remounted `MS_RDONLY`
   before virtio-fs attach (guest `MS_RDONLY` alone is not host write denial).
   Aligns with SandboxViaOci RO attachment aliases. Non-Linux remains
