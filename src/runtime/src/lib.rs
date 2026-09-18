@@ -90,6 +90,26 @@ pub use local_execution::{
     OciMigrationPolicy, OciPreparedExecution, OciRuntimeBinding, OciRuntimeEndpoint,
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
+
+/// Tear down a keep-authority SandboxViaOci host-netdevice lease under
+/// `home_dir/boxes/{box_id}/sandbox/`. Absent lease is success; present
+/// rule/link delete failures retain the lease file for retry.
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub fn teardown_sandbox_host_netdevice_lease(
+    home_dir: &std::path::Path,
+    box_id: &str,
+) -> a3s_box_core::ExecutionManagerResult<()> {
+    local_execution::oci_host_netdevice::teardown_lease(home_dir, box_id)
+}
+
+/// Non-Linux / no-vm: keep-authority host netdevice leases are not staged.
+#[cfg(not(all(feature = "vm", target_os = "linux")))]
+pub fn teardown_sandbox_host_netdevice_lease(
+    _home_dir: &std::path::Path,
+    _box_id: &str,
+) -> a3s_box_core::ExecutionManagerResult<()> {
+    Ok(())
+}
 #[cfg(feature = "vm")]
 pub use local_execution::{
     LinuxKvmOciBundleProvider, LinuxKvmOciMigrationConfig, NativeLinuxOciBundleProvider,

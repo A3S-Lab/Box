@@ -180,6 +180,19 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     remove_host_cgroup(record);
 
     if record.box_dir.exists() {
+        // Keep-authority DNAT/veth/MASQUERADE leases live under boxes/{id}/sandbox/.
+        // Tear down before wiping the claim; fail closed so present publish rules
+        // cannot outlive durable lease state (same contract as managed remove).
+        let home = a3s_box_core::dirs_home();
+        a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&home, &record.id).map_err(
+            |error| {
+                a3s_box_core::error::BoxError::Other(format!(
+                    "Failed to tear down SandboxViaOci host netdevice lease for {}: {error}",
+                    record.id
+                ))
+            },
+        )?;
+
         // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes
         // into the live mount ("Stale file handle") and leaks it.
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));

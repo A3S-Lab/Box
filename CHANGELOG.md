@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Legacy CLI `cleanup_removed_box` and Compose partial-service wipe tear down
+  keep-authority host-netdevice leases before deleting `boxes/{id}` (fail
+  closed / retain dir on teardown failure), matching managed remove and orphan
+  reap. Does **not** close ROADMAP B3/B4/B2 or claim UDP publish teardown parity.
 - Orphan Sandbox crash-recovery reap tears down keep-authority host-netdevice
   leases before wiping `boxes/{id}` and retains the directory when teardown
   fails (same contract as boot-failure / managed remove). Does **not** close
