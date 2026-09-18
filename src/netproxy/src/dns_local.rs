@@ -92,6 +92,123 @@ fn build_a_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Config for answering NetworkStore DNS A queries on a raw Ethernet path
+/// (Linux passt_bridge). Guests query configured upstream IPs on UDP/53.
+#[derive(Clone)]
+pub struct NetworkDnsConfig {
+    pub networks_json: std::path::PathBuf,
+    pub network_name: String,
+    pub dns_servers: Vec<Ipv4Addr>,
+}
+
+/// If `frame` is IPv4 UDP/53 to a configured DNS server for a NetworkStore name,
+/// return a full Ethernet reply frame. Otherwise `None` (forward upstream).
+pub(crate) fn try_ethernet_network_a_reply(
+    frame: &[u8],
+    config: &NetworkDnsConfig,
+) -> Option<Vec<u8>> {
+    // Ethernet: dst(6) src(6) type(2) + IPv4
+    if frame.len() < 14 + 20 + 8 {
+        return None;
+    }
+    if frame[12..14] != [0x08, 0x00] {
+        return None;
+    }
+    let ip = &frame[14..];
+    let ihl = (ip[0] & 0x0f) as usize * 4;
+    if ihl < 20 || frame.len() < 14 + ihl + 8 {
+        return None;
+    }
+    if ip[9] != 17 {
+        return None; // UDP
+    }
+    let dst_ip = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
+    if !config.dns_servers.iter().any(|server| *server == dst_ip) {
+        return None;
+    }
+    let udp = &ip[ihl..];
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    if dst_port != 53 {
+        return None;
+    }
+    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp_len < 8 || udp.len() < udp_len {
+        return None;
+    }
+    let query = &udp[8..udp_len];
+    let dns_payload =
+        try_network_a_response(query, &config.networks_json, &config.network_name)?;
+
+    let src_mac = [
+        frame[6], frame[7], frame[8], frame[9], frame[10], frame[11],
+    ];
+    let dst_mac = [
+        frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+    ];
+    let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+
+    Some(build_ipv4_udp_ethernet_frame(
+        dst_mac, // reply src = original dst (gateway)
+        src_mac, // reply dst = guest
+        dst_ip,  // reply src IP = DNS server
+        src_ip,  // reply dst IP = guest
+        53,
+        src_port,
+        &dns_payload,
+    ))
+}
+
+fn build_ipv4_udp_ethernet_frame(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = 8 + payload.len();
+    let ip_len = 20 + udp_len;
+    let mut frame = Vec::with_capacity(14 + ip_len);
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&[0x08, 0x00]);
+
+    let mut ip_header = [0u8; 20];
+    ip_header[0] = 0x45; // v4, IHL=5
+    ip_header[1] = 0;
+    ip_header[2] = (ip_len >> 8) as u8;
+    ip_header[3] = (ip_len & 0xff) as u8;
+    ip_header[6] = 0x40; // DF
+    ip_header[8] = 64; // TTL
+    ip_header[9] = 17; // UDP
+    ip_header[12..16].copy_from_slice(&src_ip.octets());
+    ip_header[16..20].copy_from_slice(&dst_ip.octets());
+    let checksum = ipv4_header_checksum(&ip_header);
+    ip_header[10] = (checksum >> 8) as u8;
+    ip_header[11] = (checksum & 0xff) as u8;
+    frame.extend_from_slice(&ip_header);
+
+    frame.extend_from_slice(&src_port.to_be_bytes());
+    frame.extend_from_slice(&dst_port.to_be_bytes());
+    frame.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    frame.extend_from_slice(&0u16.to_be_bytes()); // UDP checksum optional (0)
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn ipv4_header_checksum(header: &[u8; 20]) -> u16 {
+    let mut sum = 0u32;
+    for chunk in header.chunks_exact(2) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +263,39 @@ mod tests {
         let body = serde_json::json!({ "networks": { "mynet": net } });
         std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
         assert!(try_network_a_response(&encode_query("example.com"), &path, "mynet").is_none());
+    }
+
+    #[test]
+    fn ethernet_udp_dns_a_reply_for_registered_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let ep = net
+            .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+            .unwrap();
+        let body = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+
+        let dns_server = Ipv4Addr::new(8, 8, 8, 8);
+        let guest_ip = Ipv4Addr::new(10, 88, 0, 2);
+        let query = encode_query("db");
+        let frame = build_ipv4_udp_ethernet_frame(
+            [0x02, 0x42, 0x0a, 0x58, 0x00, 0x02],
+            [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            guest_ip,
+            dns_server,
+            53000,
+            53,
+            &query,
+        );
+        let config = NetworkDnsConfig {
+            networks_json: path,
+            network_name: "mynet".into(),
+            dns_servers: vec![dns_server],
+        };
+        let reply = try_ethernet_network_a_reply(&frame, &config).unwrap();
+        assert_eq!(&reply[0..6], &frame[6..12]); // dst = guest
+        assert_eq!(&reply[6..12], &frame[0..6]); // src = gateway
+        assert_eq!(&reply[reply.len() - 4..], &ep.ip_address.octets());
     }
 }

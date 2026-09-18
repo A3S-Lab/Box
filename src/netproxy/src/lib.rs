@@ -7,8 +7,8 @@
 //!
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries answered for NetworkStore names/aliases when a
-//!   bridge `networks.json` is configured, otherwise forwarded to the host's
-//!   configured DNS servers.
+//!   bridge `networks.json` is configured (macOS netproxy and Linux
+//!   passt_bridge), otherwise forwarded to the host's configured DNS servers.
 //! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
 //!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
 //!   `"5353:53/udp"`).
@@ -50,6 +50,7 @@ use manager::write_stats_file;
 
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 pub use passt_bridge::spawn_inherited_passt_bridge;
+pub use dns_local::NetworkDnsConfig;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

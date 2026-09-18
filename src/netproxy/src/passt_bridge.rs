@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::device::BridgePort;
+use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
 
 const MIN_ETHERNET_FRAME: usize = 14;
 const MAX_ETHERNET_FRAME: usize = 65_550;
@@ -21,11 +22,16 @@ const IO_BURST: usize = 64;
 const POLL_TIMEOUT_MS: libc::c_int = 100;
 
 /// Start a shim-owned adapter for an inherited libkrun stream socket.
+///
+/// When `dns` is set, guest UDP/53 queries to configured upstream DNS servers
+/// for NetworkStore names/aliases are answered locally (same contract as
+/// macOS netproxy) before the frame is forwarded to passt.
 pub fn spawn_inherited_passt_bridge(
     proxy_fd: RawFd,
     passt_socket_path: PathBuf,
     bridge_socket_dir: PathBuf,
     own_mac: [u8; 6],
+    dns: Option<NetworkDnsConfig>,
 ) -> a3s_box_core::error::Result<()> {
     if proxy_fd < 0 {
         return Err(a3s_box_core::error::BoxError::NetworkError(
@@ -54,7 +60,7 @@ pub fn spawn_inherited_passt_bridge(
             let marker = passt_socket_path
                 .parent()
                 .map(|dir| dir.join("passt.backend_lost"));
-            if let Err(error) = run_passt_bridge(guest, passt, bridge, marker) {
+            if let Err(error) = run_passt_bridge(guest, passt, bridge, marker, dns) {
                 tracing::warn!(%error, "passt peer bridge stopped");
             }
         })
@@ -85,6 +91,7 @@ fn run_passt_bridge(
     mut passt: UnixStream,
     bridge: BridgePort,
     backend_lost_marker: Option<PathBuf>,
+    dns: Option<NetworkDnsConfig>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
     passt.set_nonblocking(true)?;
@@ -106,6 +113,16 @@ fn run_passt_bridge(
         }
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
+            // NetworkStore-local DNS A before passt upstream forward (#572 parity).
+            if let Some(config) = dns.as_ref() {
+                if let Some(reply) = try_ethernet_network_a_reply(&frame, config) {
+                    to_guest.push_frame(&reply)?;
+                    // Still deliver peer copies if the switch wants them; do not
+                    // also send the DNS query to passt.
+                    let _ = bridge.forward_from_guest(&frame);
+                    continue;
+                }
+            }
             if bridge.forward_from_guest(&frame) {
                 to_passt.push_frame(&frame)?;
             }
@@ -467,9 +484,9 @@ mod tests {
             .unwrap();
 
         let thread_a =
-            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None));
+            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None, None));
         let thread_b =
-            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None, None));
 
         let peer = ethernet_frame(mac_b, mac_a, 0x11);
         write_frame(&mut guest_a, &peer);
@@ -532,9 +549,9 @@ mod tests {
             .unwrap();
 
         let thread_a =
-            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None));
+            std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a, None, None));
         let thread_b =
-            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None, None));
 
         let request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 3]);
         write_frame(&mut guest_a, &request);
@@ -580,10 +597,10 @@ mod tests {
 
         let marker_for_thread = marker.clone();
         let thread_a = std::thread::spawn(move || {
-            run_passt_bridge(proxy_a, passt_a, bridge_a, Some(marker_for_thread))
+            run_passt_bridge(proxy_a, passt_a, bridge_a, Some(marker_for_thread), None)
         });
         let thread_b =
-            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None));
+            std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b, None, None));
 
         // Kill passt's side of box A — previously this dropped BridgePort and
         // peer unicast died (#454).
