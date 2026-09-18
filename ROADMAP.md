@@ -669,7 +669,9 @@ retain process or filesystem sessions after its owner dies.
   published snapshot), the same home-scoped refresh on `info` / `df` /
   `events` / `compose wait` / `compose ps` / `compose logs` / `stats` /
   `top` / `port` / `logs` / `attach` / `monitor` poll so read-only inventory
-  projections and restart decisions stay present-tense with `ps`,
+  projections and restart decisions stay present-tense with `ps` (refresh
+  fails closed on inspect / remove-retry / restart-reconcile / passt
+  observation errors; no best-effort invent-Ok),
   and resume of durable managed `Removing` via remove-retry (`finish_remove`)
   on those surfaces and `wait` (not inspect NotFound retirement; prune filter
   stays `stopped|dead|created`), resume of durable managed

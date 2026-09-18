@@ -189,26 +189,33 @@ pub(crate) async fn observe_managed_inventory_claims(
     Ok(())
 }
 
-/// Soft-batch variant for prune/ps: warn and continue if one claim fails.
-pub(crate) async fn observe_managed_inventory_claims_best_effort(
-    manager: &impl ExecutionManager,
-    candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for record in candidates {
-        if !needs_managed_inventory_observation(record) {
-            continue;
-        }
-        let execution_id = ExecutionId::new(record.id.clone())?;
-        if let Err(error) = manager.inspect(&execution_id).await {
-            tracing::warn!(
-                box_id = %record.id,
-                status = %record.status,
-                error = %error,
-                "Failed to observe abandoned managed claim before inventory"
-            );
-        }
+/// Observe / remove-retry / restart-reconcile under the default home, then reload.
+///
+/// Fail closed: one inspect / remove-retry / restart-reconcile error refuses
+/// inventory success so `ps` / `prune` / `info` cannot project stale transitional
+/// claims. Passt backend-loss observation errors also fail closed.
+pub(crate) async fn refresh_default_home_after_inventory_observation(
+) -> Result<StateFile, Box<dyn std::error::Error>> {
+    let home = a3s_box_core::dirs_home();
+    observe_bridge_passt_backend_loss(&home)?;
+    let state = StateFile::load_default()?;
+    let needs_work = state.list(true).into_iter().any(|record| {
+        needs_managed_inventory_observation(record)
+            || needs_managed_removal_resume(record)
+            || needs_managed_restart_resume(record)
+    });
+    if !needs_work {
+        return Ok(state);
     }
-    Ok(())
+
+    let manager = super::configured_local_execution_manager(&home).await?;
+    let candidates = state.list(true);
+    observe_managed_inventory_claims(&manager, candidates).await?;
+    let state = StateFile::load_default()?;
+    resume_managed_removal_claims(&manager, state.list(true)).await?;
+    let state = StateFile::load_default()?;
+    resume_managed_restart_claims(&manager, state.list(true)).await?;
+    Ok(StateFile::load_default()?)
 }
 
 /// Resume durable managed `Removing` via manager remove-retry.
@@ -227,35 +234,6 @@ pub(crate) async fn resume_managed_removal_claims(
     Ok(())
 }
 
-/// Soft-batch remove-retry for prune/ps.
-pub(crate) async fn resume_managed_removal_claims_best_effort(
-    manager: &impl ExecutionManager,
-    candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for record in candidates {
-        if !needs_managed_removal_resume(record) {
-            continue;
-        }
-        let execution_id = ExecutionId::new(record.id.clone())?;
-        let Ok(generation) = managed_generation(record) else {
-            tracing::warn!(
-                box_id = %record.id,
-                "Failed to read managed generation for abandoned Removing claim"
-            );
-            continue;
-        };
-        if let Err(error) = manager.remove(&execution_id, generation).await {
-            tracing::warn!(
-                box_id = %record.id,
-                status = %record.status,
-                error = %error,
-                "Failed to resume abandoned managed Removing before inventory"
-            );
-        }
-    }
-    Ok(())
-}
-
 /// Resume durable managed restart claims via manager reconcile (create op).
 pub(crate) async fn resume_managed_restart_claims(
     manager: &impl ExecutionManager,
@@ -268,50 +246,6 @@ pub(crate) async fn resume_managed_restart_claims(
         resume_one_managed_restart(manager, record).await?;
     }
     Ok(())
-}
-
-/// Soft-batch restart reconcile for prune/ps.
-pub(crate) async fn resume_managed_restart_claims_best_effort(
-    manager: &impl ExecutionManager,
-    candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for record in candidates {
-        if !needs_managed_restart_resume(record) {
-            continue;
-        }
-        if let Err(error) = resume_one_managed_restart(manager, record).await {
-            tracing::warn!(
-                box_id = %record.id,
-                status = %record.status,
-                error = %error,
-                "Failed to resume abandoned managed restart before inventory"
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Observe / remove-retry / restart-reconcile under the default home, then reload.
-pub(crate) async fn refresh_default_home_after_inventory_observation(
-) -> Result<StateFile, Box<dyn std::error::Error>> {
-    let home = a3s_box_core::dirs_home();
-    // Best-effort: surface dead passt backends before projecting inventory (#454).
-    let _ = observe_bridge_passt_backend_loss(&home);
-    let state = StateFile::load_default()?;
-    let needs_work = state.list(true).into_iter().any(|record| {
-        needs_managed_inventory_observation(record)
-            || needs_managed_removal_resume(record)
-            || needs_managed_restart_resume(record)
-    });
-    if !needs_work {
-        return Ok(state);
-    }
-
-    let manager = super::configured_local_execution_manager(&home).await?;
-    observe_managed_inventory_claims_best_effort(&manager, state.list(true)).await?;
-    resume_managed_removal_claims_best_effort(&manager, state.list(true)).await?;
-    resume_managed_restart_claims_best_effort(&manager, state.list(true)).await?;
-    Ok(StateFile::load_default()?)
 }
 
 /// Observe / remove-retry / restart-reconcile one claim; `None` if remove finished.
