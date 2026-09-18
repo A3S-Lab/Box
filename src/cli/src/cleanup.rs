@@ -25,7 +25,12 @@ pub fn cleanup_box_resources(
     volume_names: &[String],
     network_name: Option<&str>,
 ) -> a3s_box_core::error::Result<()> {
-    let store = a3s_box_runtime::NetworkStore::default_path().ok();
+    // Only open NetworkStore when removal must disconnect. Soft-open (.ok())
+    // invents clean detach while bridge endpoints can remain claimed.
+    let store = match network_name {
+        Some(_) => Some(a3s_box_runtime::NetworkStore::default_path()?),
+        None => None,
+    };
     cleanup_box_resources_in(store.as_ref(), box_id, volume_names, network_name)
 }
 
@@ -44,7 +49,12 @@ fn cleanup_box_resources_in(
     // under the store's cross-process lock with a fresh read, so a concurrent
     // connect to the same network is not lost (a get → disconnect → update
     // reads outside the lock and would clobber it).
-    if let (Some(net_name), Some(net_store)) = (network_name, net_store) {
+    if let Some(net_name) = network_name {
+        let Some(net_store) = net_store else {
+            return Err(a3s_box_core::error::BoxError::NetworkError(format!(
+                "Failed to open NetworkStore for disconnect of {box_id} from {net_name}; refusing invent-clean detach"
+            )));
+        };
         net_store.with_write_lock(|networks| -> Result<(), a3s_box_core::error::BoxError> {
             if let Some(net_config) = networks.get_mut(net_name) {
                 // Absent endpoint is idempotent success.
@@ -380,5 +390,15 @@ mod tests {
             0,
             "removal must release the network endpoint"
         );
+    }
+
+    #[test]
+    fn removal_cleanup_refuses_invent_clean_disconnect_without_network_store() {
+        let err = cleanup_box_resources_in(None, "box-1", &[], Some("dev"))
+            .expect_err("missing NetworkStore must not invent clean disconnect");
+        let message = err.to_string();
+        assert!(message.contains("box-1"));
+        assert!(message.contains("dev"));
+        assert!(message.contains("refusing invent-clean detach"));
     }
 }
