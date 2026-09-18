@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::Ipv4Addr;
+use std::path::Path;
 
 /// Opt-in env for SandboxViaOci Privileged network-device authority and named
 /// bridge staging. Requires matched root at owner spawn; unset keeps GA rootless.
@@ -573,6 +574,52 @@ impl NetworkConfig {
             .cloned()
             .collect()
     }
+}
+
+/// Serializable wrapper matching runtime `networks.json` on disk.
+#[derive(Debug, Deserialize, Default)]
+struct NetworksFile {
+    #[serde(default)]
+    networks: HashMap<String, NetworkConfig>,
+}
+
+/// Resolve a DNS A name against one network in `networks.json`.
+///
+/// Matches `box_name` and `aliases` case-insensitively (trailing `.` stripped).
+/// Re-reads the file each call so late joiners become visible without rewriting
+/// guest `/etc/hosts`. Corrupt or missing files return `None` (caller forwards
+/// upstream). Does not invent NXDOMAIN for public names.
+pub fn lookup_network_a(
+    networks_path: &Path,
+    network_name: &str,
+    qname: &str,
+) -> Option<Ipv4Addr> {
+    let data = std::fs::read_to_string(networks_path).ok()?;
+    let file: NetworksFile = serde_json::from_str(&data).ok()?;
+    let net = file.networks.get(network_name)?;
+    let needle = normalize_dns_lookup_name(qname);
+    if needle.is_empty() {
+        return None;
+    }
+    for endpoint in net.endpoints.values() {
+        if dns_names_equal(&endpoint.box_name, &needle) {
+            return Some(endpoint.ip_address);
+        }
+        for alias in &endpoint.aliases {
+            if dns_names_equal(alias, &needle) {
+                return Some(endpoint.ip_address);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_dns_lookup_name(name: &str) -> String {
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn dns_names_equal(stored: &str, needle: &str) -> bool {
+    normalize_dns_lookup_name(stored) == needle
 }
 
 #[cfg(test)]
@@ -1295,5 +1342,30 @@ mod tests {
         let ipam = Ipam6::new("fd00::/120").unwrap();
         let ip = ipam.allocate(&[]).unwrap();
         assert_eq!(ip, "fd00::2".parse::<std::net::Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn lookup_network_a_resolves_box_name_and_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let ep = net
+            .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+            .unwrap();
+        let file = serde_json::json!({
+            "networks": { "mynet": net }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+
+        assert_eq!(
+            lookup_network_a(&path, "mynet", "db"),
+            Some(ep.ip_address)
+        );
+        assert_eq!(
+            lookup_network_a(&path, "mynet", "PROJ-DB."),
+            Some(ep.ip_address)
+        );
+        assert_eq!(lookup_network_a(&path, "mynet", "example.com"), None);
+        assert_eq!(lookup_network_a(&path, "other", "db"), None);
     }
 }

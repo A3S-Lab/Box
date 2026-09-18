@@ -455,6 +455,8 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                         stats_path: net_config.net_stats_path.clone(),
                         bridge_socket_dir: net_config.bridge_socket_dir.clone(),
                         own_mac: net_config.mac_address,
+                        networks_json: net_config.networks_json.clone(),
+                        network_name: net_config.network_name.clone(),
                     },
                 )?;
             }

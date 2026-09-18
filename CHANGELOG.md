@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Netproxy Bridge DNS answers NetworkStore box names and aliases (A records
+  from `networks.json`) before upstream UDP/53 forward so late-joining peers
+  resolve without rewriting guest `/etc/hosts`. Unknown names still forward
+  upstream. Linux passt / TCP/53 / AAAA / CNI remain open. Does **not** close
+  ROADMAP B3/B2.
 - Warm-pool `--snapshot-fork` honesty (#563): imply deferred-main for the
   idle template; quiesce host exec/vsock before snapshot; skip guest-stop on
   paused template teardown; mark template `Unavailable` on first feature-missing
