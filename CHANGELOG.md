@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Windows MicroVM `:ro` volumes host-enforce write denial via BindFlt read-only
+  mappings (live view of the source; source path stays writable), matching the
+  Linux RO-bind honesty contract. macOS `:ro` still fails closed. Destroy /
+  orphan / wipe paths detach BindFlt aliases fail-closed. Does **not** close
+  ROADMAP B3/B2 or claim UID/GID storage parity.
 - VM destroy fails closed when the runtime socket directory or `boxes/{id}`
   cannot be removed (surfaces via destroy `Result`, no invent-clean Ok).
   Boot-failure cleanup likewise refuses wiping the box dir while the socket

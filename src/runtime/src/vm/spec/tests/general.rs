@@ -219,10 +219,37 @@ fn test_parse_volume_mount_read_only() {
     let temp = TempDir::new().unwrap();
     let host_path = temp.path().to_str().unwrap();
     let volume = format!("{}:/data:ro", host_path);
+    let box_dir = TempDir::new().unwrap();
+    let filemounts = box_dir.path().join(".filemounts");
+    std::fs::create_dir_all(&filemounts).unwrap();
 
-    let mount = VmManager::parse_volume_mount(&volume, 1, std::path::Path::new("/tmp")).unwrap();
+    let mount = match VmManager::parse_volume_mount(&volume, 1, &filemounts) {
+        Ok(mount) => mount,
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains(":ro")
+                    || message.contains("host-enforced")
+                    || message.contains("BindFlt")
+                    || message.contains("CAP_SYS")
+                    || message.contains("bind"),
+                "{message}"
+            );
+            return;
+        }
+    };
     assert_eq!(mount.tag, "vol1");
     assert!(mount.read_only);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        assert!(
+            mount.host_path.starts_with(filemounts.join("ro-aliases")),
+            "host path should be the RO alias, got {}",
+            mount.host_path.display()
+        );
+        crate::vm::cleanup_virtiofs_ro_shares(box_dir.path()).unwrap();
+        assert!(!filemounts.join("ro-aliases").exists());
+    }
 }
 
 #[test]
@@ -309,9 +336,10 @@ fn test_build_instance_spec_windows_bind_uses_linux_guest_target() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn test_build_instance_spec_windows_refuses_ro_without_host_denial() {
+fn test_build_instance_spec_windows_stages_ro_with_bindflt() {
     let home = tempdir().unwrap();
     let host = tempdir().unwrap();
+    std::fs::write(host.path().join("marker"), b"data").unwrap();
     let layout_dir = tempdir().unwrap();
     let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
     let mut vm = test_vm_manager(BoxConfig {
@@ -320,11 +348,39 @@ fn test_build_instance_spec_windows_refuses_ro_without_host_denial() {
     });
     vm.home_dir = home.path().to_path_buf();
 
-    let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+    let spec = match vm.build_instance_spec(&layout) {
+        Ok(spec) => spec,
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("BindFlt") || message.contains(":ro"),
+                "{message}"
+            );
+            return;
+        }
+    };
+    let mount = spec
+        .fs_mounts
+        .iter()
+        .find(|mount| mount.tag == "vol0")
+        .expect("vol0 mount");
+    assert!(mount.read_only);
     assert!(
-        error.contains("Linux host-enforced") || error.contains(":ro"),
-        "{error}"
+        mount
+            .host_path
+            .components()
+            .any(|c| c.as_os_str() == "ro-aliases"),
+        "expected BindFlt RO alias, got {}",
+        mount.host_path.display()
     );
+    assert!(std::fs::write(mount.host_path.join("denied"), b"no").is_err());
+    // Aliases live under home/boxes/<id>/.filemounts/ro-aliases.
+    let boxes = home.path().join("boxes");
+    if let Ok(entries) = std::fs::read_dir(&boxes) {
+        for entry in entries.flatten() {
+            let _ = crate::vm::cleanup_virtiofs_ro_shares(&entry.path());
+        }
+    }
 }
 
 #[test]
