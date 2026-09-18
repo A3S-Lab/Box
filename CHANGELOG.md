@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `VolumeStore::prune` only reports volumes that were actually removed and
+  fails closed on non-idempotent remove errors instead of soft-discarding
+  `remove` failures while claiming prune success. Does **not** close ROADMAP
+  B3/B2.
 - Keep-authority host-netdevice veth/bridge staging surfaces rollback failures
   (present-link / idle-bridge delete) combined with the primary staging error
   instead of soft-discarding them when no lease file exists yet. Does **not**

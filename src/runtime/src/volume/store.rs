@@ -338,16 +338,22 @@ impl VolumeStore {
     /// Remove all volumes that are not in use. Returns names of removed volumes.
     pub fn prune(&self) -> Result<Vec<String>> {
         let volumes = self.load()?;
+        let candidates: Vec<String> = volumes
+            .iter()
+            .filter(|(_, config)| !config.is_in_use())
+            .map(|(name, _)| name.clone())
+            .collect();
+
         let mut pruned = Vec::new();
-
-        for (name, config) in &volumes {
-            if !config.is_in_use() {
-                pruned.push(name.clone());
+        for name in candidates {
+            match self.remove(&name, false) {
+                Ok(_) => pruned.push(name),
+                // Raced to in-use or already gone: do not claim removal.
+                Err(error)
+                    if error.to_string().contains("not found")
+                        || error.to_string().contains("in use") => {}
+                Err(error) => return Err(error),
             }
-        }
-
-        for name in &pruned {
-            self.remove(name, false).ok();
         }
 
         Ok(pruned)
