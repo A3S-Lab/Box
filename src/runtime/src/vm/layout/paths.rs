@@ -4,11 +4,6 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use crate::host_sockets::{ensure_runtime_socket_dir, runtime_socket_dir};
 
-#[cfg(unix)]
-pub(crate) use crate::host_sockets::{
-    ensure_shared_runtime_socket_root, shared_runtime_socket_root,
-};
-
 /// Short host path for one Sandbox runtime owner and its private control socket.
 ///
 /// Unix-domain socket paths have a small fixed kernel limit. Keeping the A3S
