@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Managed Linux SandboxViaOci `diff` baseline is captured from OCI-mapped rootfs
+  metadata (same mode/size contract as live/stopped host-rootfs `diff`) and
+  fails closed on prepare instead of silently installing a host-subordinate
+  walk. Does **not** close ROADMAP B3/B2 or claim MicroVM live host-path
+  snapshot parity.
 - SandboxViaOci create fails closed when an OCI `type=bind` mount remains
   unclassified after Box-owned volume/workspace storage, staged caller bind
   aliases (`a3s.box.bind.{slot}`), and managed Secret classification. Does

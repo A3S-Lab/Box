@@ -33,12 +33,99 @@ pub fn walk_rootfs(root: &Path) -> Result<HashMap<String, RootfsFileInfo>> {
 /// Runtime callers invoke this after all host-side rootfs preparation and before
 /// the workload starts. Later starts and monitor recovery therefore preserve the
 /// original generation's baseline instead of racing a fast container command.
+///
+/// Prefer [`create_diff_baseline_from_metadata_if_absent`] for managed Linux
+/// SandboxViaOci so baseline modes match live/stopped OCI-mapped `diff`.
 pub fn create_diff_baseline_if_absent(box_dir: &Path, rootfs: &Path) -> Result<()> {
     if existing_baseline_is_regular(&box_dir.join(DIFF_BASELINE_FILE))? {
         return Ok(());
     }
 
     let entries = walk_rootfs(rootfs)?;
+    let encoded = serde_json::to_vec(&entries).map_err(|error| {
+        BoxError::BuildError(format!("failed to encode rootfs baseline: {error}"))
+    })?;
+    install_baseline_bytes_if_absent(box_dir, &encoded)
+}
+
+/// Convert OCI rootfs metadata into the `HashMap` shape consumed by `a3s-box diff`.
+///
+/// Mode bits match `walk_tar_archive`: POSIX type flags OR permission bits from
+/// the manifest (`mode & 0o7777`). Skips the synthetic root (`.`) entry and
+/// runtime-internal paths.
+#[cfg(unix)]
+pub fn rootfs_file_info_map_from_metadata(
+    manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+) -> Result<HashMap<String, RootfsFileInfo>> {
+    use a3s_box_core::rootfs_metadata::RootfsEntryKind;
+    use base64::Engine;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    const DIRECTORY_MODE: u32 = 0o040000;
+    const REGULAR_FILE_MODE: u32 = 0o100000;
+    const SYMBOLIC_LINK_MODE: u32 = 0o120000;
+
+    manifest
+        .validate()
+        .map_err(|error| BoxError::BuildError(format!("invalid rootfs metadata: {error}")))?;
+
+    let mut entries = HashMap::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&entry.path_base64)
+            .map_err(|error| {
+                BoxError::BuildError(format!("invalid rootfs metadata path encoding: {error}"))
+            })?;
+        let relative = Path::new(OsStr::from_bytes(&bytes));
+        if relative.as_os_str().is_empty()
+            || relative == Path::new(".")
+            || relative == Path::new("/")
+        {
+            continue;
+        }
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(relative) {
+            continue;
+        }
+        let key = rootfs_path_string(relative);
+        if key == "/" {
+            continue;
+        }
+        let permissions = entry.mode & 0o7777;
+        let (size, mode, is_dir) = match entry.kind {
+            RootfsEntryKind::Directory => (0, DIRECTORY_MODE | permissions, true),
+            RootfsEntryKind::Regular => (entry.size, REGULAR_FILE_MODE | permissions, false),
+            RootfsEntryKind::Symlink => {
+                let size = match &entry.link_target_base64 {
+                    Some(target) => base64::engine::general_purpose::STANDARD
+                        .decode(target)
+                        .map(|bytes| bytes.len() as u64)
+                        .unwrap_or(entry.size),
+                    None => entry.size,
+                };
+                (size, SYMBOLIC_LINK_MODE | permissions, false)
+            }
+        };
+        entries.insert(key, RootfsFileInfo { size, mode, is_dir });
+    }
+    Ok(entries)
+}
+
+/// Install a diff baseline from OCI-mapped rootfs metadata (SandboxViaOci).
+///
+/// Converts the manifest with the same mode/size contract as
+/// `a3s-box diff`'s tar walk of commit/snapshot capture, so baseline and
+/// current sides compare the same semantics. First-writer-wins; never replaces.
+#[cfg(unix)]
+pub fn create_diff_baseline_from_metadata_if_absent(
+    box_dir: &Path,
+    manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+) -> Result<()> {
+    if existing_baseline_is_regular(&box_dir.join(DIFF_BASELINE_FILE))? {
+        return Ok(());
+    }
+
+    let entries = rootfs_file_info_map_from_metadata(manifest)?;
     let encoded = serde_json::to_vec(&entries).map_err(|error| {
         BoxError::BuildError(format!("failed to encode rootfs baseline: {error}"))
     })?;
@@ -282,6 +369,76 @@ mod tests {
         assert!(baseline.contains_key("/root/original.txt"));
         assert!(!baseline.contains_key("/root/later.txt"));
         assert!(!baseline.contains_key("/.a3s-box-exec.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_baseline_matches_tar_walk_mode_contract() {
+        use a3s_box_core::rootfs_metadata::{
+            RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+        };
+        use base64::Engine;
+
+        let path = base64::engine::general_purpose::STANDARD.encode(b"bin/tool");
+        let link = base64::engine::general_purpose::STANDARD.encode(b"target");
+        let manifest = RootfsMetadataManifest::new(vec![
+            RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD.encode(b"."),
+                kind: RootfsEntryKind::Directory,
+                mode: 0o40755,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                size: 0,
+                link_target_base64: None,
+            },
+            RootfsMetadataEntry {
+                path_base64: path,
+                kind: RootfsEntryKind::Regular,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                size: 4,
+                link_target_base64: None,
+            },
+            RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD.encode(b"link"),
+                kind: RootfsEntryKind::Symlink,
+                mode: 0o120777,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+                size: 6,
+                link_target_base64: Some(link),
+            },
+        ]);
+
+        let directory = tempfile::tempdir().unwrap();
+        let box_dir = directory.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        create_diff_baseline_from_metadata_if_absent(&box_dir, &manifest).unwrap();
+
+        let baseline: HashMap<String, RootfsFileInfo> =
+            serde_json::from_slice(&std::fs::read(box_dir.join(DIFF_BASELINE_FILE)).unwrap())
+                .unwrap();
+        assert!(!baseline.contains_key("/"));
+        assert_eq!(
+            baseline.get("/bin/tool"),
+            Some(&RootfsFileInfo {
+                size: 4,
+                mode: 0o100644,
+                is_dir: false,
+            })
+        );
+        assert_eq!(
+            baseline.get("/link"),
+            Some(&RootfsFileInfo {
+                size: 6,
+                mode: 0o120777,
+                is_dir: false,
+            })
+        );
     }
 
     #[test]
