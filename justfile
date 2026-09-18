@@ -246,12 +246,31 @@ test-vm *ARGS:
     set -e
     cd src
 
-    # Locate libkrun/libkrunfw dynamic libraries from cargo build output
-    LIBKRUN_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib 2>/dev/null | head -1)
-    LIBKRUNFW_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib 2>/dev/null | head -1)
+    # Locate libkrun/libkrunfw from cargo build output. The crate package is
+    # `a3s-libkrun-sys` (legacy glob `libkrun-sys-*` kept for older trees);
+    # Linux emits `lib64`, macOS/other Unix emit `lib` (#575).
+    find_libkrun_dir() {
+        local component="$1"
+        local path
+        for profile in debug release; do
+            for crate in a3s-libkrun-sys libkrun-sys; do
+                for libdir in lib64 lib; do
+                    path=$(ls -td "target/${profile}/build/${crate}-*/out/libkrun/${component}/${libdir}" 2>/dev/null | head -1 || true)
+                    if [ -n "$path" ]; then
+                        echo "$path"
+                        return 0
+                    fi
+                done
+            done
+        done
+        return 1
+    }
+
+    LIBKRUN_LIB=$(find_libkrun_dir libkrun || true)
+    LIBKRUNFW_LIB=$(find_libkrun_dir libkrunfw || true)
 
     if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
-        echo "❌ libkrun not found. Run 'just build' first."
+        echo "❌ libkrun not found. Run 'just build' or 'just release' first."
         exit 1
     fi
 
@@ -259,7 +278,7 @@ test-vm *ARGS:
     export LD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
 
     # Verify binary works
-    if ! target/debug/a3s-box version >/dev/null 2>&1; then
+    if ! target/debug/a3s-box version >/dev/null 2>&1 && ! target/release/a3s-box version >/dev/null 2>&1; then
         echo "❌ a3s-box binary not working. Run 'just build' first."
         exit 1
     fi
@@ -283,12 +302,29 @@ test-tee *ARGS:
     set -e
     cd src
 
-    # Locate libkrun/libkrunfw dynamic libraries from cargo build output
-    LIBKRUN_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib 2>/dev/null | head -1)
-    LIBKRUNFW_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib 2>/dev/null | head -1)
+    # Same lib discovery as `just test-vm` (#575): a3s-libkrun-sys + lib64 on Linux.
+    find_libkrun_dir() {
+        local component="$1"
+        local path
+        for profile in debug release; do
+            for crate in a3s-libkrun-sys libkrun-sys; do
+                for libdir in lib64 lib; do
+                    path=$(ls -td "target/${profile}/build/${crate}-*/out/libkrun/${component}/${libdir}" 2>/dev/null | head -1 || true)
+                    if [ -n "$path" ]; then
+                        echo "$path"
+                        return 0
+                    fi
+                done
+            done
+        done
+        return 1
+    }
+
+    LIBKRUN_LIB=$(find_libkrun_dir libkrun || true)
+    LIBKRUNFW_LIB=$(find_libkrun_dir libkrunfw || true)
 
     if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
-        echo "❌ libkrun not found. Run 'just build' first."
+        echo "❌ libkrun not found. Run 'just build' or 'just release' first."
         exit 1
     fi
 
@@ -296,7 +332,7 @@ test-tee *ARGS:
     export LD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
 
     # Verify binary works
-    if ! target/debug/a3s-box version >/dev/null 2>&1; then
+    if ! target/debug/a3s-box version >/dev/null 2>&1 && ! target/release/a3s-box version >/dev/null 2>&1; then
         echo "❌ a3s-box binary not working. Run 'just build' first."
         exit 1
     fi
