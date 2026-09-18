@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- VM destroy, SDK `cleanup_removed_box`, and CLI foreground `--rm` wipe tear
+  down keep-authority host-netdevice leases before deleting `boxes/{id}`
+  (retain dir / fail closed on teardown failure). Does **not** close ROADMAP
+  B3/B4/B2 or claim UDP publish teardown parity.
 - Legacy CLI `cleanup_removed_box` and Compose partial-service wipe tear down
   keep-authority host-netdevice leases before deleting `boxes/{id}` (fail
   closed / retain dir on teardown failure), matching managed remove and orphan

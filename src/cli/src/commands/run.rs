@@ -642,6 +642,16 @@ async fn cleanup_managed_execution(
             // backend. Natural exit has no kill path, so the CLI owns cleanup.
             crate::cleanup::cleanup_anonymous_volumes(&ctx.box_id, &ctx.anonymous_volumes);
         }
+        let home = a3s_box_core::dirs_home();
+        a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&home, &ctx.box_id).map_err(
+            |error| {
+                format!(
+                    "removed box {} state but refused to wipe {}: host netdevice lease teardown failed: {error}",
+                    ctx.box_id,
+                    ctx.box_dir.display()
+                )
+            },
+        )?;
         if let Err(error) = std::fs::remove_dir_all(&ctx.box_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return Err(format!(

@@ -469,7 +469,42 @@ impl VmManager {
         // accumulation slows later RunPodSandbox calls until they time out
         // (observed: pod #21 after churning 20). Persistent boxes keep their
         // dir intentionally.
-        if !preserve_rootfs && mount_aliases_clean {
+        // Keep-authority host-netdevice lease must be torn down before wipe;
+        // retain the dir when teardown fails so durable claim survives.
+        #[cfg(all(feature = "vm", target_os = "linux"))]
+        let host_net_clean = if self.config.isolation.is_sandbox() {
+            match crate::local_execution::oci_host_netdevice::teardown_lease(
+                &self.home_dir,
+                &self.box_id,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!(
+                        box_id = %self.box_id,
+                        %error,
+                        "Refusing to remove box directory on destroy while host netdevice lease teardown failed"
+                    );
+                    if stop_error.is_none() {
+                        stop_error = Some(BoxError::BoxBootError {
+                            message: format!(
+                                "Failed to tear down SandboxViaOci host netdevice lease during destroy: {error}"
+                            ),
+                            hint: Some(
+                                "Reconcile keep-authority iptables publish rules before retrying destroy"
+                                    .into(),
+                            ),
+                        });
+                    }
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        #[cfg(not(all(feature = "vm", target_os = "linux")))]
+        let host_net_clean = true;
+
+        if !preserve_rootfs && mount_aliases_clean && host_net_clean {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
