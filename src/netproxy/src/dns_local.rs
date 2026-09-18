@@ -17,6 +17,21 @@ const DNS_TYPE_AAAA: u16 = 28;
 const DNS_CLASS_IN: u16 = 1;
 const DNS_TTL_SECS: u32 = 30;
 
+/// Split one DNS-over-TCP message (`u16be` length + payload).
+///
+/// Returns `(message, bytes_consumed)`. `None` while the length prefix or
+/// payload is still incomplete. A zero length is rejected.
+pub(crate) fn split_dns_tcp_message(buf: &[u8]) -> Option<(&[u8], usize)> {
+    if buf.len() < 2 {
+        return None;
+    }
+    let len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    if len == 0 || buf.len() < 2 + len {
+        return None;
+    }
+    Some((&buf[2..2 + len], 2 + len))
+}
+
 /// If `query` is a single-question A/AAAA lookup for a NetworkStore name/alias,
 /// return a synthesized response. Otherwise `None` (caller forwards upstream).
 pub(crate) fn try_network_a_response(
@@ -254,6 +269,20 @@ mod tests {
 
     fn encode_query(name: &str) -> Vec<u8> {
         encode_query_typed(name, DNS_TYPE_A)
+    }
+
+    #[test]
+    fn split_dns_tcp_message_waits_for_complete_payload() {
+        let query = encode_query("db");
+        let mut framed = (query.len() as u16).to_be_bytes().to_vec();
+        assert!(split_dns_tcp_message(&framed).is_none());
+        framed.extend_from_slice(&query[..query.len() - 1]);
+        assert!(split_dns_tcp_message(&framed).is_none());
+        framed.push(query[query.len() - 1]);
+        let (message, consumed) = split_dns_tcp_message(&framed).unwrap();
+        assert_eq!(message, query.as_slice());
+        assert_eq!(consumed, framed.len());
+        assert!(split_dns_tcp_message(&[0, 0]).is_none());
     }
 
     #[test]

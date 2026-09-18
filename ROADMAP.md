@@ -934,7 +934,10 @@ open and harness reports still keep
   upstream UDP/53 forward so late joiners resolve without rewriting guest
   hosts; guest `/etc/hosts` also includes the box's own NetworkStore aliases.
   Known NetworkStore names also receive authoritative AAAA NODATA (IPv4-only
-  store). TCP/53, full AAAA records, CNI, multi-device, rootless/MicroVM/Windows
+  store). macOS netproxy answers those names on TCP/53 before the upstream
+  TCP proxy; unknown names still proxy, and Linux passt_bridge still forwards
+  TCP/53 unmodified. Full AAAA records, CNI, multi-device,
+  rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
