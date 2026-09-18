@@ -1,14 +1,18 @@
 //! Port publishing validation.
 //!
-//! a3s-box currently supports Docker-style TCP port publishing in the
-//! `host_port:guest_port[/tcp]` form. Unsupported protocols and bind-specific
-//! host IPs are rejected before a box record is persisted or a VM boots.
+//! a3s-box supports Docker-style TCP and UDP port publishing in the
+//! `host_port:guest_port[/tcp|/udp]` form. Bind-specific host IPs, ranges,
+//! and other protocols are rejected before a box record is persisted or a VM
+//! boots. Unresolved `host_port=0` is allocated here when the caller uses
+//! [`normalize_and_resolve_port_maps`]; backends that still see `0` fail closed.
 
 /// Supported published-port protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortProtocol {
     /// TCP port publishing.
     Tcp,
+    /// UDP port publishing.
+    Udp,
 }
 
 impl PortProtocol {
@@ -16,6 +20,7 @@ impl PortProtocol {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
+            Self::Udp => "udp",
         }
     }
 }
@@ -37,9 +42,15 @@ impl PortMapping {
         parse_port_mapping(&format!("{host_port}:{guest_port}"))
     }
 
-    /// Convert to the normalized runtime `host:guest` format.
+    /// Convert to the normalized runtime format.
+    ///
+    /// TCP stays `host:guest` so existing records keep their spelling. UDP
+    /// keeps `/udp` so passt and keep-authority DNAT cannot treat it as TCP.
     pub fn runtime_entry(&self) -> String {
-        format!("{}:{}", self.host_port, self.guest_port)
+        match self.protocol {
+            PortProtocol::Tcp => format!("{}:{}", self.host_port, self.guest_port),
+            PortProtocol::Udp => format!("{}:{}/udp", self.host_port, self.guest_port),
+        }
     }
 }
 
@@ -71,19 +82,30 @@ pub fn normalize_and_resolve_port_maps(entries: &[String]) -> Result<Vec<String>
 /// Resolve an auto-assign host port (`0:guest`) to a concrete free ephemeral
 /// port. A non-zero host port is returned unchanged.
 pub fn resolve_auto_host_port(entry: String) -> Result<String, String> {
-    let mapping = parse_port_mapping(&entry)?;
+    let mut mapping = parse_port_mapping(&entry)?;
     if mapping.host_port != 0 {
         return Ok(mapping.runtime_entry());
     }
-    let listener = std::net::TcpListener::bind("0.0.0.0:0")
-        .map_err(|e| format!("failed to allocate a host port for '{entry}': {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("failed to read allocated host port: {e}"))?
-        .port();
-    // Release so the box can bind the port (small TOCTOU window, as Docker has).
-    drop(listener);
-    Ok(format!("{port}:{}", mapping.guest_port))
+    let port = match mapping.protocol {
+        PortProtocol::Tcp => {
+            let listener = std::net::TcpListener::bind("0.0.0.0:0")
+                .map_err(|e| format!("failed to allocate a host port for '{entry}': {e}"))?;
+            listener
+                .local_addr()
+                .map_err(|e| format!("failed to read allocated host port: {e}"))?
+                .port()
+        }
+        PortProtocol::Udp => {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+                .map_err(|e| format!("failed to allocate a UDP host port for '{entry}': {e}"))?;
+            socket
+                .local_addr()
+                .map_err(|e| format!("failed to read allocated UDP host port: {e}"))?
+                .port()
+        }
+    };
+    mapping.host_port = port;
+    Ok(mapping.runtime_entry())
 }
 
 /// Parse a published-port mapping.
@@ -98,6 +120,7 @@ pub fn parse_port_mapping(input: &str) -> Result<PortMapping, String> {
     let protocol = match protocol_split.next() {
         None => PortProtocol::Tcp,
         Some(value) if value.eq_ignore_ascii_case("tcp") => PortProtocol::Tcp,
+        Some(value) if value.eq_ignore_ascii_case("udp") => PortProtocol::Udp,
         Some("") => {
             return Err(format!(
                 "Invalid port mapping '{input}': protocol must not be empty"
@@ -105,13 +128,13 @@ pub fn parse_port_mapping(input: &str) -> Result<PortMapping, String> {
         }
         Some(value) => {
             return Err(format!(
-                "Unsupported port mapping protocol '{value}' in '{input}'; only TCP is supported"
+                "Unsupported port mapping protocol '{value}' in '{input}'; only TCP and UDP are supported"
             ));
         }
     };
     if protocol_split.next().is_some() {
         return Err(format!(
-            "Invalid port mapping '{input}': expected host_port:guest_port[/tcp]"
+            "Invalid port mapping '{input}': expected host_port:guest_port[/tcp|/udp]"
         ));
     }
 
@@ -227,10 +250,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_port_mapping_rejects_udp() {
-        let error = parse_port_mapping("8080:80/udp").unwrap_err();
+    fn test_parse_port_mapping_keeps_udp_suffix() {
+        let mapping = parse_port_mapping("8080:80/udp").unwrap();
+        assert_eq!(mapping.protocol, PortProtocol::Udp);
+        assert_eq!(mapping.runtime_entry(), "8080:80/udp");
+        let normalized = normalize_port_maps(&["8080:80/UDP".to_string()]).unwrap();
+        assert_eq!(normalized, vec!["8080:80/udp"]);
+    }
 
-        assert!(error.contains("only TCP is supported"));
+    #[test]
+    fn test_resolve_udp_auto_host_port() {
+        let resolved = normalize_and_resolve_port_maps(&["0:53/udp".to_string()]).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].ends_with(":53/udp"), "{}", resolved[0]);
+        assert!(!resolved[0].starts_with("0:"));
     }
 
     #[test]

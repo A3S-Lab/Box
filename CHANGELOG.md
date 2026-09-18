@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Bridge publish accepts static UDP (`host:guest/udp`). Passt forwards it with
+  `--udp-ports`, and keep-authority Sandbox DNAT installs matching UDP rules.
+  CLI/SDK auto-assign (`0:guest/udp`) allocates a UDP port. Netproxy, CRI, and
+  unresolved `host_port=0` at passt/DNAT still fail closed. Does **not** close
+  ROADMAP B3 or unlock CNI/DNS/Service UDP.
 - CLI, SDK, and managed remove now delete shim file-mount staging at
   `$TMPDIR/a3s-fs-mount-<id>-<tag>` (the path the shim actually writes), not
   only the unsuffixed directory, and fail closed if that staging, an external

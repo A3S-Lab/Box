@@ -204,6 +204,11 @@ pub(super) fn parse_port_forwards(
     let mut forwards = Vec::new();
     for entry in port_map {
         let mapping = a3s_box_core::parse_port_mapping(entry)?;
+        if mapping.protocol != a3s_box_core::PortProtocol::Tcp {
+            return Err(format!(
+                "netproxy published ports only support TCP; got '{entry}'"
+            ));
+        }
         let host_port = mapping.host_port;
         let guest_port = mapping.guest_port;
 

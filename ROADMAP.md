@@ -888,10 +888,12 @@ open and harness reports still keep
   and installs the NetworkStore gateway on the bridge plus a default route on
   the container end, with host `ip_forward` + per-subnet iptables MASQUERADE for
   egress and NetworkStore peer `/etc/hosts` discovery, plus optional static TCP
-  DNAT publication (CLI/SDK and Compose sandbox under keep-authority Bridge).
-  Product admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a
-  concrete ephemeral host port before boot so backends do not silently drop
-  unresolved auto-assign. MicroVM bridge `passt` rejects unresolved
+  DNAT publication (CLI/SDK and Compose sandbox under keep-authority Bridge),
+  including static UDP (`host:guest/udp`) on the same PREROUTING/OUTPUT/FORWARD
+  contract. Passt bridge publish forwards that UDP with `--udp-ports`. Product
+  admission resolves `0:guest` and `0:guest/udp` to a concrete ephemeral host
+  port before boot. Unresolved `host_port=0` still fails closed at passt and
+  keep-authority DNAT. Netproxy and CRI stay TCP-only. MicroVM bridge `passt` rejects unresolved
   `host_port=0` / invalid publish entries instead of silent skip. Keep-authority
   DNAT teardown fails closed when a present publish rule cannot be deleted
   (lease retained); prepare and Sandbox cleanup propagate lease teardown
@@ -908,7 +910,7 @@ open and harness reports still keep
   uses the same present-rule delete contract; CLI removal cleanup fails closed
   when NetworkStore cannot be opened for disconnect (no invent-clean detach).
   GA default remains delegated rootless/
-  `base_v2` loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy,
+  `base_v2` loopback-only. CNI, netproxy/CRI/Service UDP, DNS server/proxy,
   multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
@@ -986,8 +988,8 @@ guest endpoint.
   `LocalExecutionManager` / SandboxViaOci (same create/start/remove path as
   CLI/SDK), including session-exec health probes and `service_healthy` waits.
   Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` also creates
-  NetworkStore named bridges for Sandbox Compose and admits static TCP
-  published ports (CLI/SDK DNAT contract; UDP/`host_port=0` still refused).
+  NetworkStore named bridges for Sandbox Compose and admits static TCP and UDP
+  published ports (CLI/SDK DNAT contract; unresolved `host_port=0` still refused).
   Start-failure cleanup surfaces `remove_execution` errors instead of
   soft-discard (Compose sandbox and CLI `run`); `compose down` fails closed on
   network/volume remove errors; failed `compose up` service and network

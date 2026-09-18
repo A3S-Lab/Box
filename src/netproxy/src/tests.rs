@@ -654,7 +654,7 @@ fn test_parse_port_forwards_rejects_udp_suffix() {
         Err(error) => error,
     };
 
-    assert!(error.contains("only TCP is supported"));
+    assert!(error.contains("netproxy published ports only support TCP"));
 }
 
 #[test]

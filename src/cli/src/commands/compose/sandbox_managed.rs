@@ -2,8 +2,8 @@
 //!
 //! MicroVM Compose keeps the legacy `VmManager::boot` path. This module only
 //! covers the SandboxViaOci GA route so Compose shares create/start/remove with
-//! CLI/SDK. Named bridges and static TCP published ports require keep-authority
-//! opt-in (same DNAT surface as CLI/SDK); UDP and `host_port=0` stay refused.
+//! CLI/SDK. Named bridges and static TCP/UDP published ports require keep-authority
+//! opt-in (same DNAT surface as CLI/SDK). Unresolved `host_port=0` stays refused.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,7 +13,7 @@ use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
     parse_port_mapping, sandbox_named_bridge_opt_in_enabled, CreateExecutionRequest, ExecutionId,
     ExecutionManager, ExecutionRecordPolicy, ExecutionRestartPolicy, KillExecutionOptions,
-    OperationId, PortProtocol, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
+    OperationId, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 use a3s_box_runtime::{ComposeRuntimePlan, ManagedExecutionState};
 
@@ -66,12 +66,6 @@ fn validate_sandbox_compose_published_ports(
                 "Compose --isolation sandbox published port on service '{service_name}': {error}"
             )
         })?;
-        if mapping.protocol != PortProtocol::Tcp {
-            return Err(format!(
-                "Compose --isolation sandbox published ports on service '{service_name}' only support TCP; got '{entry}'"
-            )
-            .into());
-        }
         if mapping.host_port == 0 {
             return Err(format!(
                 "Compose --isolation sandbox published ports on service '{service_name}' reject host_port=0 auto-assign in '{entry}'"
