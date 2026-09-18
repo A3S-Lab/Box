@@ -39,7 +39,7 @@ impl A3sBoxClient {
 
         let id = record.id.clone();
         let name = record.name.clone();
-        cleanup_removed_box(&self.paths, &record);
+        cleanup_removed_box(&self.paths, &record)?;
         let removed =
             StateFile::modify(&self.paths.boxes_file, |state| Ok(state.remove_by_id(&id)))?;
         if !removed {
@@ -69,7 +69,7 @@ impl A3sBoxClient {
         })?;
 
         for record in &records {
-            cleanup_removed_box(&self.paths, record);
+            cleanup_removed_box(&self.paths, record)?;
         }
 
         Ok(records
@@ -121,7 +121,7 @@ impl A3sBoxClient {
         let name = record.name.clone();
 
         if auto_removed {
-            cleanup_removed_box(&self.paths, &record);
+            cleanup_removed_box(&self.paths, &record)?;
             StateFile::modify(&self.paths.boxes_file, |state| {
                 state.remove_by_id(&record_id);
                 Ok(())
@@ -136,7 +136,7 @@ impl A3sBoxClient {
             });
         }
 
-        cleanup_stopped_box(&self.paths, &record);
+        cleanup_stopped_box(&self.paths, &record)?;
         let box_summary = StateFile::modify(&self.paths.boxes_file, |state| {
             let Some(record) = state.find_by_id_mut(&record_id) else {
                 return Ok(None);

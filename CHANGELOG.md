@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Legacy CLI/SDK stop and remove detach named volumes and remove anonymous
+  volumes fail closed (matching managed `release_resources` /
+  `remove_anonymous_volumes`) instead of soft-discarding VolumeStore errors
+  while reporting cleanup success. Does **not** close ROADMAP B3/B2.
 - Snapshot `delete`/`prune` CoW-protection inventory fails closed on boxes
   directory or `.snapshot-lower` I/O errors instead of treating unread markers
   as unprotected; CLI `snapshot rm` treats unreadable markers as in-use. Does

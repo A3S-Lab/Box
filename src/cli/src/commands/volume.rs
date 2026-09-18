@@ -289,15 +289,21 @@ pub(crate) fn attach_volumes_with_store(
 }
 
 /// Detach named volumes from a box in the VolumeStore.
-pub fn detach_volumes(volume_names: &[String], box_id: &str) {
+///
+/// Missing volumes are success (`modify` → `Ok(false)`). Store open / lock /
+/// write failures fail closed so `in_use_by` cannot stay stale after stop/rm.
+pub fn detach_volumes(
+    volume_names: &[String],
+    box_id: &str,
+) -> a3s_box_core::error::Result<()> {
     if volume_names.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Ok(store) = VolumeStore::default_path() {
-        for name in volume_names {
-            store.modify(name, |config| config.detach(box_id)).ok();
-        }
+    let store = VolumeStore::default_path()?;
+    for name in volume_names {
+        store.modify(name, |config| config.detach(box_id))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
