@@ -905,8 +905,10 @@ open and harness reports still keep
   contract. Passt bridge publish forwards that UDP with `--udp-ports`. Product
   admission resolves `0:guest` and `0:guest/udp` to a concrete ephemeral host
   port before boot. Unresolved `host_port=0` still fails closed at passt and
-  keep-authority DNAT. Netproxy now admits static UDP (`host:guest/udp`) with
-  per-client NAT associations; Service UDP stays TCP-only at its own boundary.
+  keep-authority DNAT. Netproxy admits static UDP (`host:guest/udp`) with
+  per-client NAT associations; Runtime Service endpoints also admit UDP with
+  generation-fenced host listeners and guest associations (MicroVM
+  `FRAME_OPEN_UDP` / Sandbox netns UDP). Health probes remain TCP-only.
   CRI admits static UDP into the same `host:guest/udp` contract.
   MicroVM bridge `passt` rejects unresolved
   `host_port=0` / invalid publish entries instead of silent skip. Keep-authority
@@ -927,7 +929,7 @@ open and harness reports still keep
   uses the same present-rule delete contract; CLI removal cleanup fails closed
   when NetworkStore cannot be opened for disconnect (no invent-clean detach).
   GA default remains delegated rootless/
-  `base_v2` loopback-only. CNI, Service UDP, DNS server/proxy,
+  `base_v2` loopback-only. CNI, DNS server/proxy,
   multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux

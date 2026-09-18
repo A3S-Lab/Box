@@ -15,7 +15,7 @@ use a3s_box_core::{
 };
 use a3s_runtime::contract::{
     ArtifactRef, NetworkMode as RuntimeNetworkMode, RestartPolicy, RuntimeMountSource,
-    RuntimeUnitClass, RuntimeUnitSpec, SecretTarget, TransportProtocol,
+    RuntimeUnitClass, RuntimeUnitSpec, SecretTarget,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
@@ -259,16 +259,6 @@ fn validate_supported_shape(
         )]));
     }
     compile_network_mode(&spec.network.mode, execution_isolation)?;
-    if spec
-        .network
-        .ports
-        .iter()
-        .any(|port| port.protocol != TransportProtocol::Tcp)
-    {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![
-            "feature:ServiceUdp".into(),
-        ]));
-    }
     if let Some(bytes) = spec.resources.ephemeral_storage_bytes {
         if bytes == 0 {
             return Err(RuntimeError::InvalidRequest(

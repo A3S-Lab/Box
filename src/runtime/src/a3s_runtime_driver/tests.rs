@@ -281,6 +281,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
             RuntimeFeature::Stop,
             RuntimeFeature::Remove,
             RuntimeFeature::ServiceTcp,
+            RuntimeFeature::ServiceUdp,
             RuntimeFeature::Logs,
             RuntimeFeature::Exec,
             RuntimeFeature::ServiceLifecycle,

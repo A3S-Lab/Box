@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionPortConnector, ExecutionPortStream,
+    ExecutionPortConnector, ExecutionPortStream, ExecutionUdpPort, ExecutionUdpPortIo,
 };
 use a3s_runtime::contract::{
     NetworkMode, RuntimeFeature, RuntimeInspection, RuntimePort, RuntimeServiceEndpoint,
@@ -32,10 +32,13 @@ struct ConnectCall {
 #[derive(Default)]
 struct TestConnector {
     streams: Mutex<VecDeque<ExecutionPortStream>>,
+    udp_ports: Mutex<VecDeque<ExecutionUdpPort>>,
     /// Keep auto-created duplex peers alive so advertised-URL probes do not
     /// see an immediate EOF from a dropped workload half.
     held_peers: Mutex<Vec<DuplexStream>>,
+    held_udp: Mutex<Vec<tokio::sync::mpsc::Sender<Vec<u8>>>>,
     calls: Mutex<Vec<ConnectCall>>,
+    udp_calls: Mutex<Vec<ConnectCall>>,
 }
 
 impl TestConnector {
@@ -46,8 +49,57 @@ impl TestConnector {
         workload_stream
     }
 
+    fn queue_udp_pair(
+        &self,
+    ) -> (
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        let (to_workload, from_connector) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        let (to_connector, from_workload) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        self.udp_ports
+            .lock()
+            .unwrap()
+            .push_back(Box::new(ChannelUdpPort {
+                tx: to_workload,
+                rx: from_workload,
+            }));
+        (from_connector, to_connector)
+    }
+
     fn calls(&self) -> Vec<ConnectCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn udp_calls(&self) -> Vec<ConnectCall> {
+        self.udp_calls.lock().unwrap().clone()
+    }
+}
+
+struct ChannelUdpPort {
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[async_trait]
+impl ExecutionUdpPortIo for ChannelUdpPort {
+    async fn send_datagram(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        self.tx.send(payload.to_vec()).await.map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "UDP workload peer closed")
+        })
+    }
+
+    async fn recv_datagram(&mut self, max_len: usize) -> std::io::Result<Vec<u8>> {
+        let payload = self.rx.recv().await.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "UDP workload peer closed")
+        })?;
+        if payload.len() > max_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "UDP datagram exceeds receiver bound",
+            ));
+        }
+        Ok(payload)
     }
 }
 
@@ -75,6 +127,36 @@ impl ExecutionPortConnector for TestConnector {
         let (connector_stream, workload_stream) = tokio::io::duplex(1_024);
         self.held_peers.lock().unwrap().push(workload_stream);
         Ok(Box::pin(connector_stream))
+    }
+
+    async fn connect_udp_port(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        port: NonZeroU16,
+        timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionUdpPort> {
+        self.udp_calls.lock().unwrap().push(ConnectCall {
+            execution_id: execution_id.clone(),
+            generation,
+            port,
+            timeout,
+        });
+        if let Some(port) = self.udp_ports.lock().unwrap().pop_front() {
+            return Ok(port);
+        }
+        let (to_workload, mut from_connector) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        let (to_connector, from_workload) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+        // Hold the workload send half so probe-driven associations stay open.
+        self.held_udp.lock().unwrap().push(to_connector);
+        // Drain probe-side sends so the channel does not fill.
+        tokio::spawn(async move {
+            while from_connector.recv().await.is_some() {}
+        });
+        Ok(Box::new(ChannelUdpPort {
+            tx: to_workload,
+            rx: from_workload,
+        }))
     }
 }
 
@@ -545,7 +627,7 @@ async fn stop_remove_and_provider_loss_close_every_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capabilities_advertise_outbound_and_reject_udp_without_mutation() {
+async fn capabilities_advertise_service_udp_and_outbound() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(DriverFakeBackend::default());
     let driver = fake_driver_with_backend_and_connector(
@@ -563,24 +645,32 @@ async fn capabilities_advertise_outbound_and_reject_udp_without_mutation() {
         ]
     );
     assert!(capabilities.features.contains(&RuntimeFeature::ServiceTcp));
-    assert!(!capabilities.features.contains(&RuntimeFeature::ServiceUdp));
+    assert!(capabilities.features.contains(&RuntimeFeature::ServiceUdp));
     assert!(capabilities.network_modes.contains(&NetworkMode::Outbound));
 
     let mut udp = service_spec("service-endpoint-udp", 1, &[("dns", 5_353)]);
     udp.network.ports[0].protocol = TransportProtocol::Udp;
-    assert!(matches!(
-        driver.apply(&udp, &accepted(&udp)).await,
-        Err(RuntimeError::UnsupportedCapabilities(missing))
-            if missing == vec!["feature:ServiceUdp"]
-    ));
+    let running = driver.apply(&udp, &accepted(&udp)).await.unwrap();
+    let endpoints = running.service_endpoints().unwrap();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].protocol, TransportProtocol::Udp);
+    assert!(endpoints[0].address.is_loopback());
 
     let mut outbound = runtime_spec("service-endpoint-outbound", 1, RuntimeUnitClass::Task);
     outbound.network.mode = NetworkMode::Outbound;
     assert!(driver.apply(&outbound, &accepted(&outbound)).await.is_ok());
     let records = driver.manager.managed_records().await.unwrap();
-    assert_eq!(records.len(), 1);
+    let outbound_record = records
+        .iter()
+        .find(|record| record.id.contains("outbound") || {
+            record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| metadata.request.config.network == a3s_box_core::NetworkMode::Tsi)
+        })
+        .expect("outbound task record");
     assert_eq!(
-        records[0]
+        outbound_record
             .managed_execution
             .as_ref()
             .unwrap()
@@ -588,5 +678,47 @@ async fn capabilities_advertise_outbound_and_reject_udp_without_mutation() {
             .config
             .network,
         a3s_box_core::NetworkMode::Tsi
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn endpoints_relay_bidirectional_udp_datagrams() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(DriverFakeBackend::default());
+    let connector = Arc::new(TestConnector::default());
+    let driver =
+        fake_driver_with_backend_and_connector(&directory, backend.clone(), connector.clone());
+    let mut spec = service_spec("service-endpoint-udp-relay", 1, &[("dns", 5_353)]);
+    spec.network.ports[0].protocol = TransportProtocol::Udp;
+
+    let (mut workload_rx, workload_tx) = connector.queue_udp_pair();
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    let address = endpoint(&running, "dns").socket_addr();
+    assert_eq!(endpoint(&running, "dns").protocol, TransportProtocol::Udp);
+
+    let client = tokio::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    client.send_to(b"udp-request", address).await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(2), workload_rx.recv())
+        .await
+        .unwrap()
+        .expect("workload should receive UDP datagram");
+    assert_eq!(request, b"udp-request");
+    workload_tx.send(b"udp-response".to_vec()).await.unwrap();
+
+    let mut buf = [0_u8; 64];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"udp-response");
+    assert_eq!(
+        connector
+            .udp_calls()
+            .iter()
+            .map(|call| call.port.get())
+            .collect::<Vec<_>>(),
+        vec![5_353]
     );
 }

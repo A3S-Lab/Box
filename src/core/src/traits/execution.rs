@@ -814,6 +814,15 @@ impl<T> ExecutionPortIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
 pub type ExecutionPortStream = Pin<Box<dyn ExecutionPortIo>>;
 
+/// Datagram session connected to one generation-fenced workload UDP port.
+#[async_trait]
+pub trait ExecutionUdpPortIo: Send {
+    async fn send_datagram(&mut self, payload: &[u8]) -> std::io::Result<()>;
+    async fn recv_datagram(&mut self, max_len: usize) -> std::io::Result<Vec<u8>>;
+}
+
+pub type ExecutionUdpPort = Box<dyn ExecutionUdpPortIo>;
+
 /// Backend-neutral connector used by data-plane gateways.
 ///
 /// Implementations must validate the execution generation atomically with
@@ -828,6 +837,23 @@ pub trait ExecutionPortConnector: Send + Sync {
         port: NonZeroU16,
         timeout: Duration,
     ) -> ExecutionManagerResult<ExecutionPortStream>;
+
+    /// Open a generation-fenced UDP association to a workload-local port.
+    ///
+    /// Default is unavailable so TCP-only connectors keep compiling; Service
+    /// UDP providers override this with a real datagram session.
+    async fn connect_udp_port(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        port: NonZeroU16,
+        timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionUdpPort> {
+        let _ = (execution_id, generation, port, timeout);
+        Err(ExecutionManagerError::Unavailable(
+            "UDP port connections are not supported by this connector".into(),
+        ))
+    }
 }
 
 /// Backend-neutral lifecycle facade shared by the CLI, SDK, and remote service.

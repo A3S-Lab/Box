@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, UdpSocket};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
@@ -31,6 +31,7 @@ const FRAME_OPEN: u8 = 1;
 const FRAME_OPEN_ACK: u8 = 2;
 const FRAME_DATA: u8 = 3;
 const FRAME_CLOSE: u8 = 4;
+const FRAME_OPEN_UDP: u8 = 5;
 
 fn decode_stop_signal_payload(payload: &[u8]) -> Option<i32> {
     let bytes: [u8; 4] = payload.try_into().ok()?;
@@ -45,6 +46,7 @@ type StreamMap = Arc<Mutex<HashMap<u32, GuestTargetStream>>>;
 #[cfg(target_os = "linux")]
 enum GuestTargetStream {
     Tcp(TcpStream),
+    Udp(UdpSocket),
     Exec(UnixStream),
 }
 
@@ -53,6 +55,7 @@ impl GuestTargetStream {
     fn try_clone(&self) -> io::Result<Self> {
         match self {
             Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            Self::Udp(socket) => socket.try_clone().map(Self::Udp),
             Self::Exec(stream) => stream.try_clone().map(Self::Exec),
         }
     }
@@ -60,6 +63,7 @@ impl GuestTargetStream {
     fn shutdown(&self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Self::Udp(socket) => socket.shutdown(Shutdown::Both),
             Self::Exec(stream) => stream.shutdown(Shutdown::Both),
         }
     }
@@ -67,6 +71,7 @@ impl GuestTargetStream {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         match self {
             Self::Tcp(stream) => stream.as_raw_fd(),
+            Self::Udp(socket) => socket.as_raw_fd(),
             Self::Exec(stream) => stream.as_raw_fd(),
         }
     }
@@ -74,6 +79,7 @@ impl GuestTargetStream {
     fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Self::Udp(socket) => socket.set_nonblocking(nonblocking),
             Self::Exec(stream) => stream.set_nonblocking(nonblocking),
         }
     }
@@ -84,6 +90,7 @@ impl Read for GuestTargetStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.read(buf),
+            Self::Udp(socket) => socket.recv(buf),
             Self::Exec(stream) => stream.read(buf),
         }
     }
@@ -94,6 +101,7 @@ impl Write for GuestTargetStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.write(buf),
+            Self::Udp(socket) => socket.send(buf),
             Self::Exec(stream) => stream.write(buf),
         }
     }
@@ -101,6 +109,7 @@ impl Write for GuestTargetStream {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.flush(),
+            Self::Udp(_) => Ok(()),
             Self::Exec(stream) => stream.flush(),
         }
     }
@@ -231,6 +240,19 @@ fn connect_guest_loopback(port: u16) -> io::Result<TcpStream> {
 }
 
 #[cfg(target_os = "linux")]
+fn connect_guest_loopback_udp(port: u16) -> io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        0,
+    )))?;
+    socket.connect(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        port,
+    )))?;
+    Ok(socket)
+}
+
+#[cfg(target_os = "linux")]
 fn connect_control() -> io::Result<std::fs::File> {
     let fd = socket(
         AddressFamily::Vsock,
@@ -293,7 +315,7 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                             guest_port,
                             peer = ?peer,
                             local = ?local,
-                            "pf: connected guest target, spawned reader"
+                            "pf: connected guest TCP target, spawned reader"
                         );
                         streams.lock().unwrap().insert(frame.stream_id, stream);
                         spawn_guest_reader(
@@ -310,6 +332,46 @@ fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> i
                             stream_id = frame.stream_id,
                             guest_port,
                             "Failed to connect guest TCP target"
+                        );
+                        write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
+                    }
+                }
+            }
+            FRAME_OPEN_UDP => {
+                if frame.payload.len() != 2 {
+                    write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
+                    continue;
+                }
+
+                let guest_port = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+                match connect_guest_loopback_udp(guest_port) {
+                    Ok(socket) => {
+                        let peer = socket.peer_addr().ok();
+                        let local = socket.local_addr().ok();
+                        let stream = GuestTargetStream::Udp(socket);
+                        let read_stream = stream.try_clone()?;
+                        debug!(
+                            stream_id = frame.stream_id,
+                            guest_port,
+                            peer = ?peer,
+                            local = ?local,
+                            "pf: connected guest UDP target, spawned reader"
+                        );
+                        streams.lock().unwrap().insert(frame.stream_id, stream);
+                        spawn_guest_reader(
+                            frame.stream_id,
+                            read_stream,
+                            writer.clone(),
+                            streams.clone(),
+                        );
+                        write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[0])?;
+                    }
+                    Err(err) => {
+                        debug!(
+                            error = %err,
+                            stream_id = frame.stream_id,
+                            guest_port,
+                            "Failed to connect guest UDP target"
                         );
                         write_frame(&writer, FRAME_OPEN_ACK, frame.stream_id, &[1])?;
                     }

@@ -346,9 +346,9 @@ impl BoxRuntimeDriver {
                 RuntimeError::Protocol(format!("health port {port_name:?} is not declared"))
             })?;
         if port.protocol != TransportProtocol::Tcp {
-            return Err(RuntimeError::UnsupportedCapabilities(vec![
-                "feature:ServiceUdp".into(),
-            ]));
+            return Err(RuntimeError::InvalidRequest(
+                "Runtime health probes require a TCP service port".into(),
+            ));
         }
         let port = NonZeroU16::new(port.container_port)
             .ok_or_else(|| RuntimeError::Protocol("health port is zero".into()))?;
