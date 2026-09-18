@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Managed `ExecutionResourceGuard` rollback fails closed on volume/network/
+  snapshot-marker undo errors and OCI/MicroVM start paths chain those failures
+  with the primary create/start Err instead of warn-and-inventing a clean
+  resource undo. Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - Compose partial-service wipe/detach fails closed (CLI/SDK parity) instead of
   log-and-void inventing clean undo; teardown and compose-up partial paths chain
   wipe failures with the primary error. Does **not** close ROADMAP B4/B3/B2 or

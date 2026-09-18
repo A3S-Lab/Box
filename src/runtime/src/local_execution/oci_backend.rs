@@ -1775,14 +1775,52 @@ fn managed_resource_home(record: &BoxRecord) -> ExecutionManagerResult<PathBuf> 
     Ok(home.to_path_buf())
 }
 
-async fn rollback_execution_resources(resources: ExecutionResourceGuard, record: &BoxRecord) {
+async fn rollback_execution_resources(
+    resources: ExecutionResourceGuard,
+    record: &BoxRecord,
+) -> ExecutionManagerResult<()> {
     let execution_id = record.id.clone();
-    if let Err(error) = tokio::task::spawn_blocking(move || resources.rollback()).await {
-        tracing::warn!(
-            %execution_id,
-            %error,
-            "Managed OCI resource rollback task failed"
-        );
+    match tokio::task::spawn_blocking(move || resources.rollback()).await {
+        Ok(result) => result,
+        Err(error) => Err(ExecutionManagerError::Internal(format!(
+            "managed OCI resource rollback task failed for {execution_id}: {error}"
+        ))),
+    }
+}
+
+fn chain_managed_resource_rollback(
+    primary: ExecutionManagerError,
+    rollback: ExecutionManagerResult<()>,
+) -> ExecutionManagerError {
+    match rollback {
+        Ok(()) => primary,
+        Err(rollback) => ExecutionManagerError::Internal(format!(
+            "{primary}; managed resource rollback also failed: {rollback}"
+        )),
+    }
+}
+
+fn chain_prepare_cleanup_and_resource_rollback(
+    primary: ExecutionManagerError,
+    cleanup: ExecutionManagerResult<()>,
+    rollback: ExecutionManagerResult<()>,
+) -> ExecutionManagerError {
+    match (cleanup, rollback) {
+        (Ok(()), Ok(())) => primary,
+        (cleanup, rollback) => {
+            let mut message = primary.to_string();
+            if let Err(cleanup) = cleanup {
+                message.push_str(&format!(
+                    "; Box OCI preparation cleanup also failed: {cleanup}"
+                ));
+            }
+            if let Err(rollback) = rollback {
+                message.push_str(&format!(
+                    "; managed resource rollback also failed: {rollback}"
+                ));
+            }
+            ExecutionManagerError::Internal(message)
+        }
     }
 }
 
@@ -1860,19 +1898,16 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
         let prepared = match self.provider.prepare(record, &preparation).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                rollback_execution_resources(resources, record).await;
-                return Err(error);
+                let rollback = rollback_execution_resources(resources, record).await;
+                return Err(chain_managed_resource_rollback(error, rollback));
             }
         };
         if let Err(error) = prepared.validate_for(record, &preparation) {
             let cleanup = self.provider.cleanup(record).await;
-            rollback_execution_resources(resources, record).await;
-            return match cleanup {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(ExecutionManagerError::Internal(format!(
-                    "{error}; Box OCI preparation cleanup also failed: {cleanup}"
-                ))),
-            };
+            let rollback = rollback_execution_resources(resources, record).await;
+            return Err(chain_prepare_cleanup_and_resource_rollback(
+                error, cleanup, rollback,
+            ));
         }
         let console_log = prepared.console_log.clone();
         let anonymous_volumes = prepared.anonymous_volumes.clone();
@@ -1933,13 +1968,10 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                     Ok(None) => {}
                 }
                 let cleanup = self.provider.cleanup(record).await;
-                rollback_execution_resources(resources, record).await;
-                match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(ExecutionManagerError::Internal(format!(
-                        "{error}; Box OCI preparation cleanup also failed: {cleanup}"
-                    ))),
-                }
+                let rollback = rollback_execution_resources(resources, record).await;
+                Err(chain_prepare_cleanup_and_resource_rollback(
+                    error, cleanup, rollback,
+                ))
             }
         }
     }
