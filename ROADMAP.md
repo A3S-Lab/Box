@@ -871,10 +871,12 @@ open and harness reports still keep
   unresolved auto-assign. MicroVM bridge `passt` rejects unresolved
   `host_port=0` / invalid publish entries instead of silent skip. Keep-authority
   DNAT teardown fails closed when a present publish rule cannot be deleted
-  (lease retained). GA default remains delegated rootless/`base_v2`
-  loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy, multi-device,
-  rootless/MicroVM/Windows parity, and the B3 exit gate remain open. Does
-  **not** flip `b2_process_session_recovery_closed`.
+  (lease retained); prepare and Sandbox cleanup propagate lease teardown
+  failures instead of soft-skip/warn; idle-bridge MASQUERADE removal uses the
+  same present-rule delete contract. GA default remains delegated rootless/
+  `base_v2` loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy,
+  multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata

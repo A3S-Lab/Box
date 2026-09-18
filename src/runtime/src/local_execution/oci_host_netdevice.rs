@@ -173,8 +173,10 @@ pub(crate) fn stage_for_sandbox_bundle(
         published_tcp,
     );
 
-    // Replace any stale lease/ifaces from a previous failed prepare.
-    let _ = teardown_lease(home_dir, box_id);
+    // Replace any stale lease/ifaces from a previous failed prepare. Fail closed
+    // if an existing publish rule or lease cannot be torn down — soft-skipping
+    // here can leave duplicate DNAT beside a new lease.
+    teardown_lease(home_dir, box_id)?;
 
     stage_veth_pair(&lease, endpoint, prefix_len, config.gateway)?;
     ensure_published_tcp_dnat(&lease)?;
@@ -204,7 +206,7 @@ pub(crate) fn teardown_lease(home_dir: &Path, box_id: &str) -> ExecutionManagerR
     delete_link_if_present(&lease.container_iface);
     delete_link_if_present(&lease.peer_iface);
     // Network-scoped bridge is shared across endpoints; delete only when empty.
-    try_delete_bridge_if_idle(&lease.bridge_iface, &lease.subnet);
+    try_delete_bridge_if_idle(&lease.bridge_iface, &lease.subnet)?;
 
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -668,25 +670,23 @@ fn iptables_nat_rule_present(subnet: &str, bridge_iface: &str) -> ExecutionManag
 }
 
 #[cfg(target_os = "linux")]
-fn remove_bridge_egress_nat(subnet: &str, bridge_iface: &str) {
+fn remove_bridge_egress_nat(subnet: &str, bridge_iface: &str) -> ExecutionManagerResult<()> {
     if subnet.is_empty() || bridge_iface.is_empty() {
-        return;
+        return Ok(());
     }
-    let _ = Command::new("iptables")
-        .args([
-            "-t",
-            "nat",
-            "-D",
-            "POSTROUTING",
-            "-s",
-            subnet,
-            "!",
-            "-o",
-            bridge_iface,
-            "-j",
-            "MASQUERADE",
-        ])
-        .output();
+    iptables_delete_if_present(&[
+        "-t",
+        "nat",
+        "-D",
+        "POSTROUTING",
+        "-s",
+        subnet,
+        "!",
+        "-o",
+        bridge_iface,
+        "-j",
+        "MASQUERADE",
+    ])
 }
 
 #[cfg(target_os = "linux")]
@@ -721,32 +721,36 @@ fn link_exists(name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) {
+fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) -> ExecutionManagerResult<()> {
     if !link_exists(bridge_iface) {
-        remove_bridge_egress_nat(subnet, bridge_iface);
-        return;
+        return remove_bridge_egress_nat(subnet, bridge_iface);
     }
     // `ip -o link show master <br>` lists slaves; empty means idle fabric.
     let output = Command::new("ip")
         .args(["-o", "link", "show", "master", bridge_iface])
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
+        .output()
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to inspect slaves for bridge {bridge_iface}: {error}"
+            ))
+        })?;
     if !output.status.success() {
-        return;
+        return Err(ExecutionManagerError::Unavailable(format!(
+            "failed to list slaves for bridge {bridge_iface}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
-        return;
+        return Ok(());
     }
-    remove_bridge_egress_nat(subnet, bridge_iface);
-    let _ = Command::new("ip")
-        .args(["link", "del", bridge_iface])
-        .output();
+    remove_bridge_egress_nat(subnet, bridge_iface)?;
+    run_ip(&["link", "del", bridge_iface])
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_delete_bridge_if_idle(_bridge_iface: &str, _subnet: &str) {}
+fn try_delete_bridge_if_idle(_bridge_iface: &str, _subnet: &str) -> ExecutionManagerResult<()> {
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn run_ip(args: &[&str]) -> ExecutionManagerResult<()> {

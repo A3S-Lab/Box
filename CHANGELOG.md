@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Keep-authority SandboxViaOci host-netdevice prepare propagates stale-lease
+  teardown failures instead of `let _ = teardown_lease`, and Sandbox cleanup
+  fails closed on lease teardown instead of warn-and-continue; bridge
+  MASQUERADE removal uses the same present-rule delete contract as TCP DNAT.
+  Does **not** close ROADMAP B3/B4/B2 or claim UDP publish teardown parity.
 - MicroVM image-declared anonymous `VOLUME` materialization fails closed on
   `VolumeStore` claim failure instead of warn-and-skip, aligning with Sandbox
   ownership honesty. Does **not** close ROADMAP B3/B2, invent Windows volume/

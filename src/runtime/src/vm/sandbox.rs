@@ -568,15 +568,18 @@ impl VmManager {
     pub(crate) fn cleanup_runtime_owned_sandbox_bundle(&self) -> Result<()> {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         #[cfg(all(feature = "vm", target_os = "linux"))]
-        if let Err(error) =
-            crate::local_execution::oci_host_netdevice::teardown_lease(&self.home_dir, &self.box_id)
-        {
-            tracing::warn!(
-                box_id = %self.box_id,
-                %error,
-                "Failed to tear down SandboxViaOci host netdevice lease during cleanup"
-            );
-        }
+        crate::local_execution::oci_host_netdevice::teardown_lease(&self.home_dir, &self.box_id)
+            .map_err(|error| {
+                BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to tear down SandboxViaOci host netdevice lease during cleanup: {error}"
+                    ),
+                    hint: Some(
+                        "Reconcile keep-authority iptables publish rules before retrying remove"
+                            .into(),
+                    ),
+                }
+            })?;
         crate::sandbox::cleanup_sandbox_mount_aliases(&self.home_dir, &self.box_id)?;
         self.rootfs_provider
             .cleanup(&box_dir, self.config.persistent)?;
