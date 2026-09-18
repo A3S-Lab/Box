@@ -8,7 +8,9 @@
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries answered for NetworkStore names/aliases when a
 //!   bridge `networks.json` is configured (macOS netproxy and Linux
-//!   passt_bridge), otherwise forwarded to the host's configured DNS servers.
+//!   passt_bridge). macOS netproxy also answers those names on TCP/53 before
+//!   the upstream TCP proxy. Linux passt_bridge still forwards TCP/53
+//!   unmodified. Unknown names are forwarded upstream.
 //! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
 //!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
 //!   `"5353:53/udp"`).
@@ -130,6 +132,9 @@ struct TcpProxyConnection {
     host_stream: TcpStream,
     host_read_closed: bool,
     guest_read_closed: bool,
+    /// Guest bytes already consumed while deciding a TCP/53 local answer.
+    /// Written to the upstream socket before any further guest read.
+    prefetch: Vec<u8>,
     /// An abort raised after the most recent interface poll must survive until
     /// the next poll so smoltcp can emit its reset packet.
     abort_pending: bool,
@@ -142,6 +147,7 @@ impl TcpProxyConnection {
             host_stream,
             host_read_closed: false,
             guest_read_closed: false,
+            prefetch: Vec::new(),
             abort_pending: false,
         }
     }
@@ -162,6 +168,20 @@ struct PendingOutboundConnection {
     host_stream: Option<TcpStream>,
     started_at: std::time::Instant,
     failed: bool,
+    /// Bytes pulled from the guest while a TCP/53 query was classified.
+    prefetch: Vec<u8>,
+}
+
+/// Guest TCP/53 to a configured DNS server, held until the first DNS message
+/// is complete. Known NetworkStore names are answered here. Unknown names
+/// fall through to the normal upstream TCP proxy with `prefetch` intact.
+struct DnsTcpSession {
+    flow: OutboundFlow,
+    handle: smoltcp::iface::SocketHandle,
+    buffer: Vec<u8>,
+    reply: Vec<u8>,
+    started_at: std::time::Instant,
+    abort_pending: bool,
 }
 
 struct ActiveOutboundConnection {
@@ -199,6 +219,7 @@ struct ProxyEngine {
     udp_forwards: Vec<UdpPortForward>,
     pending_outbound: Vec<PendingOutboundConnection>,
     active_outbound: Vec<ActiveOutboundConnection>,
+    dns_tcp: Vec<DnsTcpSession>,
     outbound_connectors: Arc<AtomicUsize>,
     next_ephemeral: u16,
     shutdown: Arc<AtomicBool>,
@@ -280,6 +301,7 @@ impl ProxyEngine {
             udp_forwards,
             pending_outbound: Vec::new(),
             active_outbound: Vec::new(),
+            dns_tcp: Vec::new(),
             outbound_connectors: Arc::new(AtomicUsize::new(0)),
             next_ephemeral: EPHEMERAL_BASE,
             shutdown,
@@ -323,6 +345,7 @@ impl ProxyEngine {
             // 5. Promote pending TCP connections to active once established.
             self.promote_established();
             self.promote_outbound_established();
+            self.serve_networkstore_dns_tcp();
 
             // 6. Proxy data for active TCP connections and UDP associations.
             self.proxy_data();
@@ -592,13 +615,21 @@ impl ProxyEngine {
             if self.outbound_flow_exists(flow) {
                 continue;
             }
-            if self.pending_outbound.len() + self.active_outbound.len() >= MAX_OUTBOUND_CONNECTIONS
+            if self.pending_outbound.len() + self.active_outbound.len() + self.dns_tcp.len()
+                >= MAX_OUTBOUND_CONNECTIONS
                 || self.outbound_connectors.load(Ordering::Relaxed) >= MAX_OUTBOUND_CONNECTIONS
             {
                 tracing::warn!(
                     limit = MAX_OUTBOUND_CONNECTIONS,
                     "NetProxy outbound connection limit reached"
                 );
+                continue;
+            }
+
+            if self.should_hold_networkstore_dns_tcp(&flow) {
+                if self.listen_outbound_socket(flow).is_some() {
+                    tracing::debug!(?flow, "NetProxy holding TCP/53 for a NetworkStore answer");
+                }
                 continue;
             }
 
@@ -635,6 +666,7 @@ impl ProxyEngine {
                 host_stream: None,
                 started_at: std::time::Instant::now(),
                 failed: false,
+                prefetch: Vec::new(),
             });
             tracing::debug!(
                 ?flow,
@@ -652,6 +684,7 @@ impl ProxyEngine {
                 .active_outbound
                 .iter()
                 .any(|active| active.flow == flow)
+            || self.dns_tcp.iter().any(|session| session.flow == flow)
     }
 
     /// Collect host connect results without blocking the netproxy packet loop.
@@ -740,9 +773,11 @@ impl ProxyEngine {
             if matches!(state, State::Established | State::CloseWait) {
                 if let Some(stream) = pending.host_stream.take() {
                     tracing::debug!(flow = ?pending.flow, handle = ?pending.handle, "NetProxy outbound TCP proxy active");
+                    let mut proxy = TcpProxyConnection::new(pending.handle, stream);
+                    proxy.prefetch = pending.prefetch;
                     self.active_outbound.push(ActiveOutboundConnection {
                         flow: pending.flow,
-                        proxy: TcpProxyConnection::new(pending.handle, stream),
+                        proxy,
                     });
                     continue;
                 }
@@ -784,6 +819,19 @@ impl ProxyEngine {
         for handle in to_remove {
             self.sockets.remove(handle);
         }
+
+        let mut dns_remove = Vec::new();
+        self.dns_tcp.retain(|session| {
+            if session.abort_pending {
+                dns_remove.push(session.handle);
+                false
+            } else {
+                true
+            }
+        });
+        for handle in dns_remove {
+            self.sockets.remove(handle);
+        }
     }
 
     // ── Bidirectional data proxy ──────────────────────────────────────────────
@@ -800,6 +848,158 @@ impl ProxyEngine {
     }
 
     // ── DNS forwarding ────────────────────────────────────────────────────────
+
+    fn should_hold_networkstore_dns_tcp(&self, flow: &OutboundFlow) -> bool {
+        flow.remote_port == 53
+            && self.networks_json.is_some()
+            && self.network_name.is_some()
+            && self
+                .dns_sockets
+                .iter()
+                .any(|(_, server)| *server == flow.remote_ip)
+    }
+
+    fn listen_outbound_socket(
+        &mut self,
+        flow: OutboundFlow,
+    ) -> Option<smoltcp::iface::SocketHandle> {
+        let rx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+        let tx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+        let mut socket = tcp::Socket::new(rx, tx);
+        let endpoint = IpEndpoint::new(
+            IpAddress::Ipv4(to_smoltcp_ipv4(flow.remote_ip)),
+            flow.remote_port,
+        );
+        if let Err(error) = socket.listen(endpoint) {
+            tracing::warn!(?error, ?flow, "NetProxy failed to listen for outbound flow");
+            return None;
+        }
+        socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
+        socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
+        let handle = self.sockets.add(socket);
+        self.dns_tcp.push(DnsTcpSession {
+            flow,
+            handle,
+            buffer: Vec::new(),
+            reply: Vec::new(),
+            started_at: std::time::Instant::now(),
+            abort_pending: false,
+        });
+        Some(handle)
+    }
+
+    /// Answer the first complete TCP/53 query for a NetworkStore name.
+    ///
+    /// Unknown names are not failed closed here: the bytes already read are
+    /// prefetched onto the existing upstream TCP proxy. Linux passt_bridge does
+    /// not use this path.
+    fn serve_networkstore_dns_tcp(&mut self) {
+        use smoltcp::socket::tcp::State;
+
+        let networks_json = self.networks_json.clone();
+        let network_name = self.network_name.clone();
+        let mut still = Vec::new();
+        let mut fallbacks = Vec::new();
+        for mut session in self.dns_tcp.drain(..) {
+            if session.abort_pending {
+                still.push(session);
+                continue;
+            }
+            let state = self.sockets.get::<tcp::Socket>(session.handle).state();
+            if matches!(state, State::Closed | State::TimeWait) {
+                self.sockets.remove(session.handle);
+                continue;
+            }
+
+            if session.reply.is_empty() {
+                {
+                    let socket = self.sockets.get_mut::<tcp::Socket>(session.handle);
+                    if socket.can_recv() {
+                        let _ = socket.recv(|data| {
+                            session.buffer.extend_from_slice(data);
+                            (data.len(), ())
+                        });
+                    }
+                }
+                if session.buffer.len() > 2 + 65535 {
+                    self.sockets.get_mut::<tcp::Socket>(session.handle).abort();
+                    session.abort_pending = true;
+                    still.push(session);
+                    continue;
+                }
+                if let Some((query, consumed)) = dns_local::split_dns_tcp_message(&session.buffer) {
+                    let query = query.to_vec();
+                    let response = networks_json
+                        .as_deref()
+                        .zip(network_name.as_deref())
+                        .and_then(|(path, name)| {
+                            dns_local::try_network_a_response(&query, path, name)
+                        });
+                    if let Some(response) = response.filter(|response| response.len() <= 65535) {
+                        let mut reply = (response.len() as u16).to_be_bytes().to_vec();
+                        reply.extend_from_slice(&response);
+                        session.reply = reply;
+                        session.buffer.drain(..consumed);
+                    } else {
+                        fallbacks.push(session);
+                        continue;
+                    }
+                } else if session.started_at.elapsed() > OUTBOUND_CONNECT_TIMEOUT {
+                    self.sockets.get_mut::<tcp::Socket>(session.handle).abort();
+                    session.abort_pending = true;
+                    still.push(session);
+                    continue;
+                } else {
+                    still.push(session);
+                    continue;
+                }
+            }
+
+            {
+                let socket = self.sockets.get_mut::<tcp::Socket>(session.handle);
+                if socket.can_send() && !session.reply.is_empty() {
+                    if let Ok(sent) = socket.send_slice(&session.reply) {
+                        session.reply.drain(..sent);
+                    }
+                }
+                if session.reply.is_empty() {
+                    socket.close();
+                }
+            }
+            still.push(session);
+        }
+        self.dns_tcp = still;
+        for session in fallbacks {
+            self.fallback_dns_tcp_upstream(session);
+        }
+    }
+
+    fn fallback_dns_tcp_upstream(&mut self, session: DnsTcpSession) {
+        let connect_result = match spawn_outbound_connect(
+            session.flow,
+            Arc::clone(&self.outbound_connectors),
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                tracing::warn!(%error, flow = ?session.flow, "NetProxy failed to spawn TCP/53 upstream");
+                self.sockets.get_mut::<tcp::Socket>(session.handle).abort();
+                self.dns_tcp.push(DnsTcpSession {
+                    abort_pending: true,
+                    ..session
+                });
+                return;
+            }
+        };
+        self.pending_outbound.push(PendingOutboundConnection {
+            flow: session.flow,
+            handle: session.handle,
+            connect_result,
+            host_stream: None,
+            started_at: session.started_at,
+            failed: false,
+            prefetch: session.buffer,
+        });
+    }
 
     fn forward_dns(&mut self) {
         let next_query = self.dns_sockets.iter().find_map(|(handle, server)| {
@@ -963,6 +1163,39 @@ fn spawn_outbound_connect(
 /// bytes under backpressure.
 fn proxy_tcp_connection(sockets: &mut SocketSet<'static>, connection: &mut TcpProxyConnection) {
     let handle = connection.handle;
+    if !connection.prefetch.is_empty() {
+        let socket = sockets.get_mut::<tcp::Socket>(handle);
+        match connection.host_stream.write(&connection.prefetch) {
+            Ok(0) => {
+                let _ = connection.host_stream.shutdown(Shutdown::Both);
+                socket.abort();
+                connection.abort_pending = true;
+                return;
+            }
+            Ok(written) => {
+                connection.prefetch.drain(..written);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(%error, ?handle, "NetProxy host prefetch write failed");
+                let _ = connection.host_stream.shutdown(Shutdown::Both);
+                socket.abort();
+                connection.abort_pending = true;
+                return;
+            }
+        }
+        if !connection.prefetch.is_empty() {
+            return;
+        }
+    }
+
     let socket = sockets.get_mut::<tcp::Socket>(handle);
 
     let mut guest_to_host_bytes = 0usize;

@@ -80,6 +80,7 @@ fn poll_test_proxy_tcp(proxy: &mut ProxyEngine) {
     proxy.finish_aborted_connections();
     proxy.promote_established();
     proxy.promote_outbound_established();
+    proxy.serve_networkstore_dns_tcp();
     proxy.proxy_data();
     proxy.forward_udp_guest_to_host();
     proxy.cleanup();
@@ -365,6 +366,79 @@ fn outbound_tcp_proxy_transfers_bytes_end_to_end() {
     assert_eq!(guest_received, HOST_RESPONSE);
     assert_eq!(proxy.pending_outbound.len(), 0);
     assert_eq!(proxy.active_outbound.len(), 1);
+}
+
+#[test]
+fn networkstore_tcp_dns_answers_alias_without_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("networks.json");
+    let mut net = a3s_box_core::network::NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+    let endpoint = net
+        .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+        .unwrap();
+    let body = serde_json::json!({ "networks": { "mynet": net } });
+    std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+
+    let dns_server = Ipv4Addr::new(8, 8, 8, 8);
+    let (mut guest, mut proxy) = test_guest_and_proxy(vec![dns_server]);
+    proxy.networks_json = Some(path);
+    proxy.network_name = Some("mynet".to_string());
+
+    let mut query = vec![
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 2, b'd', b'b', 0,
+        0x00, 0x01, 0x00, 0x01,
+    ];
+    let mut framed = (query.len() as u16).to_be_bytes().to_vec();
+    framed.append(&mut query);
+
+    let rx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let tx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let mut guest_tcp = tcp::Socket::new(rx, tx);
+    guest_tcp
+        .connect(
+            guest.iface.context(),
+            (IpAddress::Ipv4(to_smoltcp_ipv4(dns_server)), 53),
+            53053,
+        )
+        .unwrap();
+    let guest_handle = guest.sockets.add(guest_tcp);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut sent = false;
+    let mut received = Vec::new();
+    while std::time::Instant::now() < deadline && received.len() < 2 {
+        poll_test_guest(&mut guest);
+        poll_test_proxy_tcp(&mut proxy);
+        let socket = guest.sockets.get_mut::<tcp::Socket>(guest_handle);
+        if !sent && socket.can_send() {
+            assert_eq!(socket.send_slice(&framed).unwrap(), framed.len());
+            sent = true;
+        }
+        if socket.can_recv() {
+            socket
+                .recv(|data| {
+                    received.extend_from_slice(data);
+                    (data.len(), ())
+                })
+                .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(sent, "guest TCP/53 connection never became writable");
+    assert!(
+        received.len() >= 2,
+        "NetworkStore TCP/53 answer was not delivered"
+    );
+    let len = u16::from_be_bytes([received[0], received[1]]) as usize;
+    assert!(received.len() >= 2 + len);
+    let message = &received[2..2 + len];
+    assert_eq!(message[2] & 0x80, 0x80);
+    assert_eq!(&message[message.len() - 4..], &endpoint.ip_address.octets());
+    assert!(
+        proxy.dns_tcp.is_empty() || proxy.dns_tcp.iter().all(|session| session.reply.is_empty())
+    );
+    assert!(proxy.active_outbound.is_empty());
 }
 
 #[test]

@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- macOS netproxy answers NetworkStore name/alias A and AAAA NODATA on
+  TCP/53 before opening the upstream TCP proxy. Unknown names still use that
+  proxy, with the bytes already read prefetched. Linux passt_bridge still
+  forwards TCP/53 unmodified. Does **not** close ROADMAP B3/B2.
 - Short Sandbox/MicroVM tasks that exit before the exec server heartbeat
   keep their in-process owner so startup reconciliation can persist the
   authenticated exit instead of reporting ProviderUnavailable. OnFailure
