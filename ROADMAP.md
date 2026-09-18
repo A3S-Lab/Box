@@ -948,8 +948,9 @@ guest endpoint.
   Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` also creates
   NetworkStore named bridges for Sandbox Compose and admits static TCP
   published ports (CLI/SDK DNAT contract; UDP/`host_port=0` still refused).
-  Warm-pool, MicroVM Compose cutover, and the B4 exit gate remain open. Does
-  **not** flip `b2_process_session_recovery_closed`.
+  Start-failure cleanup surfaces `remove_execution` errors instead of
+  soft-discard. Warm-pool, MicroVM Compose cutover, and the B4 exit gate remain
+  open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep `a3s-box-cri` only as an optional full product adapter; it must use
   the same execution adapter and must not spawn the Box CLI.
 - [ ] Make the OCI Runtime-owned containerd shim the preferred Kubernetes
