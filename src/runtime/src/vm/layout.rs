@@ -11,7 +11,9 @@ use a3s_box_core::error::{BoxError, Result};
 use super::{BoxLayout, VmManager};
 
 mod paths;
-pub(crate) use paths::{legacy_sandbox_runtime_root, runtime_socket_dir, sandbox_runtime_root};
+pub(crate) use paths::{
+    ensure_runtime_socket_dir, legacy_sandbox_runtime_root, runtime_socket_dir, sandbox_runtime_root,
+};
 
 mod image;
 
@@ -57,13 +59,8 @@ impl VmManager {
         let transient_registry_auth = self.transient_registry_auth.take();
         // Create box-specific directories
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-        let socket_dir = self.socket_dir();
+        let socket_dir = ensure_runtime_socket_dir(&self.home_dir, &self.box_id)?;
         let logs_dir = box_dir.join("logs");
-
-        std::fs::create_dir_all(&socket_dir).map_err(|e| BoxError::BoxBootError {
-            message: format!("Failed to create socket directory: {}", e),
-            hint: None,
-        })?;
 
         #[cfg(windows)]
         super::windows_stop::clear(&socket_dir).map_err(|error| BoxError::BoxBootError {

@@ -17,6 +17,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Host-global `/tmp/a3s-box-sockets` (and macOS `/private/tmp/...`) is created
+  and kept sticky world-writable (`1777`) so a root-lane MicroVM/Sandbox cannot
+  permanently brick later unprivileged `run` (#560). Per-box socket dirs stay
+  private (`0700`). Sandbox no longer chowns the shared root to a single UID.
+  An unfixable non-shared root fails closed with a `chmod 1777` hint. Does
+  **not** close ROADMAP B3/B2 or unlock CNI/DNS/macOS `:ro`.
 - Runtime Service endpoints admit UDP: advertise `ServiceUdp`, bind
   generation-fenced host UDP listeners, and NAT-relay datagrams through
   `connect_udp_port` (MicroVM `FRAME_OPEN_UDP` + Sandbox netns UDP). Health
