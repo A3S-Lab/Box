@@ -874,10 +874,11 @@ open and harness reports still keep
   (lease retained); prepare and Sandbox cleanup propagate lease teardown
   failures instead of soft-skip/warn; boot-failure and managed path cleanup
   tear down the lease before wiping `boxes/{id}` (retain dir on teardown
-  failure); orphan crash-recovery reap and legacy CLI/Compose path cleanup use
-  the same lease-before-wipe contract; veth delete uses the same present-link
-  delete contract as DNAT/MASQUERADE; idle-bridge MASQUERADE removal uses the
-  same present-rule delete contract. GA default remains delegated rootless/
+  failure); orphan crash-recovery reap, VM destroy, SDK/CLI/Compose path
+  cleanup, and foreground `--rm` use the same lease-before-wipe contract; veth
+  delete uses the same present-link delete contract as DNAT/MASQUERADE;
+  idle-bridge MASQUERADE removal uses the same present-rule delete contract.
+  GA default remains delegated rootless/
   `base_v2` loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy,
   multi-device, rootless/MicroVM/Windows parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
