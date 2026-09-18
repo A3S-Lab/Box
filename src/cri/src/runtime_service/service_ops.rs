@@ -117,42 +117,32 @@ impl BoxRuntimeService {
         &self,
         network_name: &str,
         sandbox_id: &str,
-    ) {
+    ) -> Result<(), Status> {
         let network_name = network_name.to_string();
         let sandbox_id = sandbox_id.to_string();
         let task_network_name = network_name.clone();
         let task_sandbox_id = sandbox_id.clone();
         let store = self.network_store.clone();
-        match tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             disconnect_sandbox_from_network_store(&store, &task_network_name, &task_sandbox_id)
         })
         .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    network = %network_name,
-                    error = %error,
-                    "Failed to disconnect CRI sandbox from network"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    network = %network_name,
-                    error = %error,
-                    "CRI sandbox network cleanup task failed"
-                );
-            }
-        }
+        .map_err(|error| {
+            Status::internal(format!(
+                "CRI sandbox network cleanup task failed for {sandbox_id} on {network_name}: {error}"
+            ))
+        })?
     }
 
-    pub(super) async fn disconnect_sandbox_network(&self, sandbox: &PodSandbox) {
+    pub(super) async fn disconnect_sandbox_network(
+        &self,
+        sandbox: &PodSandbox,
+    ) -> Result<(), Status> {
         if let Some(network_name) = sandbox_network_name(sandbox) {
             self.disconnect_sandbox_network_by_name(&network_name, &sandbox.id)
-                .await;
+                .await?;
         }
+        Ok(())
     }
 
     pub(super) async fn resolve_container_image(
@@ -357,7 +347,7 @@ impl BoxRuntimeService {
             .update_sandbox_state(&container.sandbox_id, SandboxState::NotReady)
             .await;
         if let Some(sandbox) = self.store.sandboxes.get(&container.sandbox_id).await {
-            self.disconnect_sandbox_network(&sandbox).await;
+            self.disconnect_sandbox_network(&sandbox).await?;
         }
 
         Ok(())

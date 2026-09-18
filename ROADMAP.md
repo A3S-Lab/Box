@@ -793,7 +793,9 @@ retain process or filesystem sessions after its owner dies.
   auth (#453 / #452); CRI RemoveContainer / RemovePodSandbox fail closed on
   prepared rootfs wipe (umount exit status + directory remove) before durable
   store deletion, and CreateContainer rollback refuses invent-clean rootfs
-  cleanup;
+  cleanup; CRI StopPodSandbox / RemovePodSandbox / last-container StopContainer
+  fail closed on NetworkStore disconnect (no invent-clean stop while an
+  endpoint may remain);
 
   default TSI unpublished guest listeners are allowlist-gated so they do not
   bind host `0.0.0.0` without `-p` (#371); unpublished guest `listen()` still

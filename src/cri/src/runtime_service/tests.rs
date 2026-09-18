@@ -4800,6 +4800,35 @@ async fn test_stop_pod_sandbox_disconnects_network_endpoint() {
 }
 
 #[tokio::test]
+async fn stop_pod_sandbox_refuses_invent_clean_when_network_disconnect_fails() {
+    let svc = make_test_service();
+    let mut sandbox = test_networked_sandbox("sb-busy-net");
+    add_test_network_endpoint(&svc, &mut sandbox);
+    svc.store.sandboxes.add(sandbox).await;
+
+    // Replace networks.json with a directory so disconnect cannot persist.
+    let path = svc.network_store.path().to_path_buf();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let error = svc
+        .stop_pod_sandbox(Request::new(StopPodSandboxRequest {
+            pod_sandbox_id: "sb-busy-net".to_string(),
+        }))
+        .await
+        .expect_err("network disconnect failure must not invent StopPodSandbox success");
+    assert!(
+        error.message().contains("failed to") || error.message().contains("network"),
+        "unexpected message: {}",
+        error.message()
+    );
+    assert!(
+        svc.store.sandboxes.get("sb-busy-net").await.is_some(),
+        "durable sandbox must remain for a later fail-closed retry"
+    );
+}
+
+#[tokio::test]
 async fn test_stop_pod_sandbox_removes_vm_manager() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
