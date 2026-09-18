@@ -468,12 +468,14 @@ pub fn unmount_box_overlay(merged: &Path) {
     }
 }
 
-/// Fully unmount a box overlay before its writable layer is reused.
+/// Fully unmount a box overlay before its writable layer is reused or the box
+/// directory is wiped.
 ///
 /// Unlike [`unmount_box_overlay`], this path never falls back to lazy detach:
-/// callers must not start another overlay writer until every stacked mount has
-/// been synchronously released.
-pub(crate) fn unmount_box_overlay_for_reuse(merged: &Path) -> a3s_box_core::error::Result<()> {
+/// callers must not invent clean stop/remove while a stacked mount remains, and
+/// must not start another overlay writer until every mount has been
+/// synchronously released.
+pub fn unmount_box_overlay_for_reuse(merged: &Path) -> a3s_box_core::error::Result<()> {
     for _ in 0..8 {
         if !is_mountpoint(merged) {
             return Ok(());

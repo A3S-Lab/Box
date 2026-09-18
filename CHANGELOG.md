@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Product stop/remove wipe (CLI / SDK / Compose partial / managed remove) fails
+  closed on synchronous overlay `merged` unmount instead of void best-effort
+  inventing clean teardown while a live mount may remain. Drop/cache paths keep
+  best-effort `unmount_box_overlay`. Does **not** close ROADMAP B4/B3/B2 or
+  unlock UDP/`host_port=0`.
 - SDK stop/remove/prune fail closed on recorded Sandbox OCI runtime reap
   (owner / log-worker) before rootfs unmount/wipe (CLI parity) instead of
   inventing clean teardown while shared-kernel processes may still hold the

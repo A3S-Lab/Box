@@ -927,8 +927,10 @@ open and harness reports still keep
   baseline creation (no warn-and-continue); boot fails closed when
   `.snapshot-lower` is present but the lower directory is missing (no
   image-pull fallthrough); snapshot delete/prune inventory fails closed on
-  `.snapshot-lower` I/O errors; MicroVM live host-path snapshots and the full
-  B3 storage/network qualification gate remain open. Does **not** flip
+  `.snapshot-lower` I/O errors; product stop/remove wipe fails closed on
+  synchronous overlay `merged` unmount (no invent-clean while mounted);
+  MicroVM live host-path snapshots and the full B3 storage/network
+  qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and

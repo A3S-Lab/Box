@@ -136,7 +136,8 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     #[cfg(target_os = "linux")]
     crate::network::terminate_passt(&socket_dir);
 
-    crate::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+    crate::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
+        .map_err(|error| cleanup_error(record, "unmount the overlay merged view", error))?;
     crate::rootfs::cleanup_bounded_writable_layer_for_removal(&record.box_dir)
         .map_err(|error| cleanup_error(record, "detach bounded writable-layer mounts", error))?;
     crate::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
