@@ -936,8 +936,10 @@ open and harness reports still keep
   Known NetworkStore names also receive authoritative AAAA NODATA (IPv4-only
   store). macOS netproxy answers those names on TCP/53 before the upstream
   TCP proxy; unknown names still proxy, and Linux passt_bridge still forwards
-  TCP/53 unmodified. Full AAAA records, CNI, multi-device,
-  rootless/MicroVM/Windows
+  TCP/53 unmodified. Default MicroVM egress on netproxy / passt_bridge denies
+  loopback, link-local/metadata, foreign RFC1918, and CGNAT outside the
+  attached bridge CIDR (public and same-CIDR peers remain). Full AAAA records,
+  CNI, multi-device, first-match operator policy DSL, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux

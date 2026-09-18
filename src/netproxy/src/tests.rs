@@ -266,12 +266,8 @@ fn proxy_engine_enables_any_ip_for_transparent_outbound_tcp() {
 }
 
 #[test]
-fn outbound_tcp_proxy_transfers_bytes_end_to_end() {
-    const GUEST_REQUEST: &[u8] = b"guest-request";
-    const HOST_RESPONSE: &[u8] = b"host-response";
-
+fn outbound_tcp_proxy_denies_loopback_by_default_egress() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    listener.set_nonblocking(true).unwrap();
     let host_port = listener.local_addr().unwrap().port();
     let (mut guest, mut proxy) = test_guest_and_proxy(Vec::new());
 
@@ -286,6 +282,83 @@ fn outbound_tcp_proxy_transfers_bytes_end_to_end() {
                 host_port,
             ),
             50123,
+        )
+        .unwrap();
+    let guest_handle = guest.sockets.add(guest_tcp);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut became_writable = false;
+    while std::time::Instant::now() < deadline {
+        poll_test_guest(&mut guest);
+        poll_test_proxy_tcp(&mut proxy);
+        if guest.sockets.get::<tcp::Socket>(guest_handle).can_send() {
+            became_writable = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(
+        !became_writable,
+        "loopback egress should stay denied by default untrusted policy"
+    );
+    assert!(proxy.pending_outbound.is_empty());
+    assert!(proxy.active_outbound.is_empty());
+}
+
+#[test]
+fn outbound_tcp_proxy_transfers_bytes_end_to_end() {
+    const GUEST_REQUEST: &[u8] = b"guest-request";
+    const HOST_RESPONSE: &[u8] = b"host-response";
+    // Public unicast is allowed by default untrusted egress. Host I/O stays on
+    // loopback so CI does not need a routable attached-CIDR address.
+    const PUBLIC_DST: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+    const GUEST_PORT: u16 = 50123;
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let host_port = listener.local_addr().unwrap().port();
+    let (mut guest, mut proxy) = test_guest_and_proxy(Vec::new());
+
+    let flow = OutboundFlow {
+        guest_ip: TEST_GUEST_IP,
+        guest_port: GUEST_PORT,
+        remote_ip: PUBLIC_DST,
+        remote_port: host_port,
+    };
+    let host_client =
+        TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_port)).unwrap();
+    host_client.set_nonblocking(true).unwrap();
+    let _ = host_client.set_nodelay(true);
+    let (sender, connect_result) = mpsc::sync_channel(1);
+    sender.send(Ok(host_client)).unwrap();
+
+    let rx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+    let tx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+    let mut listen_socket = tcp::Socket::new(rx, tx);
+    let endpoint = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(PUBLIC_DST)), host_port);
+    listen_socket.listen(endpoint).unwrap();
+    listen_socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
+    listen_socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
+    let handle = proxy.sockets.add(listen_socket);
+    proxy.pending_outbound.push(PendingOutboundConnection {
+        flow,
+        handle,
+        connect_result,
+        host_stream: None,
+        started_at: std::time::Instant::now(),
+        failed: false,
+        prefetch: Vec::new(),
+    });
+
+    let rx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let tx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let mut guest_tcp = tcp::Socket::new(rx, tx);
+    guest_tcp
+        .connect(
+            guest.iface.context(),
+            (IpAddress::Ipv4(to_smoltcp_ipv4(PUBLIC_DST)), host_port),
+            GUEST_PORT,
         )
         .unwrap();
     let guest_handle = guest.sockets.add(guest_tcp);
@@ -366,6 +439,36 @@ fn outbound_tcp_proxy_transfers_bytes_end_to_end() {
     assert_eq!(guest_received, HOST_RESPONSE);
     assert_eq!(proxy.pending_outbound.len(), 0);
     assert_eq!(proxy.active_outbound.len(), 1);
+}
+
+#[test]
+fn outbound_tcp_proxy_accepts_public_destination() {
+    let (mut guest, mut proxy) = test_guest_and_proxy(Vec::new());
+    let rx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let tx = tcp::SocketBuffer::new(vec![0u8; 4096]);
+    let mut guest_tcp = tcp::Socket::new(rx, tx);
+    guest_tcp
+        .connect(
+            guest.iface.context(),
+            (
+                IpAddress::Ipv4(to_smoltcp_ipv4(Ipv4Addr::new(1, 1, 1, 1))),
+                443,
+            ),
+            50124,
+        )
+        .unwrap();
+    let _guest_handle = guest.sockets.add(guest_tcp);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        poll_test_guest(&mut guest);
+        poll_test_proxy_tcp(&mut proxy);
+        if !proxy.pending_outbound.is_empty() || !proxy.active_outbound.is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("public unicast destination was not accepted for outbound proxy");
 }
 
 #[test]
