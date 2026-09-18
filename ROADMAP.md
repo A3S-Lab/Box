@@ -903,8 +903,9 @@ open and harness reports still keep
   tear down the lease before wiping `boxes/{id}` (retain dir on teardown
   failure); orphan crash-recovery reap fails closed when the log worker
   remains or the bundle/runtime-root/`runtime.json` cannot be removed, and
-  retains the box directory when synchronous overlay unmount or directory
-  wipe fails (no success claim). Orphan crash-recovery reap, VM destroy,
+  retains the box directory when synchronous overlay or platform rootfs
+  unmount, legacy MicroVM host cgroup removal, file-mount staging cleanup, or
+  directory wipe fails (no success claim). Orphan crash-recovery reap, VM destroy,
   SDK/CLI/Compose path cleanup, and foreground `--rm` use the same
   lease-before-wipe contract; veth
   delete contract as DNAT/MASQUERADE; staging rollback surfaces combined

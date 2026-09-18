@@ -19,9 +19,11 @@ use std::path::Path;
 /// kill its `a3s-box-shim`, unmount its overlay, and remove its box directory.
 ///
 /// Idempotent. A box with no leftovers (for example after a graceful shutdown)
-/// is a no-op. Overlay unmount and directory removal fail closed: a still-
-/// mounted overlay or a delete error retains the box directory and does not
-/// log a successful reap. Safe to call for every known sandbox id on startup.
+/// is a no-op. Overlay/platform-rootfs unmount, legacy host cgroup removal,
+/// file-mount staging cleanup, and directory removal fail closed: a still-
+/// mounted root claim, busy cgroup, residual staging, or delete error retains
+/// the box directory and does not log a successful reap. Safe to call for
+/// every known sandbox id on startup.
 #[cfg(target_os = "linux")]
 pub fn reap_orphaned_box(box_id: &str) {
     reap_orphaned_box_in(&a3s_box_core::dirs_home(), box_id);
@@ -141,8 +143,8 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     }
 
     // Synchronous unmount: a plain directory is not a mount and may be removed.
-    // A still-mounted overlay must retain the box directory (same contract as
-    // product stop/remove). Do not claim the orphan was reaped.
+    // A still-mounted overlay or platform rootfs must retain the box directory
+    // (same contract as product stop/remove). Do not claim the orphan was reaped.
     let merged = box_dir.join("merged");
     if let Err(error) = crate::rootfs::unmount_box_overlay_for_reuse(&merged) {
         tracing::error!(
@@ -150,6 +152,42 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
             path = %merged.display(),
             %error,
             "Refusing to remove orphaned box directory while overlay unmount failed"
+        );
+        return;
+    }
+    let rootfs = box_dir.join("rootfs");
+    if let Err(error) = crate::rootfs::unmount_box_rootfs_for_reuse(&rootfs) {
+        tracing::error!(
+            box_id,
+            path = %rootfs.display(),
+            %error,
+            "Refusing to remove orphaned box directory while platform rootfs unmount failed"
+        );
+        return;
+    }
+
+    // Legacy MicroVM shim cgroup — fail closed before wipe so a busy host claim
+    // cannot be dropped while we invent a clean orphan reap. Sandbox OCI delete
+    // already removed its hierarchy when runtime_owned_cgroup is true.
+    if !runtime_owned_cgroup {
+        if let Err(error) = crate::process::remove_legacy_microvm_cgroup(box_id) {
+            tracing::error!(
+                box_id,
+                %error,
+                "Refusing to remove orphaned box directory while legacy host cgroup remove failed"
+            );
+            return;
+        }
+    }
+
+    // Shim file-mount staging lives under $TMPDIR and is independent of the box
+    // dir. Clean it before wipe: if wipe succeeded first, a later orphan pass
+    // would early-return on a missing box dir and leave staging forever.
+    if let Err(error) = crate::fs::remove_file_mount_staging(box_id) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove orphaned box directory while file-mount staging cleanup failed"
         );
         return;
     }
@@ -164,13 +202,6 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
             );
             return;
         }
-    }
-
-    // A legacy MicroVM shim could leave an empty host cgroup behind. A3S OCI
-    // Runtime instead owns and removes the complete Sandbox hierarchy as part
-    // of the successful delete above.
-    if !runtime_owned_cgroup {
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{box_id}"));
     }
 
     if !killed.is_empty() {

@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Orphan crash-recovery reap fails closed on platform rootfs detach, legacy
+  MicroVM host cgroup removal, and shim file-mount staging cleanup before wipe
+  (retain `boxes/{id}` on failure; no invent-clean reap). Staging runs before
+  wipe so a later pass cannot skip residual `$TMPDIR` claims. Does **not**
+  close ROADMAP B3/B2 or unlock CNI/DNS/Windows/macOS `:ro`.
 - Product stop/remove wipe fails closed on platform rootfs detach
   (`unmount_box_rootfs_for_reuse`), matching the overlay contract, so a
   still-attached macOS APFS image cannot invent clean teardown. Drop/cache
@@ -37,11 +42,12 @@ All notable changes to A3S Box will be documented in this file.
   socket directory, or a legacy MicroVM host cgroup cannot be removed. Does
   **not** close ROADMAP B3/B2 or unlock UDP/`host_port=0`.
 - Orphan Sandbox crash recovery fails closed when the log worker remains, the
-  bundle directory, runtime root, or `runtime.json` cannot be removed, or the
-  overlay stays mounted. Directory wipe uses the same synchronous overlay
-  unmount contract as product stop/remove and does not log a successful reap
-  while the box directory remains. Does **not** close ROADMAP B3/B2 or unlock
-  UDP/`host_port=0`.
+  bundle directory, runtime root, or `runtime.json` cannot be removed, the
+  overlay or platform rootfs stays mounted, legacy host cgroup removal fails,
+  or file-mount staging cannot be cleaned. Directory wipe uses the same
+  synchronous unmount contract as product stop/remove, cleans staging before
+  wipe, and does not log a successful reap while the box directory remains.
+  Does **not** close ROADMAP B3/B2 or unlock UDP/`host_port=0`.
 - CLI inventory refresh (`ps` / `prune` / `info` / `df` / `events` / stats /
   logs / compose read+wait / inspect) fails closed on managed inspect,
   remove-retry, restart-reconcile, and passt backend-loss observation
