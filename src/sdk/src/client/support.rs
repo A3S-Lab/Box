@@ -329,6 +329,114 @@ fn is_prunable_box_record(record: &BoxRecord) -> bool {
     matches!(record.status.as_str(), "created" | "stopped" | "dead")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedRemovePlan {
+    execution_id: ExecutionId,
+    generation: ExecutionGeneration,
+    terminate: bool,
+}
+
+fn managed_remove_plan(record: &BoxRecord, force: bool) -> Result<Option<ManagedRemovePlan>> {
+    let Some(metadata) = record.managed_execution.as_ref() else {
+        return Ok(None);
+    };
+    let state = record
+        .managed_state()
+        .map_err(ClientError::Runtime)?
+        .ok_or_else(|| {
+            ClientError::Validation(format!(
+                "box {} lost managed lifecycle metadata",
+                record.name
+            ))
+        })?;
+    let terminate = match state {
+        ManagedExecutionState::Created
+        | ManagedExecutionState::Stopped
+        | ManagedExecutionState::Failed
+        | ManagedExecutionState::Removing => false,
+        ManagedExecutionState::Running
+        | ManagedExecutionState::Paused
+        | ManagedExecutionState::Killing
+        | ManagedExecutionState::Creating
+        | ManagedExecutionState::Starting => {
+            if !force {
+                return Err(ClientError::Validation(format!(
+                    "box {} is {}. Stop it before removing it, or force removal explicitly.",
+                    record.name,
+                    state.as_status()
+                )));
+            }
+            true
+        }
+        other => {
+            return Err(ClientError::Validation(format!(
+                "Cannot remove box {} while its managed lifecycle is {}",
+                record.name,
+                other.as_status()
+            )));
+        }
+    };
+    Ok(Some(ManagedRemovePlan {
+        execution_id: ExecutionId::new(record.id.clone()).map_err(ClientError::Execution)?,
+        generation: metadata.generation,
+        terminate,
+    }))
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedStopPlan {
+    execution_id: ExecutionId,
+    generation: ExecutionGeneration,
+    options: KillExecutionOptions,
+}
+
+#[cfg(unix)]
+fn managed_stop_plan(
+    record: &BoxRecord,
+    timeout: Option<u64>,
+) -> Result<Option<ManagedStopPlan>> {
+    let Some(metadata) = record.managed_execution.as_ref() else {
+        return Ok(None);
+    };
+    let state = record
+        .managed_state()
+        .map_err(ClientError::Runtime)?
+        .ok_or_else(|| {
+            ClientError::Validation(format!(
+                "box {} lost managed lifecycle metadata",
+                record.name
+            ))
+        })?;
+    if !matches!(
+        state,
+        ManagedExecutionState::Running
+            | ManagedExecutionState::Paused
+            | ManagedExecutionState::Killing
+            | ManagedExecutionState::Creating
+            | ManagedExecutionState::Starting
+    ) {
+        return Err(ClientError::Validation(format!(
+            "Cannot stop box {} because it is {}",
+            record.name,
+            state.as_status()
+        )));
+    }
+    let signal = record
+        .stop_signal
+        .as_deref()
+        .map(parse_signal_name)
+        .unwrap_or(15);
+    Ok(Some(ManagedStopPlan {
+        execution_id: ExecutionId::new(record.id.clone()).map_err(ClientError::Execution)?,
+        generation: metadata.generation,
+        options: KillExecutionOptions {
+            signal: Some(signal),
+            timeout_secs: Some(timeout.or(record.stop_timeout).unwrap_or(10)),
+        },
+    }))
+}
+
 #[cfg(unix)]
 fn require_active(record: &BoxRecord, action: &str) -> Result<()> {
     if record.is_active() {

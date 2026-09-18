@@ -24,17 +24,17 @@ use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager, ExecutionProcessInventory,
     ExecutionReservation, ExecutionResourceUpdate, ExecutionSessionManager, ExecutionSnapshot,
     ExecutionSnapshotId, ExecutionStats, ExecutionStatus, FileRequest, FileResponse,
-    FilesystemRequest, FilesystemResponse, KillOutcome, OperationId, ReconcileOutcome,
-    RestartExecutionOptions, StoredImage,
+    FilesystemRequest, FilesystemResponse, KillExecutionOptions, KillOutcome, OperationId,
+    ReconcileOutcome, RestartExecutionOptions, StoredImage,
 };
 #[cfg(unix)]
 use a3s_box_runtime::is_process_alive;
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{
     is_process_alive_with_identity, load_resolved_image_config, BuildConfig as RuntimeBuildConfig,
-    BuildNetworkPolicy, ImagePuller, ImageReference, ImageStore, NetworkStore, OciImage,
-    PushResult, RegistryAuth, RegistryProtocol, RegistryPusher, SignaturePolicy, SnapshotStore,
-    VolumeStore,
+    BuildNetworkPolicy, ImagePuller, ImageReference, ImageStore, ManagedExecutionState,
+    NetworkStore, OciImage, PushResult, RegistryAuth, RegistryProtocol, RegistryPusher,
+    SignaturePolicy, SnapshotStore, VolumeStore,
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
