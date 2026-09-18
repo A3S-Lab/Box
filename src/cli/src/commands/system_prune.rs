@@ -73,34 +73,49 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
         println!("Removed box: {}", record.name);
     }
 
-    // Phase 2: Remove unused images
+    // Phase 2: Remove unused images — fail closed on store open/remove so
+    // system-prune cannot invent success while unused image claims remain.
     // Reload state to get current active boxes after removal.
     let state = StateFile::load_default()?;
     let protected_images = active_image_references(&state);
     let prune_mode = image_prune_mode(args.all);
 
     let images_dir = super::images_dir();
+    let mut image_errors = Vec::new();
     if images_dir.exists() {
-        if let Ok(store) = super::open_image_store() {
-            let all_images = store.list().await;
-            let image_size_before = store.total_size().await;
+        let store = super::open_image_store().map_err(|error| {
+            format!(
+                "Failed to open image store for system-prune: {error}; refusing system-prune success"
+            )
+        })?;
+        let all_images = store.list().await;
+        let image_size_before = store.total_size().await;
 
-            for image in &all_images {
-                if image_usage::is_prunable_reference(
-                    &image.reference,
-                    &protected_images,
-                    prune_mode,
-                ) && store.remove(&image.reference).await.is_ok()
-                {
+        for image in &all_images {
+            if !image_usage::is_prunable_reference(
+                &image.reference,
+                &protected_images,
+                prune_mode,
+            ) {
+                continue;
+            }
+            match store.remove(&image.reference).await {
+                Ok(()) => {
                     images_removed += 1;
                     println!("Removed image: {}", image.reference);
                 }
+                Err(error) => {
+                    image_errors.push(format!("{}: {error}", image.reference));
+                }
             }
-            // Multiple references can share one content directory.  Account
-            // for the actual content delta, not one image size per tag.
-            space_freed = space_freed
-                .saturating_add(image_size_before.saturating_sub(store.total_size().await));
         }
+        // Multiple references can share one content directory.  Account
+        // for the actual content delta, not one image size per tag.
+        space_freed = space_freed
+            .saturating_add(image_size_before.saturating_sub(store.total_size().await));
+    }
+    if !image_errors.is_empty() {
+        return Err(system_prune_image_errors(image_errors));
     }
 
     // Phase 3: Remove unused networks (mirrors `docker system prune`).
@@ -165,6 +180,14 @@ fn system_prune_box_cleanup_error(
 fn system_prune_network_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
     format!(
         "Failed to prune unused network(s): {}; refusing system-prune success",
+        errors.join("; ")
+    )
+    .into()
+}
+
+fn system_prune_image_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
+    format!(
+        "Failed to prune unused image(s): {}; refusing system-prune success",
         errors.join("; ")
     )
     .into()
@@ -328,6 +351,18 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("orphan: write failed"));
         assert!(message.contains("other: locked"));
+        assert!(message.contains("refusing system-prune success"));
+    }
+
+    #[test]
+    fn system_prune_image_errors_refuse_invented_success() {
+        let err = system_prune_image_errors(vec![
+            "alpine:latest: busy".to_string(),
+            "redis:latest: io error".to_string(),
+        ]);
+        let message = err.to_string();
+        assert!(message.contains("alpine:latest: busy"));
+        assert!(message.contains("redis:latest: io error"));
         assert!(message.contains("refusing system-prune success"));
     }
 }

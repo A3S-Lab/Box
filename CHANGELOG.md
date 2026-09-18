@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `system-prune` image phase fails closed on image-store open/remove errors
+  instead of soft-skipping and inventing prune success (network-phase / `rmi`
+  parity). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - CLI `system-prune` network phase fails closed on NetworkStore list/remove
   errors (and shared `prune_unused_networks` no longer invents empty success on
   list I/O failure), matching `network prune`. Does **not** close ROADMAP
