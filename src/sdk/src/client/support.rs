@@ -506,14 +506,23 @@ async fn wait_for_exit_or_kill(pid: u32, timeout_secs: u64) -> StopOutcome {
 
 #[cfg(unix)]
 fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
+    // Reap recorded Sandbox OCI owner / log worker before unmounting rootfs
+    // (CLI parity). A failed runtime cleanup must not invent a clean stop while
+    // a shared-kernel process may still hold the rootfs.
+    cleanup_sandbox_runtime(record)?;
     detach_volumes(paths, &record.volume_names, &record.id)?;
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+    a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(record);
     Ok(())
 }
 
 fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
+    // A Sandbox log worker exits only after the A3S OCI owner closes both output
+    // streams. Reconcile that runtime first so wipe cannot invent success while
+    // shared-kernel processes still use the rootfs (CLI parity).
+    cleanup_sandbox_runtime(record)?;
     detach_volumes(paths, &record.volume_names, &record.id)?;
     cleanup_network_endpoint(paths, record)?;
     cleanup_anonymous_volumes(paths, &record.id, &record.anonymous_volumes)?;
@@ -537,6 +546,7 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
             )))
         })?;
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+        a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -557,6 +567,14 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
         let _ = std::fs::remove_dir_all(fs_mount_dir);
     }
     Ok(())
+}
+
+fn cleanup_sandbox_runtime(record: &BoxRecord) -> Result<()> {
+    if !record.isolation.is_sandbox() {
+        return Ok(());
+    }
+    a3s_box_runtime::vm::reap::cleanup_recorded_sandbox_runtime(&record.box_dir, &record.id)
+        .map_err(ClientError::Runtime)
 }
 
 fn detach_volumes(paths: &A3sBoxPaths, volume_names: &[String], box_id: &str) -> Result<()> {
