@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `a3s-box diff` fails closed when `rootfs_snapshot.json` is absent instead of
+  printing a soft message and exiting 0; MicroVM/Sandbox boot propagates
+  baseline-create failures before workload launch instead of warn-and-continue.
+  Does **not** close ROADMAP B3/B2, invent live digests, or claim SandboxViaOci
+  OCI-map baseline parity.
 - Product admission (CLI / MicroVM Compose / SDK) resolves `host_port=0`
   (`0:guest`) to a concrete ephemeral host port before persisting `port_map`,
   so TSI/passt/keep-authority DNAT no longer see unresolved auto-assign and
