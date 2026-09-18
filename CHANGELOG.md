@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- SDK stop/remove/prune fail closed on recorded Sandbox OCI runtime reap
+  (owner / log-worker) before rootfs unmount/wipe (CLI parity) instead of
+  inventing clean teardown while shared-kernel processes may still hold the
+  rootfs. Also unmounts `rootfs` alongside `merged` on SDK stop/remove.
+  Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - CLI `info` fails closed on box-inventory refresh and image-store open errors
   instead of inventing empty `Boxes: 0` / `Images: 0` counts (`ps` / `df`
   parity). Does **not** close ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.

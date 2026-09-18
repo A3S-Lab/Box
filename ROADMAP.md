@@ -861,13 +861,14 @@ open and harness reports still keep
   (`a3s.box.bind.{slot}`) into `a3s.oci.attachments.v2` (caller-owned
   DetachOnly). Remaining unclassified external binds fail closed at create.
   Legacy CLI/SDK stop/remove volume detach and anonymous volume removal fail
-  closed like managed cleanup; SDK remove/prune also fail closed on
-  host-netdevice / MicroVM `:ro` detach and box-dir wipe (no invent-Ok while
-  retaining host claim); `VolumeStore::prune` only reports actually
-  removed volumes and fails closed on non-idempotent remove errors; managed
-  MicroVM destroy anonymous-volume cleanup fails closed like OCI remove.
-  Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
-  parity, and the B3 exit gate remain open. Does **not** flip
+  closed like managed cleanup; SDK stop/remove/prune also fail closed on
+  recorded Sandbox OCI runtime reap (owner/log-worker) before rootfs
+  unmount/wipe, plus host-netdevice / MicroVM `:ro` detach and box-dir wipe
+  (no invent-Ok while retaining host claim); `VolumeStore::prune` only reports
+  actually removed volumes and fails closed on non-idempotent remove errors;
+  managed MicroVM destroy anonymous-volume cleanup fails closed like OCI
+  remove. Image/build/snapshot/commit descriptor handoff, network v3, Windows
+  volume parity, and the B3 exit gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Keep network objects, IPAM, DNS, aliases, and publication policy in Box;
   delegate namespace, VM NIC, and guest transport attachment to OCI Runtime.
