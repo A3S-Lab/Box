@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI StopPodSandbox / RemovePodSandbox / last-container StopContainer fail
+  closed on bridge NetworkStore disconnect (no invent-clean stop/remove while
+  an endpoint may remain). RunPodSandbox rollback and CancelGuard log/refuse
+  invent-clean disconnect on the same contract. Does **not** close ROADMAP
+  B4/B3/B2 or unlock CNI/DNS.
 - CRI `RemoveContainer` / `RemovePodSandbox` fail closed on prepared container
   and sandbox rootfs wipe (including umount exit status), wiping before durable
   store deletion so a still-attached bind cannot invent remove success. Create

@@ -516,7 +516,13 @@ impl BoxRuntimeService {
                 // and a recreated pod can eventually fail with IP exhaustion.
                 // Disconnect it while the persisted sandbox still carries the
                 // network annotation that identifies the owning network.
-                self.disconnect_sandbox_network(&sandbox).await;
+                if let Err(error) = self.disconnect_sandbox_network(&sandbox).await {
+                    tracing::error!(
+                        sandbox_id = %sandbox.id,
+                        error = %error.message(),
+                        "Refusing invent-clean CRI restart reclaim while network disconnect failed"
+                    );
+                }
                 // Crash recovery: a graceful shutdown already destroyed the VMs,
                 // but a crash (SIGKILL/OOM) leaves the shim microVM, its overlay
                 // mount, and the rootfs dirs orphaned. Reap them so they do not
@@ -686,8 +692,16 @@ impl RuntimeService for BoxRuntimeService {
             if network_ip.is_empty() {
                 network_ip = allocation.ip.clone();
             } else if network_ip != allocation.ip {
-                self.disconnect_sandbox_network_by_name(&allocation.network_name, &sandbox_id)
-                    .await;
+                if let Err(disconnect_status) = self
+                    .disconnect_sandbox_network_by_name(&allocation.network_name, &sandbox_id)
+                    .await
+                {
+                    return Err(Status::internal(format!(
+                        "Annotation {ANN_POD_IP} value {network_ip} does not match allocated network IP {}; additionally refused invent-clean network rollback: {}",
+                        allocation.ip,
+                        disconnect_status.message()
+                    )));
+                }
                 return Err(Status::invalid_argument(format!(
                     "Annotation {ANN_POD_IP} value {network_ip} does not match allocated network IP {}",
                     allocation.ip
@@ -703,8 +717,19 @@ impl RuntimeService for BoxRuntimeService {
             Ok(vm) => vm,
             Err(status) => {
                 if let Some(allocation) = &network_allocation {
-                    self.disconnect_sandbox_network_by_name(&allocation.network_name, &sandbox_id)
-                        .await;
+                    if let Err(disconnect_status) = self
+                        .disconnect_sandbox_network_by_name(
+                            &allocation.network_name,
+                            &sandbox_id,
+                        )
+                        .await
+                    {
+                        return Err(Status::internal(format!(
+                            "{}; additionally refused invent-clean network rollback: {}",
+                            status.message(),
+                            disconnect_status.message()
+                        )));
+                    }
                 }
                 return Err(status);
             }
@@ -726,12 +751,20 @@ impl RuntimeService for BoxRuntimeService {
             let sid = sandbox_id.clone();
             CancelGuard::new(move || {
                 // Network disconnect is synchronous — do it directly in Drop.
+                // Drop cannot fail closed; log so a retained endpoint is visible.
                 if let Some(network_name) = cancel_network_name {
-                    let _ = disconnect_sandbox_from_network_store(
+                    if let Err(error) = disconnect_sandbox_from_network_store(
                         network_store.as_ref(),
                         &network_name,
                         &sid,
-                    );
+                    ) {
+                        tracing::error!(
+                            sandbox_id = %sid,
+                            network = %network_name,
+                            error = %error.message(),
+                            "CancelGuard refused invent-clean network disconnect; endpoint may remain"
+                        );
+                    }
                 }
                 // VM destroy is async — spawn it on the still-running runtime (the
                 // request future is being dropped, not the server). Best-effort.
@@ -844,8 +877,9 @@ impl RuntimeService for BoxRuntimeService {
                 // Inventable Ready demoted — finish host cleanup without inventing
                 // live workload stop (#444).
                 let destroy_result = self.destroy_sandbox_vm(sandbox_id, None).await;
-                self.disconnect_sandbox_network(&sandbox).await;
+                let disconnect_result = self.disconnect_sandbox_network(&sandbox).await;
                 destroy_result?;
+                disconnect_result?;
             }
             return Ok(Response::new(StopPodSandboxResponse {}));
         }
@@ -918,11 +952,12 @@ impl RuntimeService for BoxRuntimeService {
         // the sandbox is Ready) would attach to a sandbox whose VM is gone. A
         // VM-destroy error is surfaced after the state is made consistent.
         let destroy_result = self.destroy_sandbox_vm(sandbox_id, None).await;
-        self.disconnect_sandbox_network(&sandbox).await;
+        let disconnect_result = self.disconnect_sandbox_network(&sandbox).await;
         self.store
             .update_sandbox_state(sandbox_id, SandboxState::NotReady)
             .await;
         destroy_result?;
+        disconnect_result?;
 
         Ok(Response::new(StopPodSandboxResponse {}))
     }
@@ -954,7 +989,7 @@ impl RuntimeService for BoxRuntimeService {
         // Used sandbox VMs must be destroyed; they are not clean enough to
         // return to the warm pool.
         self.destroy_sandbox_vm(sandbox_id, None).await?;
-        self.disconnect_sandbox_network(&sandbox).await;
+        self.disconnect_sandbox_network(&sandbox).await?;
 
         // Tear down prepared rootfs trees before dropping durable CRI records so
         // a wipe failure cannot invent RemovePodSandbox success while host
