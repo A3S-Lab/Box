@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI `RemoveContainer` / `RemovePodSandbox` fail closed on prepared container
+  and sandbox rootfs wipe (including umount exit status), wiping before durable
+  store deletion so a still-attached bind cannot invent remove success. Create
+  rollback also refuses invent-clean rootfs cleanup. Does **not** close ROADMAP
+  B4/B3/B2 or unlock CNI/DNS.
 - Orphan crash-recovery reap fails closed on platform rootfs detach, legacy
   MicroVM host cgroup removal, and shim file-mount staging cleanup before wipe
   (retain `boxes/{id}` on failure; no invent-clean reap). Staging runs before

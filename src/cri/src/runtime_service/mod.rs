@@ -522,7 +522,13 @@ impl BoxRuntimeService {
                 // mount, and the rootfs dirs orphaned. Reap them so they do not
                 // leak across restarts. No-op when nothing is left behind.
                 a3s_box_runtime::vm::reap::reap_orphaned_box(&sandbox.id);
-                self.cleanup_sandbox_rootfs(&sandbox.id).await;
+                if let Err(error) = self.cleanup_sandbox_rootfs(&sandbox.id).await {
+                    tracing::error!(
+                        sandbox_id = %sandbox.id,
+                        error = %error,
+                        "Refusing invent-clean CRI restart reclaim while sandbox rootfs cleanup failed"
+                    );
+                }
             }
         }
 
@@ -583,7 +589,13 @@ impl BoxRuntimeService {
                     "Failed to destroy sandbox VM during shutdown"
                 );
             }
-            self.cleanup_sandbox_rootfs(&sandbox_id).await;
+            if let Err(e) = self.cleanup_sandbox_rootfs(&sandbox_id).await {
+                tracing::error!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "Refusing invent-clean CRI shutdown while sandbox rootfs cleanup failed"
+                );
+            }
         }
     }
 }
@@ -944,7 +956,16 @@ impl RuntimeService for BoxRuntimeService {
         self.destroy_sandbox_vm(sandbox_id, None).await?;
         self.disconnect_sandbox_network(&sandbox).await;
 
-        // Remove all containers and their prepared rootfs directories.
+        // Tear down prepared rootfs trees before dropping durable CRI records so
+        // a wipe failure cannot invent RemovePodSandbox success while host
+        // claims remain.
+        let listed_containers = self.store.containers.list(Some(sandbox_id), None).await;
+        for container in &listed_containers {
+            self.cleanup_container_rootfs_path(&container.rootfs_path)
+                .await?;
+        }
+        self.cleanup_sandbox_rootfs(sandbox_id).await?;
+
         let removed_containers = self.store.remove_containers_by_sandbox(sandbox_id).await;
         {
             let mut attach_streams = self.attach_streams.write().await;
@@ -968,10 +989,7 @@ impl RuntimeService for BoxRuntimeService {
                 "ContainerDeleted",
                 format!("Container {} removed with pod sandbox", container.name),
             );
-            self.cleanup_container_rootfs_path(&container.rootfs_path)
-                .await;
         }
-        self.cleanup_sandbox_rootfs(sandbox_id).await;
 
         // Remove sandbox
         self.store.remove_sandbox(sandbox_id).await;
@@ -1428,7 +1446,15 @@ impl RuntimeService for BoxRuntimeService {
                     .await
                 {
                     let failed_path = paths.host_path.to_string_lossy().to_string();
-                    self.cleanup_container_rootfs_path(&failed_path).await;
+                    if let Err(cleanup_status) =
+                        self.cleanup_container_rootfs_path(&failed_path).await
+                    {
+                        return Err(Status::internal(format!(
+                            "{}; additionally refused invent-clean rootfs rollback: {}",
+                            status.message(),
+                            cleanup_status.message()
+                        )));
+                    }
                     return Err(status);
                 }
                 (
@@ -1443,7 +1469,15 @@ impl RuntimeService for BoxRuntimeService {
                 .materialize_container_mounts(&rootfs_path, &mounts)
                 .await
             {
-                self.cleanup_container_rootfs_path(&rootfs_path).await;
+                if let Err(cleanup_status) =
+                    self.cleanup_container_rootfs_path(&rootfs_path).await
+                {
+                    return Err(Status::internal(format!(
+                        "{}; additionally refused invent-clean rootfs rollback: {}",
+                        status.message(),
+                        cleanup_status.message()
+                    )));
+                }
                 return Err(status);
             }
         }
@@ -1503,8 +1537,16 @@ impl RuntimeService for BoxRuntimeService {
             .require_reported_sandbox_ready(&container.sandbox_id, "CreateContainer")
             .await
         {
-            self.cleanup_container_rootfs_path(&container.rootfs_path)
-                .await;
+            if let Err(cleanup_status) = self
+                .cleanup_container_rootfs_path(&container.rootfs_path)
+                .await
+            {
+                return Err(Status::internal(format!(
+                    "{}; additionally refused invent-clean rootfs rollback: {}",
+                    status.message(),
+                    cleanup_status.message()
+                )));
+            }
             return Err(status);
         }
 
@@ -1863,6 +1905,12 @@ impl RuntimeService for BoxRuntimeService {
             .await?;
         }
 
+        // Wipe prepared rootfs before dropping the durable CRI record so a
+        // still-attached bind or undeletable tree cannot invent RemoveContainer
+        // success.
+        self.cleanup_container_rootfs_path(&container.rootfs_path)
+            .await?;
+
         if let Some(removed) = self.store.remove_container(container_id).await {
             self.attach_streams.write().await.remove(container_id);
             self.workload_stdins.write().await.remove(container_id);
@@ -1877,8 +1925,6 @@ impl RuntimeService for BoxRuntimeService {
                 "ContainerDeleted",
                 format!("Container {} removed", removed.name),
             );
-            self.cleanup_container_rootfs_path(&removed.rootfs_path)
-                .await;
         }
 
         Ok(Response::new(RemoveContainerResponse {}))
