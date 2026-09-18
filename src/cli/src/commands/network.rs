@@ -138,17 +138,22 @@ fn network_is_unused(
 /// Remove every unused, non-predefined network from `store`. Returns the names
 /// removed and any per-network errors. Shared by `network prune` and
 /// `system prune` (Docker's `system prune` also reaps unused networks).
+///
+/// Inventory list failures fail closed so callers cannot invent an empty-success
+/// prune when the NetworkStore cannot be read.
 pub(crate) fn prune_unused_networks(
     store: &NetworkStore,
     state: &crate::state::StateFile,
-) -> (Vec<String>, Vec<String>) {
+) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     let in_use: std::collections::HashSet<String> = state
         .records()
         .iter()
         .filter_map(|record| crate::cleanup::record_network_name(record).map(str::to_string))
         .collect();
 
-    let mut networks = store.list().unwrap_or_default();
+    let mut networks = store.list().map_err(|error| {
+        format!("Failed to list networks for prune: {error}")
+    })?;
     networks.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut removed = Vec::new();
@@ -162,7 +167,7 @@ pub(crate) fn prune_unused_networks(
             Err(error) => errors.push(format!("{}: {error}", net.name)),
         }
     }
-    (removed, errors)
+    Ok((removed, errors))
 }
 
 async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -181,7 +186,7 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
 
     let store = NetworkStore::default_path()?;
     let state = crate::state::StateFile::load_default()?;
-    let (removed, errors) = prune_unused_networks(&store, &state);
+    let (removed, errors) = prune_unused_networks(&store, &state)?;
 
     if removed.is_empty() {
         println!("Total reclaimed space: 0 networks");
@@ -909,13 +914,51 @@ mod tests {
         set_record_network(&mut record, "recnet");
         let (_state_dir, state) = crate::test_helpers::fixtures::setup_state(vec![record]);
 
-        let (removed, errors) = prune_unused_networks(&store, &state);
+        let (removed, errors) = prune_unused_networks(&store, &state).unwrap();
 
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(removed, vec!["orphan".to_string()]);
         assert!(store.get("orphan").unwrap().is_none());
         assert!(store.get("withep").unwrap().is_some());
         assert!(store.get("recnet").unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_unused_networks_fails_closed_on_list_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the store path makes list/read fail closed.
+        std::fs::create_dir_all(dir.path().join("networks.json")).unwrap();
+        let store = NetworkStore::new(dir.path().join("networks.json"));
+        let (_state_dir, state) = crate::test_helpers::fixtures::setup_state(Vec::new());
+
+        let err = prune_unused_networks(&store, &state)
+            .expect_err("unreadable NetworkStore must not invent empty prune success");
+        assert!(err.to_string().contains("Failed to list networks for prune"));
+    }
+
+    #[test]
+    fn prune_unused_networks_surfaces_remove_errors() {
+        let (_dir, store) = temp_store();
+        store
+            .create(NetworkConfig::new("orphan", "10.89.0.0/24").unwrap())
+            .unwrap();
+
+        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(store.path(), perms).unwrap();
+
+        let (_state_dir, state) = crate::test_helpers::fixtures::setup_state(Vec::new());
+        let (removed, errors) = prune_unused_networks(&store, &state).unwrap();
+        assert!(removed.is_empty());
+        assert!(
+            !errors.is_empty(),
+            "readonly NetworkStore must surface remove failures"
+        );
+        assert!(store.get("orphan").unwrap().is_some());
+
+        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(store.path(), perms).unwrap();
     }
 
     #[test]
