@@ -439,6 +439,7 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                     }
                     _ => None,
                 },
+                Some((net_config.ip_address, net_config.prefix_len)),
             )?;
             log_inherited_net_fd(fd);
             ctx.add_net_unixstream_fd(fd, &net_config.mac_address)?;

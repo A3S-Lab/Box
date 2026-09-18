@@ -27,6 +27,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM default untrusted egress (Axis C): macOS netproxy and Linux
+  passt_bridge deny guest IPv4 to loopback, link-local/cloud metadata
+  (`169.254.0.0/16`), foreign RFC1918, and CGNAT `100.64/10`, while allowing
+  the attached bridge CIDR and public unicast. Peer L2 frames are unchanged.
+  Does **not** close ROADMAP B3/B2, invent CNI, or claim Sandbox bridge GA.
 - Ephemeral MicroVM one-shots that publish a durable guest exit (including
   `0`) before the exec heartbeat no longer wipe `boxes/{id}` during
   boot-failure cleanup, so `exit_code()` still authenticates and CLI

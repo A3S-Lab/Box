@@ -18,10 +18,13 @@
 //!   are terminated by smoltcp and connected through the host TCP stack.
 //!
 //! On Linux, a stream adapter switches same-network peer frames while retaining
-//! passt for gateway and egress traffic.
+//! passt for gateway and egress traffic. Default untrusted egress also drops
+//! guest IPv4 frames to loopback, link-local/metadata, and foreign private /
+//! CGNAT destinations before passt (attached bridge CIDR and public remain).
 
 mod device;
 mod dns_local;
+mod egress;
 mod manager;
 mod passt_bridge;
 #[cfg(test)]
@@ -215,6 +218,7 @@ struct ProxyEngine {
     dns_sockets: Vec<(smoltcp::iface::SocketHandle, Ipv4Addr)>,
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
+    prefix_len: u8,
     port_forwards: Vec<PortForward>,
     udp_forwards: Vec<UdpPortForward>,
     pending_outbound: Vec<PendingOutboundConnection>,
@@ -297,6 +301,7 @@ impl ProxyEngine {
             dns_sockets,
             guest_ip,
             gateway_ip,
+            prefix_len,
             port_forwards,
             udp_forwards,
             pending_outbound: Vec::new(),
@@ -630,6 +635,17 @@ impl ProxyEngine {
                 if self.listen_outbound_socket(flow).is_some() {
                     tracing::debug!(?flow, "NetProxy holding TCP/53 for a NetworkStore answer");
                 }
+                continue;
+            }
+
+            if egress::default_untrusted_egress_denied(
+                flow.remote_ip,
+                Some((self.guest_ip, self.prefix_len)),
+            ) {
+                tracing::debug!(
+                    ?flow,
+                    "NetProxy denying outbound TCP by default untrusted egress policy"
+                );
                 continue;
             }
 
