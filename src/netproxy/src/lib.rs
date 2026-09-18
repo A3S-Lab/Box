@@ -7,8 +7,9 @@
 //!
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries forwarded to the host's configured DNS servers.
-//! - **Inbound TCP port-forwarding**: `host_port → guest_ip:guest_port` pairs
-//!   parsed from the box's `port_map` config (e.g. `"8088:80"`).
+//! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
+//!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
+//!   `"5353:53/udp"`).
 //! - **Outbound TCP proxying**: guest connections addressed through the gateway
 //!   are terminated by smoltcp and connected through the host TCP stack.
 //!
@@ -74,12 +75,16 @@ const MAX_OUTBOUND_CONNECTIONS: usize = 256;
 const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Idle TCP state is eventually reclaimed even if one endpoint disappears.
 const TCP_IDLE_TIMEOUT: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(300);
+/// Idle UDP NAT associations are reclaimed when neither side has traffic.
+const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound per published UDP port memory and host NAT slots.
+const MAX_UDP_ASSOCIATIONS: usize = 256;
 /// How often the proxy refreshes its stats file.
 const STATS_WRITE_INTERVAL: Duration = Duration::from_secs(1);
 
 // ── Port-forward state ────────────────────────────────────────────────────────
 
-/// Parsed port-forward rule: `host_port → guest_ip:guest_port`.
+/// Parsed TCP port-forward rule: `host_port → guest_ip:guest_port`.
 struct PortForward {
     listener: TcpListener,
     guest_ip: Ipv4Addr,
@@ -88,6 +93,26 @@ struct PortForward {
     pending: Vec<PendingGuestConnection>,
     /// Fully established connections ready for data proxying.
     active: Vec<TcpProxyConnection>,
+}
+
+/// Parsed UDP port-forward rule with per-client NAT associations.
+struct UdpPortForward {
+    socket: UdpSocket,
+    guest_ip: Ipv4Addr,
+    guest_port: u16,
+    associations: Vec<UdpAssociation>,
+}
+
+struct UdpAssociation {
+    client: SocketAddr,
+    handle: smoltcp::iface::SocketHandle,
+    last_activity: std::time::Instant,
+}
+
+/// Split TCP/UDP published-port listeners after parse+bind.
+struct ParsedPortForwards {
+    tcp: Vec<PortForward>,
+    udp: Vec<UdpPortForward>,
 }
 
 struct PendingGuestConnection {
@@ -149,6 +174,7 @@ struct ProxyEngineConfig {
     prefix_len: u8,
     dns_servers: Vec<Ipv4Addr>,
     port_forwards: Vec<PortForward>,
+    udp_forwards: Vec<UdpPortForward>,
     shutdown: Arc<AtomicBool>,
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
@@ -163,6 +189,7 @@ struct ProxyEngine {
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     port_forwards: Vec<PortForward>,
+    udp_forwards: Vec<UdpPortForward>,
     pending_outbound: Vec<PendingOutboundConnection>,
     active_outbound: Vec<ActiveOutboundConnection>,
     outbound_connectors: Arc<AtomicUsize>,
@@ -182,6 +209,7 @@ impl ProxyEngine {
             prefix_len,
             dns_servers,
             port_forwards,
+            udp_forwards,
             shutdown,
             stats,
             stats_path,
@@ -238,6 +266,7 @@ impl ProxyEngine {
             guest_ip,
             gateway_ip,
             port_forwards,
+            udp_forwards,
             pending_outbound: Vec::new(),
             active_outbound: Vec::new(),
             outbound_connectors: Arc::new(AtomicUsize::new(0)),
@@ -264,6 +293,7 @@ impl ProxyEngine {
             // 2. Accept published-port clients and discover new guest outbound
             // TCP flows before smoltcp consumes their SYN packets.
             self.accept_connections();
+            self.forward_udp_host_to_guest();
             self.accept_outbound_flows();
 
             // 3. Collect non-blocking host connect results. Failed established
@@ -281,14 +311,16 @@ impl ProxyEngine {
             self.promote_established();
             self.promote_outbound_established();
 
-            // 6. Proxy data for active TCP connections.
+            // 6. Proxy data for active TCP connections and UDP associations.
             self.proxy_data();
+            self.forward_udp_guest_to_host();
 
             // 7. Forward DNS queries to real DNS servers.
             self.forward_dns();
 
             // 8. Remove closed connections and release their smoltcp sockets.
             self.cleanup();
+            self.cleanup_udp_associations();
 
             // 9. Publish resource counters for `a3s-box stats`.
             self.maybe_write_stats_snapshot();
@@ -370,11 +402,7 @@ impl ProxyEngine {
         let tx = tcp::SocketBuffer::new(vec![0u8; 65536]);
         let mut socket = tcp::Socket::new(rx, tx);
 
-        let local_port = self.next_ephemeral;
-        self.next_ephemeral = self.next_ephemeral.wrapping_add(1);
-        if self.next_ephemeral < EPHEMERAL_BASE {
-            self.next_ephemeral = EPHEMERAL_BASE;
-        }
+        let local_port = self.next_ephemeral_port();
 
         let remote = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(guest_ip)), guest_port);
         socket
@@ -384,6 +412,158 @@ impl ProxyEngine {
         socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
 
         self.sockets.add(socket)
+    }
+
+    // ── Inbound UDP port-forward NAT ──────────────────────────────────────────
+
+    fn next_ephemeral_port(&mut self) -> u16 {
+        let local_port = self.next_ephemeral;
+        self.next_ephemeral = self.next_ephemeral.wrapping_add(1);
+        if self.next_ephemeral < EPHEMERAL_BASE {
+            self.next_ephemeral = EPHEMERAL_BASE;
+        }
+        local_port
+    }
+
+    fn forward_udp_host_to_guest(&mut self) {
+        let mut buf = [0u8; 65535];
+        for index in 0..self.udp_forwards.len() {
+            loop {
+                let received = match self.udp_forwards[index].socket.recv_from(&mut buf) {
+                    Ok(received) => received,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "UDP port-forward host recv error");
+                        break;
+                    }
+                };
+                let (n, client) = received;
+                let payload = buf[..n].to_vec();
+                if let Err(error) = self.send_udp_to_guest(index, client, &payload) {
+                    tracing::warn!(
+                        error = %error,
+                        client = %client,
+                        "UDP port-forward host→guest failed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn send_udp_to_guest(
+        &mut self,
+        forward_index: usize,
+        client: SocketAddr,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let guest_ip = self.udp_forwards[forward_index].guest_ip;
+        let guest_port = self.udp_forwards[forward_index].guest_port;
+        let remote = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(guest_ip)), guest_port);
+
+        if let Some(association) = self.udp_forwards[forward_index]
+            .associations
+            .iter_mut()
+            .find(|association| association.client == client)
+        {
+            let handle = association.handle;
+            association.last_activity = std::time::Instant::now();
+            let socket = self.sockets.get_mut::<udp::Socket>(handle);
+            socket
+                .send_slice(payload, remote)
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+            return Ok(());
+        }
+
+        if self.udp_forwards[forward_index].associations.len() >= MAX_UDP_ASSOCIATIONS {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("UDP association limit ({MAX_UDP_ASSOCIATIONS}) reached"),
+            ));
+        }
+
+        let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
+        let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
+        let mut socket = udp::Socket::new(rx, tx);
+        let local_port = self.next_ephemeral_port();
+        socket
+            .bind(local_port)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP bind: {error:?}")))?;
+        socket
+            .send_slice(payload, remote)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+        let handle = self.sockets.add(socket);
+        self.udp_forwards[forward_index]
+            .associations
+            .push(UdpAssociation {
+                client,
+                handle,
+                last_activity: std::time::Instant::now(),
+            });
+        tracing::debug!(
+            client = %client,
+            guest = %guest_ip,
+            port = guest_port,
+            handle = ?handle,
+            "NetProxy opened UDP association for published port"
+        );
+        Ok(())
+    }
+
+    fn forward_udp_guest_to_host(&mut self) {
+        let mut deliveries: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        for (forward_index, forward) in self.udp_forwards.iter().enumerate() {
+            for (association_index, association) in forward.associations.iter().enumerate() {
+                loop {
+                    let socket = self.sockets.get_mut::<udp::Socket>(association.handle);
+                    if !socket.can_recv() {
+                        break;
+                    }
+                    match socket.recv() {
+                        Ok((payload, _)) => {
+                            deliveries.push((forward_index, association_index, payload.to_vec()));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        for (forward_index, association_index, payload) in deliveries {
+            let forward = &mut self.udp_forwards[forward_index];
+            let client = forward.associations[association_index].client;
+            match forward.socket.send_to(&payload, client) {
+                Ok(_) => {
+                    forward.associations[association_index].last_activity =
+                        std::time::Instant::now();
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        client = %client,
+                        "UDP port-forward guest→host send failed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn cleanup_udp_associations(&mut self) {
+        let mut stale_handles = Vec::new();
+        for forward in &mut self.udp_forwards {
+            forward.associations.retain(|association| {
+                if association.last_activity.elapsed() > UDP_IDLE_TIMEOUT {
+                    stale_handles.push(association.handle);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        for handle in stale_handles {
+            self.sockets.remove(handle);
+        }
     }
 
     // ── Discover guest outbound TCP connections ──────────────────────────────

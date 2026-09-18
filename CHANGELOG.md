@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Netproxy admits static UDP published ports (`host:guest/udp`) with per-client
+  NAT associations (host↔guest datagram relay), matching passt/DNAT/CRI UDP
+  admission. Unresolved `host_port=0` still fails closed. Service UDP remains
+  TCP-only. Does **not** close ROADMAP B3/B2 or unlock CNI/DNS.
 - Windows MicroVM `:ro` volumes host-enforce write denial via BindFlt read-only
   mappings (live view of the source; source path stays writable), matching the
   Linux RO-bind honesty contract. macOS `:ro` still fails closed. Destroy /
