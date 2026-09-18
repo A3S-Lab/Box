@@ -91,7 +91,10 @@ impl ExecutionUdpPortIo for ChannelUdpPort {
 
     async fn recv_datagram(&mut self, max_len: usize) -> std::io::Result<Vec<u8>> {
         let payload = self.rx.recv().await.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "UDP workload peer closed")
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "UDP workload peer closed",
+            )
         })?;
         if payload.len() > max_len {
             return Err(std::io::Error::new(
@@ -150,9 +153,7 @@ impl ExecutionPortConnector for TestConnector {
         // Hold the workload send half so probe-driven associations stay open.
         self.held_udp.lock().unwrap().push(to_connector);
         // Drain probe-side sends so the channel does not fill.
-        tokio::spawn(async move {
-            while from_connector.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while from_connector.recv().await.is_some() {} });
         Ok(Box::new(ChannelUdpPort {
             tx: to_workload,
             rx: from_workload,
@@ -662,11 +663,12 @@ async fn capabilities_advertise_service_udp_and_outbound() {
     let records = driver.manager.managed_records().await.unwrap();
     let outbound_record = records
         .iter()
-        .find(|record| record.id.contains("outbound") || {
-            record
-                .managed_execution
-                .as_ref()
-                .is_some_and(|metadata| metadata.request.config.network == a3s_box_core::NetworkMode::Tsi)
+        .find(|record| {
+            record.id.contains("outbound") || {
+                record.managed_execution.as_ref().is_some_and(|metadata| {
+                    metadata.request.config.network == a3s_box_core::NetworkMode::Tsi
+                })
+            }
         })
         .expect("outbound task record");
     assert_eq!(

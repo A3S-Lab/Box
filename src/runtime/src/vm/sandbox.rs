@@ -272,8 +272,7 @@ impl VmManager {
         // pristine OCI-mapped baseline before that boundary so short-lived
         // filesystem mutations cannot win a race against post-start bookkeeping.
         #[cfg(target_os = "linux")]
-        if let Err(error) =
-            self.create_sandbox_oci_diff_baseline(&layout, &bundle_spec.id_mappings)
+        if let Err(error) = self.create_sandbox_oci_diff_baseline(&layout, &bundle_spec.id_mappings)
         {
             self.cleanup_boot_failure().await;
             return Err(error);

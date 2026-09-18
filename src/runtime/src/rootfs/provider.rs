@@ -465,7 +465,6 @@ fn remove_overlay_dir_if_present(dir: &Path) -> Result<()> {
     }
 }
 
-
 fn ensure_empty_rootfs_directory(rootfs: &Path) -> Result<()> {
     match std::fs::symlink_metadata(rootfs) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {

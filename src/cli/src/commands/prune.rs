@@ -37,9 +37,8 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut removed: usize = 0;
     for record in &to_remove {
-        crate::cleanup::cleanup_removed_box(record).map_err(|error| {
-            prune_cleanup_error(&record.id, error)
-        })?;
+        crate::cleanup::cleanup_removed_box(record)
+            .map_err(|error| prune_cleanup_error(&record.id, error))?;
         state.remove(&record.id).map_err(|error| {
             format!(
                 "Failed to remove pruned Box {} from state after host cleanup: {error}",
@@ -60,10 +59,7 @@ fn is_prunable_box(record: &crate::state::BoxRecord) -> bool {
     matches!(record.status.as_str(), "stopped" | "dead" | "created")
 }
 
-fn prune_cleanup_error(
-    box_id: &str,
-    error: impl std::fmt::Display,
-) -> Box<dyn std::error::Error> {
+fn prune_cleanup_error(box_id: &str, error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
     format!(
         "Failed to clean pruned Box {box_id}: {error}; preserving its state (refusing prune success)"
     )

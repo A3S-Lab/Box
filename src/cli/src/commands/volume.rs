@@ -292,10 +292,7 @@ pub(crate) fn attach_volumes_with_store(
 ///
 /// Missing volumes are success (`modify` → `Ok(false)`). Store open / lock /
 /// write failures fail closed so `in_use_by` cannot stay stale after stop/rm.
-pub fn detach_volumes(
-    volume_names: &[String],
-    box_id: &str,
-) -> a3s_box_core::error::Result<()> {
+pub fn detach_volumes(volume_names: &[String], box_id: &str) -> a3s_box_core::error::Result<()> {
     if volume_names.is_empty() {
         return Ok(());
     }

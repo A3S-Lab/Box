@@ -589,11 +589,7 @@ struct NetworksFile {
 /// Re-reads the file each call so late joiners become visible without rewriting
 /// guest `/etc/hosts`. Corrupt or missing files return `None` (caller forwards
 /// upstream). Does not invent NXDOMAIN for public names.
-pub fn lookup_network_a(
-    networks_path: &Path,
-    network_name: &str,
-    qname: &str,
-) -> Option<Ipv4Addr> {
+pub fn lookup_network_a(networks_path: &Path, network_name: &str, qname: &str) -> Option<Ipv4Addr> {
     let data = std::fs::read_to_string(networks_path).ok()?;
     let file: NetworksFile = serde_json::from_str(&data).ok()?;
     let net = file.networks.get(network_name)?;
@@ -1357,10 +1353,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
 
-        assert_eq!(
-            lookup_network_a(&path, "mynet", "db"),
-            Some(ep.ip_address)
-        );
+        assert_eq!(lookup_network_a(&path, "mynet", "db"), Some(ep.ip_address));
         assert_eq!(
             lookup_network_a(&path, "mynet", "PROJ-DB."),
             Some(ep.ip_address)

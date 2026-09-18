@@ -17,10 +17,32 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Short Sandbox/MicroVM tasks that exit before the exec server heartbeat
+  keep their in-process owner so startup reconciliation can persist the
+  authenticated exit instead of reporting ProviderUnavailable. OnFailure
+  restart can then observe that exit. Does **not** close ROADMAP B3/B2.
+- MicroVM `:ro` bind remount verification reads VFS mount options before
+  super_opts (bind remounts keep the underlying superblock `rw`). Unblocks
+  R17 mounts profile on hosts where remount succeeds. Does **not** close
+  ROADMAP B3/B2 or unlock macOS `:ro`.
+- Fail-closed NetworkStore/VolumeStore tests deny writes on the parent
+  directory (atomic rename ignores file `set_readonly` on Linux). Workspace
+  rustfmt + lease-ctor clippy allow unblock CI after #568. Does **not** close
+  ROADMAP B3/B2.
+- Guest port-forward UDP open uses frame type `7` (not `5`) so it does not
+  collide with `WINDOWS_CONTROL_SIGNAL_FRAME`, and UDP stream close is a
+  no-op instead of the nonexistent `UdpSocket::shutdown`. Unblocks workspace
+  build after #568. Does **not** close ROADMAP B3/B2.
+- Linux passt_bridge answers NetworkStore box names and aliases (UDP/53 A
+  from `networks.json`) before forwarding Ethernet frames to passt, matching
+  macOS netproxy late-join DNS. Guest `/etc/hosts` now includes the box's own
+  NetworkStore aliases alongside box name and hostname. Known names also get
+  authoritative AAAA NODATA (IPv4-only NetworkStore). TCP/53, CNI, and the B3
+  exit gate remain open. Does **not** close ROADMAP B3/B2.
 - Netproxy Bridge DNS answers NetworkStore box names and aliases (A records
   from `networks.json`) before upstream UDP/53 forward so late-joining peers
   resolve without rewriting guest `/etc/hosts`. Unknown names still forward
-  upstream. Linux passt / TCP/53 / AAAA / CNI remain open. Does **not** close
+  upstream. TCP/53 / AAAA / CNI remain open. Does **not** close
   ROADMAP B3/B2.
 - Warm-pool `--snapshot-fork` honesty (#563): imply deferred-main for the
   idle template; quiesce host exec/vsock before snapshot; skip guest-stop on

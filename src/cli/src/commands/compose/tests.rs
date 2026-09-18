@@ -432,7 +432,9 @@ fn test_partial_service_cleanup_fails_closed_on_wipe() {
         box_dir.exists(),
         "failed wipe must retain the partial Compose path"
     );
-    assert!(err.to_string().contains("Failed to remove Compose box directory"));
+    assert!(err
+        .to_string()
+        .contains("Failed to remove Compose box directory"));
 
     let mut perms = std::fs::metadata(&box_dir).unwrap().permissions();
     perms.set_mode(0o755);

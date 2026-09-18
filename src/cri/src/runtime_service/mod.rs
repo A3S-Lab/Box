@@ -718,10 +718,7 @@ impl RuntimeService for BoxRuntimeService {
             Err(status) => {
                 if let Some(allocation) = &network_allocation {
                     if let Err(disconnect_status) = self
-                        .disconnect_sandbox_network_by_name(
-                            &allocation.network_name,
-                            &sandbox_id,
-                        )
+                        .disconnect_sandbox_network_by_name(&allocation.network_name, &sandbox_id)
                         .await
                     {
                         return Err(Status::internal(format!(
@@ -1504,8 +1501,7 @@ impl RuntimeService for BoxRuntimeService {
                 .materialize_container_mounts(&rootfs_path, &mounts)
                 .await
             {
-                if let Err(cleanup_status) =
-                    self.cleanup_container_rootfs_path(&rootfs_path).await
+                if let Err(cleanup_status) = self.cleanup_container_rootfs_path(&rootfs_path).await
                 {
                     return Err(Status::internal(format!(
                         "{}; additionally refused invent-clean rootfs rollback: {}",

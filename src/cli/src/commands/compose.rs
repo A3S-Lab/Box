@@ -29,9 +29,8 @@ use crate::status;
 
 pub use args::{ComposeArgs, ComposeCommand, ComposeDownArgs, ComposeLogsArgs, ComposeUpArgs};
 use lifecycle::{
-    cleanup_partial_service_box, chain_partial_cleanup_error, execute_down, rollback_compose_up,
-    rollback_with_current,
-    teardown_service_box, ServiceBox,
+    chain_partial_cleanup_error, cleanup_partial_service_box, execute_down, rollback_compose_up,
+    rollback_with_current, teardown_service_box, ServiceBox,
 };
 use operations::{ComposeStopArgs, ProjectServicesArgs};
 use read::{execute_config, execute_logs, execute_ps};

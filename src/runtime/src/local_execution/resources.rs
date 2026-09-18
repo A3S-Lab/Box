@@ -479,14 +479,23 @@ mod tests {
         let (volumes, _networks) = stores(temporary.path());
         let guard = ExecutionResourceGuard::prepare(temporary.path(), &record).unwrap();
 
-        let volumes_path = temporary.path().join("volumes.json");
-        let mut perms = std::fs::metadata(&volumes_path).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&volumes_path, perms).unwrap();
+        // Atomic rename ignores the target file mode; deny writes on the parent.
+        let parent = temporary.path();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o555);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
 
         let err = guard
             .rollback()
-            .expect_err("unwritable VolumeStore must surface managed rollback failure");
+            .expect_err("unwritable VolumeStore parent must surface managed rollback failure");
         assert!(
             volumes
                 .get("workspace")
@@ -496,12 +505,22 @@ mod tests {
                 .contains(&record.id),
             "failed rollback must leave the volume claim intact"
         );
-        assert!(err.to_string().contains("failed to roll back managed resources"));
+        assert!(err
+            .to_string()
+            .contains("failed to roll back managed resources"));
         let _ = err;
 
-        let mut perms = std::fs::metadata(&volumes_path).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&volumes_path, perms).unwrap();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
     }
 
     #[test]

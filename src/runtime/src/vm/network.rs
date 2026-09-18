@@ -292,7 +292,17 @@ impl VmManager {
         })?;
 
         let own_ip = endpoint.ip_address.to_string();
-        let own_names = self.hostname_aliases(Some(&endpoint.box_name));
+        // Peers already include NetworkStore aliases; own endpoint must too so
+        // local processes resolve `--network-alias` names via `/etc/hosts`.
+        let mut own_names = self.hostname_aliases(Some(&endpoint.box_name));
+        for alias in &endpoint.aliases {
+            if alias.is_empty() {
+                continue;
+            }
+            if !own_names.iter().any(|existing| existing == alias) {
+                own_names.push(alias.clone());
+            }
+        }
         let peers = net_config.peer_endpoints(&self.box_id);
         let add_hosts = self.parse_add_hosts()?;
 
@@ -456,6 +466,34 @@ mod tests {
             vm.hostname_aliases(Some("box-name")),
             vec!["box-name", "web"]
         );
+    }
+
+    #[test]
+    fn test_render_network_hosts_includes_own_endpoint_aliases() {
+        let dir = TempDir::new().unwrap();
+        let mut net = a3s_box_core::network::NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let ep = net
+            .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+            .unwrap();
+        let body = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(
+            dir.path().join("networks.json"),
+            serde_json::to_string(&body).unwrap(),
+        )
+        .unwrap();
+
+        let mut vm = VmManager::with_box_id(
+            a3s_box_core::config::BoxConfig {
+                hostname: Some("db-host".to_string()),
+                ..Default::default()
+            },
+            a3s_box_core::event::EventEmitter::new(16),
+            "box-db".to_string(),
+        );
+        vm.home_dir = dir.path().to_path_buf();
+
+        let hosts = vm.render_network_hosts_file("mynet").unwrap();
+        assert!(hosts.contains(&format!("{} proj-db db-host db", ep.ip_address)));
     }
 
     #[test]

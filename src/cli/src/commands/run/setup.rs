@@ -178,10 +178,8 @@ pub(super) async fn setup_and_boot(
             }
             Err(recovery_error) => {
                 return Err(chain_failed_managed_run_cleanup(
-                    format!(
-                        "{error}; failed to inspect managed startup outcome: {recovery_error}"
-                    )
-                    .into(),
+                    format!("{error}; failed to inspect managed startup outcome: {recovery_error}")
+                        .into(),
                     manager
                         .remove_execution(&execution_id, reservation.generation)
                         .await,
@@ -327,7 +325,9 @@ fn chain_failed_managed_run_cleanup(
 ) -> Box<dyn std::error::Error> {
     match cleanup {
         Ok(_) => primary,
-        Err(cleanup) => format!("{primary}; also failed to roll back managed run: {cleanup}").into(),
+        Err(cleanup) => {
+            format!("{primary}; also failed to roll back managed run: {cleanup}").into()
+        }
     }
 }
 
@@ -483,10 +483,8 @@ mod tests {
 
     #[test]
     fn chain_failed_managed_run_cleanup_surfaces_both_errors() {
-        let err = chain_failed_managed_run_cleanup(
-            "start failed".into(),
-            Err::<bool, _>("wipe refused"),
-        );
+        let err =
+            chain_failed_managed_run_cleanup("start failed".into(), Err::<bool, _>("wipe refused"));
         let message = err.to_string();
         assert!(message.contains("start failed"));
         assert!(message.contains("wipe refused"));

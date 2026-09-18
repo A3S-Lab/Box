@@ -7,8 +7,8 @@
 //!
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries answered for NetworkStore names/aliases when a
-//!   bridge `networks.json` is configured, otherwise forwarded to the host's
-//!   configured DNS servers.
+//!   bridge `networks.json` is configured (macOS netproxy and Linux
+//!   passt_bridge), otherwise forwarded to the host's configured DNS servers.
 //! - **Inbound TCP/UDP port-forwarding**: `host_port → guest_ip:guest_port`
 //!   pairs parsed from the box's `port_map` config (e.g. `"8088:80"`,
 //!   `"5353:53/udp"`).
@@ -48,6 +48,7 @@ use smoltcp::wire::{
 use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
+pub use dns_local::NetworkDnsConfig;
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 pub use passt_bridge::spawn_inherited_passt_bridge;
 
@@ -483,15 +484,14 @@ impl ProxyEngine {
             let socket = self.sockets.get_mut::<udp::Socket>(handle);
             socket
                 .send_slice(payload, remote)
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+                .map_err(|error| io::Error::other(format!("smoltcp UDP send: {error:?}")))?;
             return Ok(());
         }
 
         if self.udp_forwards[forward_index].associations.len() >= MAX_UDP_ASSOCIATIONS {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("UDP association limit ({MAX_UDP_ASSOCIATIONS}) reached"),
-            ));
+            return Err(io::Error::other(format!(
+                "UDP association limit ({MAX_UDP_ASSOCIATIONS}) reached"
+            )));
         }
 
         let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
@@ -500,10 +500,10 @@ impl ProxyEngine {
         let local_port = self.next_ephemeral_port();
         socket
             .bind(local_port)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP bind: {error:?}")))?;
+            .map_err(|error| io::Error::other(format!("smoltcp UDP bind: {error:?}")))?;
         socket
             .send_slice(payload, remote)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+            .map_err(|error| io::Error::other(format!("smoltcp UDP send: {error:?}")))?;
         let handle = self.sockets.add(socket);
         self.udp_forwards[forward_index]
             .associations

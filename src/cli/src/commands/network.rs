@@ -151,9 +151,9 @@ pub(crate) fn prune_unused_networks(
         .filter_map(|record| crate::cleanup::record_network_name(record).map(str::to_string))
         .collect();
 
-    let mut networks = store.list().map_err(|error| {
-        format!("Failed to list networks for prune: {error}")
-    })?;
+    let mut networks = store
+        .list()
+        .map_err(|error| format!("Failed to list networks for prune: {error}"))?;
     networks.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut removed = Vec::new();
@@ -933,32 +933,53 @@ mod tests {
 
         let err = prune_unused_networks(&store, &state)
             .expect_err("unreadable NetworkStore must not invent empty prune success");
-        assert!(err.to_string().contains("Failed to list networks for prune"));
+        assert!(err
+            .to_string()
+            .contains("Failed to list networks for prune"));
     }
 
     #[test]
     fn prune_unused_networks_surfaces_remove_errors() {
-        let (_dir, store) = temp_store();
+        let (dir, store) = temp_store();
         store
             .create(NetworkConfig::new("orphan", "10.89.0.0/24").unwrap())
             .unwrap();
 
-        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(store.path(), perms).unwrap();
+        // Atomic rename ignores the target file mode; deny writes on the parent
+        // so NetworkStore cannot persist a remove.
+        let parent = dir.path();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o555);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
 
         let (_state_dir, state) = crate::test_helpers::fixtures::setup_state(Vec::new());
         let (removed, errors) = prune_unused_networks(&store, &state).unwrap();
         assert!(removed.is_empty());
         assert!(
             !errors.is_empty(),
-            "readonly NetworkStore must surface remove failures"
+            "unwritable NetworkStore parent must surface remove failures"
         );
         assert!(store.get("orphan").unwrap().is_some());
 
-        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(store.path(), perms).unwrap();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
     }
 
     #[test]

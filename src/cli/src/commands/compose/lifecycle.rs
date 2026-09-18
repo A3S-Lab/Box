@@ -609,23 +609,39 @@ mod tests {
             a3s_box_core::network::NetworkConfig::new("project_default", "10.88.0.0/24").unwrap();
         store.create(net).unwrap();
 
-        // Make the store unwritable so update/remove cannot invent success.
-        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(store.path(), perms).unwrap();
+        // Atomic rename ignores the target file mode; deny writes on the parent.
+        let parent = dir.path();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o555);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
 
         let err = cleanup_created_networks_with_store(&store, &["project_default".to_string()])
-            .expect_err("readonly NetworkStore must surface rollback failure");
+            .expect_err("unwritable NetworkStore parent must surface rollback failure");
         assert!(
             store.get("project_default").unwrap().is_some(),
             "failed rollback must leave the network claim intact"
         );
         let _ = err;
 
-        // Restore writability so TempDir cleanup succeeds on Windows.
-        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(store.path(), perms).unwrap();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
     }
 
     #[test]

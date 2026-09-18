@@ -30,7 +30,7 @@ const PORT_FORWARD_FRAME_DATA: u8 = 3;
 #[cfg(target_os = "linux")]
 const PORT_FORWARD_FRAME_CLOSE: u8 = 4;
 #[cfg(target_os = "linux")]
-const PORT_FORWARD_FRAME_OPEN_UDP: u8 = 5;
+const PORT_FORWARD_FRAME_OPEN_UDP: u8 = 7;
 #[cfg(target_os = "linux")]
 const PORT_FORWARD_BUFFER_BYTES: usize = 16 * 1024;
 #[cfg(target_os = "linux")]
@@ -519,9 +519,7 @@ async fn connect_udp_in_network_namespace(
         })?;
 
     let socket = receiver.await.map_err(|_| {
-        ExecutionManagerError::Internal(
-            "Sandbox UDP connector exited without a result".to_string(),
-        )
+        ExecutionManagerError::Internal("Sandbox UDP connector exited without a result".to_string())
     })??;
     let socket = tokio::net::UdpSocket::from_std(socket).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
@@ -675,9 +673,7 @@ async fn connect_microvm_udp_port(
         let (from_guest_tx, from_guest_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
         let relay_execution_id = execution_id.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                relay_microvm_udp(control, &mut to_guest_rx, from_guest_tx).await
-            {
+            if let Err(error) = relay_microvm_udp(control, &mut to_guest_rx, from_guest_tx).await {
                 tracing::warn!(
                     execution_id = %relay_execution_id,
                     guest_port = port.get(),

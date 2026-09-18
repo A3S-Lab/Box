@@ -424,6 +424,21 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                 net_config.net_socket_path.clone(),
                 bridge_socket_dir,
                 net_config.mac_address,
+                match (
+                    net_config.networks_json.clone(),
+                    net_config.network_name.clone(),
+                ) {
+                    (Some(networks_json), Some(network_name))
+                        if !net_config.dns_servers.is_empty() =>
+                    {
+                        Some(a3s_box_netproxy::NetworkDnsConfig {
+                            networks_json,
+                            network_name,
+                            dns_servers: net_config.dns_servers.clone(),
+                        })
+                    }
+                    _ => None,
+                },
             )?;
             log_inherited_net_fd(fd);
             ctx.add_net_unixstream_fd(fd, &net_config.mac_address)?;

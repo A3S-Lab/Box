@@ -49,6 +49,7 @@ pub(crate) struct HostNetDeviceLease {
 }
 
 impl HostNetDeviceLease {
+    #[allow(clippy::too_many_arguments)] // lease fields are the persisted wire shape
     fn new(
         network: &str,
         subnet: String,
