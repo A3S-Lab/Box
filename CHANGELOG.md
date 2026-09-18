@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- VM destroy fails closed when the runtime socket directory or `boxes/{id}`
+  cannot be removed (surfaces via destroy `Result`, no invent-clean Ok).
+  Boot-failure cleanup likewise refuses wiping the box dir while the socket
+  directory remains. Does **not** close ROADMAP B3/B2 or unlock CNI/DNS.
 - `terminate_passt` fails closed: wait for SIGTERM exit and refuse invent-clean
   teardown when passt remains or pid/socket artifacts cannot be removed. CLI,
   SDK, managed remove, orphan reap, destroy, and boot-failure cleanup
