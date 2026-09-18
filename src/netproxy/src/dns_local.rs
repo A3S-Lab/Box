@@ -123,7 +123,7 @@ pub(crate) fn try_ethernet_network_a_reply(
         return None; // UDP
     }
     let dst_ip = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
-    if !config.dns_servers.iter().any(|server| *server == dst_ip) {
+    if !config.dns_servers.contains(&dst_ip) {
         return None;
     }
     let udp = &ip[ihl..];
@@ -200,8 +200,8 @@ fn build_ipv4_udp_ethernet_frame(
 
 fn ipv4_header_checksum(header: &[u8; 20]) -> u16 {
     let mut sum = 0u32;
-    for chunk in header.chunks_exact(2) {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    for chunk in header.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*chunk) as u32;
     }
     while sum > 0xffff {
         sum = (sum & 0xffff) + (sum >> 16);

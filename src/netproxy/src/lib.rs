@@ -484,15 +484,14 @@ impl ProxyEngine {
             let socket = self.sockets.get_mut::<udp::Socket>(handle);
             socket
                 .send_slice(payload, remote)
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+                .map_err(|error| io::Error::other(format!("smoltcp UDP send: {error:?}")))?;
             return Ok(());
         }
 
         if self.udp_forwards[forward_index].associations.len() >= MAX_UDP_ASSOCIATIONS {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("UDP association limit ({MAX_UDP_ASSOCIATIONS}) reached"),
-            ));
+            return Err(io::Error::other(format!(
+                "UDP association limit ({MAX_UDP_ASSOCIATIONS}) reached"
+            )));
         }
 
         let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
@@ -501,10 +500,10 @@ impl ProxyEngine {
         let local_port = self.next_ephemeral_port();
         socket
             .bind(local_port)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP bind: {error:?}")))?;
+            .map_err(|error| io::Error::other(format!("smoltcp UDP bind: {error:?}")))?;
         socket
             .send_slice(payload, remote)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("smoltcp UDP send: {error:?}")))?;
+            .map_err(|error| io::Error::other(format!("smoltcp UDP send: {error:?}")))?;
         let handle = self.sockets.add(socket);
         self.udp_forwards[forward_index]
             .associations
