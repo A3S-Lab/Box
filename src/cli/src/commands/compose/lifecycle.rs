@@ -157,8 +157,14 @@ pub(super) async fn rollback_compose_up<T>(
     error: impl Into<Box<dyn std::error::Error>>,
 ) -> Result<T, Box<dyn std::error::Error>> {
     rollback_started_services(state, started_services).await;
-    cleanup_created_networks(created_networks);
-    Err(error.into())
+    let primary = error.into();
+    match cleanup_created_networks(created_networks) {
+        Ok(()) => Err(primary),
+        Err(cleanup) => Err(format!(
+            "{primary}; also failed to roll back compose networks: {cleanup}"
+        )
+        .into()),
+    }
 }
 
 async fn rollback_started_services(state: &mut StateFile, started_services: &[ServiceBox]) {
@@ -289,31 +295,33 @@ fn teardown_target(
         .or_else(|| cleanup_owned_if_unregistered.then(|| discovered.clone()))
 }
 
-fn cleanup_created_networks(created_networks: &[String]) {
+fn cleanup_created_networks(created_networks: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if created_networks.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let Ok(net_store) = NetworkStore::default_path() else {
-        return;
-    };
+    // Fail closed: compose up rollback must not invent a clean network undo
+    // while NetworkStore claims remain (parity with compose down).
+    let net_store = NetworkStore::default_path()?;
+    cleanup_created_networks_with_store(&net_store, created_networks)
+}
 
+fn cleanup_created_networks_with_store(
+    net_store: &NetworkStore,
+    created_networks: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     for net_name in created_networks.iter().rev() {
-        if let Ok(Some(mut net_config)) = net_store.get(net_name) {
+        if let Some(mut net_config) = net_store.get(net_name)? {
             let endpoint_ids: Vec<_> = net_config.endpoints.keys().cloned().collect();
             for endpoint_id in endpoint_ids {
+                // Absent endpoint is idempotent success.
                 let _ = net_config.disconnect(&endpoint_id);
             }
-            let _ = net_store.update(&net_config);
-        }
-
-        if let Err(error) = net_store.remove(net_name) {
-            eprintln!(
-                "  Warning: failed to roll back network {}: {}",
-                net_name, error
-            );
+            net_store.update(&net_config)?;
+            net_store.remove(net_name)?;
         }
     }
+    Ok(())
 }
 
 /// `compose down` — Stop and remove all services, networks, and optionally volumes.
@@ -505,5 +513,35 @@ mod tests {
             Some(111),
             "rollback must still clean an owned VM that failed before registration"
         );
+    }
+
+    #[test]
+    fn compose_up_network_rollback_fails_closed_on_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NetworkStore::new(dir.path().join("networks.json"));
+        let net = a3s_box_core::network::NetworkConfig::new("project_default", "10.88.0.0/24")
+            .unwrap();
+        store.create(net).unwrap();
+
+        // Make the store unwritable so update/remove cannot invent success.
+        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(store.path(), perms).unwrap();
+
+        let err = cleanup_created_networks_with_store(
+            &store,
+            &["project_default".to_string()],
+        )
+        .expect_err("readonly NetworkStore must surface rollback failure");
+        assert!(
+            store.get("project_default").unwrap().is_some(),
+            "failed rollback must leave the network claim intact"
+        );
+        let _ = err;
+
+        // Restore writability so TempDir cleanup succeeds on Windows.
+        let mut perms = std::fs::metadata(store.path()).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(store.path(), perms).unwrap();
     }
 }
