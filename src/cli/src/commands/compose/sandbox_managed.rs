@@ -2,8 +2,8 @@
 //!
 //! MicroVM Compose keeps the legacy `VmManager::boot` path. This module only
 //! covers the SandboxViaOci GA route so Compose shares create/start/remove with
-//! CLI/SDK. Named bridges require keep-authority opt-in; published ports stay
-//! fail-closed.
+//! CLI/SDK. Named bridges and static TCP published ports require keep-authority
+//! opt-in (same DNAT surface as CLI/SDK); UDP and `host_port=0` stay refused.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,9 +11,9 @@ use std::path::Path;
 use a3s_box_core::config::BoxConfig;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
-    sandbox_named_bridge_opt_in_enabled, CreateExecutionRequest, ExecutionId, ExecutionManager,
-    ExecutionRecordPolicy, ExecutionRestartPolicy, KillExecutionOptions, OperationId,
-    OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
+    parse_port_mapping, sandbox_named_bridge_opt_in_enabled, CreateExecutionRequest, ExecutionId,
+    ExecutionManager, ExecutionRecordPolicy, ExecutionRestartPolicy, KillExecutionOptions,
+    OperationId, PortProtocol, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 use a3s_box_runtime::{ComposeRuntimePlan, ManagedExecutionState};
 
@@ -44,8 +44,37 @@ pub(super) fn preflight_sandbox_compose(
             .into());
         }
         if !service.ports.is_empty() {
+            if !bridge_opt_in {
+                return Err(format!(
+                    "Compose --isolation sandbox published ports on service '{service_name}' require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root) with Bridge"
+                )
+                .into());
+            }
+            validate_sandbox_compose_published_ports(service_name, &service.ports)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_sandbox_compose_published_ports(
+    service_name: &str,
+    ports: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in ports {
+        let mapping = parse_port_mapping(entry).map_err(|error| {
+            format!(
+                "Compose --isolation sandbox published port on service '{service_name}': {error}"
+            )
+        })?;
+        if mapping.protocol != PortProtocol::Tcp {
             return Err(format!(
-                "Compose --isolation sandbox does not support published ports on service '{service_name}' yet"
+                "Compose --isolation sandbox published ports on service '{service_name}' only support TCP; got '{entry}'"
+            )
+            .into());
+        }
+        if mapping.host_port == 0 {
+            return Err(format!(
+                "Compose --isolation sandbox published ports on service '{service_name}' reject host_port=0 auto-assign in '{entry}'"
             )
             .into());
         }
@@ -56,14 +85,14 @@ pub(super) fn preflight_sandbox_compose(
 /// Apply SandboxViaOci Compose networking policy.
 ///
 /// Loopback-only by default. Keep-authority opt-in preserves Bridge so prepare
-/// can stage host netDevices; published ports stay cleared.
+/// can stage host netDevices and keeps static TCP `port_map` for DNAT.
 pub(super) fn sandbox_box_config(mut config: BoxConfig) -> BoxConfig {
-    if !sandbox_named_bridge_opt_in_enabled()
-        || !matches!(config.network, NetworkMode::Bridge { .. })
-    {
+    let keep_bridge = sandbox_named_bridge_opt_in_enabled()
+        && matches!(config.network, NetworkMode::Bridge { .. });
+    if !keep_bridge {
         config.network = NetworkMode::None;
+        config.port_map.clear();
     }
-    config.port_map.clear();
     config
 }
 
@@ -226,7 +255,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn preflight_rejects_published_ports() {
+    fn preflight_rejects_published_ports_without_keep_authority() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         let mut services = HashMap::new();
@@ -246,7 +275,68 @@ mod tests {
         };
         let project = ComposeRuntimePlan::new("demo", config).unwrap();
         let error = preflight_sandbox_compose(&project).unwrap_err();
-        assert!(error.to_string().contains("published ports"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keep_authority_admits_static_tcp_published_ports() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "1");
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                image: Some("alpine:latest".to_string()),
+                ports: vec!["8080:80".to_string()],
+                ..Default::default()
+            },
+        );
+        let config = ComposeConfig {
+            version: None,
+            services,
+            volumes: HashMap::new(),
+            networks: HashMap::new(),
+        };
+        let project = ComposeRuntimePlan::new("demo", config).unwrap();
+        preflight_sandbox_compose(&project).unwrap();
+        let config = sandbox_box_config(
+            project
+                .build_box_config("web", Some(&project.default_network_name()))
+                .unwrap(),
+        );
+        assert!(matches!(config.network, NetworkMode::Bridge { .. }));
+        assert_eq!(config.port_map, vec!["8080:80".to_string()]);
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+    }
+
+    #[test]
+    fn keep_authority_rejects_host_port_zero_published_ports() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "1");
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                image: Some("alpine:latest".to_string()),
+                ports: vec!["0:80".to_string()],
+                ..Default::default()
+            },
+        );
+        let config = ComposeConfig {
+            version: None,
+            services,
+            volumes: HashMap::new(),
+            networks: HashMap::new(),
+        };
+        let project = ComposeRuntimePlan::new("demo", config).unwrap();
+        let error = preflight_sandbox_compose(&project).unwrap_err();
+        assert!(error.to_string().contains("host_port=0"), "{error}");
+        std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
     }
 
     #[test]
@@ -320,6 +410,7 @@ mod tests {
             network: NetworkMode::Bridge {
                 network: "frontend".into(),
             },
+            port_map: vec!["8080:80".into()],
             ..Default::default()
         });
         assert_eq!(
@@ -328,6 +419,7 @@ mod tests {
                 network: "frontend".into(),
             }
         );
+        assert_eq!(config.port_map, vec!["8080:80".to_string()]);
         assert!(sandbox_compose_creates_networks());
         std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         assert!(!sandbox_compose_creates_networks());

@@ -245,6 +245,7 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
                         )
                     },
                 )?;
+            meta.mark_managed_sandbox_oci_capture();
             store.save_managed(meta, &rootfs_path, &rootfs_metadata)?
         } else {
             let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
@@ -353,6 +354,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     // Find snapshot by ID or name
     let meta = resolve_snapshot(&store, &args.snapshot)?;
     meta.require_image_config()?;
+    meta.require_restorable_via_cli_or_sdk()?;
     #[cfg(windows)]
     if meta.has_effective_health_check() {
         return Err(
@@ -387,6 +389,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     let restored_rootfs = store.restore_rootfs_to_box(&meta.id, &box_dir)?;
     let meta = restored_rootfs.metadata;
     meta.require_image_config()?;
+    meta.require_restorable_via_cli_or_sdk()?;
     #[cfg(windows)]
     if meta.has_effective_health_check() {
         return Err(

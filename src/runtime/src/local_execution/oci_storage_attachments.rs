@@ -20,8 +20,10 @@ const WORKSPACE_STORAGE_IDENTITY: &str = "a3s.box.workspace";
 /// Attach Box-owned VolumeStore mounts and the implicit `/workspace` bind into
 /// `a3s.oci.attachments.v2`.
 ///
-/// External caller bind mounts stay unclassified (OCI mount inventory only).
 /// Caller ownership + DetachOnly matches Box retaining deletion authority.
+/// Staged caller bind aliases are attached separately via
+/// [`attach_staged_caller_bind_aliases`]; anything else still fails
+/// [`reject_unclassified_bind_mounts`].
 pub(super) fn attach_box_owned_volume_storage(
     bundle: &OciBundle,
     attachments: CreateAttachments,
@@ -40,6 +42,156 @@ pub(super) fn attach_box_owned_volume_storage(
     )?;
     attachments = attach_workspace_bind(bundle, attachments, record, &mounts)?;
     Ok(attachments)
+}
+
+/// Classify Box-staged caller bind aliases under
+/// `{box_dir}/sandbox/attachments/{slot}` into `a3s.oci.attachments.v2`.
+///
+/// Preparation rewrites external `-v` sources onto these O_PATH aliases; this
+/// attaches the matching storage identity (`a3s.box.bind.{slot}`) so create no
+/// longer sees an unclassified bind for the common Docker bind surface.
+pub(super) fn attach_staged_caller_bind_aliases(
+    bundle: &OciBundle,
+    attachments: CreateAttachments,
+    home_dir: &Path,
+    record: &BoxRecord,
+) -> ExecutionManagerResult<CreateAttachments> {
+    let alias_root = staged_caller_bind_alias_root(home_dir, &record.id);
+    let Ok(alias_root) = alias_root.canonicalize() else {
+        // No staged aliases for this generation (no external binds, or not yet
+        // prepared). Leave attachments unchanged.
+        return Ok(attachments);
+    };
+
+    let mounts = oci_bind_mounts(bundle)?;
+    let already = classified_bind_indices(&attachments)?;
+    let mut attachments = attachments;
+    for (index, mount) in mounts.iter().enumerate() {
+        if already.contains(&index) {
+            continue;
+        }
+        let Some(source) = mount.source.as_ref() else {
+            continue;
+        };
+        let Ok(canonical) = source.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(&alias_root) {
+            continue;
+        }
+        let slot = bind_alias_slot(&alias_root, &canonical).ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "SandboxViaOci bind alias {} is not a direct slot under {}",
+                canonical.display(),
+                alias_root.display()
+            ))
+        })?;
+        let identity = format!("a3s.box.bind.{slot}");
+        attachments = attach_storage(bundle, attachments, index, &identity, mount.read_only)?;
+    }
+    Ok(attachments)
+}
+
+/// Fail closed when any OCI `type=bind` mount remains unclassified as storage
+/// or secret after Box attachment assembly.
+///
+/// External binds outside Box-owned volumes, `/workspace`, managed Secrets, and
+/// staged caller bind aliases must not reach runtime create.
+pub(super) fn reject_unclassified_bind_mounts(
+    bundle: &OciBundle,
+    attachments: CreateAttachments,
+) -> ExecutionManagerResult<CreateAttachments> {
+    let mounts = oci_bind_mounts(bundle)?;
+    let classified = classified_bind_indices(&attachments)?;
+    for (index, mount) in mounts.iter().enumerate() {
+        if mount.source.is_none() {
+            continue;
+        }
+        if classified.contains(&index) {
+            continue;
+        }
+        let destination = mount
+            .destination
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("mount index {index}"));
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "SandboxViaOci rejects unclassified external bind mount at {destination}; \
+             use a Box-owned named/anonymous volume, the /workspace bind, a managed Secret, \
+             or a prepare-staged caller bind alias under sandbox/attachments"
+        )));
+    }
+    Ok(attachments)
+}
+
+/// Require `{alias_root}/{slot}` with a four-digit slot basename (no nesting).
+fn bind_alias_slot(alias_root: &Path, canonical: &Path) -> Option<String> {
+    let relative = canonical.strip_prefix(alias_root).ok()?;
+    let mut components = relative.components();
+    let slot = match components.next()? {
+        std::path::Component::Normal(slot) => slot.to_str()?.to_string(),
+        _ => return None,
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    if slot.len() != 4 || !slot.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(slot)
+}
+
+/// Box-owned alias directory for prepare-rewritten caller binds.
+///
+/// Mirrors `sandbox::sandbox_mount_alias_root` so attachment classification
+/// compiles on non-Linux hosts even though alias staging itself is Linux-only.
+fn staged_caller_bind_alias_root(home_dir: &Path, box_id: &str) -> PathBuf {
+    home_dir
+        .join("boxes")
+        .join(box_id)
+        .join("sandbox")
+        .join("attachments")
+}
+
+fn classified_bind_indices(
+    attachments: &CreateAttachments,
+) -> ExecutionManagerResult<std::collections::HashSet<usize>> {
+    let mut classified = std::collections::HashSet::new();
+    for storage in attachments.storage() {
+        if let Some(index) = mount_index_from_pointer(storage.mount().json_pointer()) {
+            classified.insert(index);
+        }
+    }
+    let encoded = serde_json::to_value(attachments).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to inspect attachment secrets for bind classification: {error}"
+        ))
+    })?;
+    if let Some(secrets) = encoded.get("secrets").and_then(|value| value.as_array()) {
+        for secret in secrets {
+            let pointer = secret
+                .pointer("/configuration/jsonPointer")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    secret
+                        .get("configuration")
+                        .and_then(|value| value.get("jsonPointer"))
+                        .and_then(|value| value.as_str())
+                });
+            if let Some(index) = pointer.and_then(mount_index_from_pointer) {
+                classified.insert(index);
+            }
+        }
+    }
+    Ok(classified)
+}
+
+fn mount_index_from_pointer(pointer: &str) -> Option<usize> {
+    let rest = pointer.strip_prefix("/mounts/")?;
+    if rest.contains('/') {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 fn attach_named_and_anonymous_volumes(
@@ -372,7 +524,105 @@ mod tests {
     }
 
     #[test]
-    fn ignores_external_binds_without_volume_ownership() {
+    fn attaches_staged_caller_bind_alias_and_passes_reject_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "11111111-1111-4111-8111-111111111115";
+        let record = make_record(home.path(), id);
+        let alias_root = staged_caller_bind_alias_root(home.path(), id);
+        let alias = alias_root.join("0000");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::write(alias.join("payload"), b"data").unwrap();
+        let source = alias.canonicalize().unwrap();
+
+        let bundle_dir = home.path().join("bundle");
+        std::fs::create_dir_all(bundle_dir.join("rootfs")).unwrap();
+        let bundle = OciBundle::from_json(
+            &bundle_dir,
+            serde_json::to_string(&json!({
+                "ociVersion": "1.3.0",
+                "root": {"path": "rootfs"},
+                "process": {
+                    "cwd": "/",
+                    "args": ["/bin/true"],
+                    "user": {"uid": 0, "gid": 0}
+                },
+                "mounts": [{
+                    "destination": "/host-data",
+                    "type": "bind",
+                    "source": source,
+                    "options": ["rbind", "rprivate", "nosuid", "nodev", "ro"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let attachments = CreateAttachments::from_bundle(&bundle, ProcessIo::default()).unwrap();
+        let attached =
+            attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
+                .unwrap();
+        assert!(attached.storage().is_empty());
+        let attached =
+            attach_staged_caller_bind_aliases(&bundle, attached, home.path(), &record).unwrap();
+        assert_eq!(attached.schema_version(), "a3s.oci.attachments.v2");
+        assert_eq!(attached.storage().len(), 1);
+        assert_eq!(
+            attached.storage()[0].identity().as_str(),
+            "a3s.box.bind.0000"
+        );
+        assert_eq!(
+            attached.storage()[0].access_mode(),
+            StorageAccessMode::ReadOnly
+        );
+        let accepted = reject_unclassified_bind_mounts(&bundle, attached).unwrap();
+        assert_eq!(accepted.storage().len(), 1);
+    }
+
+    #[test]
+    fn still_rejects_external_binds_outside_alias_root() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let source = external.path().canonicalize().unwrap();
+        let bundle_dir = home.path().join("bundle");
+        std::fs::create_dir_all(bundle_dir.join("rootfs")).unwrap();
+        let bundle = OciBundle::from_json(
+            &bundle_dir,
+            serde_json::to_string(&json!({
+                "ociVersion": "1.3.0",
+                "root": {"path": "rootfs"},
+                "process": {
+                    "cwd": "/",
+                    "args": ["/bin/true"],
+                    "user": {"uid": 0, "gid": 0}
+                },
+                "mounts": [{
+                    "destination": "/external",
+                    "type": "bind",
+                    "source": source,
+                    "options": ["rbind", "rw"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let record = make_record(home.path(), "11111111-1111-4111-8111-111111111116");
+        let attachments = CreateAttachments::from_bundle(&bundle, ProcessIo::default()).unwrap();
+        let attached =
+            attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
+                .unwrap();
+        let attached =
+            attach_staged_caller_bind_aliases(&bundle, attached, home.path(), &record).unwrap();
+        assert!(attached.storage().is_empty());
+        let error = reject_unclassified_bind_mounts(&bundle, attached).unwrap_err();
+        assert!(
+            error.to_string().contains("unclassified external bind"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_external_binds_without_volume_ownership() {
         let home = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         let source = external.path().canonicalize().unwrap();
@@ -404,7 +654,54 @@ mod tests {
         let attached =
             attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
                 .unwrap();
-        assert_eq!(attached.schema_version(), "a3s.oci.attachments.v1");
         assert!(attached.storage().is_empty());
+        let error = reject_unclassified_bind_mounts(&bundle, attached).unwrap_err();
+        assert!(
+            error.to_string().contains("unclassified external bind"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn accepts_volume_owned_binds_after_classification() {
+        let home = tempfile::tempdir().unwrap();
+        let store = VolumeStore::new(
+            home.path().join("volumes.json"),
+            home.path().join("volumes"),
+        );
+        let volume = store.create(VolumeConfig::new("dataset-a", "")).unwrap();
+        let source = PathBuf::from(&volume.mount_point).canonicalize().unwrap();
+
+        let bundle_dir = home.path().join("bundle");
+        std::fs::create_dir_all(bundle_dir.join("rootfs")).unwrap();
+        let bundle = OciBundle::from_json(
+            &bundle_dir,
+            serde_json::to_string(&json!({
+                "ociVersion": "1.3.0",
+                "root": {"path": "rootfs"},
+                "process": {
+                    "cwd": "/",
+                    "args": ["/bin/true"],
+                    "user": {"uid": 0, "gid": 0}
+                },
+                "mounts": [{
+                    "destination": "/data",
+                    "type": "bind",
+                    "source": source,
+                    "options": ["rbind", "rprivate", "nosuid", "nodev", "rw"]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut record = make_record(home.path(), "11111111-1111-4111-8111-111111111114");
+        record.volume_names = vec!["dataset-a".to_string()];
+        let attachments = CreateAttachments::from_bundle(&bundle, ProcessIo::default()).unwrap();
+        let attached =
+            attach_box_owned_volume_storage(&bundle, attachments, home.path(), &record, &[])
+                .unwrap();
+        let accepted = reject_unclassified_bind_mounts(&bundle, attached).unwrap();
+        assert_eq!(accepted.storage().len(), 1);
     }
 }

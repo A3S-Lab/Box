@@ -847,9 +847,10 @@ open and harness reports still keep
 - [ ] Keep image distribution, builds, named volumes, snapshots, and commits in
   Box while passing immutable, descriptor-bound attachments to OCI Runtime.
   **Partial:** Native Linux SandboxViaOci prepare now binds Box-owned named and
-  anonymous volumes, plus the Box-owned `/workspace` bind
-  (`a3s.box.workspace`), into `a3s.oci.attachments.v2` (caller-owned
-  DetachOnly). External caller binds stay unclassified.
+  anonymous volumes, the Box-owned `/workspace` bind (`a3s.box.workspace`), and
+  staged caller bind aliases under `sandbox/attachments/{slot}`
+  (`a3s.box.bind.{slot}`) into `a3s.oci.attachments.v2` (caller-owned
+  DetachOnly). Remaining unclassified external binds fail closed at create.
   Image/build/snapshot/commit descriptor handoff, network v3, Windows volume
   parity, and the B3 exit gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
@@ -864,14 +865,14 @@ open and harness reports still keep
   and installs the NetworkStore gateway on the bridge plus a default route on
   the container end, with host `ip_forward` + per-subnet iptables MASQUERADE for
   egress and NetworkStore peer `/etc/hosts` discovery, plus optional static TCP
-  DNAT publication (CLI/SDK; Compose ports still fail-closed). Product
-  admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a concrete
-  ephemeral host port before boot so backends do not silently drop unresolved
-  auto-assign. MicroVM bridge `passt` likewise rejects unresolved
+  DNAT publication (CLI/SDK and Compose sandbox under keep-authority Bridge).
+  Product admission (CLI / MicroVM Compose / SDK) resolves `0:guest` to a
+  concrete ephemeral host port before boot so backends do not silently drop
+  unresolved auto-assign. MicroVM bridge `passt` rejects unresolved
   `host_port=0` / invalid publish entries instead of silent skip. Keep-authority
   DNAT teardown fails closed when a present publish rule cannot be deleted
   (lease retained). GA default remains delegated rootless/`base_v2`
-  loopback-only. CNI, UDP publish, DNS server/proxy, multi-device,
+  loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy, multi-device,
   rootless/MicroVM/Windows parity, and the B3 exit gate remain open. Does
   **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
@@ -881,15 +882,20 @@ open and harness reports still keep
   prepare and managed VolumeStore paths refuse symlink/reparse host sources
   before following them. Stopped directory-backed MicroVM `export`/`diff`
   require guest rootfs metadata (same honesty contract as stopped `commit`).
-  Host `:ro` write denial on virtio-fs and full Linux UID/GID storage on
-  Windows binds remain open. Does **not** flip
+  Linux MicroVM `:ro` volumes host-enforce write denial via private RO bind
+  aliases before virtio-fs; Windows/macOS host `:ro` denial and full Linux
+  UID/GID storage on Windows binds remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
-  managed quiesce/host-rootfs surface; Windows stopped snapshots retain guest
-  metadata via `save_managed`; stopped directory MicroVM export/diff retain
-  guest metadata; MicroVM live host-path snapshots and the full B3
+  managed quiesce/host-rootfs surface; SandboxViaOci `diff` baselines use the
+  same OCI-mapped metadata contract as live/stopped capture; Windows stopped
+  snapshots retain guest metadata via `save_managed`; stopped directory MicroVM
+  export/diff retain guest metadata; managed SandboxViaOci captures are labeled
+  and refuse MicroVM-shaped CLI/SDK `snapshot restore`; missing
+  `rootfs_snapshot.json` fails closed on `diff` and baseline-create errors abort
+  boot instead of soft success; MicroVM live host-path snapshots and the full B3
   storage/network qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
@@ -935,9 +941,10 @@ guest endpoint.
   `LocalExecutionManager` / SandboxViaOci (same create/start/remove path as
   CLI/SDK), including session-exec health probes and `service_healthy` waits.
   Opt-in `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=1` also creates
-  NetworkStore named bridges for Sandbox Compose. Published ports, warm-pool,
-  MicroVM Compose cutover, and the B4 exit gate remain open. Does **not** flip
-  `b2_process_session_recovery_closed`.
+  NetworkStore named bridges for Sandbox Compose and admits static TCP
+  published ports (CLI/SDK DNAT contract; UDP/`host_port=0` still refused).
+  Warm-pool, MicroVM Compose cutover, and the B4 exit gate remain open. Does
+  **not** flip `b2_process_session_recovery_closed`.
 - [ ] Keep `a3s-box-cri` only as an optional full product adapter; it must use
   the same execution adapter and must not spawn the Box CLI.
 - [ ] Make the OCI Runtime-owned containerd shim the preferred Kubernetes

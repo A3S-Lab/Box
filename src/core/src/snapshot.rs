@@ -94,6 +94,11 @@ impl SnapshotImageHealthCheck {
     }
 }
 
+/// Label key stamped on managed SandboxViaOci filesystem captures.
+pub const MANAGED_SANDBOX_OCI_CAPTURE_LABEL: &str = "a3s.box.snapshot.capture";
+/// Label value for captures that must not restore onto the MicroVM CLI/SDK path.
+pub const MANAGED_SANDBOX_OCI_CAPTURE_VALUE: &str = "managed-sandbox-oci";
+
 /// Metadata for a saved VM snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
@@ -225,6 +230,36 @@ impl SnapshotMetadata {
                     .as_ref()
                     .and_then(|config| config.health_check.as_ref())
                     .is_some_and(SnapshotImageHealthCheck::is_enabled))
+    }
+
+    /// Mark this snapshot as a managed SandboxViaOci filesystem capture.
+    ///
+    /// CLI/SDK `snapshot restore` still stamps MicroVM + no managed lifecycle.
+    /// Fail closed there until restore can recreate SandboxViaOci authority.
+    pub fn mark_managed_sandbox_oci_capture(&mut self) {
+        self.labels.insert(
+            MANAGED_SANDBOX_OCI_CAPTURE_LABEL.to_string(),
+            MANAGED_SANDBOX_OCI_CAPTURE_VALUE.to_string(),
+        );
+    }
+
+    /// True when restore must not invent a MicroVM box from a managed Sandbox capture.
+    pub fn is_managed_sandbox_oci_capture(&self) -> bool {
+        self.labels.get(MANAGED_SANDBOX_OCI_CAPTURE_LABEL).map(String::as_str)
+            == Some(MANAGED_SANDBOX_OCI_CAPTURE_VALUE)
+    }
+
+    /// Refuse MicroVM-shaped restore for managed SandboxViaOci captures.
+    pub fn require_restorable_via_cli_or_sdk(&self) -> Result<()> {
+        if !self.is_managed_sandbox_oci_capture() {
+            return Ok(());
+        }
+        Err(BoxError::ConfigError(format!(
+            "Snapshot '{}' is a managed SandboxViaOci capture and cannot be restored through \
+             `snapshot restore` (that path still creates MicroVM boxes without managed lifecycle). \
+             Recreate via Sandbox create with rootfs_snapshot_id / the managed execution API instead.",
+            self.id
+        )))
     }
 }
 
@@ -448,6 +483,28 @@ mod tests {
         assert!(config.snapshot_dir.is_none());
         assert_eq!(config.max_snapshots, 0);
         assert_eq!(config.max_total_bytes, 0);
+    }
+
+    #[test]
+    fn managed_sandbox_oci_capture_label_fails_cli_restore() {
+        let mut meta = SnapshotMetadata::new(
+            "snap-managed".to_string(),
+            "managed".to_string(),
+            "box-m".to_string(),
+            "alpine:latest".to_string(),
+        );
+        assert!(meta.require_restorable_via_cli_or_sdk().is_ok());
+        meta.mark_managed_sandbox_oci_capture();
+        assert!(meta.is_managed_sandbox_oci_capture());
+        let error = meta.require_restorable_via_cli_or_sdk().unwrap_err();
+        assert!(
+            error.to_string().contains("managed SandboxViaOci capture"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("rootfs_snapshot_id"),
+            "{error}"
+        );
     }
 
     #[test]
