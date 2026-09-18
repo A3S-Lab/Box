@@ -902,8 +902,10 @@ open and harness reports still keep
   export/diff retain guest metadata; managed SandboxViaOci captures are labeled
   and refuse MicroVM-shaped CLI/SDK `snapshot restore`; missing
   `rootfs_snapshot.json` fails closed on `diff` and baseline-create errors abort
-  boot instead of soft success; MicroVM live host-path snapshots and the full B3
-  storage/network qualification gate remain open. Does **not** flip
+  boot instead of soft success; boot fails closed when `.snapshot-lower` is
+  present but the lower directory is missing (no image-pull fallthrough);
+  MicroVM live host-path snapshots and the full B3 storage/network
+  qualification gate remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [x] Persist normalized image-declared anonymous-volume identities before OCI
   bundle preparation, enforce exact single-owner claims, and keep recovery and

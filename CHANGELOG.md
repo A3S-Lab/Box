@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Boot layout fails closed when `.snapshot-lower` is present but the target
+  directory is missing, instead of warn-and-falling through to a fresh image
+  pull (aligns with `prepare_preserved_rootfs`). Does **not** close ROADMAP
+  B3/B2 or invent SandboxViaOci snapshot restore.
 - VM destroy, SDK `cleanup_removed_box`, and CLI foreground `--rm` wipe tear
   down keep-authority host-netdevice leases before deleting `boxes/{id}`
   (retain dir / fail closed on teardown failure). Does **not** close ROADMAP
