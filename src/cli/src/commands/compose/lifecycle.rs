@@ -126,7 +126,18 @@ pub(super) fn cleanup_partial_service_box(
     // only detaches volumes and networking.
     a3s_box_runtime::rootfs::unmount_box_overlay(&box_dir.join("merged"));
     a3s_box_runtime::rootfs::unmount_box_rootfs(&box_dir.join("rootfs"));
-    let _ = std::fs::remove_dir_all(box_dir);
+    match std::fs::remove_dir_all(box_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::error!(
+                box_id,
+                path = %box_dir.display(),
+                %error,
+                "Failed to remove partial Compose box directory after resource teardown"
+            );
+        }
+    }
     crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
 }
 
@@ -341,44 +352,30 @@ pub(super) async fn execute_down(
         }
     }
 
-    // Clean up networks
-    if let Ok(net_store) = NetworkStore::default_path() {
-        for network_name in network_names {
-            if let Ok(Some(mut network)) = net_store.get(&network_name) {
-                let ids = network.endpoints.keys().cloned().collect::<Vec<_>>();
-                for id in ids {
-                    network.disconnect(&id).ok();
-                }
-                let _ = net_store.update(&network);
-                if let Err(error) = net_store.remove(&network_name) {
-                    eprintln!(
-                        "  Warning: failed to remove network {}: {}",
-                        network_name, error
-                    );
-                } else {
-                    println!("  [-] Network {} removed", network_name);
-                }
+    // Clean up networks — fail closed so compose down cannot invent success
+    // while endpoints or network objects remain.
+    let net_store = NetworkStore::default_path()?;
+    for network_name in network_names {
+        if let Some(mut network) = net_store.get(&network_name)? {
+            let ids = network.endpoints.keys().cloned().collect::<Vec<_>>();
+            for id in ids {
+                // Absent endpoint is idempotent success.
+                let _ = network.disconnect(&id);
             }
+            net_store.update(&network)?;
+            net_store.remove(&network_name)?;
+            println!("  [-] Network {} removed", network_name);
         }
     }
 
-    // Optionally remove named volumes
+    // Optionally remove named volumes — fail closed on remove errors.
     if down_args.volumes {
         let vol_store = a3s_box_runtime::volume::VolumeStore::default_path()?;
         let mut removed = 0u32;
         for volume_name in volume_names {
-            match vol_store.remove(&volume_name, true) {
-                Ok(_) => {
-                    println!("  [-] Volume {} removed", volume_name);
-                    removed += 1;
-                }
-                Err(error) => {
-                    eprintln!(
-                        "  Warning: failed to remove volume {}: {}",
-                        volume_name, error
-                    );
-                }
-            }
+            vol_store.remove(&volume_name, true)?;
+            println!("  [-] Volume {} removed", volume_name);
+            removed += 1;
         }
         if removed > 0 {
             println!("  Removed {} volume(s).", removed);

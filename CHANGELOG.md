@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose `down` fails closed on network disconnect/update/remove and
+  `--volumes` remove errors instead of warn-and-claiming project stop success;
+  partial-service wipe logs wipe failures after teardown. Does **not** close
+  ROADMAP B4/B3/B2 or unlock UDP/`host_port=0`.
 - SDK `cleanup_removed_box` fails closed on host-netdevice / MicroVM `:ro`
   detach and box-dir wipe (CLI parity) instead of retaining the dir while
   returning `Ok` and dropping state; `prune_boxes` cleans host resources before
