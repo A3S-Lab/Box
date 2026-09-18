@@ -79,19 +79,17 @@ pub(super) fn cleanup_partial_service_box(
     volume_names: &[String],
     anonymous_volumes: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Err(error) =
-        crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name)
-    {
+    if let Err(error) = crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name) {
         tracing::error!(
             box_id,
             %error,
             "Refusing to remove partial Compose box directory while volume/network detach failed"
         );
-        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return Err(format!(
-            "volume/network detach failed for Compose service {box_id}: {error}"
-        )
-        .into());
+        return Err(chain_socket_cleanup(
+            box_dir,
+            exec_socket_path,
+            format!("volume/network detach failed for Compose service {box_id}: {error}"),
+        ));
     }
     if let Err(error) = crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes) {
         tracing::error!(
@@ -99,11 +97,11 @@ pub(super) fn cleanup_partial_service_box(
             %error,
             "Refusing to remove partial Compose box directory while anonymous volume cleanup failed"
         );
-        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return Err(format!(
-            "anonymous volume cleanup failed for Compose service {box_id}: {error}"
-        )
-        .into());
+        return Err(chain_socket_cleanup(
+            box_dir,
+            exec_socket_path,
+            format!("anonymous volume cleanup failed for Compose service {box_id}: {error}"),
+        ));
     }
     // Keep-authority host-netdevice lease may exist after a partial prepare.
     // Tear down before wiping boxes/{id}; retain the dir when teardown fails.
@@ -114,11 +112,11 @@ pub(super) fn cleanup_partial_service_box(
             %error,
             "Refusing to remove partial Compose box directory while host netdevice lease teardown failed"
         );
-        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return Err(format!(
-            "host netdevice lease teardown failed for Compose service {box_id}: {error}"
-        )
-        .into());
+        return Err(chain_socket_cleanup(
+            box_dir,
+            exec_socket_path,
+            format!("host netdevice lease teardown failed for Compose service {box_id}: {error}"),
+        ));
     }
     if let Err(error) = a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(box_dir) {
         tracing::error!(
@@ -126,22 +124,21 @@ pub(super) fn cleanup_partial_service_box(
             %error,
             "Refusing to remove partial Compose box directory while MicroVM :ro virtio-fs alias detach failed"
         );
-        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return Err(format!(
-            "MicroVM :ro virtio-fs alias detach failed for Compose service {box_id}: {error}"
-        )
-        .into());
+        return Err(chain_socket_cleanup(
+            box_dir,
+            exec_socket_path,
+            format!(
+                "MicroVM :ro virtio-fs alias detach failed for Compose service {box_id}: {error}"
+            ),
+        ));
     }
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above
     // only detaches volumes and networking. Fail closed on overlay so wipe
     // cannot invent success while merged remains mounted.
-    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged")).map_err(
-        |error| {
-            format!("Overlay unmount failed for Compose service {box_id}: {error}")
-        },
-    )?;
+    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged"))
+        .map_err(|error| format!("Overlay unmount failed for Compose service {box_id}: {error}"))?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&box_dir.join("rootfs"));
     match std::fs::remove_dir_all(box_dir) {
         Ok(()) => {}
@@ -153,16 +150,29 @@ pub(super) fn cleanup_partial_service_box(
                 %error,
                 "Failed to remove partial Compose box directory after resource teardown"
             );
-            crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-            return Err(format!(
-                "Failed to remove Compose box directory {}: {error}",
-                box_dir.display()
-            )
-            .into());
+            return Err(chain_socket_cleanup(
+                box_dir,
+                exec_socket_path,
+                format!(
+                    "Failed to remove Compose box directory {}: {error}",
+                    box_dir.display()
+                ),
+            ));
         }
     }
-    crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+    crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path)?;
     Ok(())
+}
+
+fn chain_socket_cleanup(
+    box_dir: &std::path::Path,
+    exec_socket_path: &std::path::Path,
+    primary: String,
+) -> Box<dyn std::error::Error> {
+    match crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path) {
+        Ok(()) => primary.into(),
+        Err(error) => format!("{primary}; socket directory cleanup also failed: {error}").into(),
+    }
 }
 
 /// Chain a partial-service wipe failure into the primary compose-up error.
@@ -173,10 +183,9 @@ pub(super) fn chain_partial_cleanup_error(
     let primary = primary.into();
     match cleanup {
         Ok(()) => primary,
-        Err(cleanup) => format!(
-            "{primary}; also failed to clean partial Compose service: {cleanup}"
-        )
-        .into(),
+        Err(cleanup) => {
+            format!("{primary}; also failed to clean partial Compose service: {cleanup}").into()
+        }
     }
 }
 
@@ -595,8 +604,8 @@ mod tests {
     fn compose_up_network_rollback_fails_closed_on_remove() {
         let dir = tempfile::tempdir().unwrap();
         let store = NetworkStore::new(dir.path().join("networks.json"));
-        let net = a3s_box_core::network::NetworkConfig::new("project_default", "10.88.0.0/24")
-            .unwrap();
+        let net =
+            a3s_box_core::network::NetworkConfig::new("project_default", "10.88.0.0/24").unwrap();
         store.create(net).unwrap();
 
         // Make the store unwritable so update/remove cannot invent success.
@@ -604,11 +613,8 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(store.path(), perms).unwrap();
 
-        let err = cleanup_created_networks_with_store(
-            &store,
-            &["project_default".to_string()],
-        )
-        .expect_err("readonly NetworkStore must surface rollback failure");
+        let err = cleanup_created_networks_with_store(&store, &["project_default".to_string()])
+            .expect_err("readonly NetworkStore must surface rollback failure");
         assert!(
             store.get("project_default").unwrap().is_some(),
             "failed rollback must leave the network claim intact"
@@ -636,10 +642,7 @@ mod tests {
 
     #[test]
     fn chain_partial_cleanup_error_surfaces_wipe_failure() {
-        let chained = chain_partial_cleanup_error(
-            "boot failed",
-            Err("wipe refused".into()),
-        );
+        let chained = chain_partial_cleanup_error("boot failed", Err("wipe refused".into()));
         let message = chained.to_string();
         assert!(message.contains("boot failed"));
         assert!(message.contains("wipe refused"));

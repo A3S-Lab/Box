@@ -128,6 +128,70 @@ mod dirs {
     }
 }
 
+/// Remove virtio-fs file-mount staging left by the shim.
+///
+/// The shim writes `$TMPDIR/a3s-fs-mount-<box_id>-<tag>` (and older callers
+/// also used the unsuffixed directory). Cleanup must match those identities.
+/// A directory listing or delete error fails closed so remove cannot invent a
+/// clean host while staging remains. Absent directories are success.
+pub fn remove_file_mount_staging(box_id: &str) -> Result<()> {
+    remove_file_mount_staging_in(&std::env::temp_dir(), box_id)
+}
+
+pub(crate) fn remove_file_mount_staging_in(temp_dir: &Path, box_id: &str) -> Result<()> {
+    if box_id.is_empty()
+        || box_id.contains(['/', '\\'])
+        || box_id.contains("..")
+        || box_id.contains('\0')
+    {
+        return Err(BoxError::Other(format!(
+            "refusing to scan file-mount staging for unsafe box id {box_id:?}"
+        )));
+    }
+
+    let exact = format!("a3s-fs-mount-{box_id}");
+    let prefix = format!("a3s-fs-mount-{box_id}-");
+    let entries = match std::fs::read_dir(temp_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(BoxError::Other(format!(
+                "failed to list file-mount staging in {}: {error}",
+                temp_dir.display()
+            )));
+        }
+    };
+
+    let mut owned = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            BoxError::Other(format!(
+                "failed to read file-mount staging in {}: {error}",
+                temp_dir.display()
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == exact || name.starts_with(&prefix) {
+            owned.push(entry.path());
+        }
+    }
+
+    for path in owned {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BoxError::Other(format!(
+                    "failed to remove file-mount staging {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +290,34 @@ mod tests {
         let dir = ensure_cache_dir().await.unwrap();
         assert!(dir.exists());
         assert!(dir.to_string_lossy().contains("a3s-box"));
+    }
+
+    #[test]
+    fn file_mount_staging_removes_tagged_dirs_and_keeps_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let box_id = "11111111-1111-4111-8111-111111111111";
+        let tagged = temp.path().join(format!("a3s-fs-mount-{box_id}-app"));
+        let legacy = temp.path().join(format!("a3s-fs-mount-{box_id}"));
+        let sibling = temp
+            .path()
+            .join("a3s-fs-mount-22222222-2222-4222-8222-222222222222-app");
+        std::fs::create_dir_all(&tagged).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(tagged.join("app.conf"), b"x").unwrap();
+
+        remove_file_mount_staging_in(temp.path(), box_id).unwrap();
+
+        assert!(!tagged.exists());
+        assert!(!legacy.exists());
+        assert!(sibling.exists());
+    }
+
+    #[test]
+    fn file_mount_staging_refuses_unsafe_box_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = remove_file_mount_staging_in(temp.path(), "../tmp").unwrap_err();
+        assert!(error.to_string().contains("unsafe box id"));
     }
 
     #[test]

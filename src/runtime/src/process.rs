@@ -37,6 +37,41 @@ pub fn is_process_alive(_pid: u32) -> bool {
     false
 }
 
+/// Remove a legacy MicroVM host cgroup `/sys/fs/cgroup/a3s-box/<id>`.
+///
+/// Sandbox cgroups are owned by the OCI runtime delete path and must not be
+/// touched here. Absent is success. A still-busy cgroup is retried briefly,
+/// then the error is returned so stop/remove cannot invent a clean host.
+pub fn remove_legacy_microvm_cgroup(box_id: &str) -> a3s_box_core::error::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if box_id.is_empty() || box_id.contains(['/', '\\']) || box_id.contains("..") {
+            return Err(a3s_box_core::error::BoxError::Other(format!(
+                "refusing to remove a host cgroup for unsafe box id {box_id:?}"
+            )));
+        }
+        let path = std::path::PathBuf::from("/sys/fs/cgroup/a3s-box").join(box_id);
+        for attempt in 0..50 {
+            match std::fs::remove_dir(&path) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) if attempt + 1 < 50 => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => {
+                    return Err(a3s_box_core::error::BoxError::Other(format!(
+                        "Failed to remove host cgroup {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = box_id;
+    Ok(())
+}
+
 /// Read a process start time as a stable PID identity token.
 ///
 /// Linux returns field 22 of `/proc/<pid>/stat`, measured in clock ticks since
