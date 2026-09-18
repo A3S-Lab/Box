@@ -17,6 +17,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM `:ro` bind remount verification reads VFS mount options before
+  super_opts (bind remounts keep the underlying superblock `rw`). Unblocks
+  R17 mounts profile on hosts where remount succeeds. Does **not** close
+  ROADMAP B3/B2 or unlock macOS `:ro`.
+- Fail-closed NetworkStore/VolumeStore tests deny writes on the parent
+  directory (atomic rename ignores file `set_readonly` on Linux). Workspace
+  rustfmt + lease-ctor clippy allow unblock CI after #568. Does **not** close
+  ROADMAP B3/B2.
 - Guest port-forward UDP open uses frame type `7` (not `5`) so it does not
   collide with `WINDOWS_CONTROL_SIGNAL_FRAME`, and UDP stream close is a
   no-op instead of the nonexistent `UdpSocket::shutdown`. Unblocks workspace

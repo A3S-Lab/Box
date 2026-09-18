@@ -325,15 +325,21 @@ fn mount_is_read_only(mountinfo: &str, target: &Path) -> bool {
         }
         // Optional fields … `-` fs_type source super_opts
         let rest: Vec<_> = parts.collect();
-        if let Some(dash) = rest.iter().position(|p| *p == "-") {
-            if let Some(super_opts) = rest.get(dash + 3) {
-                return super_opts.split(',').any(|opt| opt == "ro");
+        // Prefer VFS mount options (field after mount point). Bind remounts keep
+        // underlying super_opts `rw` while field 6 becomes `ro`.
+        if let Some(opts) = rest.first() {
+            if opts.split(',').any(|opt| opt == "ro") {
+                return true;
             }
         }
-        // Fallback: mount options field immediately after mount point.
-        if let Some(opts) = rest.first() {
-            return opts.split(',').any(|opt| opt == "ro");
+        if let Some(dash) = rest.iter().position(|p| *p == "-") {
+            if let Some(super_opts) = rest.get(dash + 3) {
+                if super_opts.split(',').any(|opt| opt == "ro") {
+                    return true;
+                }
+            }
         }
+        return false;
     }
     false
 }
@@ -497,6 +503,18 @@ mod tests {
         } else {
             false
         }
+    }
+
+    #[test]
+    fn mount_is_read_only_prefers_vfs_opts_over_rw_super_opts() {
+        let target = "/tmp/box/.filemounts/ro-aliases/0";
+        let mountinfo =
+            format!("123 45 0:67 / {target} ro,relatime - ext4 /dev/sda1 rw,errors=continue\n");
+        assert!(mount_is_read_only(&mountinfo, Path::new(target)));
+
+        let rw_mount =
+            format!("123 45 0:67 / {target} rw,relatime - ext4 /dev/sda1 rw,errors=continue\n");
+        assert!(!mount_is_read_only(&rw_mount, Path::new(target)));
     }
 
     #[test]
