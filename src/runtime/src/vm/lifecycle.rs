@@ -504,7 +504,24 @@ impl VmManager {
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
         let host_net_clean = true;
 
-        if !preserve_rootfs && mount_aliases_clean && host_net_clean {
+        // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe;
+        // otherwise remove_dir_all can leave busy mounts / invent clean destroy.
+        let virtiofs_ro_clean = match crate::vm::cleanup_virtiofs_ro_shares(&box_dir) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    %error,
+                    "Refusing to remove box directory on destroy while MicroVM :ro virtio-fs alias detach failed"
+                );
+                if stop_error.is_none() {
+                    stop_error = Some(error);
+                }
+                false
+            }
+        };
+
+        if !preserve_rootfs && mount_aliases_clean && host_net_clean && virtiofs_ro_clean {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

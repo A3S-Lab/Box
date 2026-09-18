@@ -196,6 +196,14 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
             },
         )?;
 
+        // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe.
+        a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&record.box_dir).map_err(|error| {
+            a3s_box_core::error::BoxError::Other(format!(
+                "Failed to detach MicroVM :ro virtio-fs aliases for {}: {error}",
+                record.id
+            ))
+        })?;
+
         // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes
         // into the live mount ("Stale file handle") and leaks it.
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));

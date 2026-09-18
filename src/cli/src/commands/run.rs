@@ -660,6 +660,13 @@ async fn cleanup_managed_execution(
                 )
             },
         )?;
+        a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&ctx.box_dir).map_err(|error| {
+            format!(
+                "removed box {} state but refused to wipe {}: MicroVM :ro virtio-fs alias detach failed: {error}",
+                ctx.box_id,
+                ctx.box_dir.display()
+            )
+        })?;
         if let Err(error) = std::fs::remove_dir_all(&ctx.box_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return Err(format!(

@@ -625,13 +625,14 @@ impl VmManager {
             net_manager.stop();
         }
 
-        self.cleanup_created_anonymous_volumes();
-        self.cleanup_box_dir();
+        let anon_volumes_clean = self.cleanup_created_anonymous_volumes();
+        self.cleanup_box_dir(anon_volumes_clean);
     }
 
-    fn cleanup_created_anonymous_volumes(&mut self) {
+    /// Returns whether every created anonymous volume was removed (fail closed).
+    fn cleanup_created_anonymous_volumes(&mut self) -> bool {
         if self.created_anonymous_volumes.is_empty() {
-            return;
+            return true;
         }
 
         let created = std::mem::take(&mut self.created_anonymous_volumes);
@@ -641,23 +642,26 @@ impl VmManager {
             self.home_dir.join("volumes"),
         );
 
+        let mut clean = true;
         for volume_name in &created {
             if let Err(error) = store.remove_anonymous(volume_name, &self.box_id) {
-                tracing::debug!(
+                tracing::error!(
                     box_id = %self.box_id,
                     volume = volume_name,
                     error = %error,
-                    "Failed to remove anonymous volume after boot failure"
+                    "Refusing to invent clean boot-failure cleanup while anonymous volume remove failed"
                 );
+                clean = false;
             }
         }
 
         self.anonymous_volumes
             .retain(|name| !created_set.contains(name));
+        clean
     }
 
     /// Remove transient host boot artifacts, retaining persistent guest data.
-    fn cleanup_box_dir(&self) {
+    fn cleanup_box_dir(&self, anon_volumes_clean: bool) {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let socket_dir = self.socket_dir();
         let mount_aliases_clean = match self.cleanup_sandbox_mount_aliases() {
@@ -696,6 +700,19 @@ impl VmManager {
         };
         #[cfg(not(all(feature = "vm", target_os = "linux")))]
         let host_net_clean = true;
+
+        // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe.
+        let virtiofs_ro_clean = match crate::vm::cleanup_virtiofs_ro_shares(&box_dir) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    %error,
+                    "Refusing to remove box directory after boot failure while MicroVM :ro virtio-fs alias detach failed"
+                );
+                false
+            }
+        };
 
         // Reap the box's passt daemon (Linux bridge mode) BEFORE removing its
         // socket dir. A boot that fails after passt spawned but before
@@ -736,9 +753,13 @@ impl VmManager {
         // A failed restart must never erase a persistent writable rootfs. The
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
-        // Retain the box dir when host-netdevice teardown failed so the lease
-        // file remains for a later fail-closed retry.
-        if !self.config.persistent && mount_aliases_clean && host_net_clean {
+        // Retain the box dir when host-netdevice or :ro alias teardown failed.
+        if !self.config.persistent
+            && mount_aliases_clean
+            && host_net_clean
+            && virtiofs_ro_clean
+            && anon_volumes_clean
+        {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

@@ -111,6 +111,15 @@ pub(super) fn cleanup_partial_service_box(
         crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
         return;
     }
+    if let Err(error) = a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(box_dir) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove partial Compose box directory while MicroVM :ro virtio-fs alias detach failed"
+        );
+        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+        return;
+    }
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above
