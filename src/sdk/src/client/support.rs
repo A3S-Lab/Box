@@ -530,6 +530,12 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
             cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
             return Ok(());
         }
+        if let Err(_error) =
+            a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&record.box_dir)
+        {
+            cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
+            return Ok(());
+        }
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
         let _ = std::fs::remove_dir_all(&record.box_dir);
     }

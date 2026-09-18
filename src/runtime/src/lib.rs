@@ -91,6 +91,23 @@ pub use local_execution::{
     OciRuntimeLaunch, OCI_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 
+/// Detach MicroVM `:ro` virtio-fs host RO-bind aliases under `box_dir/.filemounts`.
+/// Absent aliases are success. Present mount detach failures retain the aliases
+/// for retry (same contract as managed execution path cleanup).
+pub fn cleanup_microvm_virtiofs_ro_shares(
+    box_dir: &std::path::Path,
+) -> a3s_box_core::error::Result<()> {
+    #[cfg(feature = "vm")]
+    {
+        vm::cleanup_virtiofs_ro_shares(box_dir)
+    }
+    #[cfg(not(feature = "vm"))]
+    {
+        let _ = box_dir;
+        Ok(())
+    }
+}
+
 /// Tear down a keep-authority SandboxViaOci host-netdevice lease under
 /// `home_dir/boxes/{box_id}/sandbox/`. Absent lease is success; present
 /// rule/link delete failures retain the lease file for retry.

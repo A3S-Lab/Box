@@ -896,9 +896,11 @@ open and harness reports still keep
   require guest rootfs metadata (same honesty contract as stopped `commit`).
   Linux MicroVM `:ro` volumes host-enforce write denial via private RO bind
   aliases before virtio-fs; non-Linux MicroVM `:ro` is refused until native
-  host denial exists (no guest-honor-only attach). Windows/macOS host `:ro`
-  denial implementation and full Linux UID/GID storage on Windows binds remain
-  open. Does **not** flip `b2_process_session_recovery_closed`.
+  host denial exists (no guest-honor-only attach); destroy/boot-failure and
+  legacy wipe paths detach those aliases fail-closed before deleting
+  `boxes/{id}`. Windows/macOS host `:ro` denial implementation and full Linux
+  UID/GID storage on Windows binds remain open. Does **not** flip
+  `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the

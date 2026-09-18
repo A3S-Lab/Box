@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM destroy, boot-failure wipe, and legacy CLI/SDK/Compose path cleanup
+  detach `:ro` virtio-fs host RO-bind aliases before wiping `boxes/{id}` (retain
+  dir / surface Err on detach failure), matching managed OCI remove; boot-failure
+  anonymous-volume remove also fails closed before wipe. Does **not** invent
+  Windows/macOS native `:ro` denial or close ROADMAP B3/B2.
 - CLI boot/start/restart/run baseline creation fails closed (and refuses
   inventing a baseline when rootfs is unresolved) instead of warn-and-continuing
   after a successful start, aligning with managed prepare/boot honesty. Does
