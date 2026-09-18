@@ -31,7 +31,9 @@ const FRAME_OPEN: u8 = 1;
 const FRAME_OPEN_ACK: u8 = 2;
 const FRAME_DATA: u8 = 3;
 const FRAME_CLOSE: u8 = 4;
-const FRAME_OPEN_UDP: u8 = 5;
+// Must not collide with WINDOWS_CONTROL_SIGNAL_FRAME (5) or
+// WINDOWS_CONTROL_EXEC_FRAME (6) on the shared Windows control channel.
+const FRAME_OPEN_UDP: u8 = 7;
 
 fn decode_stop_signal_payload(payload: &[u8]) -> Option<i32> {
     let bytes: [u8; 4] = payload.try_into().ok()?;
@@ -63,7 +65,9 @@ impl GuestTargetStream {
     fn shutdown(&self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
-            Self::Udp(socket) => socket.shutdown(Shutdown::Both),
+            // UDP has no stream shutdown; drop/close happens when the map entry
+            // is removed. Connected datagrams still deliver until then.
+            Self::Udp(_) => Ok(()),
             Self::Exec(stream) => stream.shutdown(Shutdown::Both),
         }
     }

@@ -17,6 +17,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Guest port-forward UDP open uses frame type `7` (not `5`) so it does not
+  collide with `WINDOWS_CONTROL_SIGNAL_FRAME`, and UDP stream close is a
+  no-op instead of the nonexistent `UdpSocket::shutdown`. Unblocks workspace
+  build after #568. Does **not** close ROADMAP B3/B2.
 - Linux passt_bridge answers NetworkStore box names and aliases (UDP/53 A
   from `networks.json`) before forwarding Ethernet frames to passt, matching
   macOS netproxy late-join DNS. Guest `/etc/hosts` now includes the box's own
