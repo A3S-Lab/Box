@@ -874,7 +874,8 @@ open and harness reports still keep
   (lease retained); prepare and Sandbox cleanup propagate lease teardown
   failures instead of soft-skip/warn; boot-failure and managed path cleanup
   tear down the lease before wiping `boxes/{id}` (retain dir on teardown
-  failure); veth delete uses the same present-link delete contract as
+  failure); orphan crash-recovery reap uses the same lease-before-wipe
+  contract; veth delete uses the same present-link delete contract as
   DNAT/MASQUERADE; idle-bridge MASQUERADE removal uses the same present-rule
   delete contract. GA default remains delegated rootless/
   `base_v2` loopback-only. CNI, UDP/auto-assign publish, DNS server/proxy,

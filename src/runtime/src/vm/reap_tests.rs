@@ -49,6 +49,32 @@ fn test_reap_removes_box_dir() {
 }
 
 #[test]
+fn test_reap_retains_box_dir_when_host_netdevice_teardown_fails() {
+    // Corrupt lease must fail closed: wipe would drop durable claim while host
+    // publish/NAT fabric may still exist.
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "44444444-4444-4444-8444-444444444444";
+    let box_dir = home.path().join("boxes").join(box_id);
+    std::fs::create_dir_all(box_dir.join("sandbox")).unwrap();
+    std::fs::write(
+        box_dir.join("sandbox/host-netdevice.json"),
+        b"{not-valid-host-netdevice-lease",
+    )
+    .unwrap();
+
+    reap_orphaned_box_in(home.path(), box_id);
+
+    assert!(
+        box_dir.exists(),
+        "orphaned box dir must be retained when host-netdevice teardown fails"
+    );
+    assert!(
+        box_dir.join("sandbox/host-netdevice.json").exists(),
+        "corrupt lease claim must remain for a later fail-closed retry"
+    );
+}
+
+#[test]
 fn test_reap_absent_box_is_noop() {
     let home = tempfile::tempdir().unwrap();
     // No boxes/<id> dir at all - must not panic or error.

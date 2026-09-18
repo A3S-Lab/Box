@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Orphan Sandbox crash-recovery reap tears down keep-authority host-netdevice
+  leases before wiping `boxes/{id}` and retains the directory when teardown
+  fails (same contract as boot-failure / managed remove). Does **not** close
+  ROADMAP B3/B4/B2 or claim UDP publish teardown parity.
 - Compose `--isolation sandbox` start failure no longer soft-discards
   `remove_execution` errors; when cleanup also fails the combined error is
   returned so a partial Created/network lease is not hidden behind the start

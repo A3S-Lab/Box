@@ -114,6 +114,21 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
+    // Keep-authority DNAT/veth/MASQUERADE leases live under boxes/{id}/sandbox/.
+    // Tear down before wiping the claim; retain the box dir on failure so a
+    // later retry can still find the durable lease (same contract as boot-
+    // failure cleanup and managed remove).
+    if let Err(error) =
+        crate::local_execution::oci_host_netdevice::teardown_lease(home_dir, box_id)
+    {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove orphaned box directory while host netdevice lease teardown failed"
+        );
+        return;
+    }
+
     // Unmount the box overlay; MNT_DETACH (lazy) inside overlay_unmount handles
     // a mount that is somehow still busy.
     let merged = box_dir.join("merged");
