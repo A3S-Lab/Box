@@ -17,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Product stop/remove wipe fails closed on platform rootfs detach
+  (`unmount_box_rootfs_for_reuse`), matching the overlay contract, so a
+  still-attached macOS APFS image cannot invent clean teardown. Drop/cache
+  keep best-effort unmount. Does **not** close ROADMAP B3/B2 or unlock
+  Windows/macOS `:ro` host denial.
 - CRI pod sandbox port mappings admit static UDP and persist them as
   `host:guest/udp`, matching CLI/passt/keep-authority DNAT. Netproxy and
   Service UDP still fail closed. Does **not** close ROADMAP B3/B4 or unlock

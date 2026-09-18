@@ -139,7 +139,8 @@ pub(super) fn cleanup_partial_service_box(
     // cannot invent success while merged remains mounted.
     a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged"))
         .map_err(|error| format!("Overlay unmount failed for Compose service {box_id}: {error}"))?;
-    a3s_box_runtime::rootfs::unmount_box_rootfs(&box_dir.join("rootfs"));
+    a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&box_dir.join("rootfs"))
+        .map_err(|error| format!("Rootfs unmount failed for Compose service {box_id}: {error}"))?;
     match std::fs::remove_dir_all(box_dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

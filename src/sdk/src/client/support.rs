@@ -618,7 +618,8 @@ fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     detach_volumes(paths, &record.volume_names, &record.id)?;
     a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
         .map_err(ClientError::Runtime)?;
-    a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
+    a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))
+        .map_err(ClientError::Runtime)?;
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path)?;
     remove_host_cgroup(record)?;
     Ok(())
@@ -653,7 +654,8 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
         })?;
         a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
             .map_err(ClientError::Runtime)?;
-        a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
+        a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))
+            .map_err(ClientError::Runtime)?;
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
