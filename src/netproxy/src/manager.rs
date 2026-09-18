@@ -8,7 +8,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use a3s_box_core::error::{BoxError, Result};
 
 use super::device::{BridgePort, NetStats, NetStatsSnapshot};
-use super::{PortForward, ProxyEngine, ProxyEngineConfig};
+use super::{
+    ParsedPortForwards, PortForward, ProxyEngine, ProxyEngineConfig, UdpPortForward,
+};
 
 // ── NetProxyManager lifecycle ─────────────────────────────────────────────────
 
@@ -120,7 +122,7 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
         own_mac,
     } = config;
     let socket = unsafe { UnixDatagram::from_raw_fd(fd) };
-    let port_forwards = parse_port_forwards(port_map, guest_ip)
+    let parsed = parse_port_forwards(port_map, guest_ip)
         .map_err(|e| BoxError::NetworkError(format!("invalid port_map: {e}")))?;
     let dns_servers = dns_servers.to_vec();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -148,7 +150,8 @@ pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) 
                 gateway_ip: gateway,
                 prefix_len,
                 dns_servers,
-                port_forwards,
+                port_forwards: parsed.tcp,
+                udp_forwards: parsed.udp,
                 shutdown,
                 stats,
                 stats_path,
@@ -193,44 +196,72 @@ pub(super) fn write_stats_file(path: &Path, stats: NetStatsSnapshot) -> io::Resu
     std::fs::rename(tmp, path)
 }
 
-/// Parse `["8088:80", "443:443"]` into `Vec<PortForward>`.
+/// Parse `["8088:80", "5353:53/udp"]` into TCP listeners and UDP sockets.
 ///
 /// Each rule maps `host_port → guest_ip:guest_port`. Guest IP is always the
-/// IPAM-assigned `guest_ip`.
+/// IPAM-assigned `guest_ip`. Unresolved `host_port=0` fails closed (product
+/// admission must allocate first).
 pub(super) fn parse_port_forwards(
     port_map: &[String],
     guest_ip: Ipv4Addr,
-) -> std::result::Result<Vec<PortForward>, String> {
-    let mut forwards = Vec::new();
+) -> std::result::Result<ParsedPortForwards, String> {
+    use std::net::UdpSocket;
+
+    let mut tcp = Vec::new();
+    let mut udp = Vec::new();
     for entry in port_map {
         let mapping = a3s_box_core::parse_port_mapping(entry)?;
-        if mapping.protocol != a3s_box_core::PortProtocol::Tcp {
+        if mapping.host_port == 0 {
             return Err(format!(
-                "netproxy published ports only support TCP; got '{entry}'"
+                "netproxy published ports reject host_port=0 auto-assign in '{entry}'"
             ));
         }
         let host_port = mapping.host_port;
         let guest_port = mapping.guest_port;
 
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
-            .map_err(|e| format!("cannot bind 0.0.0.0:{host_port}: {e}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("set_nonblocking on listener: {e}"))?;
+        match mapping.protocol {
+            a3s_box_core::PortProtocol::Tcp => {
+                let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
+                    .map_err(|e| format!("cannot bind TCP 0.0.0.0:{host_port}: {e}"))?;
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|e| format!("set_nonblocking on TCP listener: {e}"))?;
 
-        tracing::info!(
-            host_port,
-            guest_port,
-            guest_ip = %guest_ip,
-            "Port-forward listener ready"
-        );
-        forwards.push(PortForward {
-            listener,
-            guest_ip,
-            guest_port,
-            pending: Vec::new(),
-            active: Vec::new(),
-        });
+                tracing::info!(
+                    host_port,
+                    guest_port,
+                    guest_ip = %guest_ip,
+                    "TCP port-forward listener ready"
+                );
+                tcp.push(PortForward {
+                    listener,
+                    guest_ip,
+                    guest_port,
+                    pending: Vec::new(),
+                    active: Vec::new(),
+                });
+            }
+            a3s_box_core::PortProtocol::Udp => {
+                let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
+                    .map_err(|e| format!("cannot bind UDP 0.0.0.0:{host_port}: {e}"))?;
+                socket
+                    .set_nonblocking(true)
+                    .map_err(|e| format!("set_nonblocking on UDP socket: {e}"))?;
+
+                tracing::info!(
+                    host_port,
+                    guest_port,
+                    guest_ip = %guest_ip,
+                    "UDP port-forward socket ready"
+                );
+                udp.push(UdpPortForward {
+                    socket,
+                    guest_ip,
+                    guest_port,
+                    associations: Vec::new(),
+                });
+            }
+        }
     }
-    Ok(forwards)
+    Ok(ParsedPortForwards { tcp, udp })
 }

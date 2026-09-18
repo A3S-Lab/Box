@@ -51,6 +51,7 @@ fn test_guest_and_proxy(dns_servers: Vec<Ipv4Addr>) -> (TestGuest, ProxyEngine) 
         prefix_len: 24,
         dns_servers,
         port_forwards: Vec::new(),
+        udp_forwards: Vec::new(),
         shutdown: Arc::new(AtomicBool::new(false)),
         stats,
         stats_path: None,
@@ -70,6 +71,7 @@ fn poll_test_proxy_tcp(proxy: &mut ProxyEngine) {
     let now = smoltcp_now();
     proxy.device.drain();
     proxy.accept_connections();
+    proxy.forward_udp_host_to_guest();
     proxy.accept_outbound_flows();
     proxy.poll_outbound_connectors();
     proxy.iface.poll(now, &mut proxy.device, &mut proxy.sockets);
@@ -77,7 +79,9 @@ fn poll_test_proxy_tcp(proxy: &mut ProxyEngine) {
     proxy.promote_established();
     proxy.promote_outbound_established();
     proxy.proxy_data();
+    proxy.forward_udp_guest_to_host();
     proxy.cleanup();
+    proxy.cleanup_udp_associations();
 }
 
 fn port_is_bindable(port: u16) -> bool {
@@ -239,6 +243,7 @@ fn proxy_engine_enables_any_ip_for_transparent_outbound_tcp() {
         prefix_len: 24,
         dns_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
         port_forwards: Vec::new(),
+        udp_forwards: Vec::new(),
         shutdown: Arc::new(AtomicBool::new(false)),
         stats: Arc::new(NetStats::default()),
         stats_path: None,
@@ -642,19 +647,21 @@ fn test_net_stats_records_bytes_and_packets() {
 fn test_parse_port_forwards_empty_rules() {
     let guest = Ipv4Addr::new(10, 89, 0, 2);
     let fwds = parse_port_forwards(&[], guest).unwrap();
-    assert!(fwds.is_empty());
+    assert!(fwds.tcp.is_empty());
+    assert!(fwds.udp.is_empty());
 }
 
 #[test]
-fn test_parse_port_forwards_rejects_udp_suffix() {
+fn test_parse_port_forwards_accepts_udp_suffix() {
     let guest = Ipv4Addr::new(10, 89, 0, 2);
-    let rules = vec!["19990:80/udp".to_string()];
-    let error = match parse_port_forwards(&rules, guest) {
-        Ok(_) => panic!("UDP port mapping unexpectedly succeeded"),
-        Err(error) => error,
-    };
-
-    assert!(error.contains("netproxy published ports only support TCP"));
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let rules = vec![format!("{port}:80/udp")];
+    let fwds = parse_port_forwards(&rules, guest).unwrap();
+    assert!(fwds.tcp.is_empty());
+    assert_eq!(fwds.udp.len(), 1);
+    assert_eq!(fwds.udp[0].guest_port, 80);
 }
 
 #[test]
@@ -670,10 +677,10 @@ fn test_parse_port_forwards_multiple_rules() {
         "19993:8080".to_string(),
     ];
     let fwds = parse_port_forwards(&rules, guest).unwrap();
-    assert_eq!(fwds.len(), 3);
-    assert_eq!(fwds[0].guest_port, 80);
-    assert_eq!(fwds[1].guest_port, 443);
-    assert_eq!(fwds[2].guest_port, 8080);
+    assert_eq!(fwds.tcp.len(), 3);
+    assert_eq!(fwds.tcp[0].guest_port, 80);
+    assert_eq!(fwds.tcp[1].guest_port, 443);
+    assert_eq!(fwds.tcp[2].guest_port, 8080);
 }
 
 #[test]
@@ -813,9 +820,9 @@ fn test_parse_port_forwards_valid() {
     // Use a random high port to avoid conflicts
     let rules = vec!["19988:80".to_string(), "19443:443".to_string()];
     let fwds = parse_port_forwards(&rules, guest).unwrap();
-    assert_eq!(fwds.len(), 2);
-    assert_eq!(fwds[0].guest_port, 80);
-    assert_eq!(fwds[1].guest_port, 443);
+    assert_eq!(fwds.tcp.len(), 2);
+    assert_eq!(fwds.tcp[0].guest_port, 80);
+    assert_eq!(fwds.tcp[1].guest_port, 443);
 }
 
 #[test]
@@ -827,7 +834,8 @@ fn test_parse_port_forwards_with_protocol_suffix() {
     }
     let rules = vec!["19989:80/tcp".to_string()];
     let fwds = parse_port_forwards(&rules, guest).unwrap();
-    assert_eq!(fwds[0].guest_port, 80);
+    assert_eq!(fwds.tcp.len(), 1);
+    assert_eq!(fwds.tcp[0].guest_port, 80);
 }
 
 #[test]
@@ -849,7 +857,79 @@ fn test_parse_port_forwards_reports_bind_conflict() {
         Err(error) => error,
     };
 
-    assert!(error.contains(&format!("cannot bind 0.0.0.0:{port}")));
+    assert!(error.contains(&format!("cannot bind TCP 0.0.0.0:{port}")));
+}
+
+#[test]
+fn udp_port_forward_transfers_datagrams_end_to_end() {
+    const REQUEST: &[u8] = b"udp-request";
+    const RESPONSE: &[u8] = b"udp-response";
+
+    let host_socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let host_port = host_socket.local_addr().unwrap().port();
+    // Re-bind as the published forward socket owned by the proxy.
+    drop(host_socket);
+    let published = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_port)).unwrap();
+    published.set_nonblocking(true).unwrap();
+
+    let (mut guest, mut proxy) = test_guest_and_proxy(Vec::new());
+    proxy.udp_forwards.push(UdpPortForward {
+        socket: published,
+        guest_ip: TEST_GUEST_IP,
+        guest_port: 9_999,
+        associations: Vec::new(),
+    });
+
+    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]);
+    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0u8; 2048]);
+    let mut guest_udp = udp::Socket::new(rx, tx);
+    guest_udp.bind(9_999).unwrap();
+    let guest_handle = guest.sockets.add(guest_udp);
+
+    let client = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    client.set_nonblocking(true).unwrap();
+    client
+        .send_to(REQUEST, SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_port))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut got_request = false;
+    let mut got_response = None;
+    let mut buf = [0u8; 2048];
+
+    while std::time::Instant::now() < deadline && got_response.is_none() {
+        poll_test_guest(&mut guest);
+        poll_test_proxy_tcp(&mut proxy);
+        poll_test_guest(&mut guest);
+
+        if !got_request {
+            let socket = guest.sockets.get_mut::<udp::Socket>(guest_handle);
+            if socket.can_recv() {
+                let (payload, source) = socket.recv().unwrap();
+                assert_eq!(payload, REQUEST);
+                socket.send_slice(RESPONSE, source).unwrap();
+                got_request = true;
+            }
+        }
+
+        poll_test_guest(&mut guest);
+        poll_test_proxy_tcp(&mut proxy);
+
+        match client.recv_from(&mut buf) {
+            Ok((n, _)) => got_response = Some(buf[..n].to_vec()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("client recv failed: {error}"),
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(got_request, "guest never received published UDP datagram");
+    assert_eq!(got_response.as_deref(), Some(RESPONSE));
+    assert_eq!(proxy.udp_forwards[0].associations.len(), 1);
 }
 
 // Note: test_netproxy_manager_spawn_binds_and_releases_host_ports was removed
