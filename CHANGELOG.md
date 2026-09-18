@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Snapshot `delete`/`prune` CoW-protection inventory fails closed on boxes
+  directory or `.snapshot-lower` I/O errors instead of treating unread markers
+  as unprotected; CLI `snapshot rm` treats unreadable markers as in-use. Does
+  **not** close ROADMAP B3/B2 or invent force-delete policy changes.
 - Boot layout fails closed when `.snapshot-lower` is present but the target
   directory is missing, instead of warn-and-falling through to a fresh image
   pull (aligns with `prepare_preserved_rootfs`). Does **not** close ROADMAP

@@ -274,7 +274,7 @@ impl SnapshotStore {
         rootfs_bundle::validate_snapshot_id(id)?;
         let _lock = self.acquire_exclusive_lock()?;
         let rootfs = normalize_snapshot_reference(self.rootfs_path(id));
-        if self.referenced_rootfs_paths().contains(&rootfs) {
+        if self.referenced_rootfs_paths()?.contains(&rootfs) {
             return Err(BoxError::StateError(format!(
                 "Snapshot '{id}' is still used as a copy-on-write rootfs lower"
             )));
@@ -335,7 +335,7 @@ impl SnapshotStore {
         // never be evicted — deleting a live lower breaks the box (ESTALE) or stops
         // it from re-starting. Read which are in use from the boxes' `.snapshot-lower`
         // markers and skip them, evicting the oldest *evictable* snapshot instead.
-        let protected = self.referenced_rootfs_paths();
+        let protected = self.referenced_rootfs_paths()?;
         let mut snapshots = self.list()?; // newest-first
         let mut removed = Vec::new();
 
@@ -378,20 +378,34 @@ impl SnapshotStore {
     /// (`<box_dir>/.snapshot-lower`, written by `snapshot restore`). These snapshots
     /// must not be pruned. Boxes live next to snapshots under the a3s home
     /// (`base_dir` = `<home>/snapshots`).
-    fn referenced_rootfs_paths(&self) -> std::collections::HashSet<PathBuf> {
+    ///
+    /// Inventory I/O failures fail closed: callers must not treat an unread
+    /// `.snapshot-lower` as unprotected and evict a live lower.
+    fn referenced_rootfs_paths(&self) -> Result<std::collections::HashSet<PathBuf>> {
         let mut set = std::collections::HashSet::new();
         let boxes = match self.base_dir.parent() {
             Some(home) => home.join("boxes"),
-            None => return set,
+            None => return Ok(set),
         };
-        if let Ok(entries) = std::fs::read_dir(&boxes) {
-            for entry in entries.flatten() {
-                if let Ok(content) = std::fs::read_to_string(entry.path().join(".snapshot-lower")) {
+        let entries = match std::fs::read_dir(&boxes) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(set),
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(BoxError::IoError)?;
+            let marker = entry.path().join(".snapshot-lower");
+            match std::fs::read_to_string(&marker) {
+                Ok(content) => {
                     set.insert(normalize_snapshot_reference(PathBuf::from(content.trim())));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(BoxError::IoError(error));
                 }
             }
         }
-        set
+        Ok(set)
     }
 }
 

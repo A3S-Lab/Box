@@ -587,17 +587,22 @@ fn boxes_referencing_snapshot(
 }
 
 /// Whether the box at `box_dir` references `snap_rootfs` as its CoW overlay lower.
+///
+/// Unreadable markers (other than missing) are treated as in-use so
+/// `snapshot rm` cannot soft-skip a live CoW user under inventory I/O failure.
 fn box_references_lower(box_dir: &std::path::Path, snap_rootfs: &std::path::Path) -> bool {
-    std::fs::read_to_string(box_dir.join(".snapshot-lower"))
-        .map(|s| {
+    match std::fs::read_to_string(box_dir.join(".snapshot-lower")) {
+        Ok(s) => {
             let referenced = std::path::PathBuf::from(s.trim());
             let referenced = referenced.canonicalize().unwrap_or(referenced);
             let expected = snap_rootfs
                 .canonicalize()
                 .unwrap_or_else(|_| snap_rootfs.to_path_buf());
             referenced == expected
-        })
-        .unwrap_or(false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 /// Inspect a snapshot.
