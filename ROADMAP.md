@@ -875,10 +875,12 @@ open and harness reports still keep
   invent-legacy PID teardown); SDK stop/remove/prune also fail closed on
   recorded Sandbox OCI runtime reap (owner/log-worker) before rootfs
   unmount/wipe, plus host-netdevice / MicroVM `:ro` detach and box-dir wipe
-  (no invent-Ok while retaining host claim). CLI, SDK, and managed remove
+  (no   invent-Ok while retaining host claim). CLI, SDK, and managed remove
   delete shim file-mount staging at `$TMPDIR/a3s-fs-mount-<id>-<tag>` and fail
   closed when that staging, an external socket directory, or a legacy MicroVM
-  host cgroup cannot be removed. `VolumeStore::prune` only reports
+  host cgroup cannot be removed. Overlay rootfs provider cleanup fails closed
+  on synchronous overlay unmount and directory wipe (no warn-and-Ok invent-
+  clean teardown). `VolumeStore::prune` only reports
   actually removed volumes and fails closed on non-idempotent remove errors;
   managed MicroVM destroy anonymous-volume cleanup fails closed like OCI
   remove. Image/build/snapshot/commit descriptor handoff, network v3, Windows
