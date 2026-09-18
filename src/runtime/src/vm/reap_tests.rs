@@ -108,6 +108,41 @@ fn test_reap_retains_box_dir_when_file_mount_staging_remove_fails() {
 }
 
 #[test]
+fn test_reap_retains_box_dir_when_external_socket_dir_remove_fails() {
+    // A regular file at the external socket path makes remove_dir_all fail.
+    // Wipe must not invent a clean orphan reap while that host claim remains.
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "66666666-6666-6666-8666-666666666666";
+    let box_dir = home.path().join("boxes").join(box_id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+
+    let external = crate::vm::runtime_socket_dir(home.path(), box_id);
+    if let Some(parent) = external.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&external, b"not-a-directory").unwrap();
+    struct SocketGuard(std::path::PathBuf);
+    impl Drop for SocketGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = SocketGuard(external.clone());
+
+    reap_orphaned_box_in(home.path(), box_id);
+
+    assert!(
+        box_dir.exists(),
+        "orphaned box dir must be retained when external socket cleanup fails"
+    );
+    assert!(
+        external.exists(),
+        "failed external socket claim must remain for a later fail-closed retry"
+    );
+}
+
+#[test]
 fn test_reap_absent_box_is_noop() {
     let home = tempfile::tempdir().unwrap();
     // No boxes/<id> dir at all - must not panic or error.
