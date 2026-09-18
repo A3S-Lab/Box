@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Orphan crash-recovery reap detaches MicroVM `:ro` virtio-fs host RO-bind
+  aliases before wiping `boxes/{id}` (retain dir on detach failure), matching
+  destroy/boot-failure/#528. Does **not** close ROADMAP B3/B2.
 - MicroVM destroy, boot-failure wipe, and legacy CLI/SDK/Compose path cleanup
   detach `:ro` virtio-fs host RO-bind aliases before wiping `boxes/{id}` (retain
   dir / surface Err on detach failure), matching managed OCI remove; boot-failure
