@@ -668,7 +668,7 @@ impl PoolRegistry {
             // unused — the per-request command arrives via spawn-main).
             cmd: keepalive_cmd(),
             pool: pool_config.clone(),
-            deferred_main: self.deferred,
+            deferred_main: self.deferred || self.snapshot_fork,
             ksm: self.ksm,
             ..Default::default()
         };

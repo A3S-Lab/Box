@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -136,6 +137,11 @@ pub struct WarmPool {
     /// (native VM snapshot unsupported on this build) is not re-attempted on every
     /// fill — the pool cold-boots instead.
     template: Arc<Mutex<TemplateState>>,
+    /// Consecutive idle acquire re-auth failures while a snapshot-fork template
+    /// is `Ready`. Hollow restores can pass publish then fail `health_check`;
+    /// after a small bound the template is invalidated so cold-boot serves
+    /// leases (#563).
+    fork_reauth_failures: AtomicU32,
 }
 
 /// A built snapshot-fork template: the shared RAM image + state file that pool VMs
@@ -155,6 +161,14 @@ struct PoolTemplate {
 /// the whole pool to cold-boot on a one-off hiccup, while still giving up on a
 /// genuinely-unsupported host after a few attempts.
 const MAX_TEMPLATE_BUILD_FAILURES: u32 = 3;
+
+/// Consecutive idle acquire re-auth failures before a Ready snapshot-fork
+/// template is treated as hollow and permanently invalidated (#563).
+const MAX_FORK_REAUTH_FAILURES: u32 = 3;
+
+/// Settle after dropping host exec proof before snapshot so the vsock muxer
+/// can drain (libkrun reaper timeout is 5s on the snapshot line).
+const SNAPSHOT_VSOCK_QUIESCE: Duration = Duration::from_secs(6);
 
 /// Bound concurrent VM teardown so a large pool does not turn shutdown into a
 /// host-resource spike. Teardown is I/O-heavy and independent per VM, so a
@@ -332,6 +346,15 @@ impl WarmPool {
         };
 
         let boot_limiter = Arc::new(Semaphore::new(config.max_concurrent_boots));
+        let mut box_config = box_config;
+        // Snapshot-fork requires an IDLE deferred-main template (empty vsock
+        // muxer). Auto-enable when the daemon omitted `--deferred` (#563).
+        if config.snapshot_fork && !box_config.deferred_main {
+            tracing::info!(
+                "snapshot-fork requires deferred-main idle template; enabling deferred_main"
+            );
+            box_config.deferred_main = true;
+        }
         let pool = Self {
             config,
             box_config,
@@ -346,6 +369,7 @@ impl WarmPool {
             boot_limiter,
             global_boot_limiter,
             template: Arc::new(Mutex::new(TemplateState::Unbuilt)),
+            fork_reauth_failures: AtomicU32::new(0),
         };
 
         if let Some(metrics) = &pool.metrics {
@@ -425,6 +449,7 @@ impl WarmPool {
             // refuse inventing a lease from pool membership alone (#423).
             match warm_vm.vm.health_check().await {
                 Ok(true) => {
+                    self.fork_reauth_failures.store(0, Ordering::Relaxed);
                     let mut stats = self.stats.lock().await;
                     stats.total_acquired += 1;
                     drop(stats);
@@ -459,6 +484,18 @@ impl WarmPool {
                     let _ = Self::destroy_manager_or_reap(&mut vm, Some(2000)).await;
                     let mut stats = self.stats.lock().await;
                     stats.total_evicted += 1;
+                    drop(stats);
+                    if self.config.snapshot_fork {
+                        let failures =
+                            self.fork_reauth_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                        if failures >= MAX_FORK_REAUTH_FAILURES {
+                            self.invalidate_snapshot_fork_template(
+                                "idle restores failed exec re-auth repeatedly",
+                            )
+                            .await;
+                            self.fork_reauth_failures.store(0, Ordering::Relaxed);
+                        }
+                    }
                     continue;
                 }
             }
@@ -890,6 +927,11 @@ impl WarmPool {
                             vm.boot().await?;
                             vm.wait_for_exec_available(std::time::Duration::from_secs(120))
                                 .await?;
+                            // Drop the boot handshake and re-prove so a single
+                            // lucky connect cannot publish a hollow restore (#563).
+                            vm.exec_client = None;
+                            vm.wait_for_exec_available(std::time::Duration::from_secs(30))
+                                .await?;
                             // Align BoxState::Ready after authenticated heartbeat —
                             // #414 may leave Created after restore soft-probe (#416).
                             if !vm.set_boot_completion_state().await {
@@ -1036,6 +1078,17 @@ impl WarmPool {
                 Ok(tpl)
             }
             Err(error) => {
+                // Feature-missing failures are permanent on this host/build —
+                // do not burn MAX_TEMPLATE_BUILD_FAILURES × socket poll (#563).
+                if template_error_is_feature_missing(&error) {
+                    tracing::warn!(
+                        %error,
+                        "snapshot-fork unavailable on this host; marking template \
+                         Unavailable — the warm pool will cold-boot"
+                    );
+                    *guard = TemplateState::Unavailable;
+                    return Err(error);
+                }
                 // Bounded retry: a transient failure presents identically to
                 // "snapshot unsupported", so only give up permanently after a few
                 // consecutive failures rather than downgrading the pool to
@@ -1105,6 +1158,13 @@ impl WarmPool {
             }
         };
 
+        // Quiesce host→guest vsock before snapshot: drop retained exec proof and
+        // settle past the libkrun reaper window so rings are empty (#563 / design
+        // contract: snapshot only an IDLE deferred-main guest).
+        src.exec_client = None;
+        src.exec_socket_path = None;
+        tokio::time::sleep(SNAPSHOT_VSOCK_QUIESCE).await;
+
         // Trigger the snapshot over libkrun's socket, then tear down the source (it is
         // left paused by the snapshot; the RAM + state files are the template).
         //
@@ -1113,6 +1173,9 @@ impl WarmPool {
         // here would leak the fully-booted source VM (shim process, overlay
         // mount, box dir, sockets) — neither VmManager nor ShimHandler reaps on
         // drop. Capture the result, tear down, then propagate.
+        //
+        // Exec paths stay cleared so destroy skips guest-control stop (paused
+        // guests cannot ACK — avoids "Timed out delivering the workload stop").
         let snapshot = Self::trigger_snapshot(&sock, &state_file).await;
         let _ = Self::destroy_manager_or_reap(&mut src, Some(2000)).await;
         snapshot?;
@@ -1122,6 +1185,37 @@ impl WarmPool {
             state_file: state_file.to_string_lossy().into_owned(),
             rootfs_cache_key,
         })
+    }
+
+    /// Permanently abandon a Ready snapshot-fork template and drain idle VMs so
+    /// hollow restores cannot keep failing acquire while looking `idle>0` (#563).
+    async fn invalidate_snapshot_fork_template(&self, reason: &str) {
+        {
+            let mut guard = self.template.lock().await;
+            if !matches!(*guard, TemplateState::Ready(_)) {
+                return;
+            }
+            *guard = TemplateState::Unavailable;
+            tracing::warn!(
+                %reason,
+                "snapshot-fork template invalidated; warm pool will cold-boot for this daemon"
+            );
+            self.event_emitter.emit(BoxEvent::with_string(
+                "pool.template.invalidated",
+                format!("Snapshot-fork template invalidated: {reason}"),
+            ));
+        }
+        let drained: Vec<WarmVm> = {
+            let mut idle = self.idle.lock().await;
+            let drained = idle.drain(..).collect();
+            Self::sync_idle_metric(self.metrics.as_ref(), idle.len());
+            let mut stats = self.stats.lock().await;
+            stats.idle_count = idle.len();
+            drained
+        };
+        if !drained.is_empty() {
+            Self::destroy_vms(drained, Some(2000), "invalidate-snapshot-template").await;
+        }
     }
 
     /// Send a `snapshot <state>` request to libkrun's per-template trigger socket and
@@ -1495,6 +1589,17 @@ fn replenish_backoff_delay(failures: u32, check_interval: Duration) -> Duration 
     Duration::from_secs(delay_secs)
 }
 
+/// Classify template-build errors that mean snapshot-fork cannot work on this
+/// host/build. These must mark `Unavailable` immediately (#563).
+fn template_error_is_feature_missing(error: &BoxError) -> bool {
+    let msg = error.to_string();
+    msg.contains("snapshot socket") && msg.contains("never appeared")
+        || msg.contains("snapshot-fork is only supported")
+        || msg.contains("snapshot-fork requires the Linux")
+        || msg.contains("native VM snapshot unsupported")
+        || msg.contains("snapshot-fork template unavailable")
+}
+
 #[cfg(test)]
 mod shutdown_tests;
 
@@ -1529,6 +1634,59 @@ mod tests {
             "boot_or_restore future must remain pointer-sized so pool misses fit on Tokio worker stacks; got {} bytes",
             std::mem::size_of_val(&future)
         );
+    }
+
+    #[test]
+    fn feature_missing_classifies_absent_snapshot_socket() {
+        let error = BoxError::PoolError(
+            "snapshot socket /tmp/tpl/template.sock never appeared".to_string(),
+        );
+        assert!(template_error_is_feature_missing(&error));
+    }
+
+    #[test]
+    fn feature_missing_classifies_platform_stubs() {
+        assert!(template_error_is_feature_missing(&BoxError::PoolError(
+            "snapshot-fork is only supported on Linux/KVM hosts".to_string(),
+        )));
+        assert!(template_error_is_feature_missing(&BoxError::PoolError(
+            "snapshot-fork requires the Linux x86_64 KVM build".to_string(),
+        )));
+    }
+
+    #[test]
+    fn feature_missing_ignores_transient_boot_errors() {
+        let error = BoxError::BoxBootError {
+            message: "Failed to create socket directory".to_string(),
+            hint: None,
+        };
+        assert!(!template_error_is_feature_missing(&error));
+    }
+
+    #[tokio::test]
+    async fn snapshot_fork_auto_enables_deferred_main() {
+        let pool_config = PoolConfig {
+            enabled: true,
+            min_idle: 0,
+            max_size: 1,
+            snapshot_fork: true,
+            ..Default::default()
+        };
+        let box_config = BoxConfig {
+            deferred_main: false,
+            pool: pool_config.clone(),
+            ..Default::default()
+        };
+        // min_idle 0 avoids booting; we only assert config normalization.
+        let pool = WarmPool::start(pool_config, box_config, test_event_emitter())
+            .await
+            .unwrap();
+        assert!(
+            pool.box_config.deferred_main,
+            "snapshot-fork must auto-enable deferred_main"
+        );
+        pool.signal_shutdown();
+        let _ = pool.drain_idle().await;
     }
 
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]

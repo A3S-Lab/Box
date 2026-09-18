@@ -17,6 +17,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Warm-pool `--snapshot-fork` honesty (#563): imply deferred-main for the
+  idle template; quiesce host exec/vsock before snapshot; skip guest-stop on
+  paused template teardown; mark template `Unavailable` on first feature-missing
+  failure (absent snapshot socket); invalidate a Ready template after repeated
+  idle acquire re-auth failures and drain hollow restores so cold-boot can
+  serve leases. Does **not** close ROADMAP B3/B2 or claim fork latency parity
+  with a restored libkrun snapshot pin.
 - Unprivileged Linux directory MicroVM fails closed when image metadata declares
   UIDs/GIDs outside `{0, host euid/egid}` (#562): same-UID virtio-fs cannot
   `chown` to those IDs, so `run` no longer creates a live-then-dead box for
