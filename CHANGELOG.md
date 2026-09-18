@@ -17,6 +17,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Orphan Sandbox crash recovery fails closed when the log worker remains, the
+  bundle directory, runtime root, or `runtime.json` cannot be removed, or the
+  overlay stays mounted. Directory wipe uses the same synchronous overlay
+  unmount contract as product stop/remove and does not log a successful reap
+  while the box directory remains. Does **not** close ROADMAP B3/B2 or unlock
+  UDP/`host_port=0`.
 - CLI inventory refresh (`ps` / `prune` / `info` / `df` / `events` / stats /
   logs / compose read+wait / inspect) fails closed on managed inspect,
   remove-retry, restart-reconcile, and passt backend-loss observation

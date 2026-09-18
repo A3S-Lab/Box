@@ -18,8 +18,10 @@ use std::path::Path;
 /// Reap an orphaned sandbox microVM left by a previous (crashed) process:
 /// kill its `a3s-box-shim`, unmount its overlay, and remove its box directory.
 ///
-/// Idempotent and best-effort: a box with no leftovers (e.g. after a graceful
-/// shutdown) is a no-op. Safe to call for every known sandbox id on startup.
+/// Idempotent. A box with no leftovers (for example after a graceful shutdown)
+/// is a no-op. Overlay unmount and directory removal fail closed: a still-
+/// mounted overlay or a delete error retains the box directory and does not
+/// log a successful reap. Safe to call for every known sandbox id on startup.
 #[cfg(target_os = "linux")]
 pub fn reap_orphaned_box(box_id: &str) {
     reap_orphaned_box_in(&a3s_box_core::dirs_home(), box_id);
@@ -118,8 +120,7 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     // Tear down before wiping the claim; retain the box dir on failure so a
     // later retry can still find the durable lease (same contract as boot-
     // failure cleanup and managed remove).
-    if let Err(error) =
-        crate::local_execution::oci_host_netdevice::teardown_lease(home_dir, box_id)
+    if let Err(error) = crate::local_execution::oci_host_netdevice::teardown_lease(home_dir, box_id)
     {
         tracing::error!(
             box_id,
@@ -139,28 +140,29 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
-    // Unmount the box overlay; MNT_DETACH (lazy) inside overlay_unmount handles
-    // a mount that is somehow still busy.
+    // Synchronous unmount: a plain directory is not a mount and may be removed.
+    // A still-mounted overlay must retain the box directory (same contract as
+    // product stop/remove). Do not claim the orphan was reaped.
     let merged = box_dir.join("merged");
-    if merged.exists() {
-        if let Err(error) = crate::rootfs::overlay::overlay_unmount(&merged) {
-            tracing::warn!(
-                box_id = %box_id,
-                path = %merged.display(),
-                error = %error,
-                "Failed to unmount orphaned box overlay during crash recovery"
-            );
-        }
+    if let Err(error) = crate::rootfs::unmount_box_overlay_for_reuse(&merged) {
+        tracing::error!(
+            box_id,
+            path = %merged.display(),
+            %error,
+            "Refusing to remove orphaned box directory while overlay unmount failed"
+        );
+        return;
     }
 
     if let Err(error) = std::fs::remove_dir_all(&box_dir) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(
-                box_id = %box_id,
+            tracing::error!(
+                box_id,
                 path = %box_dir.display(),
-                error = %error,
-                "Failed to remove orphaned box directory during crash recovery"
+                %error,
+                "Refusing to claim orphaned box reaped while directory remains"
             );
+            return;
         }
     }
 
@@ -552,16 +554,39 @@ fn reap_orphaned_a3s_oci(
         );
     }
 
-    drain_recorded_log_worker(&record, box_id);
+    if !drain_recorded_log_worker(&record, box_id) {
+        return failed_sandbox_reap(box_id, "Sandbox log worker remained after runtime cleanup");
+    }
     if let Err(error) = crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, box_id) {
         return failed_sandbox_reap(
             box_id,
             format!("failed to detach Sandbox attachment aliases: {error}"),
         );
     }
-    let _ = std::fs::remove_dir_all(&record.bundle_dir);
-    let _ = std::fs::remove_dir_all(&record.runtime_root);
-    let _ = std::fs::remove_file(box_dir.join("sandbox/runtime.json"));
+    if let Err(error) = remove_tree_if_present(&record.bundle_dir) {
+        return failed_sandbox_reap(
+            box_id,
+            format!(
+                "failed to remove Sandbox bundle directory {}: {error}",
+                record.bundle_dir.display()
+            ),
+        );
+    }
+    if let Err(error) = remove_tree_if_present(&record.runtime_root) {
+        return failed_sandbox_reap(
+            box_id,
+            format!(
+                "failed to remove Sandbox runtime root {}: {error}",
+                record.runtime_root.display()
+            ),
+        );
+    }
+    if let Err(error) = remove_file_if_present(&box_dir.join("sandbox/runtime.json")) {
+        return failed_sandbox_reap(
+            box_id,
+            format!("failed to remove Sandbox runtime record: {error}"),
+        );
+    }
     tracing::info!(
         box_id,
         "Reaped orphaned A3S OCI Sandbox after runtime restart"
@@ -583,12 +608,12 @@ fn recorded_operation_context(
 }
 
 #[cfg(target_os = "linux")]
-fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) {
+fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) -> bool {
     const LOG_WORKER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
     let (Some(pid), Some(start_time)) = (record.log_worker_pid, record.log_worker_pid_start_time)
     else {
-        return;
+        return true;
     };
     if !wait_for_log_worker_identity(record, LOG_WORKER_EXIT_TIMEOUT) {
         tracing::warn!(
@@ -606,16 +631,36 @@ fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) {
             }
         }
     }
-    if !crate::process::wait_for_process_exit_with_identity(
+    let gone = crate::process::wait_for_process_exit_with_identity(
         pid,
         start_time,
         LOG_WORKER_EXIT_TIMEOUT,
-    ) {
-        tracing::warn!(
+    );
+    if !gone {
+        tracing::error!(
             box_id,
             log_worker_pid = pid,
             "Recovered Sandbox log worker remained present after cleanup"
         );
+    }
+    gone
+}
+
+#[cfg(target_os = "linux")]
+fn remove_tree_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
