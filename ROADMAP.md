@@ -1080,6 +1080,10 @@ does not promote a platform.
 
 ## Prioritization
 
+Architecture ordering, non-goals, and anti-overfit rules for the work below
+live in [docs/architecture-optimization-plan.md](docs/architecture-optimization-plan.md).
+That plan does not close B2/B3/B4 or claim Enterprise GA.
+
 Work proceeds in this order:
 
 1. lifecycle correctness, state ownership, recovery, and cleanup;
