@@ -169,15 +169,23 @@ pub(super) async fn setup_and_boot(
         Err(error) => match completed_start_record(&box_id) {
             Ok(Some(record)) => (reservation.generation, Some(record)),
             Ok(None) => {
-                cleanup_failed_managed_run(&box_id);
-                return Err(error.into());
+                return Err(chain_failed_managed_run_cleanup(
+                    error.into(),
+                    manager
+                        .remove_execution(&execution_id, reservation.generation)
+                        .await,
+                ));
             }
             Err(recovery_error) => {
-                cleanup_failed_managed_run(&box_id);
-                return Err(format!(
-                    "{error}; failed to inspect managed startup outcome: {recovery_error}"
-                )
-                .into());
+                return Err(chain_failed_managed_run_cleanup(
+                    format!(
+                        "{error}; failed to inspect managed startup outcome: {recovery_error}"
+                    )
+                    .into(),
+                    manager
+                        .remove_execution(&execution_id, reservation.generation)
+                        .await,
+                ));
             }
         },
     };
@@ -313,19 +321,13 @@ async fn pull_image_config(
     Ok(puller.pull(&args.common.image).await?.config().clone())
 }
 
-fn cleanup_failed_managed_run(box_id: &str) {
-    let Ok(state) = StateFile::load_default() else {
-        return;
-    };
-    let Some(record) = state.find_by_id(box_id).cloned() else {
-        return;
-    };
-    if let Err(error) = crate::cleanup::cleanup_removed_box(&record) {
-        tracing::warn!(box_id, %error, "Failed to roll back managed run startup");
-        return;
-    }
-    if let Err(error) = StateFile::remove_record(box_id) {
-        tracing::warn!(box_id, %error, "Failed to remove rolled-back managed run record");
+fn chain_failed_managed_run_cleanup(
+    primary: Box<dyn std::error::Error>,
+    cleanup: Result<bool, impl std::fmt::Display>,
+) -> Box<dyn std::error::Error> {
+    match cleanup {
+        Ok(_) => primary,
+        Err(cleanup) => format!("{primary}; also failed to roll back managed run: {cleanup}").into(),
     }
 }
 
@@ -473,4 +475,27 @@ pub(super) fn interactive_keepalive_entrypoint() -> Vec<String> {
         "-c".to_string(),
         "trap 'exit 0' TERM INT; while :; do sleep 3600; done".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chain_failed_managed_run_cleanup;
+
+    #[test]
+    fn chain_failed_managed_run_cleanup_surfaces_both_errors() {
+        let err = chain_failed_managed_run_cleanup(
+            "start failed".into(),
+            Err::<bool, _>("wipe refused"),
+        );
+        let message = err.to_string();
+        assert!(message.contains("start failed"));
+        assert!(message.contains("wipe refused"));
+        assert!(message.contains("also failed to roll back managed run"));
+    }
+
+    #[test]
+    fn chain_failed_managed_run_cleanup_keeps_primary_when_cleanup_ok() {
+        let err = chain_failed_managed_run_cleanup("start failed".into(), Ok::<bool, &str>(true));
+        assert_eq!(err.to_string(), "start failed");
+    }
 }

@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CLI `a3s-box run` startup rollback uses `remove_execution` and fails closed,
+  chaining cleanup Err with the start failure instead of warn-and-void legacy
+  wipe (Compose sandbox parity). Does **not** close ROADMAP B4/B3/B2 or unlock
+  UDP/`host_port=0`.
 - Managed `ExecutionResourceGuard` rollback fails closed on volume/network/
   snapshot-marker undo errors and OCI/MicroVM start paths chain those failures
   with the primary create/start Err instead of warn-and-inventing a clean
