@@ -511,7 +511,8 @@ fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
     // a shared-kernel process may still hold the rootfs.
     cleanup_sandbox_runtime(record)?;
     detach_volumes(paths, &record.volume_names, &record.id)?;
-    a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
+        .map_err(ClientError::Runtime)?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(record);
@@ -545,7 +546,8 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
                 record.id
             )))
         })?;
-        a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+        a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))
+            .map_err(ClientError::Runtime)?;
         a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}

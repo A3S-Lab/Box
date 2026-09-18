@@ -135,8 +135,13 @@ pub(super) fn cleanup_partial_service_box(
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above
-    // only detaches volumes and networking.
-    a3s_box_runtime::rootfs::unmount_box_overlay(&box_dir.join("merged"));
+    // only detaches volumes and networking. Fail closed on overlay so wipe
+    // cannot invent success while merged remains mounted.
+    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged")).map_err(
+        |error| {
+            format!("Overlay unmount failed for Compose service {box_id}: {error}")
+        },
+    )?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&box_dir.join("rootfs"));
     match std::fs::remove_dir_all(box_dir) {
         Ok(()) => {}

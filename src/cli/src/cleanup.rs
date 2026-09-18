@@ -104,8 +104,9 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     // Docker. The endpoint is released only on actual removal (cleanup_removed_box).
     cleanup_box_resources(&record.id, &record.volume_names, None)?;
     // Release the overlayfs mount so a stopped box never leaves a live mount
-    // (and a later restart re-mounts cleanly instead of stacking).
-    a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+    // (and a later restart re-mounts cleanly instead of stacking). Fail closed:
+    // do not invent a clean stop while merged remains mounted.
+    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))?;
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(record);
@@ -215,8 +216,9 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
         })?;
 
         // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes
-        // into the live mount ("Stale file handle") and leaks it.
-        a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+        // into the live mount ("Stale file handle") and leaks it. Fail closed so
+        // wipe cannot invent success while merged remains mounted.
+        a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&record.box_dir.join("merged"))?;
         a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
