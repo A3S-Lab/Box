@@ -81,6 +81,18 @@ pub(super) fn cleanup_partial_service_box(
 ) {
     crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name);
     crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes);
+    // Keep-authority host-netdevice lease may exist after a partial prepare.
+    // Tear down before wiping boxes/{id}; retain the dir when teardown fails.
+    let home = a3s_box_core::dirs_home();
+    if let Err(error) = a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&home, box_id) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove partial Compose box directory while host netdevice lease teardown failed"
+        );
+        crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+        return;
+    }
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above
