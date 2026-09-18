@@ -230,9 +230,9 @@ impl VmManager {
         } else {
             host_path
         };
-        // Host-enforce :ro for virtio-fs on Linux via a private RO bind alias.
-        // Guest MS_RDONLY alone is not write denial on the host share; non-Linux
-        // refuses :ro until native host denial exists.
+        // Host-enforce :ro for virtio-fs via a private RO alias (Linux MS_RDONLY
+        // bind / Windows BindFlt). Guest MS_RDONLY alone is not write denial on
+        // the host share; other hosts refuse :ro until native denial exists.
         let host_path = if volume.read_only {
             super::virtiofs_ro::stage_virtiofs_ro_share(&host_path, filemounts_dir, index)?
         } else {
