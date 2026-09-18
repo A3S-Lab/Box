@@ -452,9 +452,11 @@ pub(crate) fn create_box_baseline_snapshot(
 }
 
 /// Compatibility alias for the CLI-level diff tests.
+#[cfg(test)]
 pub type FileInfo = RootfsFileInfo;
 
 /// Walk a directory tree and collect file metadata, keyed by relative path.
+#[cfg(test)]
 pub fn walk_dir(root: &Path) -> Result<HashMap<String, FileInfo>, Box<dyn std::error::Error>> {
     Ok(a3s_box_runtime::rootfs::walk_rootfs(root)?)
 }
