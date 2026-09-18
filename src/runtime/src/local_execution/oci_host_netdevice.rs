@@ -350,8 +350,9 @@ fn ensure_bridge(
         run_ip(&["link", "add", bridge_iface, "type", "bridge"])?;
     }
     if let Err(error) = run_ip(&["link", "set", bridge_iface, "up"]) {
-        // Only delete a bridge we may have just created with no slaves yet.
-        try_delete_bridge_if_idle(bridge_iface, "");
+        // Best-effort rollback of a bridge we may have just created with no
+        // slaves and no MASQUERADE yet (empty subnet skips NAT delete).
+        let _ = try_delete_bridge_if_idle(bridge_iface, "");
         return Err(error);
     }
     // Gateway lives on the bridge so peers ARP a real L2 next hop. Idempotent.
