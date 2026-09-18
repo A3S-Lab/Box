@@ -13,6 +13,11 @@ All notable changes to A3S Box will be documented in this file.
   capability matrix with full README CLI crosswalk and B5 non-loss checklist,
   and near-term slices. Linked from ROADMAP prioritization and README docs.
   Does **not** close B2/B3/B4 or claim Enterprise GA.
+- Host-held secret substitution spike
+  ([docs/host-held-secrets-spike.md](docs/host-held-secrets-spike.md)):
+  records why netproxy TLS rewrite is not implemented and why Compose
+  `secret_environment` tmpfs stays the product path. Does **not** add MITM,
+  deprecate tmpfs secrets, or close B3/B2.
 
 ### Changed
 
