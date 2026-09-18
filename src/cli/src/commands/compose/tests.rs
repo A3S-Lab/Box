@@ -406,9 +406,37 @@ fn test_partial_service_cleanup_removes_box_directory() {
     std::fs::create_dir_all(exec_socket.parent().unwrap()).unwrap();
     std::fs::write(box_dir.join("rootfs").join("partial"), "data").unwrap();
 
-    cleanup_partial_service_box("partial-id", &box_dir, &exec_socket, None, &[], &[]);
+    cleanup_partial_service_box("partial-id", &box_dir, &exec_socket, None, &[], &[])
+        .expect("empty partial box must wipe cleanly");
 
     assert!(!box_dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_partial_service_cleanup_fails_closed_on_wipe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let box_dir = directory.path().join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::write(box_dir.join("pinned"), "x").unwrap();
+    let mut perms = std::fs::metadata(&box_dir).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&box_dir, perms).unwrap();
+
+    let exec_socket = directory.path().join("exec.sock");
+    let err = cleanup_partial_service_box("partial-id", &box_dir, &exec_socket, None, &[], &[])
+        .expect_err("wipe failure must not invent clean partial cleanup");
+    assert!(
+        box_dir.exists(),
+        "failed wipe must retain the partial Compose path"
+    );
+    assert!(err.to_string().contains("Failed to remove Compose box directory"));
+
+    let mut perms = std::fs::metadata(&box_dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&box_dir, perms).unwrap();
 }
 
 #[cfg(windows)]

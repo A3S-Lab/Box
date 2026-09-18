@@ -60,7 +60,7 @@ impl ServiceBox {
     }
 }
 
-pub(super) fn cleanup_service_box(svc: &ServiceBox) {
+pub(super) fn cleanup_service_box(svc: &ServiceBox) -> Result<(), Box<dyn std::error::Error>> {
     cleanup_partial_service_box(
         &svc.box_id,
         &svc.box_dir,
@@ -68,7 +68,7 @@ pub(super) fn cleanup_service_box(svc: &ServiceBox) {
         svc.network_name.as_deref(),
         &svc.volume_names,
         &svc.anonymous_volumes,
-    );
+    )
 }
 
 pub(super) fn cleanup_partial_service_box(
@@ -78,7 +78,7 @@ pub(super) fn cleanup_partial_service_box(
     network_name: Option<&str>,
     volume_names: &[String],
     anonymous_volumes: &[String],
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) =
         crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name)
     {
@@ -88,7 +88,10 @@ pub(super) fn cleanup_partial_service_box(
             "Refusing to remove partial Compose box directory while volume/network detach failed"
         );
         crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return;
+        return Err(format!(
+            "volume/network detach failed for Compose service {box_id}: {error}"
+        )
+        .into());
     }
     if let Err(error) = crate::cleanup::cleanup_anonymous_volumes(box_id, anonymous_volumes) {
         tracing::error!(
@@ -97,7 +100,10 @@ pub(super) fn cleanup_partial_service_box(
             "Refusing to remove partial Compose box directory while anonymous volume cleanup failed"
         );
         crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return;
+        return Err(format!(
+            "anonymous volume cleanup failed for Compose service {box_id}: {error}"
+        )
+        .into());
     }
     // Keep-authority host-netdevice lease may exist after a partial prepare.
     // Tear down before wiping boxes/{id}; retain the dir when teardown fails.
@@ -109,7 +115,10 @@ pub(super) fn cleanup_partial_service_box(
             "Refusing to remove partial Compose box directory while host netdevice lease teardown failed"
         );
         crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return;
+        return Err(format!(
+            "host netdevice lease teardown failed for Compose service {box_id}: {error}"
+        )
+        .into());
     }
     if let Err(error) = a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(box_dir) {
         tracing::error!(
@@ -118,7 +127,10 @@ pub(super) fn cleanup_partial_service_box(
             "Refusing to remove partial Compose box directory while MicroVM :ro virtio-fs alias detach failed"
         );
         crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
-        return;
+        return Err(format!(
+            "MicroVM :ro virtio-fs alias detach failed for Compose service {box_id}: {error}"
+        )
+        .into());
     }
     // Release every directory-rootfs compatibility provider before deleting
     // the box dir. Linux may use overlayfs and snapshot/legacy macOS boxes may
@@ -136,9 +148,31 @@ pub(super) fn cleanup_partial_service_box(
                 %error,
                 "Failed to remove partial Compose box directory after resource teardown"
             );
+            crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+            return Err(format!(
+                "Failed to remove Compose box directory {}: {error}",
+                box_dir.display()
+            )
+            .into());
         }
     }
     crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path);
+    Ok(())
+}
+
+/// Chain a partial-service wipe failure into the primary compose-up error.
+pub(super) fn chain_partial_cleanup_error(
+    primary: impl Into<Box<dyn std::error::Error>>,
+    cleanup: Result<(), Box<dyn std::error::Error>>,
+) -> Box<dyn std::error::Error> {
+    let primary = primary.into();
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => format!(
+            "{primary}; also failed to clean partial Compose service: {cleanup}"
+        )
+        .into(),
+    }
 }
 
 pub(super) fn rollback_with_current(
@@ -307,9 +341,18 @@ async fn teardown_service_box_inner(
     // Rollback can own a VM that failed before its state record was published.
     // Once selected above, clean that owned instance even when no record could
     // be removed; otherwise a failed compose up would leave an orphan VM.
-    cleanup_service_box(&service);
-    removal?;
-    Ok(())
+    // Wipe/detach must fail closed (CLI/SDK parity) so down/rollback cannot
+    // invent success while boxes/{id} or host claims remain.
+    let cleanup = cleanup_service_box(&service);
+    match (removal, cleanup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(removal), Ok(())) => Err(removal.into()),
+        (Err(removal), Err(cleanup)) => Err(format!(
+            "failed to remove compose service state: {removal}; also failed to clean service: {cleanup}"
+        )
+        .into()),
+    }
 }
 
 fn teardown_target(
@@ -584,5 +627,17 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("api: lock busy"));
         assert!(message.contains("db: wipe refused"));
+    }
+
+    #[test]
+    fn chain_partial_cleanup_error_surfaces_wipe_failure() {
+        let chained = chain_partial_cleanup_error(
+            "boot failed",
+            Err("wipe refused".into()),
+        );
+        let message = chained.to_string();
+        assert!(message.contains("boot failed"));
+        assert!(message.contains("wipe refused"));
+        assert!(message.contains("also failed to clean partial Compose service"));
     }
 }

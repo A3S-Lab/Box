@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose partial-service wipe/detach fails closed (CLI/SDK parity) instead of
+  log-and-void inventing clean undo; teardown and compose-up partial paths chain
+  wipe failures with the primary error. Does **not** close ROADMAP B4/B3/B2 or
+  unlock UDP/`host_port=0`.
 - Compose `up` rollback fails closed on started-service teardown errors and on
   NetworkStore disconnect/update/remove instead of warn-and-inventing a clean
   undo; cleanup errors are chained with the original up failure (parity with

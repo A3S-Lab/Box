@@ -29,7 +29,8 @@ use crate::status;
 
 pub use args::{ComposeArgs, ComposeCommand, ComposeDownArgs, ComposeLogsArgs, ComposeUpArgs};
 use lifecycle::{
-    cleanup_partial_service_box, execute_down, rollback_compose_up, rollback_with_current,
+    cleanup_partial_service_box, chain_partial_cleanup_error, execute_down, rollback_compose_up,
+    rollback_with_current,
     teardown_service_box, ServiceBox,
 };
 use operations::{ComposeStopArgs, ProjectServicesArgs};
@@ -680,28 +681,42 @@ async fn execute_up(
 
         // Create box directory structure
         if let Err(error) = std::fs::create_dir_all(box_dir.join("sockets")) {
-            cleanup_partial_service_box(
-                &box_id,
-                &box_dir,
-                &initial_exec_socket_path,
-                network_name.as_deref(),
-                &volume_names,
-                &[],
-            );
-            return rollback_compose_up(&mut state, &started_services, &created_networks, error)
-                .await;
+            return rollback_compose_up(
+                &mut state,
+                &started_services,
+                &created_networks,
+                chain_partial_cleanup_error(
+                    error,
+                    cleanup_partial_service_box(
+                        &box_id,
+                        &box_dir,
+                        &initial_exec_socket_path,
+                        network_name.as_deref(),
+                        &volume_names,
+                        &[],
+                    ),
+                ),
+            )
+            .await;
         }
         if let Err(error) = std::fs::create_dir_all(box_dir.join("logs")) {
-            cleanup_partial_service_box(
-                &box_id,
-                &box_dir,
-                &initial_exec_socket_path,
-                network_name.as_deref(),
-                &volume_names,
-                &[],
-            );
-            return rollback_compose_up(&mut state, &started_services, &created_networks, error)
-                .await;
+            return rollback_compose_up(
+                &mut state,
+                &started_services,
+                &created_networks,
+                chain_partial_cleanup_error(
+                    error,
+                    cleanup_partial_service_box(
+                        &box_id,
+                        &box_dir,
+                        &initial_exec_socket_path,
+                        network_name.as_deref(),
+                        &volume_names,
+                        &[],
+                    ),
+                ),
+            )
+            .await;
         }
 
         // Connect to network before boot
@@ -737,19 +752,21 @@ async fn execute_up(
                 ) {
                     Ok(endpoint) => endpoint,
                     Err(error) => {
-                        cleanup_partial_service_box(
-                            &box_id,
-                            &box_dir,
-                            &initial_exec_socket_path,
-                            network_name.as_deref(),
-                            &volume_names,
-                            &[],
-                        );
                         return rollback_compose_up(
                             &mut state,
                             &started_services,
                             &created_networks,
-                            error,
+                            chain_partial_cleanup_error(
+                                error,
+                                cleanup_partial_service_box(
+                                    &box_id,
+                                    &box_dir,
+                                    &initial_exec_socket_path,
+                                    network_name.as_deref(),
+                                    &volume_names,
+                                    &[],
+                                ),
+                            ),
                         )
                         .await;
                     }
@@ -761,19 +778,21 @@ async fn execute_up(
         }
 
         if let Err(e) = vm.boot().await {
-            cleanup_partial_service_box(
-                &box_id,
-                &box_dir,
-                &initial_exec_socket_path,
-                network_name.as_deref(),
-                &volume_names,
-                vm.anonymous_volumes(),
-            );
             return rollback_compose_up(
                 &mut state,
                 &started_services,
                 &created_networks,
-                format!("Failed to start service '{}': {}", svc_name, e),
+                chain_partial_cleanup_error(
+                    format!("Failed to start service '{}': {}", svc_name, e),
+                    cleanup_partial_service_box(
+                        &box_id,
+                        &box_dir,
+                        &initial_exec_socket_path,
+                        network_name.as_deref(),
+                        &volume_names,
+                        vm.anonymous_volumes(),
+                    ),
+                ),
             )
             .await;
         }
