@@ -880,8 +880,9 @@ open and harness reports still keep
   prepare and managed VolumeStore paths refuse symlink/reparse host sources
   before following them. Stopped directory-backed MicroVM `export`/`diff`
   require guest rootfs metadata (same honesty contract as stopped `commit`).
-  Host `:ro` write denial on virtio-fs and full Linux UID/GID storage on
-  Windows binds remain open. Does **not** flip
+  Linux MicroVM `:ro` volumes host-enforce write denial via private RO bind
+  aliases before virtio-fs; Windows/macOS host `:ro` denial and full Linux
+  UID/GID storage on Windows binds remain open. Does **not** flip
   `b2_process_session_recovery_closed`.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
