@@ -44,6 +44,11 @@ All notable changes to A3S Box will be documented in this file.
   MiB fail closed. The `g`/`m` path already rejected this; `4398046511104k`
   and an equivalent byte size were truncated to 0 MiB. Does **not** close
   B4 or claim Enterprise GA.
+- Sandbox keep-authority refuses a Bridge network that stores `--egress`
+  rules, before any veth or iptables change. Those rules are enforced on
+  MicroVM netproxy and Linux passt_bridge only; attaching Sandbox would
+  have ignored operator deny. This does **not** add Sandbox egress
+  enforcement, CNI, or close B3.
 - Linux KVM qualification keeps production Sandbox on `SandboxViaOci` beside
   the DedicatedVm qualification provider. `microvm`/`kvm` fail Sandbox closed
   when that owner is not launch-ready; `all` refuses to start without it.
