@@ -68,7 +68,7 @@ Feature parity with other microVM projects is **not** an axiom.
 | Gate | Honest state |
 | --- | --- |
 | B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false` |
-| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; IPv6 Ethernet is dropped until an IPv6 policy exists; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
+| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked on MicroVM parity through OCI |
 | B6 cross-platform artifact matrix | Open |
@@ -130,7 +130,8 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 2. **First-match policy** (CIDR / protocol / port) on the host side of smoltcp
    and the Linux L2 mux, stored on the network object (`--egress`). Domain
    match is rejected: a name is not a packet field. IPv6 Ethernet is dropped
-   until an IPv6 policy exists (not an IPv6 DSL).
+   until an IPv6 policy exists (not an IPv6 DSL). One 802.1Q or 802.1ad tag
+   does not hide that header.
    This is not a CNI plugin.
 3. **DNS completeness without lying:** UDP A + AAAA NODATA already; Linux TCP/53
    now uses a real smoltcp TCP owner on passt_bridge (same honesty bar as macOS
