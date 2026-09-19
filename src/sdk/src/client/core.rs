@@ -550,6 +550,14 @@ impl A3sBoxClient {
         config.labels = request.labels;
         config.policy.isolation = request.isolation;
         config.policy.validate().map_err(ClientError::Validation)?;
+        for spec in &request.egress {
+            config.egress.push(
+                a3s_box_core::EgressMatchRule::parse(spec).map_err(ClientError::Validation)?,
+            );
+        }
+        config
+            .validate_runtime()
+            .map_err(ClientError::Validation)?;
 
         let store = self.network_store();
         store.create(config)?;

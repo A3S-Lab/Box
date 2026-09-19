@@ -18,9 +18,12 @@
 //!   are terminated by smoltcp and connected through the host TCP stack.
 //!
 //! On Linux, a stream adapter switches same-network peer frames while retaining
-//! passt for gateway and egress traffic. Default untrusted egress also drops
-//! guest IPv4 frames to loopback, link-local/metadata, and foreign private /
-//! CGNAT destinations before passt (attached bridge CIDR and public remain).
+//! passt for gateway and egress traffic. First-match network egress rules
+//! (CIDR / protocol / port) are applied before the default untrusted profile
+//! on both this TCP proxy and Linux passt_bridge. Domain match and IPv6 are
+//! not claimed. Default untrusted egress drops guest IPv4 to loopback,
+//! link-local/metadata, and foreign private / CGNAT destinations (attached
+//! bridge CIDR and public remain unless a rule says otherwise).
 
 mod device;
 mod dns_local;
@@ -51,7 +54,7 @@ use smoltcp::wire::{
     Ipv4Packet, TcpPacket,
 };
 
-use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
+use device::{BridgePort, EgressGate, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
 pub use dns_local::NetworkDnsConfig;
@@ -233,6 +236,7 @@ struct ProxyEngine {
     last_stats_write: std::time::Instant,
     networks_json: Option<PathBuf>,
     network_name: Option<String>,
+    egress_rules: Vec<a3s_box_core::EgressMatchRule>,
 }
 
 impl ProxyEngine {
@@ -253,7 +257,13 @@ impl ProxyEngine {
             network_name,
         } = config;
 
+        let egress_rules =
+            egress::load_egress_rules(networks_json.as_deref(), network_name.as_deref());
         let mut device = UnixgramDevice::new(socket, bridge, Arc::clone(&stats));
+        device.set_egress(EgressGate {
+            attached_cidr: Some((guest_ip, prefix_len)),
+            rules: egress_rules.clone(),
+        });
 
         // Configure smoltcp interface as the gateway.
         let config = Config::new(GATEWAY_MAC.into());
@@ -316,6 +326,7 @@ impl ProxyEngine {
             last_stats_write: std::time::Instant::now(),
             networks_json,
             network_name,
+            egress_rules,
         }
     }
 
@@ -639,14 +650,14 @@ impl ProxyEngine {
                 continue;
             }
 
-            if egress::default_untrusted_egress_denied(
+            if egress::untrusted_egress_denied(
                 flow.remote_ip,
+                6,
+                Some(flow.remote_port),
                 Some((self.guest_ip, self.prefix_len)),
+                &self.egress_rules,
             ) {
-                tracing::debug!(
-                    ?flow,
-                    "NetProxy denying outbound TCP by default untrusted egress policy"
-                );
+                tracing::debug!(?flow, "NetProxy denying outbound TCP by egress policy");
                 continue;
             }
 
@@ -992,6 +1003,24 @@ impl ProxyEngine {
     }
 
     fn fallback_dns_tcp_upstream(&mut self, session: DnsTcpSession) {
+        if egress::untrusted_egress_denied(
+            session.flow.remote_ip,
+            6,
+            Some(session.flow.remote_port),
+            Some((self.guest_ip, self.prefix_len)),
+            &self.egress_rules,
+        ) {
+            tracing::debug!(
+                flow = ?session.flow,
+                "NetProxy denying TCP/53 upstream by egress policy"
+            );
+            self.sockets.get_mut::<tcp::Socket>(session.handle).abort();
+            self.dns_tcp.push(DnsTcpSession {
+                abort_pending: true,
+                ..session
+            });
+            return;
+        }
         let connect_result = match spawn_outbound_connect(
             session.flow,
             Arc::clone(&self.outbound_connectors),
@@ -1045,6 +1074,16 @@ impl ProxyEngine {
         }
 
         // Forward query to the real DNS server via a host UDP socket.
+        if egress::untrusted_egress_denied(
+            dns_server,
+            17,
+            Some(53),
+            Some((self.guest_ip, self.prefix_len)),
+            &self.egress_rules,
+        ) {
+            tracing::debug!(%dns_server, "NetProxy denying DNS upstream by egress policy");
+            return;
+        }
         match UdpSocket::bind("0.0.0.0:0") {
             Ok(udp) => {
                 udp.set_read_timeout(Some(Duration::from_secs(2))).ok();

@@ -884,6 +884,7 @@ async fn resource_bridge_operations_use_typed_runtime_stores() {
             name: "ci-net".to_string(),
             subnet: "10.89.88.0/24".to_string(),
             labels: BTreeMap::new(),
+            egress: Vec::new(),
         },
     )
     .await;

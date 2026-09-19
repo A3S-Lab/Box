@@ -80,6 +80,13 @@ pub(super) struct UnixgramDevice {
     pub(super) rx_queue: VecDeque<Vec<u8>>,
     pub(super) stats: Arc<NetStats>,
     pending_tx: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    egress: Option<EgressGate>,
+}
+
+/// Attached-CIDR plus first-match rules applied before peer switch and smoltcp.
+pub(super) struct EgressGate {
+    pub(super) attached_cidr: Option<(std::net::Ipv4Addr, u8)>,
+    pub(super) rules: Vec<a3s_box_core::EgressMatchRule>,
 }
 
 impl UnixgramDevice {
@@ -94,7 +101,12 @@ impl UnixgramDevice {
             rx_queue: VecDeque::new(),
             stats,
             pending_tx: Arc::new(Mutex::new(VecDeque::new())),
+            egress: None,
         }
+    }
+
+    pub(super) fn set_egress(&mut self, gate: EgressGate) {
+        self.egress = Some(gate);
     }
 
     /// Drain the socket into `rx_queue` (non-blocking, batch up to 64 frames).
@@ -121,11 +133,38 @@ impl UnixgramDevice {
                     );
                     self.stats.record_tx(n);
                     let frame = &buf[..n];
+                    let (leg, default_denied) = match &self.egress {
+                        Some(gate) => {
+                            let leg = crate::egress::classify_ethernet_egress(frame, &gate.rules);
+                            let default_denied = crate::egress::ethernet_ipv4_destination(frame)
+                                .is_some_and(|dest| {
+                                    crate::egress::default_untrusted_egress_denied(
+                                        dest,
+                                        gate.attached_cidr,
+                                    )
+                                });
+                            (leg, default_denied)
+                        }
+                        None => (crate::egress::EgressLeg::Allow, false),
+                    };
+                    if matches!(leg, crate::egress::EgressLeg::Drop) {
+                        tracing::debug!("NetProxy dropping IPv4 by egress policy");
+                        continue;
+                    }
                     let deliver_locally = self
                         .bridge
                         .as_ref()
                         .map(|bridge| bridge.forward_from_guest(frame))
                         .unwrap_or(true);
+                    if deliver_locally
+                        && matches!(leg, crate::egress::EgressLeg::Default)
+                        && default_denied
+                    {
+                        tracing::debug!(
+                            "NetProxy denying gateway IPv4 by default untrusted egress policy"
+                        );
+                        continue;
+                    }
                     if deliver_locally {
                         self.rx_queue.push_back(frame.to_vec());
                     }

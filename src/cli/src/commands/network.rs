@@ -3,7 +3,9 @@
 //! Provides create/ls/rm/inspect/connect/disconnect for user-defined
 //! bridge networks that enable container-to-container communication.
 
-use a3s_box_core::network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode};
+use a3s_box_core::network::{
+    EgressMatchRule, IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode,
+};
 use a3s_box_runtime::NetworkStore;
 use clap::{Args, Subcommand};
 
@@ -49,6 +51,13 @@ pub struct CreateArgs {
     /// Network isolation mode: none, strict, or custom (default: none)
     #[arg(long, default_value = "none")]
     pub isolation: String,
+
+    /// Host-enforced MicroVM egress rule, repeatable.
+    /// Format: `allow|deny:CIDR[:tcp|udp[:PORT]]`.
+    /// First match wins, then the default untrusted profile. Domain names are
+    /// rejected. IPv6 is not matched. This is not a CNI plugin.
+    #[arg(long = "egress")]
+    pub egress: Vec<String>,
 
     /// Set metadata labels (KEY=VALUE), can be repeated
     #[arg(short = 'l', long = "label")]
@@ -238,6 +247,11 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
             )
         }
     };
+    for spec in &args.egress {
+        config.egress.push(
+            EgressMatchRule::parse(spec).map_err(|error| format!("invalid --egress: {error}"))?,
+        );
+    }
     validate_attachable_network(&config)?;
 
     // Parse labels

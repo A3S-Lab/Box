@@ -68,7 +68,7 @@ Feature parity with other microVM projects is **not** an axiom.
 | Gate | Honest state |
 | --- | --- |
 | B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false` |
-| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS TCP/53 landed (`#577`); Linux passt_bridge still forwards TCP/53; no full AAAA, CNI, macOS host `:ro`, MicroVM live host-path snapshots |
+| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; domain match, full AAAA, CNI, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked on MicroVM parity through OCI |
 | B6 cross-platform artifact matrix | Open |
@@ -127,7 +127,10 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 **Optimize toward (in `netproxy` / passt_bridge, not a new stack):**
 
 1. **Default egress profile** for untrusted MicroVM workloads: allow public internet optionally; deny private, link-local, cloud metadata, and host pivot unless explicitly allowed.
-2. **First-match policy** (CIDR / domain / proto / port) enforced on the host side of smoltcp or L2 mux.
+2. **First-match policy** (CIDR / protocol / port) on the host side of smoltcp
+   and the Linux L2 mux, stored on the network object (`--egress`). Domain
+   match is rejected: a name is not a packet field. IPv6 is not matched.
+   This is not a CNI plugin.
 3. **DNS completeness without lying:** UDP A + AAAA NODATA already; Linux TCP/53
    now uses a real smoltcp TCP owner on passt_bridge (same honesty bar as macOS
    `#577`); no fake one-packet TCP answers. Full AAAA RRs still open.
@@ -291,6 +294,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P0 | Keep B2 evidence honest; fix real Live/recovery failures only | A | Flipping `b2_process_session_recovery_closed` |
 | P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580` | C | CNI; Sandbox bridge GA |
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
+| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — this branch | C | Domain match; IPv6; CNI; Sandbox bridge GA |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM | B | Deleting libkrun before §4.5 |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |

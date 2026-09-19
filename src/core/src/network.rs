@@ -83,6 +83,11 @@ pub struct NetworkConfig {
     /// Network isolation policy.
     #[serde(default)]
     pub policy: NetworkPolicy,
+
+    /// Host-enforced MicroVM IPv4 egress rules, first-match before the default
+    /// untrusted profile. Empty keeps that profile only. Not a CNI plugin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress: Vec<EgressMatchRule>,
 }
 
 fn default_driver() -> String {
@@ -176,6 +181,164 @@ pub enum PolicyAction {
     Allow,
     /// Deny the traffic.
     Deny,
+}
+
+/// One host-enforced MicroVM egress rule.
+///
+/// Evaluated first-match on IPv4 before the default untrusted profile.
+/// `cidr` absent matches any destination. Domain names are rejected: a name
+/// is not a packet field, and raw-IP connects would bypass a DNS-only rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressMatchRule {
+    /// IPv4 CIDR (`10.0.0.0/8`, `1.2.3.4/32`, `0.0.0.0/0`). Absent matches any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cidr: Option<String>,
+    /// `tcp`, `udp`, or `any`.
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    /// Destination port. Absent matches any port, including non-port protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// First matching rule wins.
+    pub action: PolicyAction,
+}
+
+impl EgressMatchRule {
+    /// Deny every IPv4 destination. Used when stored rules cannot be loaded.
+    pub fn deny_all() -> Self {
+        Self {
+            cidr: Some("0.0.0.0/0".to_string()),
+            protocol: default_protocol(),
+            port: None,
+            action: PolicyAction::Deny,
+        }
+    }
+
+    /// Parse `allow|deny:CIDR[:tcp|udp[:PORT]]`.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Err("egress rule is empty".to_string());
+        }
+        let mut parts = spec.split(':');
+        let action = parts
+            .next()
+            .ok_or_else(|| "egress rule is empty".to_string())?;
+        let cidr = parts
+            .next()
+            .ok_or_else(|| "egress rule requires allow|deny:CIDR[:tcp|udp[:PORT]]".to_string())?;
+        let protocol = parts.next().unwrap_or("any");
+        let port = match parts.next() {
+            None => None,
+            Some(raw) => {
+                let port: u16 = raw
+                    .parse()
+                    .map_err(|_| format!("invalid egress port '{raw}'"))?;
+                if port == 0 {
+                    return Err("egress port must be 1-65535".to_string());
+                }
+                Some(port)
+            }
+        };
+        if parts.next().is_some() {
+            return Err(
+                "egress rule has too many ':' fields; use allow|deny:CIDR[:tcp|udp[:PORT]]"
+                    .to_string(),
+            );
+        }
+        if cidr.chars().any(|c| c.is_ascii_alphabetic()) {
+            return Err("domain egress match is not enforced; use an IPv4 CIDR \
+                 (a name is not on the packet, so raw-IP connects would bypass it)"
+                .to_string());
+        }
+        let action = match action.to_ascii_lowercase().as_str() {
+            "allow" => PolicyAction::Allow,
+            "deny" => PolicyAction::Deny,
+            other => {
+                return Err(format!(
+                    "unknown egress action '{other}'; use allow or deny"
+                ))
+            }
+        };
+        let protocol = protocol.to_ascii_lowercase();
+        let rule = Self {
+            cidr: Some(cidr.to_string()),
+            protocol,
+            port,
+            action,
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(cidr) = &self.cidr {
+            parse_ipv4_cidr(cidr)?;
+        }
+        if !matches!(self.protocol.as_str(), "any" | "tcp" | "udp") {
+            return Err(format!(
+                "egress protocol must be any, tcp, or udp (got '{}')",
+                self.protocol
+            ));
+        }
+        if self.port == Some(0) {
+            return Err("egress port must be 1-65535".to_string());
+        }
+        Ok(())
+    }
+
+    /// Whether this rule matches an IPv4 packet (`protocol` is the IP protocol number).
+    pub fn matches(&self, dest: Ipv4Addr, protocol: u8, port: Option<u16>) -> bool {
+        if let Some(cidr) = &self.cidr {
+            let Ok((network, prefix_len)) = parse_ipv4_cidr(cidr) else {
+                return false;
+            };
+            if !ipv4_in_prefix(network, prefix_len, dest) {
+                return false;
+            }
+        }
+        let protocol_matches = match self.protocol.as_str() {
+            "any" => true,
+            "tcp" => protocol == 6,
+            "udp" => protocol == 17,
+            _ => false,
+        };
+        if !protocol_matches {
+            return false;
+        }
+        match self.port {
+            Some(expected) => port == Some(expected),
+            None => true,
+        }
+    }
+}
+
+/// Parse an IPv4 CIDR. Prefix length `0`–`32` is valid (`0.0.0.0/0` matches any).
+pub fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
+    let (addr, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("invalid IPv4 CIDR '{cidr}'"))?;
+    let network: Ipv4Addr = addr
+        .parse()
+        .map_err(|error| format!("invalid IPv4 address '{addr}': {error}"))?;
+    let prefix_len: u8 = prefix
+        .parse()
+        .map_err(|error| format!("invalid prefix length '{prefix}': {error}"))?;
+    if prefix_len > 32 {
+        return Err(format!("prefix length {prefix_len} is outside 0-32"));
+    }
+    Ok((network, prefix_len))
+}
+
+/// Whether `addr` is inside `network/prefix_len`.
+pub fn ipv4_in_prefix(network: Ipv4Addr, prefix_len: u8, addr: Ipv4Addr) -> bool {
+    let prefix_len = prefix_len.min(32);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    (u32::from(network) & mask) == (u32::from(addr) & mask)
 }
 
 fn wildcard() -> String {
@@ -457,6 +620,7 @@ impl NetworkConfig {
             endpoints: HashMap::new(),
             created_at: chrono::Utc::now().to_rfc3339(),
             policy: NetworkPolicy::default(),
+            egress: Vec::new(),
         })
     }
 
@@ -470,7 +634,12 @@ impl NetworkConfig {
         }
         self.policy
             .validate()
-            .map_err(|error| format!("Unsupported network isolation mode: {error}"))
+            .map_err(|error| format!("Unsupported network isolation mode: {error}"))?;
+        for (index, rule) in self.egress.iter().enumerate() {
+            rule.validate()
+                .map_err(|error| format!("egress rule {index}: {error}"))?;
+        }
+        Ok(())
     }
 
     /// Allocate an IP and register a new endpoint for a box.
@@ -608,6 +777,38 @@ pub fn lookup_network_a(networks_path: &Path, network_name: &str, qname: &str) -
         }
     }
     None
+}
+
+/// Load one network's MicroVM egress rules from `networks.json`.
+///
+/// Missing file or missing network yields an empty list (default untrusted
+/// profile still applies). A present file that cannot be parsed, or a rule
+/// that fails validation, is an error so the caller can fail closed instead
+/// of ignoring an operator deny.
+pub fn load_network_egress_rules(
+    networks_path: &Path,
+    network_name: &str,
+) -> Result<Vec<EgressMatchRule>, String> {
+    let data = match std::fs::read_to_string(networks_path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "failed to read {}: {error}",
+                networks_path.display()
+            ))
+        }
+    };
+    let file: NetworksFile = serde_json::from_str(&data)
+        .map_err(|error| format!("failed to parse {}: {error}", networks_path.display()))?;
+    let Some(network) = file.networks.get(network_name) else {
+        return Ok(Vec::new());
+    };
+    for (index, rule) in network.egress.iter().enumerate() {
+        rule.validate()
+            .map_err(|error| format!("egress rule {index}: {error}"))?;
+    }
+    Ok(network.egress.clone())
 }
 
 fn normalize_dns_lookup_name(name: &str) -> String {
@@ -1360,5 +1561,37 @@ mod tests {
         );
         assert_eq!(lookup_network_a(&path, "mynet", "example.com"), None);
         assert_eq!(lookup_network_a(&path, "other", "db"), None);
+    }
+
+    #[test]
+    fn egress_rule_parse_rejects_domain_and_matches_first_fields() {
+        let err = EgressMatchRule::parse("deny:metadata.google.internal").unwrap_err();
+        assert!(err.contains("domain egress match is not enforced"), "{err}");
+        let allow = EgressMatchRule::parse("allow:10.1.0.0/16:tcp:443").unwrap();
+        assert!(allow.matches(Ipv4Addr::new(10, 1, 2, 3), 6, Some(443)));
+        assert!(!allow.matches(Ipv4Addr::new(10, 1, 2, 3), 6, Some(80)));
+        assert!(!allow.matches(Ipv4Addr::new(10, 1, 2, 3), 17, Some(443)));
+        assert!(!allow.matches(Ipv4Addr::new(10, 2, 0, 1), 6, Some(443)));
+        let any = EgressMatchRule::parse("deny:0.0.0.0/0").unwrap();
+        assert!(any.matches(Ipv4Addr::new(1, 1, 1, 1), 1, None));
+    }
+
+    #[test]
+    fn load_network_egress_rules_reads_stored_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.egress
+            .push(EgressMatchRule::parse("deny:1.1.1.1/32").unwrap());
+        let file = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+        let loaded = load_network_egress_rules(&path, "mynet").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].matches(Ipv4Addr::new(1, 1, 1, 1), 6, Some(443)));
+        assert!(load_network_egress_rules(&path, "missing")
+            .unwrap()
+            .is_empty());
+        let err = load_network_egress_rules(&dir.path().join("nope.json"), "mynet").unwrap();
+        assert!(err.is_empty());
     }
 }

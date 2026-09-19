@@ -656,6 +656,7 @@ class _NetworkBuilderBase:
         self._name = name
         self._subnet = "10.89.0.0/24"
         self._labels: dict[str, str] = {}
+        self._egress: list[str] = []
 
     def subnet(self: _NetworkBuilderT, subnet: str) -> _NetworkBuilderT:
         self._subnet = subnet
@@ -669,13 +670,20 @@ class _NetworkBuilderBase:
         self._labels[key] = value
         return self
 
+    def egress(self: _NetworkBuilderT, spec: str) -> _NetworkBuilderT:
+        self._egress.append(spec)
+        return self
+
     def _request(self) -> dict[str, object]:
-        return {
+        request: dict[str, object] = {
             "operation": "network_create",
             "name": self._name,
             "subnet": self._subnet,
             "labels": dict(self._labels),
         }
+        if self._egress:
+            request["egress"] = list(self._egress)
+        return request
 
 
 class NetworkBuilder(_NetworkBuilderBase):

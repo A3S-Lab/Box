@@ -371,10 +371,14 @@ async fn execute_request(
             name,
             subnet,
             labels,
+            egress,
         } => {
             let mut request = CreateNetwork::new(name).subnet(subnet);
             for (key, value) in labels {
                 request = request.label(key, value);
+            }
+            for spec in egress {
+                request = request.egress(spec);
             }
             serialize_value(client.create_network(request)?)
         }

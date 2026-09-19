@@ -599,6 +599,7 @@ export class VolumeBuilder {
 export class NetworkBuilder {
   private networkSubnet = '10.89.0.0/24'
   private readonly labels: Record<string, string> = {}
+  private readonly egressRules: string[] = []
 
   constructor(
     private readonly runtime: LocalRuntime,
@@ -615,15 +616,22 @@ export class NetworkBuilder {
     return this
   }
 
+  egress(spec: string): this {
+    this.egressRules.push(spec)
+    return this
+  }
+
   async create(): Promise<NetworkInfo> {
-    return networkInfo(
-      await this.runtime.request({
-        operation: 'network_create',
-        name: this.name,
-        subnet: this.networkSubnet,
-        labels: { ...this.labels },
-      })
-    )
+    const payload: Record<string, unknown> = {
+      operation: 'network_create',
+      name: this.name,
+      subnet: this.networkSubnet,
+      labels: { ...this.labels },
+    }
+    if (this.egressRules.length > 0) {
+      payload.egress = [...this.egressRules]
+    }
+    return networkInfo(await this.runtime.request(payload))
   }
 }
 
