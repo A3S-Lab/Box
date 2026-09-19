@@ -314,34 +314,36 @@ impl ComposeRuntimePlan {
     }
 
     /// Get the health check config for a service, if defined.
-    pub fn healthcheck(&self, service_name: &str) -> Option<HealthCheckSpec> {
-        let svc = self.config.services.get(service_name)?;
-        let hc = svc.healthcheck.as_ref()?;
+    ///
+    /// A missing duration uses the Compose default. A duration that is present
+    /// but unparsable or too large is an error: treating it as the default
+    /// would start checks on a schedule the operator did not ask for.
+    pub fn healthcheck(&self, service_name: &str) -> Result<Option<HealthCheckSpec>> {
+        let Some(svc) = self.config.services.get(service_name) else {
+            return Ok(None);
+        };
+        let Some(hc) = svc.healthcheck.as_ref() else {
+            return Ok(None);
+        };
         if hc.disable {
-            return None;
+            return Ok(None);
         }
 
-        let cmd = healthcheck_command(&hc.test)?;
+        let Some(cmd) = healthcheck_command(&hc.test) else {
+            return Ok(None);
+        };
 
-        Some(HealthCheckSpec {
+        Ok(Some(HealthCheckSpec {
             cmd,
-            interval_secs: hc
-                .interval
-                .as_deref()
-                .and_then(parse_duration_secs)
-                .unwrap_or(30),
-            timeout_secs: hc
-                .timeout
-                .as_deref()
-                .and_then(parse_duration_secs)
-                .unwrap_or(30),
+            interval_secs: optional_healthcheck_duration(hc.interval.as_deref(), 30, "interval")?,
+            timeout_secs: optional_healthcheck_duration(hc.timeout.as_deref(), 30, "timeout")?,
             retries: hc.retries.unwrap_or(3),
-            start_period_secs: hc
-                .start_period
-                .as_deref()
-                .and_then(parse_duration_secs)
-                .unwrap_or(0),
-        })
+            start_period_secs: optional_healthcheck_duration(
+                hc.start_period.as_deref(),
+                0,
+                "start_period",
+            )?,
+        }))
     }
 
     /// Return true when a service explicitly disables its health check.
@@ -443,23 +445,44 @@ pub struct HealthCheckSpec {
     pub start_period_secs: u64,
 }
 
+fn optional_healthcheck_duration(value: Option<&str>, default: u64, field: &str) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    parse_duration_secs(value).map_err(|error| {
+        BoxError::ConfigError(format!("invalid healthcheck {field} {value:?}: {error}"))
+    })
+}
+
 /// Parse a compose duration string (e.g., "30s", "1m", "500ms") into seconds.
-fn parse_duration_secs(s: &str) -> Option<u64> {
+fn parse_duration_secs(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim().to_lowercase();
     if s.ends_with("ms") {
-        let n: u64 = s.trim_end_matches("ms").parse().ok()?;
-        Some(n.div_ceil(1000))
+        let n: u64 = s
+            .trim_end_matches("ms")
+            .parse()
+            .map_err(|_| format!("invalid duration: {s}"))?;
+        Ok(n.div_ceil(1000))
     } else if s.ends_with('s') {
-        s.trim_end_matches('s').parse().ok()
+        s.trim_end_matches('s')
+            .parse()
+            .map_err(|_| format!("invalid duration: {s}"))
     } else if s.ends_with('m') {
-        let n: u64 = s.trim_end_matches('m').parse().ok()?;
-        Some(n * 60)
+        let n: u64 = s
+            .trim_end_matches('m')
+            .parse()
+            .map_err(|_| format!("invalid duration: {s}"))?;
+        n.checked_mul(60)
+            .ok_or_else(|| format!("duration too large: {s}"))
     } else if s.ends_with('h') {
-        let n: u64 = s.trim_end_matches('h').parse().ok()?;
-        Some(n * 3600)
+        let n: u64 = s
+            .trim_end_matches('h')
+            .parse()
+            .map_err(|_| format!("invalid duration: {s}"))?;
+        n.checked_mul(3600)
+            .ok_or_else(|| format!("duration too large: {s}"))
     } else {
-        // Assume seconds
-        s.parse().ok()
+        s.parse().map_err(|_| format!("invalid duration: {s}"))
     }
 }
 
@@ -1041,13 +1064,14 @@ services:
 
     #[test]
     fn test_parse_duration_secs() {
-        assert_eq!(parse_duration_secs("30s"), Some(30));
-        assert_eq!(parse_duration_secs("1m"), Some(60));
-        assert_eq!(parse_duration_secs("2h"), Some(7200));
-        assert_eq!(parse_duration_secs("500ms"), Some(1));
-        assert_eq!(parse_duration_secs("5000ms"), Some(5));
-        assert_eq!(parse_duration_secs("10"), Some(10));
-        assert_eq!(parse_duration_secs("abc"), None);
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("1m").unwrap(), 60);
+        assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("500ms").unwrap(), 1);
+        assert_eq!(parse_duration_secs("5000ms").unwrap(), 5);
+        assert_eq!(parse_duration_secs("10").unwrap(), 10);
+        assert!(parse_duration_secs("abc").is_err());
+        assert!(parse_duration_secs("307445734561825861m").is_err());
     }
 
     #[test]
@@ -1109,7 +1133,7 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        let hc = project.healthcheck("web").unwrap();
+        let hc = project.healthcheck("web").unwrap().unwrap();
         assert_eq!(hc.cmd, vec!["curl", "-f", "http://localhost/"]);
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(hc.timeout_secs, 3);
@@ -1128,12 +1152,44 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        let hc = project.healthcheck("web").unwrap();
+        let hc = project.healthcheck("web").unwrap().unwrap();
         assert_eq!(hc.cmd, vec!["true"]);
         assert_eq!(hc.interval_secs, 30);
         assert_eq!(hc.timeout_secs, 30);
         assert_eq!(hc.retries, 3);
         assert_eq!(hc.start_period_secs, 0);
+    }
+
+    #[test]
+    fn healthcheck_duration_rejects_invalid_and_overflow() {
+        let invalid = r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30sec
+"#;
+        let config = ComposeConfig::from_yaml_str(invalid).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
+        let error = project.healthcheck("web").unwrap_err();
+        assert!(
+            error.to_string().contains("invalid healthcheck interval"),
+            "{error}"
+        );
+
+        let overflow = r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "true"]
+      start_period: 307445734561825861m
+"#;
+        let config = ComposeConfig::from_yaml_str(overflow).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
+        let error = project.healthcheck("web").unwrap_err();
+        assert!(error.to_string().contains("duration too large"), "{error}");
     }
 
     #[test]
@@ -1147,7 +1203,7 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        let hc = project.healthcheck("web").unwrap();
+        let hc = project.healthcheck("web").unwrap().unwrap();
         assert_eq!(
             hc.cmd,
             vec!["sh", "-c", "curl -f http://localhost/ || exit 1"]
@@ -1165,7 +1221,7 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        let hc = project.healthcheck("web").unwrap();
+        let hc = project.healthcheck("web").unwrap().unwrap();
         assert_eq!(
             hc.cmd,
             vec!["sh", "-c", "curl -f http://localhost/ || exit 1"]
@@ -1187,9 +1243,9 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        assert!(project.healthcheck("none").is_none());
+        assert!(project.healthcheck("none").unwrap().is_none());
         assert!(project.healthcheck_disabled("none"));
-        assert!(project.healthcheck("disabled").is_none());
+        assert!(project.healthcheck("disabled").unwrap().is_none());
         assert!(project.healthcheck_disabled("disabled"));
     }
 
@@ -1197,7 +1253,7 @@ services:
     fn test_healthcheck_none() {
         let config = sample_config();
         let project = ComposeRuntimePlan::new("myapp", config).unwrap();
-        assert!(project.healthcheck("db").is_none());
+        assert!(project.healthcheck("db").unwrap().is_none());
     }
 
     #[test]

@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose healthcheck durations that are present but invalid, or that overflow
+  when converted to seconds, fail closed. A missing interval, timeout, or
+  start period still uses the Compose default. `307445734561825861m` previously
+  wrapped in release. Does **not** close B4 or claim Enterprise GA.
 - MicroVM egress sees IPv4 and IPv6 behind one 802.1Q or 802.1ad tag (QinQ).
   A guest can no longer hide metadata or IPv6 by shifting the ethertype past
   byte 12. A third VLAN tag is dropped because it is not IPv4 or ARP. This
