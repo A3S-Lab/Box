@@ -43,6 +43,9 @@ All notable changes to A3S Box will be documented in this file.
 - Dockerfile `HEALTHCHECK` durations that do not fit in `u64` seconds fail
   closed. The previous `as u64` cast saturated those values to `u64::MAX`, so
   the check would not fire. Does **not** close B4 or claim Enterprise GA.
+- Passt startup fails closed when its stderr log cannot be created, instead
+  of discarding diagnostics and hiding the sandbox-denied retry signal. Does
+  **not** close B3 or claim Enterprise GA.
 - Log `max-size` rejects sizes that overflow `u64` instead of wrapping. An
   unparsable value still uses the 10 MiB default, including `20000000000g`,
   which previously wrapped in release and panicked the shim in debug. Does
