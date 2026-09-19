@@ -66,7 +66,7 @@ fn test_build_instance_spec_passes_configured_virtiofs_cache_mode() {
 }
 
 #[test]
-fn test_build_instance_spec_disables_tsi_only_for_network_none() {
+fn test_build_instance_spec_disables_tsi_for_none_and_bridge() {
     let none_dir = tempdir().unwrap();
     let none_layout = test_layout(none_dir.path(), Some(test_oci_config(None, None)), true);
     let mut none_vm = test_vm_manager(BoxConfig {
@@ -76,6 +76,21 @@ fn test_build_instance_spec_disables_tsi_only_for_network_none() {
     assert!(
         none_vm
             .build_instance_spec(&none_layout)
+            .unwrap()
+            .disable_tsi
+    );
+
+    let bridge_dir = tempdir().unwrap();
+    let bridge_layout = test_layout(bridge_dir.path(), Some(test_oci_config(None, None)), true);
+    let mut bridge_vm = test_vm_manager(BoxConfig {
+        network: a3s_box_core::NetworkMode::Bridge {
+            network: "mynet".to_string(),
+        },
+        ..Default::default()
+    });
+    assert!(
+        bridge_vm
+            .build_instance_spec(&bridge_layout)
             .unwrap()
             .disable_tsi
     );

@@ -638,7 +638,13 @@ impl VmManager {
             // legacy no-guest-init path uses the shim's set_uid.
             user: if has_guest_init { None } else { user },
             network: None, // Network config is set by CLI when --network is specified
-            disable_tsi: matches!(&self.config.network, a3s_box_core::NetworkMode::None),
+            // Bridge uses passt/netproxy as the only guest egress path. Leaving
+            // libkrun TSI on would let connect() reach the host stack and skip
+            // that profile. Explicit vsock IPC stays. Default TSI mode is unchanged.
+            disable_tsi: matches!(
+                &self.config.network,
+                a3s_box_core::NetworkMode::None | a3s_box_core::NetworkMode::Bridge { .. }
+            ),
             resource_limits: self.config.resource_limits.clone(),
             log_config: self.log_config.clone(),
             // KSM page-merging: config field, or the A3S_BOX_KSM env override.

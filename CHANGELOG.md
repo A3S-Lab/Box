@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM Bridge mode disables libkrun TSI socket interception. TSI stayed on
+  beside passt/netproxy, so guest `connect()` could reach the host stack and
+  skip the egress profile. Explicit vsock IPC remains. Default TSI mode is
+  unchanged. Does **not** close B3 or claim Enterprise GA.
 - `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=off` or `=no` no longer
   selects the Privileged keep-authority owner. Unknown values fail closed.
   Only `1`/`true`/`on`/`yes` opt in. Does **not** close B3 or claim
