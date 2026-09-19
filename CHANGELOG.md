@@ -9,7 +9,11 @@ All notable changes to A3S Box will be documented in this file.
 - Network `--egress` first-match IPv4 rules (`allow|deny:CIDR[:tcp|udp[:PORT]]`)
   enforced on macOS netproxy and Linux passt_bridge before the default
   untrusted profile. Domain names are rejected (a name is not on the packet).
-  IPv6 is not matched. This is not a CNI plugin and does **not** close B3.
+  This is not a CNI plugin and does **not** close B3.
+- MicroVM netproxy and passt_bridge drop IPv6 Ethernet before peer switch and
+  host egress. NetworkStore and the untrusted profile are IPv4-only, so IPv6
+  would bypass link-local and metadata denial. This is not an IPv6 policy and
+  does **not** close B3.
 - Architecture optimization plan
   ([docs/architecture-optimization-plan.md](docs/architecture-optimization-plan.md)):
   first-principles axes (recovery, OCI cutover, MicroVM egress/secrets,

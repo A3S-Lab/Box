@@ -2,8 +2,9 @@
 //!
 //! First-match operator rules (CIDR / protocol / port) on the network object
 //! are evaluated before this default. Domain rules are rejected at parse time.
-//! Does not invent DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
-//! IPv6 is not matched.
+//! IPv6 Ethernet frames are dropped: NetworkStore and this profile are IPv4-only,
+//! so leaving IPv6 through would bypass link-local and metadata denial.
+//! This is not an IPv6 policy, DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
 
 use std::net::Ipv4Addr;
 
@@ -169,6 +170,13 @@ pub(crate) fn classify_ethernet_egress(frame: &[u8], rules: &[EgressMatchRule]) 
     EgressLeg::Default
 }
 
+/// IPv6 is not a product path. NetworkStore, DNS answers, and the untrusted
+/// profile are IPv4-only, so an IPv6 frame (including link-local and metadata)
+/// is dropped before peer switch and host egress. ARP is not IPv6.
+pub(crate) fn ipv6_egress_denied(frame: &[u8]) -> bool {
+    frame.len() >= 14 && frame[12] == 0x86 && frame[13] == 0xdd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +287,22 @@ mod tests {
             cidr,
             &deny_then_allow
         ));
+    }
+
+    #[test]
+    fn ipv6_frames_are_denied_and_arp_is_not() {
+        let mut ipv6 = vec![0u8; 14];
+        ipv6[12] = 0x86;
+        ipv6[13] = 0xdd;
+        assert!(ipv6_egress_denied(&ipv6));
+        let mut arp = vec![0u8; 14];
+        arp[12] = 0x08;
+        arp[13] = 0x06;
+        assert!(!ipv6_egress_denied(&arp));
+        let mut ipv4 = vec![0u8; 14];
+        ipv4[12] = 0x08;
+        ipv4[13] = 0x00;
+        assert!(!ipv6_egress_denied(&ipv4));
+        assert!(!ipv6_egress_denied(&[0u8; 13]));
     }
 }
