@@ -55,9 +55,9 @@ pub use execution::{
 };
 pub use network::{
     ipv4_in_prefix, load_network_egress_rules, lookup_network_a, parse_ipv4_cidr,
-    sandbox_named_bridge_opt_in_enabled, EgressMatchRule, IsolationMode, NetworkConfig,
-    NetworkEndpoint, NetworkMode, NetworkPolicy, PolicyAction,
-    OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
+    parse_keep_network_device_authority, sandbox_named_bridge_opt_in_enabled, EgressMatchRule,
+    IsolationMode, KeepNetworkAuthorityFlag, NetworkConfig, NetworkEndpoint, NetworkMode,
+    NetworkPolicy, PolicyAction, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::{

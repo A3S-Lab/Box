@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=off` or `=no` no longer
+  selects the Privileged keep-authority owner. Unknown values fail closed.
+  Only `1`/`true`/`on`/`yes` opt in. Does **not** close B3 or claim
+  Enterprise GA.
 - Dockerfile `HEALTHCHECK` durations that do not fit in `u64` seconds fail
   closed. The previous `as u64` cast saturated those values to `u64::MAX`, so
   the check would not fire. Does **not** close B4 or claim Enterprise GA.
