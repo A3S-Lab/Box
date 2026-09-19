@@ -1453,6 +1453,14 @@ CMD ["app.py"]
         assert!(err.contains("Invalid duration"));
     }
 
+    #[test]
+    fn test_parse_duration_rejects_magnitude_that_cannot_fit_u64() {
+        let err = utils::parse_duration_secs("999999999999999999h", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Invalid duration"), "{err}");
+    }
+
     // --- Dockerfile with new instructions ---
 
     #[test]
