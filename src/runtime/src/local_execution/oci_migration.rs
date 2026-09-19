@@ -916,6 +916,26 @@ fn parse_environment(
     Ok(Some((selection, config)))
 }
 
+/// Explicit on/off flag for qualification Host ownership.
+///
+/// Absent or empty stays off. Unknown text fails closed so a typo cannot
+/// silently select the external qualification endpoint.
+fn parse_explicit_bool(env_name: &str, value: Option<OsString>) -> ExecutionManagerResult<bool> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(false);
+    };
+    let value = value.to_str().ok_or_else(|| {
+        ExecutionManagerError::InvalidRequest(format!("{env_name} must contain UTF-8 text"))
+    })?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => Ok(false),
+        "1" | "true" | "on" | "yes" | "box-owned" => Ok(true),
+        other => Err(ExecutionManagerError::InvalidRequest(format!(
+            "unsupported {env_name} value {other:?}; expected 0/1, false/true, off/on, no/yes, or box-owned"
+        ))),
+    }
+}
+
 fn parse_windows_environment(
     inputs: WindowsWhpxEnvironmentInputs,
     home_dir: &Path,
@@ -958,15 +978,7 @@ fn parse_windows_environment(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default_service_root(home_dir));
-    let box_owned = box_owned
-        .as_ref()
-        .and_then(|value| value.to_str())
-        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "" | "0" | "false" | "off" | "no" => false,
-            "1" | "true" | "on" | "yes" | "box-owned" => true,
-            _ => false,
-        })
-        .unwrap_or(false);
+    let box_owned = parse_explicit_bool(OCI_WHPX_BOX_OWNED_ENV, box_owned)?;
 
     if box_owned {
         let service_root = service_root
@@ -1091,15 +1103,7 @@ fn parse_linux_kvm_environment(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default_service_root(home_dir));
-    let box_owned = box_owned
-        .as_ref()
-        .and_then(|value| value.to_str())
-        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "" | "0" | "false" | "off" | "no" => false,
-            "1" | "true" | "on" | "yes" | "box-owned" => true,
-            _ => false,
-        })
-        .unwrap_or(false);
+    let box_owned = parse_explicit_bool(OCI_KVM_BOX_OWNED_ENV, box_owned)?;
 
     if box_owned {
         let service_root = service_root
@@ -1399,5 +1403,26 @@ mod tests {
             owner.system_image_manifest(),
             absolute("system-image.json").as_path()
         );
+    }
+
+    #[test]
+    fn kvm_box_owned_flag_rejects_unknown_values() {
+        let home = absolute("a3s-oci-kvm-flag-home");
+        let error = parse_linux_kvm_environment(
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                endpoint: Some(absolute("runtime.sock").into_os_string()),
+                box_owned: Some(OsString::from("maybe")),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(OCI_KVM_BOX_OWNED_ENV),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("maybe"), "unexpected error: {message}");
     }
 }
