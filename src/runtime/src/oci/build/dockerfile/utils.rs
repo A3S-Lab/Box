@@ -83,5 +83,11 @@ pub(super) fn parse_duration_secs(s: &str, line_num: usize) -> Result<u64> {
     if !num.is_empty() || !saw_unit {
         return Err(invalid());
     }
-    Ok(total_secs.round() as u64)
+    // `as u64` saturates once the magnitude passes 2^64, so a huge HEALTHCHECK
+    // interval would become `u64::MAX` and never fire. Reject that instead.
+    let rounded = total_secs.round();
+    if !rounded.is_finite() || rounded < 0.0 || rounded >= u64::MAX as f64 {
+        return Err(invalid());
+    }
+    Ok(rounded as u64)
 }
