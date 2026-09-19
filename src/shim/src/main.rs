@@ -28,10 +28,10 @@ use a3s_box_core::EXEC_VSOCK_PORT;
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_core::{ATTEST_VSOCK_PORT, PORT_FWD_VSOCK_PORT, PTY_VSOCK_PORT};
-#[cfg(target_os = "linux")]
-use a3s_box_netproxy::spawn_inherited_passt_bridge;
 #[cfg(target_os = "macos")]
 use a3s_box_netproxy::{spawn_inherited_netproxy, InheritedNetProxyConfig};
+#[cfg(target_os = "linux")]
+use a3s_box_netproxy::{spawn_inherited_passt_bridge, UntrustedEgressScope};
 use clap::Parser;
 use krun::KrunContext;
 #[cfg(target_os = "windows")]

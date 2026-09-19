@@ -186,19 +186,16 @@ impl PasstManager {
             .arg("--pcap")
             .arg(&self.pcap_path)
             // Run in foreground (we manage the process)
-            .arg("--foreground")
-            // Configure the network
-            .arg("--address")
-            .arg(ip.to_string())
-            .arg("--gateway")
-            .arg(gateway.to_string())
-            .arg("--netmask")
-            .arg(format!("{}", prefix_to_netmask(prefix_len)));
-
-        // Add DNS servers
-        for dns in dns_servers {
-            cmd.arg("--dns").arg(dns.to_string());
-        }
+            .arg("--foreground");
+        // `--no-map-gw` stops passt rewriting the guest gateway to host
+        // 127.0.0.1. Do not also drop that destination in the egress profile:
+        // published-port replies are addressed to the gateway.
+        cmd.args(passt_guest_network_args(
+            ip,
+            gateway,
+            prefix_len,
+            dns_servers,
+        ));
 
         // Forward published ports into the guest. libkrun discards the
         // TSI host_port_map once a virtio-net device is attached, so passt is
@@ -599,6 +596,33 @@ fn passt_port_specs(port_map: &[String]) -> Result<PasstPortSpecs> {
     Ok(specs)
 }
 
+/// Guest network arguments for one passt process.
+///
+/// `--no-map-gw` is required. Without it, passt rewrites the gateway address
+/// to host `127.0.0.1`. The egress profile must not drop that destination,
+/// because published-port replies are addressed to the gateway.
+fn passt_guest_network_args(
+    ip: Ipv4Addr,
+    gateway: Ipv4Addr,
+    prefix_len: u8,
+    dns_servers: &[Ipv4Addr],
+) -> Vec<String> {
+    let mut args = vec![
+        "--address".to_string(),
+        ip.to_string(),
+        "--gateway".to_string(),
+        gateway.to_string(),
+        "--netmask".to_string(),
+        prefix_to_netmask(prefix_len).to_string(),
+        "--no-map-gw".to_string(),
+    ];
+    for dns in dns_servers {
+        args.push("--dns".to_string());
+        args.push(dns.to_string());
+    }
+    args
+}
+
 /// Convert a prefix length to a dotted-decimal netmask string.
 fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
     if prefix == 0 {
@@ -620,6 +644,23 @@ mod tests {
         assert_eq!(prefix_to_netmask(32), Ipv4Addr::new(255, 255, 255, 255));
         assert_eq!(prefix_to_netmask(0), Ipv4Addr::new(0, 0, 0, 0));
         assert_eq!(prefix_to_netmask(28), Ipv4Addr::new(255, 255, 255, 240));
+    }
+
+    #[test]
+    fn passt_does_not_map_the_gateway_to_host_loopback() {
+        let args = passt_guest_network_args(
+            Ipv4Addr::new(10, 88, 0, 2),
+            Ipv4Addr::new(10, 88, 0, 1),
+            24,
+            &[Ipv4Addr::new(8, 8, 8, 8)],
+        );
+        assert!(args.iter().any(|arg| arg == "--no-map-gw"));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--gateway" && pair[1] == "10.88.0.1" }));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--dns" && pair[1] == "8.8.8.8"));
     }
 
     #[test]

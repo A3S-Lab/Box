@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- passt is started with `--no-map-gw`, so the guest gateway is not rewritten
+  to host `127.0.0.1`. The egress profile still allows that address: published
+  UDP and TCP replies are destined to it. Same-CIDR peers and public
+  destinations stay allowed. Does **not** close B3 or claim Enterprise GA.
 - `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=off` or `=no` no longer
   selects the Privileged keep-authority owner. Unknown values fail closed.
   Only `1`/`true`/`on`/`yes` opt in. Does **not** close B3 or claim
