@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Log `max-size` rejects sizes that overflow `u64` instead of wrapping. An
+  unparsable value still uses the 10 MiB default, including `20000000000g`,
+  which previously wrapped in release and panicked the shim in debug. Does
+  **not** close B2 or claim Enterprise GA.
 - Sandbox keep-authority refuses a Bridge network that stores `--egress`
   rules, before any veth or iptables change. Those rules are enforced on
   MicroVM netproxy and Linux passt_bridge only; attaching Sandbox would
