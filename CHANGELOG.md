@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose memory values in kibibytes or raw bytes that do not fit in `u32`
+  MiB fail closed. The `g`/`m` path already rejected this; `4398046511104k`
+  and an equivalent byte size were truncated to 0 MiB. Does **not** close
+  B4 or claim Enterprise GA.
 - Linux KVM qualification keeps production Sandbox on `SandboxViaOci` beside
   the DedicatedVm qualification provider. `microvm`/`kvm` fail Sandbox closed
   when that owner is not launch-ready; `all` refuses to start without it.

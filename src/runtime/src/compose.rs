@@ -537,17 +537,18 @@ fn parse_compose_memory(s: &str) -> Result<u32> {
         (n, 1u64)
     } else if s.ends_with("kb") || s.ends_with('k') {
         let n = s.trim_end_matches("kb").trim_end_matches('k');
-        // KB → MB (round up)
-        return n
+        // KB → MiB (round up). Same overflow refusal as the g/m path: a bare
+        // `as u32` turned `4398046511104k` into 0 MiB.
+        let raw = n
             .parse::<u64>()
-            .map(|v| v.div_ceil(1024) as u32)
-            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)));
+            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)))?;
+        return mib_that_fits(raw.div_ceil(1024), &s);
     } else {
-        // Assume bytes
-        return s
+        // Assume bytes.
+        let raw = s
             .parse::<u64>()
-            .map(|v| v.div_ceil(1024 * 1024) as u32)
-            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)));
+            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)))?;
+        return mib_that_fits(raw.div_ceil(1024 * 1024), &s);
     };
 
     let num: f64 = num_str
@@ -572,6 +573,11 @@ fn parse_compose_memory(s: &str) -> Result<u32> {
         )));
     }
     Ok(mib.round() as u32)
+}
+
+fn mib_that_fits(mib: u64, original: &str) -> Result<u32> {
+    u32::try_from(mib)
+        .map_err(|_| BoxError::ConfigError(format!("memory value too large: {original}")))
 }
 
 fn resolve_compose_path(base_dir: &Path, path: &str) -> PathBuf {
@@ -971,8 +977,12 @@ services:
         // `99999999g` → u32::MAX MiB. Both must now be errors.
         assert!(parse_compose_memory("-5g").is_err());
         assert!(parse_compose_memory("99999999g").is_err());
+        // `4398046511104k` is 2^32 MiB. The old `as u32` cast stored 0.
+        assert!(parse_compose_memory("4398046511104k").is_err());
+        assert!(parse_compose_memory("4503599627370496").is_err());
         // Valid fractional input is still accepted (Docker-compatible).
         assert_eq!(parse_compose_memory("1.5g").unwrap(), 1536);
+        assert_eq!(parse_compose_memory("1024k").unwrap(), 1);
     }
 
     #[test]
