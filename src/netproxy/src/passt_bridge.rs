@@ -16,7 +16,8 @@ use crate::device::BridgePort;
 use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
 use crate::dns_tcp::DnsTcpOwner;
 use crate::egress::{
-    classify_ethernet_egress, default_untrusted_egress_denied, ethernet_ipv4_destination, EgressLeg,
+    classify_ethernet_egress, default_untrusted_egress_denied, ethernet_ipv4_destination,
+    ipv6_egress_denied, EgressLeg,
 };
 use a3s_box_core::EgressMatchRule;
 use std::net::Ipv4Addr;
@@ -142,6 +143,10 @@ fn run_passt_bridge(
         }
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
+            if ipv6_egress_denied(&frame) {
+                tracing::debug!("passt_bridge dropping IPv6; egress profile is IPv4-only");
+                continue;
+            }
             if let Some(owner) = dns_tcp.as_mut() {
                 if owner.should_divert(&frame) {
                     owner.push_guest_frame(frame.clone());
@@ -279,6 +284,10 @@ fn run_peer_only_bridge(
         }
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
+            if ipv6_egress_denied(&frame) {
+                tracing::debug!("passt_bridge dropping IPv6; egress profile is IPv4-only");
+                continue;
+            }
             if let Some(owner) = dns_tcp.as_mut() {
                 if owner.should_divert(&frame) {
                     owner.push_guest_frame(frame.clone());

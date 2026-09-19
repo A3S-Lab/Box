@@ -55,7 +55,7 @@ pub struct CreateArgs {
     /// Host-enforced MicroVM egress rule, repeatable.
     /// Format: `allow|deny:CIDR[:tcp|udp[:PORT]]`.
     /// First match wins, then the default untrusted profile. Domain names are
-    /// rejected. IPv6 is not matched. This is not a CNI plugin.
+    /// rejected. IPv6 frames are dropped (no IPv6 policy). This is not a CNI plugin.
     #[arg(long = "egress")]
     pub egress: Vec<String>,
 

@@ -20,10 +20,11 @@
 //! On Linux, a stream adapter switches same-network peer frames while retaining
 //! passt for gateway and egress traffic. First-match network egress rules
 //! (CIDR / protocol / port) are applied before the default untrusted profile
-//! on both this TCP proxy and Linux passt_bridge. Domain match and IPv6 are
-//! not claimed. Default untrusted egress drops guest IPv4 to loopback,
-//! link-local/metadata, and foreign private / CGNAT destinations (attached
-//! bridge CIDR and public remain unless a rule says otherwise).
+//! on both this TCP proxy and Linux passt_bridge. Domain match is not claimed.
+//! IPv6 Ethernet is dropped (IPv4-only profile). Default untrusted egress drops
+//! guest IPv4 to loopback, link-local/metadata, and foreign private / CGNAT
+//! destinations (attached bridge CIDR and public remain unless a rule says
+//! otherwise).
 
 mod device;
 mod dns_local;

@@ -133,6 +133,10 @@ impl UnixgramDevice {
                     );
                     self.stats.record_tx(n);
                     let frame = &buf[..n];
+                    if crate::egress::ipv6_egress_denied(frame) {
+                        tracing::debug!("NetProxy dropping IPv6; egress profile is IPv4-only");
+                        continue;
+                    }
                     let (leg, default_denied) = match &self.egress {
                         Some(gate) => {
                             let leg = crate::egress::classify_ethernet_egress(frame, &gate.rules);
