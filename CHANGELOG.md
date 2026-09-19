@@ -32,6 +32,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux KVM and Windows WHPX qualification `*_OCI_BOX_OWNED` flags fail closed
+  on unknown values instead of silently selecting the external qualification
+  endpoint. Absent still means off. Does **not** flip MicroVM production
+  cutover, B2, or `b2_process_session_recovery_closed`.
 - Linux passt_bridge answers NetworkStore name/alias A and AAAA NODATA on
   TCP/53 with smoltcp TCP termination (parity with macOS netproxy). Unknown
   names connect via host `TcpStream` with bytes already read prefetched;
