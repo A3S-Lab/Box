@@ -400,4 +400,39 @@ mod tests {
         tagged_arp[17] = 0x06;
         assert!(!ipv6_egress_denied(&tagged_arp));
     }
+
+    #[test]
+    fn vlan_tag_does_not_hide_tcp_port_from_operator_rules() {
+        let mut frame = vec![0u8; 42];
+        frame[12] = 0x81;
+        frame[13] = 0x00;
+        frame[16] = 0x08;
+        frame[17] = 0x00;
+        frame[18] = 0x45;
+        frame[27] = 6;
+        frame[34] = 1;
+        frame[35] = 1;
+        frame[36] = 1;
+        frame[37] = 1;
+        frame[40] = 0x01;
+        frame[41] = 0xbb;
+        let view = ethernet_ipv4_view(&frame).expect("vlan tcp view");
+        assert_eq!(view.dest, Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(view.protocol, 6);
+        assert_eq!(view.dest_port, Some(443));
+        assert!(matches!(
+            classify_ethernet_egress(
+                &frame,
+                &[EgressMatchRule::parse("deny:1.1.1.1/32:tcp:443").unwrap()]
+            ),
+            EgressLeg::Drop
+        ));
+        assert!(matches!(
+            classify_ethernet_egress(
+                &frame,
+                &[EgressMatchRule::parse("deny:1.1.1.1/32:tcp:80").unwrap()]
+            ),
+            EgressLeg::Default
+        ));
+    }
 }
