@@ -208,7 +208,8 @@ fn parse_size(s: &str) -> std::result::Result<u64, String> {
         return Err(format!("unrecognized size format: {s}"));
     };
     let n: u64 = num.parse().map_err(|_| format!("invalid number: {num}"))?;
-    Ok(n * mult)
+    n.checked_mul(mult)
+        .ok_or_else(|| format!("size value too large: {s}"))
 }
 
 // ===========================================================================
@@ -1182,6 +1183,16 @@ mod tests {
         assert_eq!(parse_size("1g").unwrap(), 1024 * 1024 * 1024);
         assert_eq!(parse_size("512k").unwrap(), 512 * 1024);
         assert!(parse_size("abc").is_err());
+        assert!(parse_size("20000000000g").is_err());
+    }
+
+    #[test]
+    fn oversized_max_size_uses_the_default_instead_of_wrapping() {
+        let mut config = LogConfig::default();
+        config
+            .options
+            .insert("max-size".to_string(), "20000000000g".to_string());
+        assert_eq!(config.max_size(), 10 * 1024 * 1024);
     }
 
     #[test]
