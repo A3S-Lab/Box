@@ -44,6 +44,11 @@ All notable changes to A3S Box will be documented in this file.
   A guest can no longer hide metadata or IPv6 by shifting the ethertype past
   byte 12. A third VLAN tag is dropped because it is not IPv4 or ARP. This
   is not a VLAN policy and does **not** close B3.
+- Sandbox keep-authority refuses a Bridge network that stores `--egress`
+  rules, before any veth or iptables change. Those rules are enforced on
+  MicroVM netproxy and Linux passt_bridge only; attaching Sandbox would
+  have ignored operator deny. This does **not** add Sandbox egress
+  enforcement, CNI, or close B3.
 - Linux KVM qualification keeps production Sandbox on `SandboxViaOci` beside
   the DedicatedVm qualification provider. `microvm`/`kvm` fail Sandbox closed
   when that owner is not launch-ready; `all` refuses to start without it.

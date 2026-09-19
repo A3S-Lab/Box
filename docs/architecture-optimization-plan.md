@@ -68,7 +68,7 @@ Feature parity with other microVM projects is **not** an axiom.
 | Gate | Honest state |
 | --- | --- |
 | B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false` |
-| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; domain match, full AAAA, CNI, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
+| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked on MicroVM parity through OCI |
 | B6 cross-platform artifact matrix | Open |
@@ -296,7 +296,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P0 | Keep B2 evidence honest; fix real Live/recovery failures only | A | Flipping `b2_process_session_recovery_closed` |
 | P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580` | C | CNI; Sandbox bridge GA |
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
-| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586` | C | Domain match; IPv6 policy DSL; CNI; Sandbox bridge GA |
+| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM | B | Deleting libkrun before §4.5 |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |

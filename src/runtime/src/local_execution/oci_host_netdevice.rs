@@ -4,6 +4,8 @@
 //! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
 //! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE. Optional
 //! static TCP and UDP published ports install per-box DNAT (+ localhost OUTPUT).
+//! Networks that store `--egress` rules are refused: this path does not evaluate
+//! them, and attaching would ignore operator deny.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -114,6 +116,20 @@ pub(crate) fn interface_names(box_id: &str) -> ExecutionManagerResult<(String, S
     Ok((format!("bv{hex}c"), format!("bv{hex}p")))
 }
 
+/// Keep-authority Sandbox does not filter `--egress`. A non-empty rule list
+/// must fail closed so operator allow/deny is not silently ignored.
+pub(crate) fn refuse_unenforced_sandbox_egress(
+    network_name: &str,
+    rule_count: usize,
+) -> ExecutionManagerResult<()> {
+    if rule_count == 0 {
+        return Ok(());
+    }
+    Err(ExecutionManagerError::InvalidRequest(format!(
+        "network '{network_name}' has {rule_count} --egress rule(s) that Sandbox keep-authority does not enforce; refusing Bridge attach. MicroVM netproxy and Linux passt_bridge enforce those rules"
+    )))
+}
+
 /// Deterministic IFNAMSIZ-safe Linux bridge name for a NetworkStore network.
 pub(crate) fn bridge_iface_name(network_name: &str) -> String {
     let mut hasher = Sha256::new();
@@ -160,6 +176,10 @@ pub(crate) fn stage_for_sandbox_bundle(
                 "network '{network_name}' not found for SandboxViaOci host netdevice staging"
             ))
         })?;
+    // Operator rules live on the network object. Keep-authority MASQUERADE does
+    // not evaluate them; attaching would ignore deny. MicroVM netproxy and
+    // passt_bridge do evaluate them. Refuse before any host mutation.
+    refuse_unenforced_sandbox_egress(network_name, config.egress.len())?;
     let endpoint = config.endpoints.get(box_id).ok_or_else(|| {
         ExecutionManagerError::Unavailable(format!(
             "box '{box_id}' is not connected to network '{network_name}'; resource guard must connect before prepare"
@@ -841,6 +861,17 @@ mod tests {
         assert_eq!(p, "bv11111111p");
         assert!(c.len() <= 15);
         assert!(p.len() <= 15);
+    }
+
+    #[test]
+    fn sandbox_bridge_refuses_networks_that_carry_egress_rules() {
+        assert!(refuse_unenforced_sandbox_egress("dev", 0).is_ok());
+        let error = refuse_unenforced_sandbox_egress("dev", 2).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("dev") && message.contains("--egress") && message.contains("2"),
+            "expected a fail-closed egress refusal, got {message}"
+        );
     }
 
     #[test]
