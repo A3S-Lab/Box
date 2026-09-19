@@ -220,19 +220,15 @@ impl PasstManager {
 
         // Capture passt's stderr to a log file so spawn failures (bad args,
         // unsupported flags, permission errors after dropping privileges) are
-        // diagnosable instead of silently discarded to /dev/null.
+        // diagnosable. Discarding that stream hides the sandbox-denied signal
+        // that decides whether a root retry is honest.
         cmd.stdout(std::process::Stdio::null());
-        match self
-            .stderr_path()
-            .and_then(|p| std::fs::File::create(p).ok())
-        {
-            Some(file) => {
-                cmd.stderr(std::process::Stdio::from(file));
-            }
-            None => {
-                cmd.stderr(std::process::Stdio::null());
-            }
-        }
+        let stderr_log = self.stderr_path().ok_or_else(|| {
+            BoxError::NetworkError(
+                "passt socket path has no parent directory for the stderr log".to_string(),
+            )
+        })?;
+        cmd.stderr(std::process::Stdio::from(open_passt_stderr_log(&stderr_log)?));
 
         let child = cmd.spawn().map_err(|e| {
             BoxError::NetworkError(format!(
@@ -383,6 +379,15 @@ impl PasstManager {
             None => false,
         }
     }
+}
+
+fn open_passt_stderr_log(path: &Path) -> Result<std::fs::File> {
+    std::fs::File::create(path).map_err(|error| {
+        BoxError::NetworkError(format!(
+            "failed to create passt stderr log {}: {error}; refusing to discard passt diagnostics",
+            path.display()
+        ))
+    })
 }
 
 fn passt_sandbox_was_denied(stderr: &str) -> bool {
@@ -774,6 +779,18 @@ mod tests {
             .to_string()
             .contains("failed to create socket directory"));
         assert!(!mgr.is_running());
+    }
+
+    #[test]
+    fn passt_stderr_log_refuses_a_missing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing").join("passt.stderr.log");
+        let error = open_passt_stderr_log(&missing).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("refusing to discard passt diagnostics"),
+            "{message}"
+        );
     }
 
     #[test]

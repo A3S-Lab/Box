@@ -40,6 +40,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Passt startup fails closed when its stderr log cannot be created, instead
+  of discarding diagnostics and hiding the sandbox-denied retry signal. Does
+  **not** close B3 or claim Enterprise GA.
 - Sandbox keep-authority refuses a Bridge network that stores `--egress`
   rules, before any veth or iptables change. Those rules are enforced on
   MicroVM netproxy and Linux passt_bridge only; attaching Sandbox would
