@@ -144,7 +144,9 @@ fn run_passt_bridge(
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
             if ipv6_egress_denied(&frame) {
-                tracing::debug!("passt_bridge dropping IPv6; egress profile is IPv4-only");
+                tracing::debug!(
+                    "passt_bridge dropping Ethernet that bypasses the IPv4 egress profile"
+                );
                 continue;
             }
             if let Some(owner) = dns_tcp.as_mut() {
@@ -285,7 +287,9 @@ fn run_peer_only_bridge(
         for frame in decode_frames(&mut guest_input)? {
             progressed = true;
             if ipv6_egress_denied(&frame) {
-                tracing::debug!("passt_bridge dropping IPv6; egress profile is IPv4-only");
+                tracing::debug!(
+                    "passt_bridge dropping Ethernet that bypasses the IPv4 egress profile"
+                );
                 continue;
             }
             if let Some(owner) = dns_tcp.as_mut() {
