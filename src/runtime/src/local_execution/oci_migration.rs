@@ -535,7 +535,7 @@ impl LocalExecutionManager {
                 state_path,
                 home_dir,
                 oci,
-                super::OciMigrationPolicy::AllViaOci,
+                super::OciMigrationPolicy::MicrovmViaOci,
                 pull_progress_fn,
             ))
         }
@@ -621,7 +621,7 @@ impl LocalExecutionManager {
                 state_path,
                 home_dir,
                 oci,
-                OciMigrationPolicy::AllViaOci,
+                OciMigrationPolicy::MicrovmViaOci,
                 pull_progress_fn,
             ))
         }

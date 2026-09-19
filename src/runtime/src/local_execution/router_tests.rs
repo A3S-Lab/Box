@@ -219,6 +219,67 @@ async fn sandbox_policy_stamps_oci_route_before_preflight_and_reservation() {
 }
 
 #[tokio::test]
+async fn microvm_qualification_policy_keeps_sandbox_on_box_backend() {
+    let temporary = tempfile::tempdir().unwrap();
+    let legacy = Arc::new(RoutedProbeBackend::default());
+    let oci = Arc::new(RoutedProbeBackend::default());
+    let manager = LocalExecutionManager::new(
+        temporary.path().join("boxes.json"),
+        temporary.path(),
+        Arc::new(LocalExecutionBackendRouter::new(
+            legacy.clone(),
+            oci.clone(),
+            OciMigrationPolicy::MicrovmViaOci,
+        )),
+    );
+
+    let sandbox = manager
+        .create(
+            request(ExecutionIsolation::Sandbox),
+            &OperationId::new("route-sandbox-kept").unwrap(),
+        )
+        .await
+        .unwrap();
+    let microvm = manager
+        .create(
+            request(ExecutionIsolation::Microvm),
+            &OperationId::new("route-microvm-oci").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let sandbox_record = manager
+        .get(&sandbox.execution_id)
+        .await
+        .unwrap()
+        .expect("sandbox record");
+    let microvm_record = manager
+        .get(&microvm.execution_id)
+        .await
+        .unwrap()
+        .expect("microvm record");
+
+    assert_eq!(
+        sandbox_record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .runtime_route,
+        ManagedRuntimeRoute::BoxVm
+    );
+    assert_eq!(
+        microvm_record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .runtime_route,
+        ManagedRuntimeRoute::OciSdk
+    );
+    assert_eq!(legacy.preflights(), 1);
+    assert_eq!(oci.preflights(), 1);
+}
+
+#[tokio::test]
 async fn invalid_backend_resource_plan_is_never_reserved() {
     let temporary = tempfile::tempdir().unwrap();
     let state_path = temporary.path().join("boxes.json");

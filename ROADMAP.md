@@ -221,7 +221,11 @@ The qualification-only `A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path still
 requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for an externally launched
 `box-kvm-qualification-service`, or `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service
 root/bin/shim/manifest so Box identity-fences and (re)spawns that Host under
-`{service_root}/runtime.sock`. Box-owned KVM Host spawn forces
+`{service_root}/runtime.sock`. That composition uses `MicrovmViaOci`: new
+MicroVM records go to the qualification DedicatedVm provider, and new Sandbox
+records stay on the retained Box backend instead of being rejected by it.
+It does not keep production `SandboxViaOci` in the same process and does not
+claim MicroVM production cutover. Box-owned KVM Host spawn forces
 `A3S_OCI_KVM_SESSION_OWNER=1`; fresh qualification construction reaps
 session-owner/shim orphans on dead-Host reclaim, while retained-manager Live
 reopen does not. Box-owned KVM ensure does not claim production

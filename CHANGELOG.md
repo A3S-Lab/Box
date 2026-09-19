@@ -32,6 +32,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux KVM and Windows WHPX qualification constructors use `MicrovmViaOci`:
+  new MicroVM records go to the DedicatedVm qualification provider, and new
+  Sandbox records stay on the retained Box backend instead of being rejected
+  there. This does **not** keep production `SandboxViaOci` in that process,
+  claim MicroVM production cutover, or close B2.
 - Linux KVM and Windows WHPX qualification `*_OCI_BOX_OWNED` flags fail closed
   on unknown values instead of silently selecting the external qualification
   endpoint. Absent still means off. Does **not** flip MicroVM production

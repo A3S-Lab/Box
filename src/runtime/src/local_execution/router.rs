@@ -29,17 +29,23 @@ pub enum OciMigrationPolicy {
     SandboxViaOci,
     /// Route both Sandbox and MicroVM through the public OCI SDK.
     AllViaOci,
+    /// Route new MicroVM records through OCI and keep Sandbox on the Box backend.
+    ///
+    /// DedicatedVm qualification uses this so a MicroVM opt-in does not send
+    /// Sandbox to a provider that rejects it. This is not production cutover:
+    /// Sandbox stays on the retained Box path, not `SandboxViaOci`.
+    MicrovmViaOci,
 }
 
 impl OciMigrationPolicy {
     const fn route(self, isolation: ExecutionIsolation) -> ManagedRuntimeRoute {
         match (self, isolation) {
-            (Self::LegacyOnly, _) | (Self::SandboxViaOci, ExecutionIsolation::Microvm) => {
-                ManagedRuntimeRoute::BoxVm
-            }
-            (Self::SandboxViaOci, ExecutionIsolation::Sandbox) | (Self::AllViaOci, _) => {
-                ManagedRuntimeRoute::OciSdk
-            }
+            (Self::LegacyOnly, _)
+            | (Self::SandboxViaOci, ExecutionIsolation::Microvm)
+            | (Self::MicrovmViaOci, ExecutionIsolation::Sandbox) => ManagedRuntimeRoute::BoxVm,
+            (Self::SandboxViaOci, ExecutionIsolation::Sandbox)
+            | (Self::AllViaOci, _)
+            | (Self::MicrovmViaOci, ExecutionIsolation::Microvm) => ManagedRuntimeRoute::OciSdk,
         }
     }
 }
