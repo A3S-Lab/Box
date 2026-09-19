@@ -35,12 +35,12 @@ const POLL_TIMEOUT_MS: libc::c_int = 100;
 /// contract as macOS netproxy) before the frame is forwarded to passt. TCP/53
 /// uses smoltcp termination; unknown names use host `TcpStream` upstream.
 ///
-/// `attached_cidr` is `(guest_ip, prefix_len)` used by the default untrusted
-/// egress filter before peer switch and passt. `gateway` is denied even when
-/// it sits in that CIDR: passt rewrites it to host loopback. `egress_rules`
-/// are first-match CIDR/protocol/port rules loaded from the network object;
-/// empty keeps the default profile only. An explicit allow still matches
-/// first. Peer IPv4 in the CIDR stays allowed. ARP is not filtered.
+/// `scope.attached_cidr` is `(guest_ip, prefix_len)` used by the default
+/// untrusted egress filter before peer switch and passt. `scope.gateway` is
+/// denied even when it sits in that CIDR: passt rewrites it to host loopback.
+/// `egress_rules` are first-match CIDR/protocol/port rules loaded from the
+/// network object; empty keeps the default profile only. An explicit allow
+/// still matches first. Peer IPv4 in the CIDR stays allowed. ARP is not filtered.
 pub fn spawn_inherited_passt_bridge(
     proxy_fd: RawFd,
     passt_socket_path: PathBuf,
