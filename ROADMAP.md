@@ -946,7 +946,9 @@ open and harness reports still keep
   attached bridge CIDR (public and same-CIDR peers remain). Network
   `--egress` rules (`allow|deny:CIDR[:tcp|udp[:PORT]]`) are first-match on
   that same IPv4 path before the default profile. IPv6 Ethernet is dropped
-  there until an IPv6 policy exists. Domain match, full
+  there until an IPv6 policy exists. Sandbox keep-authority refuses Bridge
+  attach when the network stores `--egress` rules, instead of ignoring them.
+  Domain match, full
   AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
