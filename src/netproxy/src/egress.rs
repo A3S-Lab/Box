@@ -13,8 +13,15 @@ use std::net::Ipv4Addr;
 
 use a3s_box_core::{EgressMatchRule, PolicyAction};
 
-/// Whether an outbound IPv4 destination is denied by the default untrusted
-/// MicroVM egress profile.
+/// Attached network used by the default untrusted profile.
+///
+/// `gateway` is denied even when it is inside `attached_cidr`, because passt
+/// rewrites that address to host loopback. `None` gateway keeps the CIDR allow.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UntrustedEgressScope {
+    pub attached_cidr: Option<(Ipv4Addr, u8)>,
+    pub gateway: Option<Ipv4Addr>,
+}
 ///
 /// `attached_cidr` is `(any_address_in_subnet, prefix_len)` for the guest's
 /// attached product network. When `None` (no bridge CIDR), all RFC1918 /

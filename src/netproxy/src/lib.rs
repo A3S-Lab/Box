@@ -59,6 +59,7 @@ use device::{BridgePort, EgressGate, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
 pub use dns_local::NetworkDnsConfig;
+pub use egress::UntrustedEgressScope;
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 pub use passt_bridge::spawn_inherited_passt_bridge;
 

@@ -17,7 +17,7 @@ use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
 use crate::dns_tcp::DnsTcpOwner;
 use crate::egress::{
     classify_ethernet_egress, default_untrusted_egress_denied_with_gateway,
-    ethernet_ipv4_destination, ipv6_egress_denied, EgressLeg,
+    ethernet_ipv4_destination, ipv6_egress_denied, EgressLeg, UntrustedEgressScope,
 };
 use a3s_box_core::EgressMatchRule;
 use std::net::Ipv4Addr;
@@ -47,8 +47,7 @@ pub fn spawn_inherited_passt_bridge(
     bridge_socket_dir: PathBuf,
     own_mac: [u8; 6],
     dns: Option<NetworkDnsConfig>,
-    attached_cidr: Option<(Ipv4Addr, u8)>,
-    gateway: Option<Ipv4Addr>,
+    scope: UntrustedEgressScope,
     egress_rules: Vec<EgressMatchRule>,
 ) -> a3s_box_core::error::Result<()> {
     if proxy_fd < 0 {
@@ -78,16 +77,9 @@ pub fn spawn_inherited_passt_bridge(
             let marker = passt_socket_path
                 .parent()
                 .map(|dir| dir.join("passt.backend_lost"));
-            if let Err(error) = run_passt_bridge(
-                guest,
-                passt,
-                bridge,
-                marker,
-                dns,
-                attached_cidr,
-                gateway,
-                egress_rules,
-            ) {
+            if let Err(error) =
+                run_passt_bridge(guest, passt, bridge, marker, dns, scope, egress_rules)
+            {
                 tracing::warn!(%error, "passt peer bridge stopped");
             }
         })
@@ -119,10 +111,13 @@ fn run_passt_bridge(
     bridge: BridgePort,
     backend_lost_marker: Option<PathBuf>,
     dns: Option<NetworkDnsConfig>,
-    attached_cidr: Option<(Ipv4Addr, u8)>,
-    gateway: Option<Ipv4Addr>,
+    scope: UntrustedEgressScope,
     egress_rules: Vec<EgressMatchRule>,
 ) -> io::Result<()> {
+    let UntrustedEgressScope {
+        attached_cidr,
+        gateway,
+    } = scope;
     guest.set_nonblocking(true)?;
     passt.set_nonblocking(true)?;
 
@@ -609,8 +604,7 @@ mod tests {
                 bridge_a,
                 None,
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
@@ -621,8 +615,7 @@ mod tests {
                 bridge_b,
                 None,
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
@@ -694,8 +687,7 @@ mod tests {
                 bridge_a,
                 None,
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
@@ -706,8 +698,7 @@ mod tests {
                 bridge_b,
                 None,
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
@@ -762,8 +753,7 @@ mod tests {
                 bridge_a,
                 Some(marker_for_thread),
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
@@ -774,8 +764,7 @@ mod tests {
                 bridge_b,
                 None,
                 None,
-                None,
-                None,
+                UntrustedEgressScope::default(),
                 Vec::new(),
             )
         });
