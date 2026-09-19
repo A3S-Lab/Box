@@ -365,12 +365,19 @@ fn resolve_owner_identity_from_socket(
 }
 
 fn keep_network_device_authority_requested() -> ExecutionManagerResult<bool> {
-    match std::env::var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV) {
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Ok(value) if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") => {
-            Ok(false)
+    let flag = match std::env::var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV) {
+        Err(std::env::VarError::NotPresent) => return Ok(false),
+        Ok(value) => a3s_box_core::parse_keep_network_device_authority(Some(&value))
+            .map_err(ExecutionManagerError::InvalidRequest)?,
+        Err(error) => {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "failed to read {KEEP_NETWORK_DEVICE_AUTHORITY_ENV}: {error}"
+            )));
         }
-        Ok(_) => {
+    };
+    match flag {
+        a3s_box_core::KeepNetworkAuthorityFlag::Off => Ok(false),
+        a3s_box_core::KeepNetworkAuthorityFlag::On => {
             // SAFETY: reading real/effective UIDs is async-signal-safe and
             // does not mutate process state.
             let euid = unsafe { libc::geteuid() };
@@ -382,9 +389,6 @@ fn keep_network_device_authority_requested() -> ExecutionManagerResult<bool> {
             }
             Ok(true)
         }
-        Err(error) => Err(ExecutionManagerError::Unavailable(format!(
-            "failed to read {KEEP_NETWORK_DEVICE_AUTHORITY_ENV}: {error}"
-        ))),
     }
 }
 
@@ -964,9 +968,15 @@ fn is_sha256_hex(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    fn keep_authority_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn owner_record_fences_endpoint_and_artifacts() {
@@ -1037,12 +1047,27 @@ mod tests {
 
     #[test]
     fn keep_network_device_authority_defaults_off() {
+        let _lock = keep_authority_env_lock();
         std::env::remove_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
         assert!(!keep_network_device_authority_requested().unwrap());
     }
 
     #[test]
+    fn keep_network_device_authority_off_and_unknown_do_not_opt_in() {
+        let _lock = keep_authority_env_lock();
+        for off in ["off", "no", "0", "false"] {
+            std::env::set_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV, off);
+            assert!(!keep_network_device_authority_requested().unwrap(), "{off}");
+        }
+        std::env::set_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "maybe");
+        let error = keep_network_device_authority_requested().unwrap_err();
+        assert!(error.to_string().contains("unsupported"), "{error}");
+        std::env::remove_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
+    }
+
+    #[test]
     fn keep_network_device_authority_rejects_non_root_opt_in() {
+        let _lock = keep_authority_env_lock();
         std::env::set_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV, "1");
         let result = keep_network_device_authority_requested();
         std::env::remove_var(KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
