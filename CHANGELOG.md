@@ -44,6 +44,10 @@ All notable changes to A3S Box will be documented in this file.
   when converted to seconds, fail closed. A missing interval, timeout, or
   start period still uses the Compose default. `307445734561825861m` previously
   wrapped in release. Does **not** close B4 or claim Enterprise GA.
+- Compose memory values in kibibytes or raw bytes that do not fit in `u32`
+  MiB fail closed. The `g`/`m` path already rejected this; `4398046511104k`
+  and an equivalent byte size were truncated to 0 MiB. Does **not** close
+  B4 or claim Enterprise GA.
 - MicroVM egress sees IPv4 and IPv6 behind one 802.1Q or 802.1ad tag (QinQ).
   A guest can no longer hide metadata or IPv6 by shifting the ethertype past
   byte 12. A third VLAN tag is dropped because it is not IPv4 or ARP. This
