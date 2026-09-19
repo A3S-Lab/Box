@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- MicroVM egress sees IPv4 and IPv6 behind one 802.1Q or 802.1ad tag (QinQ).
+  A guest can no longer hide metadata or IPv6 by shifting the ethertype past
+  byte 12. A third VLAN tag is dropped because it is not IPv4 or ARP. This
+  is not a VLAN policy and does **not** close B3.
 - Linux KVM qualification keeps production Sandbox on `SandboxViaOci` beside
   the DedicatedVm qualification provider. `microvm`/`kvm` fail Sandbox closed
   when that owner is not launch-ready; `all` refuses to start without it.

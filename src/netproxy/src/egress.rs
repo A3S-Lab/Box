@@ -3,8 +3,9 @@
 //! First-match operator rules (CIDR / protocol / port) on the network object
 //! are evaluated before this default. Domain rules are rejected at parse time.
 //! IPv6 Ethernet frames are dropped: NetworkStore and this profile are IPv4-only,
-//! so leaving IPv6 through would bypass link-local and metadata denial.
-//! This is not an IPv6 policy, DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
+//! so leaving IPv6 through would bypass link-local and metadata denial. A single
+//! 802.1Q or 802.1ad tag does not hide that header. This is not an IPv6 policy,
+//! VLAN policy, DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
 
 use std::net::Ipv4Addr;
 
@@ -90,21 +91,48 @@ pub(crate) struct Ipv4View {
     pub dest_port: Option<u16>,
 }
 
+/// Offset of the payload ethertype after at most two 802.1Q (`0x8100`) or
+/// 802.1ad (`0x88a8`) tags. A guest can shift IPv4 or IPv6 past byte 12;
+/// the profile still has to see the inner header. This is not a VLAN policy.
+fn payload_ethertype_offset(frame: &[u8]) -> Option<usize> {
+    if frame.len() < 14 {
+        return None;
+    }
+    let mut offset = 12usize;
+    for _ in 0..2 {
+        if frame.len() < offset + 4 {
+            return Some(offset);
+        }
+        let tpid = u16::from_be_bytes([frame[offset], frame[offset + 1]]);
+        if tpid == 0x8100 || tpid == 0x88a8 {
+            offset += 4;
+            continue;
+        }
+        return Some(offset);
+    }
+    if frame.len() < offset + 2 {
+        return None;
+    }
+    Some(offset)
+}
+
 pub(crate) fn ethernet_ipv4_view(frame: &[u8]) -> Option<Ipv4View> {
-    if frame.len() < 14 + 20 {
+    let ethertype_at = payload_ethertype_offset(frame)?;
+    if frame.len() < ethertype_at + 2 + 20 {
         return None;
     }
-    if frame[12..14] != [0x08, 0x00] {
+    if frame[ethertype_at..ethertype_at + 2] != [0x08, 0x00] {
         return None;
     }
-    let ip = &frame[14..];
+    let ip_at = ethertype_at + 2;
+    let ip = &frame[ip_at..];
     let ihl = (ip[0] & 0x0f) as usize * 4;
-    if ihl < 20 || frame.len() < 14 + ihl {
+    if ihl < 20 || frame.len() < ip_at + ihl {
         return None;
     }
     let protocol = ip[9];
     let dest_port = if protocol == 6 || protocol == 17 {
-        let payload = &frame[14 + ihl..];
+        let payload = &frame[ip_at + ihl..];
         if payload.len() >= 4 {
             Some(u16::from_be_bytes([payload[2], payload[3]]))
         } else {
@@ -172,9 +200,19 @@ pub(crate) fn classify_ethernet_egress(frame: &[u8], rules: &[EgressMatchRule]) 
 
 /// IPv6 is not a product path. NetworkStore, DNS answers, and the untrusted
 /// profile are IPv4-only, so an IPv6 frame (including link-local and metadata)
-/// is dropped before peer switch and host egress. ARP is not IPv6.
+/// is dropped before peer switch and host egress. One 802.1Q or 802.1ad tag,
+/// or QinQ, does not hide that ethertype. A third VLAN tag is also dropped:
+/// it is not IPv4 or ARP, and forwarding it would hide the inner header.
+/// ARP is not IPv6.
 pub(crate) fn ipv6_egress_denied(frame: &[u8]) -> bool {
-    frame.len() >= 14 && frame[12] == 0x86 && frame[13] == 0xdd
+    let Some(ethertype_at) = payload_ethertype_offset(frame) else {
+        return false;
+    };
+    if frame.len() < ethertype_at + 2 {
+        return false;
+    }
+    let ethertype = u16::from_be_bytes([frame[ethertype_at], frame[ethertype_at + 1]]);
+    ethertype == 0x86dd || ethertype == 0x8100 || ethertype == 0x88a8
 }
 
 #[cfg(test)]
@@ -304,5 +342,62 @@ mod tests {
         ipv4[13] = 0x00;
         assert!(!ipv6_egress_denied(&ipv4));
         assert!(!ipv6_egress_denied(&[0u8; 13]));
+    }
+
+    #[test]
+    fn vlan_tag_does_not_hide_ipv6_or_metadata() {
+        let mut tagged_ipv6 = vec![0u8; 18];
+        tagged_ipv6[12] = 0x81;
+        tagged_ipv6[13] = 0x00;
+        tagged_ipv6[16] = 0x86;
+        tagged_ipv6[17] = 0xdd;
+        assert!(ipv6_egress_denied(&tagged_ipv6));
+
+        let mut qinq_ipv6 = vec![0u8; 22];
+        qinq_ipv6[12] = 0x88;
+        qinq_ipv6[13] = 0xa8;
+        qinq_ipv6[16] = 0x81;
+        qinq_ipv6[17] = 0x00;
+        qinq_ipv6[20] = 0x86;
+        qinq_ipv6[21] = 0xdd;
+        assert!(ipv6_egress_denied(&qinq_ipv6));
+
+        // A third tag is not IPv4 or ARP. Forwarding it would hide the inner header.
+        let mut triple = vec![0u8; 26];
+        triple[12] = 0x88;
+        triple[13] = 0xa8;
+        triple[16] = 0x81;
+        triple[17] = 0x00;
+        triple[20] = 0x81;
+        triple[21] = 0x00;
+        triple[24] = 0x08;
+        triple[25] = 0x00;
+        assert!(ipv6_egress_denied(&triple));
+
+        let mut tagged_ipv4 = vec![0u8; 38];
+        tagged_ipv4[12] = 0x81;
+        tagged_ipv4[13] = 0x00;
+        tagged_ipv4[16] = 0x08;
+        tagged_ipv4[17] = 0x00;
+        tagged_ipv4[18] = 0x45;
+        tagged_ipv4[34] = 169;
+        tagged_ipv4[35] = 254;
+        tagged_ipv4[36] = 169;
+        tagged_ipv4[37] = 254;
+        assert_eq!(
+            ethernet_ipv4_destination(&tagged_ipv4),
+            Some(Ipv4Addr::new(169, 254, 169, 254))
+        );
+        assert!(default_untrusted_egress_denied(
+            ethernet_ipv4_destination(&tagged_ipv4).unwrap(),
+            Some((Ipv4Addr::new(10, 88, 0, 1), 24))
+        ));
+
+        let mut tagged_arp = vec![0u8; 18];
+        tagged_arp[12] = 0x81;
+        tagged_arp[13] = 0x00;
+        tagged_arp[16] = 0x08;
+        tagged_arp[17] = 0x06;
+        assert!(!ipv6_egress_denied(&tagged_arp));
     }
 }
