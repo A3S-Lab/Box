@@ -14,6 +14,9 @@ use async_trait::async_trait;
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
+#[cfg(target_os = "linux")]
+mod isolation_split;
+
 use super::LocalExecutionManager;
 #[cfg(target_os = "linux")]
 use super::{
@@ -412,48 +415,9 @@ impl LocalExecutionManager {
 
         #[cfg(target_os = "linux")]
         {
-            let capabilities = crate::sandbox::probe_sandbox_capabilities_for(
-                ExecutionBackend::A3sOci,
-                config.runtime_path(),
-                config.agent_path(),
-            );
-            capabilities.require_ready().map_err(|error| {
-                ExecutionManagerError::Unavailable(format!(
-                    "native Linux OCI migration preflight failed: {error}"
-                ))
-            })?;
-            let artifacts = capabilities.a3s_oci.as_ref().ok_or_else(|| {
-                ExecutionManagerError::Unavailable(
-                    "native Linux OCI migration preflight returned no runtime artifacts"
-                        .to_string(),
-                )
-            })?;
-            // Fresh SandboxViaOci construction: reclaiming a dead Host must
-            // tear down Live-survivable supervised orphans so stopped-only
-            // reconcile sees a tombstone. Retained-manager Live reopen keeps
-            // the default (no reap) via `ensure_native_linux_owner`.
-            let endpoint = super::oci_owner::ensure_native_linux_oci_owner_with_options(
-                config.service_root(),
-                artifacts,
-                super::oci_owner::EnsureNativeLinuxOwnerOptions {
-                    reap_orphaned_supervised_sessions: true,
-                },
-            )
-            .await?;
-            let mut provider = NativeLinuxOciBundleProvider::new(
-                home_dir.clone(),
-                artifacts.runtime_path.clone(),
-                artifacts.agent_path.clone(),
-            );
-            if let Some(progress) = pull_progress_fn.as_ref() {
-                provider = provider.with_pull_progress_fn(progress.clone());
-            }
-            let provider = Arc::new(provider);
-            let oci = Arc::new(
-                OciLocalExecutionBackend::connect(endpoint, provider)
-                    .await?
-                    .with_native_linux_owner_recovery(config.service_root(), artifacts.clone()),
-            );
+            let oci =
+                connect_native_linux_sandbox_backend(&home_dir, &config, pull_progress_fn.as_ref())
+                    .await?;
             Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
                 home_dir,
@@ -619,9 +583,13 @@ impl LocalExecutionManager {
             };
             Ok(Self::with_oci_migration_backend_and_pull_progress(
                 state_path,
-                home_dir,
-                oci,
-                OciMigrationPolicy::MicrovmViaOci,
+                home_dir.clone(),
+                Arc::new(isolation_split::IsolationSplitBackend::new(
+                    sandbox_backend_beside_kvm_qualification(&home_dir, pull_progress_fn.as_ref())
+                        .await?,
+                    oci,
+                )),
+                OciMigrationPolicy::AllViaOci,
                 pull_progress_fn,
             ))
         }
@@ -847,6 +815,95 @@ impl LocalExecutionBackend for UnavailableOciMigrationBackend {
 
     async fn kill(&self, _record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         Err(self.unavailable())
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn connect_native_linux_sandbox_backend(
+    home_dir: &Path,
+    config: &NativeLinuxOciMigrationConfig,
+    pull_progress_fn: Option<&crate::PullProgressFn>,
+) -> ExecutionManagerResult<Arc<dyn LocalExecutionBackend>> {
+    config.validate()?;
+    let capabilities = crate::sandbox::probe_sandbox_capabilities_for(
+        ExecutionBackend::A3sOci,
+        config.runtime_path(),
+        config.agent_path(),
+    );
+    capabilities.require_ready().map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "native Linux OCI migration preflight failed: {error}"
+        ))
+    })?;
+    let artifacts = capabilities.a3s_oci.as_ref().ok_or_else(|| {
+        ExecutionManagerError::Unavailable(
+            "native Linux OCI migration preflight returned no runtime artifacts".to_string(),
+        )
+    })?;
+    // Fresh SandboxViaOci construction: reclaiming a dead Host must tear down
+    // Live-survivable supervised orphans so stopped-only reconcile sees a
+    // tombstone. Retained-manager Live reopen keeps the default (no reap).
+    let endpoint = super::oci_owner::ensure_native_linux_oci_owner_with_options(
+        config.service_root(),
+        artifacts,
+        super::oci_owner::EnsureNativeLinuxOwnerOptions {
+            reap_orphaned_supervised_sessions: true,
+        },
+    )
+    .await?;
+    let mut provider = NativeLinuxOciBundleProvider::new(
+        home_dir.to_path_buf(),
+        artifacts.runtime_path.clone(),
+        artifacts.agent_path.clone(),
+    );
+    if let Some(progress) = pull_progress_fn {
+        provider = provider.with_pull_progress_fn(progress.clone());
+    }
+    let backend = OciLocalExecutionBackend::connect(endpoint, Arc::new(provider))
+        .await?
+        .with_native_linux_owner_recovery(config.service_root(), artifacts.clone());
+    Ok(Arc::new(backend))
+}
+
+/// `all` asks for both isolations on OCI, so a missing Sandbox owner fails the
+/// process. `microvm`/`kvm` keep qualification alive and fail Sandbox closed
+/// through [`UnavailableOciMigrationBackend`].
+#[cfg(target_os = "linux")]
+fn migration_mode_requires_ready_sandbox() -> bool {
+    std::env::var_os(OCI_MIGRATION_ENV)
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "all" | "all-via-oci"
+            )
+        })
+}
+
+#[cfg(target_os = "linux")]
+async fn sandbox_backend_beside_kvm_qualification(
+    home_dir: &Path,
+    pull_progress_fn: Option<&crate::PullProgressFn>,
+) -> ExecutionManagerResult<Arc<dyn LocalExecutionBackend>> {
+    let Some((_, config)) = parse_environment(
+        None,
+        std::env::var_os(OCI_HOST_ROOT_ENV),
+        std::env::var_os(OCI_RUNTIME_PATH_ENV),
+        std::env::var_os(OCI_AGENT_PATH_ENV),
+        home_dir,
+    )?
+    else {
+        return Err(ExecutionManagerError::Internal(
+            "Linux default Sandbox OCI config was not selected beside KVM qualification"
+                .to_string(),
+        ));
+    };
+    match connect_native_linux_sandbox_backend(home_dir, &config, pull_progress_fn).await {
+        Ok(backend) => Ok(backend),
+        Err(error) if !migration_mode_requires_ready_sandbox() => {
+            Ok(Arc::new(UnavailableOciMigrationBackend::new(error)))
+        }
+        Err(error) => Err(error),
     }
 }
 

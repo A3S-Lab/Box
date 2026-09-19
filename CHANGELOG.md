@@ -32,6 +32,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux KVM qualification keeps production Sandbox on `SandboxViaOci` beside
+  the DedicatedVm qualification provider. `microvm`/`kvm` fail Sandbox closed
+  when that owner is not launch-ready; `all` refuses to start without it.
+  Windows WHPX qualification still uses `MicrovmViaOci` (Sandbox stays on the
+  Box backend). Does **not** claim MicroVM production cutover or close B2.
 - Linux KVM and Windows WHPX qualification constructors use `MicrovmViaOci`:
   new MicroVM records go to the DedicatedVm qualification provider, and new
   Sandbox records stay on the retained Box backend instead of being rejected
