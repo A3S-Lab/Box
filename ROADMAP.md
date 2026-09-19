@@ -943,8 +943,10 @@ open and harness reports still keep
   prefetch (Linux does not forward TCP/53 mid-stream to passt). Default
   MicroVM egress on netproxy / passt_bridge denies
   loopback, link-local/metadata, foreign RFC1918, and CGNAT outside the
-  attached bridge CIDR (public and same-CIDR peers remain). Full AAAA records,
-  CNI, multi-device, first-match operator policy DSL, rootless/MicroVM/Windows
+  attached bridge CIDR (public and same-CIDR peers remain). Network
+  `--egress` rules (`allow|deny:CIDR[:tcp|udp[:PORT]]`) are first-match on
+  that same IPv4 path before the default profile. Domain match, IPv6, full
+  AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux

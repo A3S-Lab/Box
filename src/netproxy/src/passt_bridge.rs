@@ -15,7 +15,10 @@ use std::time::Duration;
 use crate::device::BridgePort;
 use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
 use crate::dns_tcp::DnsTcpOwner;
-use crate::egress::{default_untrusted_egress_denied, ethernet_ipv4_destination};
+use crate::egress::{
+    classify_ethernet_egress, default_untrusted_egress_denied, ethernet_ipv4_destination, EgressLeg,
+};
+use a3s_box_core::EgressMatchRule;
 use std::net::Ipv4Addr;
 
 const MIN_ETHERNET_FRAME: usize = 14;
@@ -32,7 +35,9 @@ const POLL_TIMEOUT_MS: libc::c_int = 100;
 /// uses smoltcp termination; unknown names use host `TcpStream` upstream.
 ///
 /// `attached_cidr` is `(guest_ip, prefix_len)` used by the default untrusted
-/// egress filter before passt. Peer L2 frames are unaffected.
+/// egress filter before peer switch and passt. `egress_rules` are first-match
+/// CIDR/protocol/port rules loaded from the network object; empty keeps the
+/// default profile only. Peer and gateway IPv4 are both filtered. ARP is not.
 pub fn spawn_inherited_passt_bridge(
     proxy_fd: RawFd,
     passt_socket_path: PathBuf,
@@ -40,6 +45,7 @@ pub fn spawn_inherited_passt_bridge(
     own_mac: [u8; 6],
     dns: Option<NetworkDnsConfig>,
     attached_cidr: Option<(Ipv4Addr, u8)>,
+    egress_rules: Vec<EgressMatchRule>,
 ) -> a3s_box_core::error::Result<()> {
     if proxy_fd < 0 {
         return Err(a3s_box_core::error::BoxError::NetworkError(
@@ -68,7 +74,15 @@ pub fn spawn_inherited_passt_bridge(
             let marker = passt_socket_path
                 .parent()
                 .map(|dir| dir.join("passt.backend_lost"));
-            if let Err(error) = run_passt_bridge(guest, passt, bridge, marker, dns, attached_cidr) {
+            if let Err(error) = run_passt_bridge(
+                guest,
+                passt,
+                bridge,
+                marker,
+                dns,
+                attached_cidr,
+                egress_rules,
+            ) {
                 tracing::warn!(%error, "passt peer bridge stopped");
             }
         })
@@ -101,6 +115,7 @@ fn run_passt_bridge(
     backend_lost_marker: Option<PathBuf>,
     dns: Option<NetworkDnsConfig>,
     attached_cidr: Option<(Ipv4Addr, u8)>,
+    egress_rules: Vec<EgressMatchRule>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
     passt.set_nonblocking(true)?;
@@ -109,7 +124,11 @@ fn run_passt_bridge(
     let mut passt_input = Vec::new();
     let mut to_guest = PendingBytes::default();
     let mut to_passt = PendingBytes::default();
-    let mut dns_tcp = dns.as_ref().map(|config| DnsTcpOwner::new(config.clone()));
+    let mut dns_tcp = dns.as_ref().map(|config| {
+        let mut owner = DnsTcpOwner::new(config.clone());
+        owner.set_egress_rules(egress_rules.clone());
+        owner
+    });
 
     loop {
         let mut progressed = false;
@@ -140,17 +159,30 @@ fn run_passt_bridge(
                     continue;
                 }
             }
-            if bridge.forward_from_guest(&frame) {
-                if let Some(dest) = ethernet_ipv4_destination(&frame) {
-                    if default_untrusted_egress_denied(dest, attached_cidr) {
-                        tracing::debug!(
-                            %dest,
-                            "passt_bridge dropping IPv4 by default untrusted egress policy"
-                        );
-                        continue;
+            match classify_ethernet_egress(&frame, &egress_rules) {
+                EgressLeg::Drop => {
+                    tracing::debug!("passt_bridge dropping IPv4 by egress policy");
+                    continue;
+                }
+                EgressLeg::Allow => {
+                    if bridge.forward_from_guest(&frame) {
+                        to_passt.push_frame(&frame)?;
                     }
                 }
-                to_passt.push_frame(&frame)?;
+                EgressLeg::Default => {
+                    if bridge.forward_from_guest(&frame) {
+                        if let Some(dest) = ethernet_ipv4_destination(&frame) {
+                            if default_untrusted_egress_denied(dest, attached_cidr) {
+                                tracing::debug!(
+                                    %dest,
+                                    "passt_bridge dropping IPv4 by default untrusted egress policy"
+                                );
+                                continue;
+                            }
+                        }
+                        to_passt.push_frame(&frame)?;
+                    }
+                }
             }
         }
 
@@ -179,7 +211,15 @@ fn run_passt_bridge(
                 }
                 // Drain any pending guest-bound bytes, then peer-only.
                 let _ = to_guest.flush(&mut guest);
-                return run_peer_only_bridge(guest, bridge, guest_input, to_guest, dns_tcp);
+                return run_peer_only_bridge(
+                    guest,
+                    bridge,
+                    guest_input,
+                    to_guest,
+                    dns_tcp,
+                    attached_cidr,
+                    egress_rules,
+                );
             }
             ReadState::Idle => {}
         }
@@ -223,6 +263,8 @@ fn run_peer_only_bridge(
     mut guest_input: Vec<u8>,
     mut to_guest: PendingBytes,
     mut dns_tcp: Option<DnsTcpOwner>,
+    _attached_cidr: Option<(Ipv4Addr, u8)>,
+    egress_rules: Vec<EgressMatchRule>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
 
@@ -243,6 +285,12 @@ fn run_peer_only_bridge(
                     let _ = bridge.forward_from_guest(&frame);
                     continue;
                 }
+            }
+            if matches!(
+                classify_ethernet_egress(&frame, &egress_rules),
+                EgressLeg::Drop
+            ) {
+                continue;
             }
             // forward_from_guest returns true when the gateway would also need
             // the frame. With passt gone we still deliver peer copies via the
@@ -533,10 +581,10 @@ mod tests {
             .unwrap();
 
         let thread_a = std::thread::spawn(move || {
-            run_passt_bridge(proxy_a, passt_a, bridge_a, None, None, None)
+            run_passt_bridge(proxy_a, passt_a, bridge_a, None, None, None, Vec::new())
         });
         let thread_b = std::thread::spawn(move || {
-            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None)
+            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None, Vec::new())
         });
 
         let peer = ethernet_frame(mac_b, mac_a, 0x11);
@@ -600,10 +648,10 @@ mod tests {
             .unwrap();
 
         let thread_a = std::thread::spawn(move || {
-            run_passt_bridge(proxy_a, passt_a, bridge_a, None, None, None)
+            run_passt_bridge(proxy_a, passt_a, bridge_a, None, None, None, Vec::new())
         });
         let thread_b = std::thread::spawn(move || {
-            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None)
+            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None, Vec::new())
         });
 
         let request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 3]);
@@ -657,10 +705,11 @@ mod tests {
                 Some(marker_for_thread),
                 None,
                 None,
+                Vec::new(),
             )
         });
         let thread_b = std::thread::spawn(move || {
-            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None)
+            run_passt_bridge(proxy_b, passt_b, bridge_b, None, None, None, Vec::new())
         });
 
         // Kill passt's side of box A — previously this dropped BridgePort and

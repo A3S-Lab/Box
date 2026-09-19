@@ -443,6 +443,10 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                     _ => None,
                 },
                 Some((net_config.ip_address, net_config.prefix_len)),
+                load_microvm_egress_rules(
+                    net_config.networks_json.as_deref(),
+                    net_config.network_name.as_deref(),
+                ),
             )?;
             log_inherited_net_fd(fd);
             ctx.add_net_unixstream_fd(fd, &net_config.mac_address)?;
@@ -867,5 +871,25 @@ pub(super) fn kernel_format_from_magic(magic: [u8; 4]) -> Option<u32> {
         [0x7f, b'E', b'L', b'F'] => Some(KRUN_KERNEL_FORMAT_ELF),
         [b'M', b'Z', _, _] => Some(KRUN_KERNEL_FORMAT_IMAGE_GZ),
         _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn load_microvm_egress_rules(
+    networks_json: Option<&std::path::Path>,
+    network_name: Option<&str>,
+) -> Vec<a3s_box_core::EgressMatchRule> {
+    let (Some(path), Some(name)) = (networks_json, network_name) else {
+        return Vec::new();
+    };
+    match a3s_box_core::load_network_egress_rules(path, name) {
+        Ok(rules) => rules,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "MicroVM egress rules failed to load; denying IPv4 egress"
+            );
+            vec![a3s_box_core::EgressMatchRule::deny_all()]
+        }
     }
 }

@@ -148,6 +148,9 @@ pub enum BridgeRequest {
         subnet: String,
         #[serde(default)]
         labels: BTreeMap<String, String>,
+        /// `allow|deny:CIDR[:tcp|udp[:PORT]]`. Absent keeps the default profile.
+        #[serde(default)]
+        egress: Vec<String>,
     },
     NetworkGet {
         name: String,

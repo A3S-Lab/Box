@@ -11,6 +11,7 @@ type NetworkBuilder struct {
 	name   string
 	subnet string
 	labels map[string]string
+	egress []string
 }
 
 func (client *Client) Network(name string) *NetworkBuilder {
@@ -32,6 +33,11 @@ func (builder *NetworkBuilder) Label(key, value string) *NetworkBuilder {
 	return builder
 }
 
+func (builder *NetworkBuilder) Egress(spec string) *NetworkBuilder {
+	builder.egress = append(builder.egress, spec)
+	return builder
+}
+
 func (builder *NetworkBuilder) Create(ctx context.Context) (NetworkInfo, error) {
 	const op = "network_create"
 	if builder == nil || builder.client == nil {
@@ -46,11 +52,15 @@ func (builder *NetworkBuilder) Create(ctx context.Context) (NetworkInfo, error) 
 	if err := validateLabels(op, builder.labels); err != nil {
 		return NetworkInfo{}, err
 	}
-	var result NetworkInfo
-	err := builder.client.request(ctx, op, map[string]any{
+	payload := map[string]any{
 		"name":   builder.name,
 		"subnet": builder.subnet,
 		"labels": cloneStringMap(builder.labels),
-	}, &result)
+	}
+	if len(builder.egress) > 0 {
+		payload["egress"] = append([]string(nil), builder.egress...)
+	}
+	var result NetworkInfo
+	err := builder.client.request(ctx, op, payload, &result)
 	return result, err
 }

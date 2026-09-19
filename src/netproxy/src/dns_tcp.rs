@@ -75,6 +75,7 @@ pub(crate) struct DnsTcpOwner {
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     config: NetworkDnsConfig,
+    egress_rules: Vec<a3s_box_core::EgressMatchRule>,
     dns_tcp: Vec<DnsTcpSession>,
     pending: Vec<PendingUpstream>,
     active: Vec<ActiveUpstream>,
@@ -83,6 +84,10 @@ pub(crate) struct DnsTcpOwner {
 }
 
 impl DnsTcpOwner {
+    pub(crate) fn set_egress_rules(&mut self, rules: Vec<a3s_box_core::EgressMatchRule>) {
+        self.egress_rules = rules;
+    }
+
     pub(crate) fn new(config: NetworkDnsConfig) -> Self {
         let guest_ip = config.guest_ip;
         let gateway_ip = config.gateway_ip;
@@ -106,6 +111,7 @@ impl DnsTcpOwner {
             guest_ip,
             gateway_ip,
             config,
+            egress_rules: Vec::new(),
             dns_tcp: Vec::new(),
             pending: Vec::new(),
             active: Vec::new(),
@@ -278,6 +284,24 @@ impl DnsTcpOwner {
     }
 
     fn fallback_upstream(&mut self, session: DnsTcpSession) {
+        if crate::egress::untrusted_egress_denied(
+            session.flow.remote_ip,
+            6,
+            Some(session.flow.remote_port),
+            Some((self.config.guest_ip, self.config.prefix_len)),
+            &self.egress_rules,
+        ) {
+            tracing::debug!(
+                flow = ?session.flow,
+                "DnsTcpOwner denying TCP/53 upstream by egress policy"
+            );
+            self.sockets.get_mut::<tcp::Socket>(session.handle).abort();
+            self.dns_tcp.push(DnsTcpSession {
+                abort_pending: true,
+                ..session
+            });
+            return;
+        }
         let connect_result = match spawn_outbound_connect(
             session.flow,
             Arc::clone(&self.outbound_connectors),

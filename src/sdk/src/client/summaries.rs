@@ -386,6 +386,8 @@ pub struct CreateNetwork {
     pub driver: String,
     pub labels: HashMap<String, String>,
     pub isolation: IsolationMode,
+    /// `allow|deny:CIDR[:tcp|udp[:PORT]]` specs. Empty keeps the default profile.
+    pub egress: Vec<String>,
 }
 
 impl CreateNetwork {
@@ -396,6 +398,7 @@ impl CreateNetwork {
             driver: "bridge".to_string(),
             labels: HashMap::new(),
             isolation: IsolationMode::None,
+            egress: Vec::new(),
         }
     }
 
@@ -416,6 +419,11 @@ impl CreateNetwork {
 
     pub fn isolation(mut self, isolation: IsolationMode) -> Self {
         self.isolation = isolation;
+        self
+    }
+
+    pub fn egress(mut self, spec: impl Into<String>) -> Self {
+        self.egress.push(spec.into());
         self
     }
 
