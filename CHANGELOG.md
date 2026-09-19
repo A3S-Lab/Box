@@ -40,6 +40,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Passt startup fails closed when its stderr log cannot be created, instead
+  of discarding diagnostics and hiding the sandbox-denied retry signal. Does
+  **not** close B3 or claim Enterprise GA.
 - Log `max-size` rejects sizes that overflow `u64` instead of wrapping. An
   unparsable value still uses the 10 MiB default, including `20000000000g`,
   which previously wrapped in release and panicked the shim in debug. Does
