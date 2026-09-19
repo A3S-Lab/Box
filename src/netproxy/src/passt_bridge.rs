@@ -16,8 +16,8 @@ use crate::device::BridgePort;
 use crate::dns_local::{try_ethernet_network_a_reply, NetworkDnsConfig};
 use crate::dns_tcp::DnsTcpOwner;
 use crate::egress::{
-    classify_ethernet_egress, default_untrusted_egress_denied_with_gateway,
-    ethernet_ipv4_destination, ipv6_egress_denied, EgressLeg, UntrustedEgressScope,
+    classify_ethernet_egress, default_untrusted_egress_denied, ethernet_ipv4_destination,
+    ipv6_egress_denied, EgressLeg, UntrustedEgressScope,
 };
 use a3s_box_core::EgressMatchRule;
 use std::net::Ipv4Addr;
@@ -36,8 +36,9 @@ const POLL_TIMEOUT_MS: libc::c_int = 100;
 /// uses smoltcp termination; unknown names use host `TcpStream` upstream.
 ///
 /// `scope.attached_cidr` is `(guest_ip, prefix_len)` used by the default
-/// untrusted egress filter before peer switch and passt. `scope.gateway` is
-/// denied even when it sits in that CIDR: passt rewrites it to host loopback.
+/// untrusted egress filter before peer switch and passt. The gateway address
+/// is not dropped here: published-port replies use it. passt is started with
+/// `--no-map-gw` so that address is not rewritten to host loopback.
 /// `egress_rules` are first-match CIDR/protocol/port rules loaded from the
 /// network object; empty keeps the default profile only. An explicit allow
 /// still matches first. Peer IPv4 in the CIDR stays allowed. ARP is not filtered.
@@ -114,10 +115,7 @@ fn run_passt_bridge(
     scope: UntrustedEgressScope,
     egress_rules: Vec<EgressMatchRule>,
 ) -> io::Result<()> {
-    let UntrustedEgressScope {
-        attached_cidr,
-        gateway,
-    } = scope;
+    let attached_cidr = scope.attached_cidr;
     guest.set_nonblocking(true)?;
     passt.set_nonblocking(true)?;
 
@@ -179,11 +177,7 @@ fn run_passt_bridge(
                 EgressLeg::Default => {
                     if bridge.forward_from_guest(&frame) {
                         if let Some(dest) = ethernet_ipv4_destination(&frame) {
-                            if default_untrusted_egress_denied_with_gateway(
-                                dest,
-                                attached_cidr,
-                                gateway,
-                            ) {
+                            if default_untrusted_egress_denied(dest, attached_cidr) {
                                 tracing::debug!(
                                     %dest,
                                     "passt_bridge dropping IPv4 by default untrusted egress policy"

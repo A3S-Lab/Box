@@ -284,13 +284,12 @@ impl DnsTcpOwner {
     }
 
     fn fallback_upstream(&mut self, session: DnsTcpSession) {
-        if crate::egress::untrusted_egress_denied_with_gateway(
+        if crate::egress::untrusted_egress_denied(
             session.flow.remote_ip,
             6,
             Some(session.flow.remote_port),
             Some((self.config.guest_ip, self.config.prefix_len)),
             &self.egress_rules,
-            Some(self.gateway_ip),
         ) {
             tracing::debug!(
                 flow = ?session.flow,

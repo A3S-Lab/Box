@@ -444,7 +444,6 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                 },
                 UntrustedEgressScope {
                     attached_cidr: Some((net_config.ip_address, net_config.prefix_len)),
-                    gateway: Some(net_config.gateway),
                 },
                 load_microvm_egress_rules(
                     net_config.networks_json.as_deref(),

@@ -86,7 +86,6 @@ pub(super) struct UnixgramDevice {
 /// Attached-CIDR plus first-match rules applied before peer switch and smoltcp.
 pub(super) struct EgressGate {
     pub(super) attached_cidr: Option<(std::net::Ipv4Addr, u8)>,
-    pub(super) gateway: Option<std::net::Ipv4Addr>,
     pub(super) rules: Vec<a3s_box_core::EgressMatchRule>,
 }
 
@@ -145,10 +144,9 @@ impl UnixgramDevice {
                             let leg = crate::egress::classify_ethernet_egress(frame, &gate.rules);
                             let default_denied = crate::egress::ethernet_ipv4_destination(frame)
                                 .is_some_and(|dest| {
-                                    crate::egress::default_untrusted_egress_denied_with_gateway(
+                                    crate::egress::default_untrusted_egress_denied(
                                         dest,
                                         gate.attached_cidr,
-                                        gate.gateway,
                                     )
                                 });
                             (leg, default_denied)
