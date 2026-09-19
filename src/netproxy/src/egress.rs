@@ -4,12 +4,25 @@
 //! are evaluated before this default. Domain rules are rejected at parse time.
 //! IPv6 Ethernet frames are dropped: NetworkStore and this profile are IPv4-only,
 //! so leaving IPv6 through would bypass link-local and metadata denial. A single
-//! 802.1Q or 802.1ad tag does not hide that header. This is not an IPv6 policy,
-//! VLAN policy, DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
+//! 802.1Q or 802.1ad tag does not hide that header. The bridge gateway stays
+//! reachable: published-port replies are addressed to it. passt is started with
+//! `--no-map-gw` so that address is not rewritten to host loopback.
+//! This is not an IPv6 policy, VLAN policy, DNS policy, TLS MITM, CNI, or
+//! Sandbox bridge GA.
 
 use std::net::Ipv4Addr;
 
 use a3s_box_core::{EgressMatchRule, PolicyAction};
+
+/// Attached CIDR for the default untrusted profile.
+///
+/// The gateway is intentionally not a separate deny. Guest replies to published
+/// ports are destined to that address. Host-loopback mapping is disabled in
+/// passt (`--no-map-gw`) instead of dropping the address here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UntrustedEgressScope {
+    pub attached_cidr: Option<(Ipv4Addr, u8)>,
+}
 
 /// Whether an outbound IPv4 destination is denied by the default untrusted
 /// MicroVM egress profile.
