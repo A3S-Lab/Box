@@ -44,6 +44,10 @@ All notable changes to A3S Box will be documented in this file.
   unparsable value still uses the 10 MiB default, including `20000000000g`,
   which previously wrapped in release and panicked the shim in debug. Does
   **not** close B2 or claim Enterprise GA.
+- MicroVM egress sees IPv4 and IPv6 behind one 802.1Q or 802.1ad tag (QinQ).
+  A guest can no longer hide metadata or IPv6 by shifting the ethertype past
+  byte 12. A third VLAN tag is dropped because it is not IPv4 or ARP. This
+  is not a VLAN policy and does **not** close B3.
 - Sandbox keep-authority refuses a Bridge network that stores `--egress`
   rules, before any veth or iptables change. Those rules are enforced on
   MicroVM netproxy and Linux passt_bridge only; attaching Sandbox would
