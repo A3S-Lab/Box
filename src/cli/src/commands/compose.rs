@@ -243,7 +243,7 @@ async fn validate_compose_health_support(
             let disabled = project.healthcheck_disabled(service_name);
             let service_health_check =
                 project
-                    .healthcheck(service_name)
+                    .healthcheck(service_name)?
                     .map(|health_check| HealthCheck {
                         cmd: health_check.cmd,
                         interval_secs: health_check.interval_secs,
@@ -585,7 +585,7 @@ async fn execute_up(
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let restart_policy = sandbox_managed::execution_restart_policy(&restart_policy)?;
             let healthcheck_disabled = project.healthcheck_disabled(svc_name);
-            let service_health_check = project.healthcheck(svc_name).map(|hc| HealthCheck {
+            let service_health_check = project.healthcheck(svc_name)?.map(|hc| HealthCheck {
                 cmd: hc.cmd,
                 interval_secs: hc.interval_secs,
                 timeout_secs: hc.timeout_secs,
@@ -824,7 +824,7 @@ async fn execute_up(
         let port_map: Vec<String> = svc.map(|s| s.ports.clone()).unwrap_or_default();
 
         // Compose healthcheck overrides image HEALTHCHECK; disable blocks fallback.
-        let service_health_check = project.healthcheck(svc_name).map(|hc| HealthCheck {
+        let service_health_check = project.healthcheck(svc_name)?.map(|hc| HealthCheck {
             cmd: hc.cmd,
             interval_secs: hc.interval_secs,
             timeout_secs: hc.timeout_secs,

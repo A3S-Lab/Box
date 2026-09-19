@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Compose healthcheck durations that are present but invalid, or that overflow
+  when converted to seconds, fail closed. A missing interval, timeout, or
+  start period still uses the Compose default. `307445734561825861m` previously
+  wrapped in release. Does **not** close B4 or claim Enterprise GA.
 - Passt startup fails closed when its stderr log cannot be created, instead
   of discarding diagnostics and hiding the sandbox-denied retry signal. Does
   **not** close B3 or claim Enterprise GA.
