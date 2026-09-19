@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- The default MicroVM egress profile denies the attached bridge gateway, not
+  only loopback. passt rewrites that address to host `127.0.0.1`, and it sits
+  inside the allowed CIDR. Same-CIDR peers and public destinations stay
+  allowed. An explicit `--egress allow` still matches first. Does **not**
+  close B3 or claim Enterprise GA.
 - `A3S_BOX_OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY=off` or `=no` no longer
   selects the Privileged keep-authority owner. Unknown values fail closed.
   Only `1`/`true`/`on`/`yes` opt in. Does **not** close B3 or claim

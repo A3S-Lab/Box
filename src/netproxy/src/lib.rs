@@ -263,6 +263,7 @@ impl ProxyEngine {
         let mut device = UnixgramDevice::new(socket, bridge, Arc::clone(&stats));
         device.set_egress(EgressGate {
             attached_cidr: Some((guest_ip, prefix_len)),
+            gateway: Some(gateway_ip),
             rules: egress_rules.clone(),
         });
 
@@ -651,12 +652,13 @@ impl ProxyEngine {
                 continue;
             }
 
-            if egress::untrusted_egress_denied(
+            if egress::untrusted_egress_denied_with_gateway(
                 flow.remote_ip,
                 6,
                 Some(flow.remote_port),
                 Some((self.guest_ip, self.prefix_len)),
                 &self.egress_rules,
+                Some(self.gateway_ip),
             ) {
                 tracing::debug!(?flow, "NetProxy denying outbound TCP by egress policy");
                 continue;
@@ -1004,12 +1006,13 @@ impl ProxyEngine {
     }
 
     fn fallback_dns_tcp_upstream(&mut self, session: DnsTcpSession) {
-        if egress::untrusted_egress_denied(
+        if egress::untrusted_egress_denied_with_gateway(
             session.flow.remote_ip,
             6,
             Some(session.flow.remote_port),
             Some((self.guest_ip, self.prefix_len)),
             &self.egress_rules,
+            Some(self.gateway_ip),
         ) {
             tracing::debug!(
                 flow = ?session.flow,
@@ -1075,12 +1078,13 @@ impl ProxyEngine {
         }
 
         // Forward query to the real DNS server via a host UDP socket.
-        if egress::untrusted_egress_denied(
+        if egress::untrusted_egress_denied_with_gateway(
             dns_server,
             17,
             Some(53),
             Some((self.guest_ip, self.prefix_len)),
             &self.egress_rules,
+            Some(self.gateway_ip),
         ) {
             tracing::debug!(%dns_server, "NetProxy denying DNS upstream by egress policy");
             return;

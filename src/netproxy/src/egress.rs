@@ -4,8 +4,10 @@
 //! are evaluated before this default. Domain rules are rejected at parse time.
 //! IPv6 Ethernet frames are dropped: NetworkStore and this profile are IPv4-only,
 //! so leaving IPv6 through would bypass link-local and metadata denial. A single
-//! 802.1Q or 802.1ad tag does not hide that header. This is not an IPv6 policy,
-//! VLAN policy, DNS policy, TLS MITM, CNI, or Sandbox bridge GA.
+//! 802.1Q or 802.1ad tag does not hide that header. The bridge gateway address
+//! is denied even inside the attached CIDR: passt rewrites it to host loopback.
+//! This is not an IPv6 policy, VLAN policy, DNS policy, TLS MITM, CNI, or
+//! Sandbox bridge GA.
 
 use std::net::Ipv4Addr;
 
@@ -16,19 +18,38 @@ use a3s_box_core::{EgressMatchRule, PolicyAction};
 ///
 /// `attached_cidr` is `(any_address_in_subnet, prefix_len)` for the guest's
 /// attached product network. When `None` (no bridge CIDR), all RFC1918 /
-/// CGNAT destinations are denied.
+/// CGNAT destinations are denied. The attached gateway is not part of this
+/// two-argument form; use [`default_untrusted_egress_denied_with_gateway`].
+#[cfg(test)]
 pub fn default_untrusted_egress_denied(
     dest: Ipv4Addr,
     attached_cidr: Option<(Ipv4Addr, u8)>,
 ) -> bool {
-    untrusted_egress_denied(dest, 0, None, attached_cidr, &[])
+    default_untrusted_egress_denied_with_gateway(dest, attached_cidr, None)
+}
+
+/// Same profile as [`default_untrusted_egress_denied`], plus the bridge gateway.
+///
+/// passt's default `--map-host-loopback` is the guest gateway, and it rewrites
+/// that destination to host `127.0.0.1`. The address is inside the attached
+/// CIDR, so the CIDR allow would otherwise open host loopback. Packets that
+/// only use the gateway as the Ethernet next hop keep their real destination
+/// and are unchanged. `None` keeps the previous CIDR allow, including `.1`.
+pub(crate) fn default_untrusted_egress_denied_with_gateway(
+    dest: Ipv4Addr,
+    attached_cidr: Option<(Ipv4Addr, u8)>,
+    gateway: Option<Ipv4Addr>,
+) -> bool {
+    untrusted_egress_denied_with_gateway(dest, 0, None, attached_cidr, &[], gateway)
 }
 
 /// First-match operator rules, then the default untrusted profile.
 ///
 /// `protocol` is the IPv4 protocol number (`6` TCP, `17` UDP). `dest_port` is
 /// set only for TCP/UDP. A rule with a port does not match ICMP or other
-/// protocols that have no port.
+/// protocols that have no port. Gateway denial is off in this test helper;
+/// production calls [`untrusted_egress_denied_with_gateway`].
+#[cfg(test)]
 pub fn untrusted_egress_denied(
     dest: Ipv4Addr,
     protocol: u8,
@@ -36,15 +57,33 @@ pub fn untrusted_egress_denied(
     attached_cidr: Option<(Ipv4Addr, u8)>,
     rules: &[EgressMatchRule],
 ) -> bool {
+    untrusted_egress_denied_with_gateway(dest, protocol, dest_port, attached_cidr, rules, None)
+}
+
+pub(crate) fn untrusted_egress_denied_with_gateway(
+    dest: Ipv4Addr,
+    protocol: u8,
+    dest_port: Option<u16>,
+    attached_cidr: Option<(Ipv4Addr, u8)>,
+    rules: &[EgressMatchRule],
+    gateway: Option<Ipv4Addr>,
+) -> bool {
     for rule in rules {
         if rule.matches(dest, protocol, dest_port) {
             return rule.action == PolicyAction::Deny;
         }
     }
-    default_profile_denied(dest, attached_cidr)
+    default_profile_denied(dest, attached_cidr, gateway)
 }
 
-fn default_profile_denied(dest: Ipv4Addr, attached_cidr: Option<(Ipv4Addr, u8)>) -> bool {
+fn default_profile_denied(
+    dest: Ipv4Addr,
+    attached_cidr: Option<(Ipv4Addr, u8)>,
+    gateway: Option<Ipv4Addr>,
+) -> bool {
+    if gateway == Some(dest) {
+        return true;
+    }
     if dest.is_loopback() || dest.is_unspecified() || dest.is_broadcast() {
         return true;
     }
@@ -269,6 +308,36 @@ mod tests {
         assert!(default_untrusted_egress_denied(
             Ipv4Addr::new(10, 0, 0, 1),
             None
+        ));
+    }
+
+    #[test]
+    fn denies_gateway_inside_attached_cidr_unless_operator_allows_it() {
+        let cidr = Some((Ipv4Addr::new(10, 88, 0, 2), 24));
+        let gateway = Some(Ipv4Addr::new(10, 88, 0, 1));
+        assert!(default_untrusted_egress_denied_with_gateway(
+            Ipv4Addr::new(10, 88, 0, 1),
+            cidr,
+            gateway
+        ));
+        assert!(!default_untrusted_egress_denied_with_gateway(
+            Ipv4Addr::new(10, 88, 0, 9),
+            cidr,
+            gateway
+        ));
+        assert!(!default_untrusted_egress_denied_with_gateway(
+            Ipv4Addr::new(8, 8, 8, 8),
+            cidr,
+            gateway
+        ));
+        let allow_gateway = EgressMatchRule::parse("allow:10.88.0.1/32").unwrap();
+        assert!(!untrusted_egress_denied_with_gateway(
+            Ipv4Addr::new(10, 88, 0, 1),
+            6,
+            Some(80),
+            cidr,
+            std::slice::from_ref(&allow_gateway),
+            gateway
         ));
     }
 

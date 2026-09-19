@@ -443,6 +443,7 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                     _ => None,
                 },
                 Some((net_config.ip_address, net_config.prefix_len)),
+                Some(net_config.gateway),
                 load_microvm_egress_rules(
                     net_config.networks_json.as_deref(),
                     net_config.network_name.as_deref(),
