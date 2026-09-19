@@ -402,14 +402,8 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         );
 
         #[cfg(target_os = "linux")]
-        if let Some(fd) = net_config.net_socket_fd {
-            let proxy_fd = net_config
-                .net_proxy_fd
-                .ok_or_else(|| BoxError::BoxBootError {
-                    message: "Linux bridge networking is missing its inherited proxy descriptor"
-                        .to_string(),
-                    hint: None,
-                })?;
+        {
+            let (fd, proxy_fd) = inherited_net_proxy_fds(net_config)?;
             let bridge_socket_dir =
                 net_config
                     .bridge_socket_dir
@@ -452,54 +446,27 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             )?;
             log_inherited_net_fd(fd);
             ctx.add_net_unixstream_fd(fd, &net_config.mac_address)?;
-        } else {
-            let socket_str =
-                net_config
-                    .net_socket_path
-                    .to_str()
-                    .ok_or_else(|| BoxError::BoxBootError {
-                        message: format!(
-                            "Invalid network socket path: {}",
-                            net_config.net_socket_path.display()
-                        ),
-                        hint: None,
-                    })?;
-            ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
         }
         #[cfg(target_os = "macos")]
-        if let Some(fd) = net_config.net_socket_fd {
-            if let Some(proxy_fd) = net_config.net_proxy_fd {
-                spawn_inherited_netproxy(
-                    proxy_fd,
-                    InheritedNetProxyConfig {
-                        guest_ip: net_config.ip_address,
-                        gateway: net_config.gateway,
-                        prefix_len: net_config.prefix_len,
-                        dns_servers: &net_config.dns_servers,
-                        port_map: &spec.port_map,
-                        stats_path: net_config.net_stats_path.clone(),
-                        bridge_socket_dir: net_config.bridge_socket_dir.clone(),
-                        own_mac: net_config.mac_address,
-                        networks_json: net_config.networks_json.clone(),
-                        network_name: net_config.network_name.clone(),
-                    },
-                )?;
-            }
+        {
+            let (fd, proxy_fd) = inherited_net_proxy_fds(net_config)?;
+            spawn_inherited_netproxy(
+                proxy_fd,
+                InheritedNetProxyConfig {
+                    guest_ip: net_config.ip_address,
+                    gateway: net_config.gateway,
+                    prefix_len: net_config.prefix_len,
+                    dns_servers: &net_config.dns_servers,
+                    port_map: &spec.port_map,
+                    stats_path: net_config.net_stats_path.clone(),
+                    bridge_socket_dir: net_config.bridge_socket_dir.clone(),
+                    own_mac: net_config.mac_address,
+                    networks_json: net_config.networks_json.clone(),
+                    network_name: net_config.network_name.clone(),
+                },
+            )?;
             log_inherited_net_fd(fd);
             ctx.add_net_unixgram_fd(fd, &net_config.mac_address)?;
-        } else {
-            let socket_str =
-                net_config
-                    .net_socket_path
-                    .to_str()
-                    .ok_or_else(|| BoxError::BoxBootError {
-                        message: format!(
-                            "Invalid network socket path: {}",
-                            net_config.net_socket_path.display()
-                        ),
-                        hint: None,
-                    })?;
-            ctx.add_net_unixgram(socket_str, &net_config.mac_address)?;
         }
 
         // Network env vars (A3S_NET_IP, A3S_NET_GATEWAY, A3S_NET_DNS) are now
@@ -873,6 +840,26 @@ pub(super) fn kernel_format_from_magic(magic: [u8; 4]) -> Option<u32> {
         [0x7f, b'E', b'L', b'F'] => Some(KRUN_KERNEL_FORMAT_ELF),
         [b'M', b'Z', _, _] => Some(KRUN_KERNEL_FORMAT_IMAGE_GZ),
         _ => None,
+    }
+}
+
+/// Guest virtio-net must use the inherited socket whose other end is the
+/// egress proxy. A path-only libkrun attach talks to passt or the macOS
+/// backend directly and skips that proxy.
+#[cfg(unix)]
+pub(super) fn inherited_net_proxy_fds(
+    net: &a3s_box_core::vmm::NetworkInstanceConfig,
+) -> Result<(std::os::fd::RawFd, std::os::fd::RawFd)> {
+    match (net.net_socket_fd, net.net_proxy_fd) {
+        (Some(guest_fd), Some(proxy_fd)) => Ok((guest_fd, proxy_fd)),
+        _ => Err(BoxError::BoxBootError {
+            message: "MicroVM virtio-net requires the inherited egress proxy; refusing to attach libkrun directly to the backend socket"
+                .to_string(),
+            hint: Some(
+                "Bridge networking must pass both the guest socket and the proxy descriptor"
+                    .to_string(),
+            ),
+        }),
     }
 }
 

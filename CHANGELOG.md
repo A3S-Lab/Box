@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- The shim refuses to attach virtio-net by socket path when the inherited
+  egress-proxy descriptor is missing. That path connected libkrun straight to
+  passt or the macOS backend and skipped the egress proxy. Does **not** close
+  B3 or claim Enterprise GA.
 - passt is started with `--no-map-gw`, so the guest gateway is not rewritten
   to host `127.0.0.1`. The egress profile still allows that address: published
   UDP and TCP replies are destined to it. Same-CIDR peers and public

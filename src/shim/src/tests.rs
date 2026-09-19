@@ -367,6 +367,35 @@ fn test_network_config() -> a3s_box_core::vmm::NetworkInstanceConfig {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn virtio_net_requires_inherited_egress_proxy() {
+    let mut net = test_network_config();
+    assert_eq!(
+        super::vm_launch::inherited_net_proxy_fds(&net).unwrap(),
+        (42, 43)
+    );
+
+    net.net_socket_fd = None;
+    let missing_guest = super::vm_launch::inherited_net_proxy_fds(&net)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing_guest.contains("inherited egress proxy"),
+        "{missing_guest}"
+    );
+
+    net.net_socket_fd = Some(42);
+    net.net_proxy_fd = None;
+    let missing_proxy = super::vm_launch::inherited_net_proxy_fds(&net)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing_proxy.contains("inherited egress proxy"),
+        "{missing_proxy}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_parse_cpuset_spec_single() {

@@ -943,7 +943,10 @@ open and harness reports still keep
   prefetch (Linux does not forward TCP/53 mid-stream to passt). Default
   MicroVM egress on netproxy / passt_bridge denies
   loopback, link-local/metadata, foreign RFC1918, and CGNAT outside the
-  attached bridge CIDR (public and same-CIDR peers remain). Network
+  attached bridge CIDR (public and same-CIDR peers remain). The shim refuses
+  a virtio-net attach that does not carry the inherited egress-proxy
+  descriptor, instead of connecting libkrun straight to passt or the macOS
+  backend. Network
   `--egress` rules (`allow|deny:CIDR[:tcp|udp[:PORT]]`) are first-match on
   that same IPv4 path before the default profile. IPv6 Ethernet is dropped
   there until an IPv6 policy exists, including behind one 802.1Q or 802.1ad

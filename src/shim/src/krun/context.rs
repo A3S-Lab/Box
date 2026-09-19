@@ -420,48 +420,9 @@ impl KrunContext {
         )
     }
 
-    /// Add a virtio-net device connected to a passt Unix stream socket.
-    ///
-    /// This disables TSI and gives the guest a real network interface (eth0).
-    /// Each call adds another interface (eth0, eth1, ...).
-    ///
-    /// # Arguments
-    /// * `socket_path` - Path to the passt Unix stream socket
-    /// * `mac` - MAC address as 6 bytes
-    ///
-    /// # Virtio-net features
-    /// Uses the standard compat features: CSUM, GUEST_CSUM, GUEST_TSO4, GUEST_UFO,
-    /// HOST_TSO4, HOST_UFO.
-    #[cfg(target_os = "linux")]
-    pub unsafe fn add_net_unixstream(&self, socket_path: &str, mac: &[u8; 6]) -> Result<()> {
-        tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via passt");
-
-        let path_c = CString::new(socket_path)
-            .map_err(|e| BoxError::NetworkError(format!("invalid passt socket path: {}", e)))?;
-
-        // Standard compat features (same as COMPAT_NET_FEATURES in libkrun.h)
-        let features: u32 = (1 << 0)   // NET_FEATURE_CSUM
-            | (1 << 1)                   // NET_FEATURE_GUEST_CSUM
-            | (1 << 7)                   // NET_FEATURE_GUEST_TSO4
-            | (1 << 10)                  // NET_FEATURE_GUEST_UFO
-            | (1 << 11)                  // NET_FEATURE_HOST_TSO4
-            | (1 << 14); // NET_FEATURE_HOST_UFO
-
-        check_status(
-            "krun_add_net_unixstream",
-            krun_add_net_unixstream(
-                self.ctx_id,
-                path_c.as_ptr(),
-                -1, // use path, not fd
-                mac.as_ptr(),
-                features,
-                0, // no flags
-            ),
-        )
-    }
-
     /// Add a virtio-net device connected to an inherited passt-compatible
-    /// Unix stream descriptor.
+    /// Unix stream descriptor. Path-only attach is refused: it would skip
+    /// the egress proxy and connect libkrun straight to passt.
     #[cfg(target_os = "linux")]
     pub unsafe fn add_net_unixstream_fd(&self, fd: i32, mac: &[u8; 6]) -> Result<()> {
         tracing::debug!(fd, mac = ?mac, "Adding virtio-net via inherited passt stream fd");
@@ -473,39 +434,8 @@ impl KrunContext {
         )
     }
 
-    /// Add a virtio-net device connected to a gvproxy Unix datagram socket (macOS).
-    ///
-    /// Uses the vfkit protocol (NET_FLAG_VFKIT) for handshake with gvproxy.
-    ///
-    /// # Arguments
-    /// * `socket_path` - Path to the gvproxy Unix datagram socket
-    /// * `mac` - MAC address as 6 bytes
-    #[cfg(target_os = "macos")]
-    pub unsafe fn add_net_unixgram(&self, socket_path: &str, mac: &[u8; 6]) -> Result<()> {
-        tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via gvproxy (vfkit)");
-
-        let path_c = CString::new(socket_path)
-            .map_err(|e| BoxError::NetworkError(format!("invalid gvproxy socket path: {}", e)))?;
-
-        // The macOS netproxy path exchanges raw Ethernet frames in userspace and
-        // does not implement checksum/GSO offloads. Keep features disabled.
-        let features: u32 = 0;
-        const NET_FLAG_VFKIT: u32 = 1 << 0;
-
-        check_status(
-            "krun_add_net_unixgram",
-            krun_add_net_unixgram(
-                self.ctx_id,
-                path_c.as_ptr(),
-                -1, // use path, not fd
-                mac.as_ptr(),
-                features,
-                NET_FLAG_VFKIT,
-            ),
-        )
-    }
-
     /// Add a virtio-net device connected to an inherited Unix datagram fd (macOS).
+    /// Path-only attach is refused: it would skip the egress proxy.
     #[cfg(target_os = "macos")]
     pub unsafe fn add_net_unixgram_fd(&self, fd: i32, mac: &[u8; 6]) -> Result<()> {
         tracing::debug!(fd, mac = ?mac, "Adding virtio-net via inherited unixgram fd");
