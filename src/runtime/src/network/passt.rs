@@ -228,7 +228,9 @@ impl PasstManager {
                 "passt socket path has no parent directory for the stderr log".to_string(),
             )
         })?;
-        cmd.stderr(std::process::Stdio::from(open_passt_stderr_log(&stderr_log)?));
+        cmd.stderr(std::process::Stdio::from(open_passt_stderr_log(
+            &stderr_log,
+        )?));
 
         let child = cmd.spawn().map_err(|e| {
             BoxError::NetworkError(format!(
