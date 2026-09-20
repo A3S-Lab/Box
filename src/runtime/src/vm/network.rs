@@ -50,11 +50,9 @@ impl VmManager {
         let dns_servers: Vec<std::net::Ipv4Addr> = if self.config.dns.is_empty() {
             vec![std::net::Ipv4Addr::new(8, 8, 8, 8)]
         } else {
-            self.config
-                .dns
-                .iter()
-                .filter_map(|value| value.parse().ok())
-                .collect()
+            a3s_box_core::dns::parse_ipv4_dns_servers(&self.config.dns).map_err(|error| {
+                BoxError::NetworkError(format!("invalid DNS server for published network: {error}"))
+            })?
         };
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let mut netproxy = crate::network::NetProxyManager::new(&box_dir);
@@ -182,13 +180,13 @@ impl VmManager {
             ))
         })?;
 
-        // Determine DNS servers
+        // Determine DNS servers. Non-empty --dns must all be IPv4: the bridge
+        // path and egress profile are IPv4-only, and silently dropping a value
+        // would leave guest resolv.conf disagreeing with the host proxy.
         let dns_servers: Vec<std::net::Ipv4Addr> = if !self.config.dns.is_empty() {
-            self.config
-                .dns
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect()
+            a3s_box_core::dns::parse_ipv4_dns_servers(&self.config.dns).map_err(|error| {
+                BoxError::NetworkError(format!("invalid DNS server for bridge network: {error}"))
+            })?
         } else {
             vec![std::net::Ipv4Addr::new(8, 8, 8, 8)]
         };
