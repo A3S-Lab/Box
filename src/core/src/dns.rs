@@ -277,22 +277,40 @@ pub fn parse_add_host_entries(entries: &[String]) -> Result<Vec<HostEntry>, Stri
         .collect()
 }
 
-/// Parse one MicroVM DNS server as IPv4.
+/// Parse one DNS server as any IP address.
 ///
-/// Bridge netproxy / passt_bridge and the untrusted egress profile are
-/// IPv4-only. An IPv6 or non-IP `--dns` value must not land in guest
-/// `resolv.conf` while the host path silently drops it.
-pub fn parse_ipv4_dns_server(server: &str) -> Result<std::net::Ipv4Addr, String> {
+/// Default TSI hijacks AF_INET6, so IPv6 nameservers remain valid there.
+/// Bridge setup uses [`parse_ipv4_dns_server`] instead.
+pub fn parse_dns_server(server: &str) -> Result<IpAddr, String> {
     let trimmed = server.trim();
     if trimmed.is_empty() {
         return Err("DNS server must not be empty".to_string());
     }
-    match trimmed.parse::<IpAddr>() {
-        Ok(IpAddr::V4(v4)) => Ok(v4),
-        Ok(IpAddr::V6(_)) => Err(format!(
-            "DNS server '{trimmed}' is IPv6; MicroVM DNS is IPv4-only until an IPv6 policy exists"
+    trimmed
+        .parse::<IpAddr>()
+        .map_err(|_| format!("invalid DNS server address '{trimmed}'"))
+}
+
+/// Parse every configured DNS server as an IP address, preserving order.
+pub fn parse_dns_servers(servers: &[String]) -> Result<Vec<IpAddr>, String> {
+    servers
+        .iter()
+        .map(|server| parse_dns_server(server))
+        .collect()
+}
+
+/// Parse one DNS server as IPv4 for Bridge / passt / netproxy.
+///
+/// Those paths and the untrusted egress profile are IPv4-only. Silently
+/// dropping an IPv6 value would leave guest `resolv.conf` disagreeing with the
+/// host proxy.
+pub fn parse_ipv4_dns_server(server: &str) -> Result<std::net::Ipv4Addr, String> {
+    match parse_dns_server(server)? {
+        IpAddr::V4(v4) => Ok(v4),
+        IpAddr::V6(_) => Err(format!(
+            "DNS server '{}' is IPv6; Bridge networking requires IPv4 DNS",
+            server.trim()
         )),
-        Err(_) => Err(format!("invalid DNS server address '{trimmed}'")),
     }
 }
 
@@ -519,6 +537,19 @@ search example.com
     }
 
     #[test]
+    fn parse_dns_servers_accepts_v4_and_v6_rejects_garbage() {
+        assert_eq!(
+            parse_dns_servers(&["8.8.8.8".into(), "2001:db8::1".into()]).unwrap(),
+            vec![
+                IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                IpAddr::V6("2001:db8::1".parse().unwrap())
+            ]
+        );
+        assert!(parse_dns_server("not-an-ip").is_err());
+        assert!(parse_dns_server("").is_err());
+    }
+
+    #[test]
     fn parse_ipv4_dns_servers_accepts_v4_rejects_v6_and_garbage() {
         assert_eq!(
             parse_ipv4_dns_servers(&["8.8.8.8".into(), "1.1.1.1".into()]).unwrap(),
@@ -529,6 +560,7 @@ search example.com
         );
         let v6 = parse_ipv4_dns_server("2001:db8::1").unwrap_err();
         assert!(v6.contains("IPv6"), "{v6}");
+        assert!(v6.contains("Bridge"), "{v6}");
         assert!(parse_ipv4_dns_server("not-an-ip").is_err());
         assert!(parse_ipv4_dns_server("").is_err());
         assert!(parse_ipv4_dns_server("   ").is_err());

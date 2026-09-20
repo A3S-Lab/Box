@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use a3s_box_core::config::ResourceConfig;
-use a3s_box_core::dns::{parse_add_host_entries, parse_ipv4_dns_server};
+use a3s_box_core::dns::{parse_add_host_entries, parse_dns_server, parse_ipv4_dns_servers};
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
@@ -435,7 +435,10 @@ impl SandboxCreateOptions {
             validate_guest_path("working directory", workdir)?;
         }
         for server in &self.dns_servers {
-            parse_ipv4_dns_server(server).map_err(ClientError::Validation)?;
+            parse_dns_server(server).map_err(ClientError::Validation)?;
+        }
+        if matches!(self.network, SandboxNetwork::Bridge { .. }) {
+            parse_ipv4_dns_servers(&self.dns_servers).map_err(ClientError::Validation)?;
         }
         Ok(())
     }
