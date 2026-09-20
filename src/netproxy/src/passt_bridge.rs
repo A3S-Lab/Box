@@ -106,6 +106,19 @@ fn connect_passt(path: &Path) -> io::Result<UnixStream> {
     }
 }
 
+/// Operator deny drops the frame entirely. The default profile only blocks
+/// the gateway leg: peers still get the frame, but DNS must not answer a
+/// query whose resolver the profile already denies.
+fn gateway_leg_denied(
+    frame: &[u8],
+    rules: &[EgressMatchRule],
+    attached_cidr: Option<(Ipv4Addr, u8)>,
+) -> bool {
+    matches!(classify_ethernet_egress(frame, rules), EgressLeg::Default)
+        && ethernet_ipv4_destination(frame)
+            .is_some_and(|dest| default_untrusted_egress_denied(dest, attached_cidr))
+}
+
 fn run_passt_bridge(
     mut guest: UnixStream,
     mut passt: UnixStream,
@@ -147,34 +160,35 @@ fn run_passt_bridge(
                 );
                 continue;
             }
-            // Operator deny is first-match, including DNS. Diverting TCP/53 or
-            // answering NetworkStore names before this check would ignore a
-            // deny of the DNS server and still emit a local reply.
-            if matches!(
-                classify_ethernet_egress(&frame, &egress_rules),
-                EgressLeg::Drop
-            ) {
+            // Operator deny and the default gateway profile both precede DNS.
+            // Diverting TCP/53 or answering NetworkStore names first would
+            // still emit a local reply for a denied resolver. Operator deny
+            // drops peers too; the default profile does not.
+            let leg = classify_ethernet_egress(&frame, &egress_rules);
+            if matches!(leg, EgressLeg::Drop) {
                 tracing::debug!("passt_bridge dropping IPv4 by egress policy");
                 continue;
             }
-            if let Some(owner) = dns_tcp.as_mut() {
-                if owner.should_divert(&frame) {
-                    owner.push_guest_frame(frame.clone());
-                    let _ = bridge.forward_from_guest(&frame);
-                    continue;
+            if !gateway_leg_denied(&frame, &egress_rules, attached_cidr) {
+                if let Some(owner) = dns_tcp.as_mut() {
+                    if owner.should_divert(&frame) {
+                        owner.push_guest_frame(frame.clone());
+                        let _ = bridge.forward_from_guest(&frame);
+                        continue;
+                    }
+                }
+                // NetworkStore-local DNS A before passt upstream forward (#572 parity).
+                if let Some(config) = dns.as_ref() {
+                    if let Some(reply) = try_ethernet_network_a_reply(&frame, config) {
+                        to_guest.push_frame(&reply)?;
+                        // Still deliver peer copies if the switch wants them; do not
+                        // also send the DNS query to passt.
+                        let _ = bridge.forward_from_guest(&frame);
+                        continue;
+                    }
                 }
             }
-            // NetworkStore-local DNS A before passt upstream forward (#572 parity).
-            if let Some(config) = dns.as_ref() {
-                if let Some(reply) = try_ethernet_network_a_reply(&frame, config) {
-                    to_guest.push_frame(&reply)?;
-                    // Still deliver peer copies if the switch wants them; do not
-                    // also send the DNS query to passt.
-                    let _ = bridge.forward_from_guest(&frame);
-                    continue;
-                }
-            }
-            match classify_ethernet_egress(&frame, &egress_rules) {
+            match leg {
                 EgressLeg::Drop => {
                     tracing::debug!("passt_bridge dropping IPv4 by egress policy");
                     continue;
@@ -278,7 +292,7 @@ fn run_peer_only_bridge(
     mut guest_input: Vec<u8>,
     mut to_guest: PendingBytes,
     mut dns_tcp: Option<DnsTcpOwner>,
-    _attached_cidr: Option<(Ipv4Addr, u8)>,
+    attached_cidr: Option<(Ipv4Addr, u8)>,
     egress_rules: Vec<EgressMatchRule>,
 ) -> io::Result<()> {
     guest.set_nonblocking(true)?;
@@ -306,11 +320,13 @@ fn run_peer_only_bridge(
             ) {
                 continue;
             }
-            if let Some(owner) = dns_tcp.as_mut() {
-                if owner.should_divert(&frame) {
-                    owner.push_guest_frame(frame.clone());
-                    let _ = bridge.forward_from_guest(&frame);
-                    continue;
+            if !gateway_leg_denied(&frame, &egress_rules, attached_cidr) {
+                if let Some(owner) = dns_tcp.as_mut() {
+                    if owner.should_divert(&frame) {
+                        owner.push_guest_frame(frame.clone());
+                        let _ = bridge.forward_from_guest(&frame);
+                        continue;
+                    }
                 }
             }
             // forward_from_guest returns true when the gateway would also need
@@ -812,6 +828,18 @@ mod tests {
 
     #[test]
     fn operator_deny_drops_dns_tcp_before_local_divert() {
+        assert_no_local_dns_tcp_reply(
+            Ipv4Addr::new(8, 8, 8, 8),
+            vec![EgressMatchRule::parse("deny:8.8.8.8/32").unwrap()],
+        );
+    }
+
+    #[test]
+    fn default_profile_drops_foreign_private_dns_before_local_divert() {
+        assert_no_local_dns_tcp_reply(Ipv4Addr::new(192, 168, 1, 1), Vec::new());
+    }
+
+    fn assert_no_local_dns_tcp_reply(dns_ip: Ipv4Addr, rules: Vec<EgressMatchRule>) {
         let directory = tempfile::tempdir().unwrap();
         let mac_a = [0x02, 0x42, 10, 91, 0, 2];
         let bridge_a = BridgePort::bind(directory.path(), mac_a).unwrap();
@@ -828,13 +856,12 @@ mod tests {
         let dns = NetworkDnsConfig {
             networks_json: directory.path().join("networks.json"),
             network_name: "n".to_string(),
-            dns_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
+            dns_servers: vec![dns_ip],
             guest_ip,
             gateway_ip: Ipv4Addr::new(10, 88, 0, 1),
             prefix_len: 24,
         };
         std::fs::write(&dns.networks_json, b"{}").unwrap();
-        let rules = vec![EgressMatchRule::parse("deny:8.8.8.8/32").unwrap()];
 
         let thread = std::thread::spawn(move || {
             run_passt_bridge(
@@ -850,7 +877,7 @@ mod tests {
             )
         });
 
-        let frame = tcp_syn_to_gateway(guest_ip, Ipv4Addr::new(8, 8, 8, 8), 53);
+        let frame = tcp_syn_to_gateway(guest_ip, dns_ip, 53);
         write_frame(&mut guest_a, &frame);
 
         let mut header = [0u8; 4];
