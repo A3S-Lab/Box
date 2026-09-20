@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Host soak writes `exit_code` / `failed_at` / `failed_command` into
+  `summary.txt` before `run_soak_verifier` when `failed_iterations > 0`
+  (#608). In-run `verify.out` no longer reports `not-recorded` while the
+  EXIT trap alone had the real values. Does **not** close B4 or claim
+  Enterprise GA.
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the
