@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Failed Sandbox create / abandoned `Starting` records can be removed (#623).
+  `begin_remove` accepts `Starting`/`Creating`, and a kill rejected while the
+  OCI container is still `Creating` converges `Killing` → `Failed` so `rm -f`
+  does not wedge forever. Does **not** close B2/B4 or claim Enterprise GA.
 - CRI container `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` / `A3S_SEC_PIDS_LIMIT`
   are applied on the guest exec/PTY spawn path (#606). StartContainer no longer
   drops those controls and joins only the unlimited pod boot cgroup. Does

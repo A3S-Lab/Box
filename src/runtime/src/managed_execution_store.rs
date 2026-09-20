@@ -206,7 +206,13 @@ impl ManagedExecutionStore {
             }
             match state {
                 ManagedExecutionState::Removing => Ok(Some(record.clone())),
+                // Failed create / abandoned start rollback (#623): the record is
+                // still Starting (or Creating) because start never reached a
+                // terminal edge. Allow remove so CLI rollback and `rm -f` do not
+                // wedge on "cannot remove execution in state starting".
                 ManagedExecutionState::Created
+                | ManagedExecutionState::Creating
+                | ManagedExecutionState::Starting
                 | ManagedExecutionState::Stopped
                 | ManagedExecutionState::Failed => {
                     record.status = ManagedExecutionState::Removing.as_status().to_string();
@@ -872,6 +878,37 @@ mod tests {
             .finish_remove(&id, ExecutionGeneration::INITIAL)
             .unwrap());
         assert!(reopened.get(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn begin_remove_accepts_abandoned_starting() {
+        // #623: failed start rollback / rm -f must not wedge on Starting.
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-starting").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-starting"))
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Created,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        let claimed = store
+            .begin_remove(&id, ExecutionGeneration::INITIAL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claimed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Removing)
+        );
+        assert!(store
+            .finish_remove(&id, ExecutionGeneration::INITIAL)
+            .unwrap());
+        assert!(store.get(&id).unwrap().is_none());
     }
 
     #[test]
