@@ -951,10 +951,7 @@ mod tests {
             overflow.message()
         );
         // Saturating to u64::MAX would wait forever; fail closed instead.
-        assert_eq!(
-            (i64::MAX as u64).saturating_mul(1_000),
-            u64::MAX
-        );
+        assert_eq!((i64::MAX as u64).saturating_mul(1_000), u64::MAX);
 
         assert_eq!(
             exec_sync_timeout_ns(0).unwrap(),
