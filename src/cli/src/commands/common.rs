@@ -466,8 +466,13 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
     }
     a3s_box_core::dns::parse_add_host_entries(&common.add_host)
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
+    a3s_box_core::dns::parse_dns_servers(&common.dns).map_err(|e| format!("Invalid --dns: {e}"))?;
 
     let network = resolve_network(common.network.as_deref());
+    if matches!(network, NetworkMode::Bridge { .. }) {
+        a3s_box_core::dns::parse_ipv4_dns_servers(&common.dns)
+            .map_err(|e| format!("Invalid --dns for --network bridge: {e}"))?;
+    }
     #[cfg(windows)]
     if matches!(network, NetworkMode::Bridge { .. }) {
         return Err(
@@ -1286,6 +1291,29 @@ mod tests {
         let err = validate_runtime_options(&args).unwrap_err();
 
         assert!(err.contains("Invalid --add-host"));
+    }
+
+    #[test]
+    fn test_validate_runtime_options_dns_by_network_mode() {
+        let mut garbage = default_common_args();
+        garbage.dns = vec!["not-an-ip".to_string()];
+        let err = validate_runtime_options(&garbage).unwrap_err();
+        assert!(err.contains("Invalid --dns"), "{err}");
+
+        let mut v6_tsi = default_common_args();
+        v6_tsi.dns = vec!["2001:db8::1".to_string()];
+        validate_runtime_options(&v6_tsi).unwrap();
+
+        let mut v6_bridge = default_common_args();
+        v6_bridge.dns = vec!["2001:db8::1".to_string()];
+        v6_bridge.network = Some("mynet".to_string());
+        let err = validate_runtime_options(&v6_bridge).unwrap_err();
+        assert!(err.contains("Invalid --dns for --network bridge"), "{err}");
+        assert!(err.contains("IPv6"), "{err}");
+
+        let mut v4 = default_common_args();
+        v4.dns = vec!["1.1.1.1".to_string()];
+        validate_runtime_options(&v4).unwrap();
     }
 
     #[test]
