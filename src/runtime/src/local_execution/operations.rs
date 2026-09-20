@@ -562,6 +562,28 @@ impl LocalExecutionManager {
                 .ok()?;
                 Some(KillOutcome::Killed)
             }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Creating | ExecutionState::Created
+                ) =>
+            {
+                // OCI rejected kill while the container never left creating
+                // (#623). No process will complete the lifecycle — fail closed
+                // to Failed so remove can forget the generation.
+                if self.release_execution_resources(&record).await.is_err() {
+                    return None;
+                }
+                self.transition(
+                    &record,
+                    ManagedExecutionState::Killing,
+                    ManagedExecutionState::Failed,
+                    RuntimeUpdate::Terminal(None),
+                )
+                .await
+                .ok()?;
+                Some(KillOutcome::AlreadyStopped)
+            }
             _ => None,
         }
     }
