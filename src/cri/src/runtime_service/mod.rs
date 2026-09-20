@@ -48,10 +48,10 @@ use convert::ANN_ADDITIONAL_POD_IPS;
 use convert::{
     container_event_response, container_exit_reason, container_mount_to_cri, container_state_label,
     container_state_to_cri, container_summary, container_user_from_linux_config,
-    ensure_container_image_available, ensure_vm_ready, merge_env, resolve_command_and_args,
-    resolve_container_mounts, resource_update_from_cri, sandbox_state_label, sandbox_summary,
-    sanitize_path_component, stop_container_timeout_ms, stop_container_wait_duration,
-    ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
+    ensure_container_image_available, ensure_vm_ready, exec_sync_timeout_ns, merge_env,
+    resolve_command_and_args, resolve_container_mounts, resource_update_from_cri,
+    sandbox_state_label, sandbox_summary, sanitize_path_component, stop_container_timeout_ms,
+    stop_container_wait_duration, ContainerRootfsPaths, ResolvedContainerImage, ANN_POD_IP,
 };
 #[cfg(test)]
 use log_writer::CriLogWriter;
@@ -2475,11 +2475,7 @@ impl RuntimeService for BoxRuntimeService {
         ensure_vm_ready(vm, "ExecSync", &container.sandbox_id).await?;
 
         // Execute the command via the exec client
-        let timeout_ns = if req.timeout > 0 {
-            req.timeout as u64 * 1_000_000_000
-        } else {
-            a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS
-        };
+        let timeout_ns = exec_sync_timeout_ns(req.timeout)?;
 
         let exec_request = a3s_box_core::exec::ExecRequest {
             // Mint once per ExecSync RPC. Guest journals this before response
