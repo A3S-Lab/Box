@@ -174,6 +174,18 @@ pub fn overlay_mount(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> 
             ));
         }
 
+        // Unprivileged hosts: the `mount` binary always fails with a noisy
+        // "must be superuser" line on stderr and cannot succeed outside a
+        // user namespace we already tried via mount(2). Skip it (#609).
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            return Err(BoxError::BuildError(format!(
+                "Failed to mount overlayfs at {} (unprivileged; mount CLI skipped): {}",
+                merged.display(),
+                failures.join("; ")
+            )));
+        }
+
         tracing::debug!(
             errors = ?failures,
             "mount(2) failed, trying mount command"
@@ -183,6 +195,7 @@ pub fn overlay_mount(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> 
             match std::process::Command::new("mount")
                 .args(["-t", "overlay", "overlay", "-o", options])
                 .arg(merged)
+                .stderr(std::process::Stdio::null())
                 .status()
             {
                 Ok(status) if status.success() => {
