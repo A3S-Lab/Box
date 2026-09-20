@@ -182,7 +182,12 @@ fn container_cgroup_oom_kills() -> u64 {
     let Some(binding) = container_cgroup() else {
         return 0;
     };
-    let Some(path) = Path::new(&binding.procs_path).parent() else {
+    cgroup_oom_kills_at(&binding.procs_path)
+}
+
+#[cfg(target_os = "linux")]
+pub fn cgroup_oom_kills_at(procs_path: &str) -> u64 {
+    let Some(path) = Path::new(procs_path).parent() else {
         return 0;
     };
     let Ok(events) = std::fs::read_to_string(path.join("memory.events")) else {
@@ -193,6 +198,50 @@ fn container_cgroup_oom_kills() -> u64 {
         .find_map(|line| line.strip_prefix("oom_kill "))
         .and_then(|count| count.trim().parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+/// Create a per-exec cgroup when CRI/resource `A3S_SEC_*` limits are present.
+///
+/// CRI `StartContainer` does not reboot the guest; it only execs into the pod
+/// VM. Without this, limits pushed in the exec env were dropped and the child
+/// joined the unlimited pod boot cgroup (#606).
+#[cfg(target_os = "linux")]
+pub fn create_exec_resource_cgroup(env: &[String]) -> Option<crate::cgroup::ContainerCgroup> {
+    let env_u64 = |key: &str| {
+        env.iter()
+            .find_map(|entry| entry.strip_prefix(&format!("{key}=")))
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let env_i64 = |key: &str| {
+        env.iter()
+            .find_map(|entry| entry.strip_prefix(&format!("{key}=")))
+            .and_then(|value| value.parse::<i64>().ok())
+    };
+    let memory_max = env_u64("A3S_SEC_MEM_LIMIT");
+    let memory_low = env_u64("A3S_SEC_MEM_LOW");
+    let memory_swap_max = env_i64("A3S_SEC_MEM_SWAP");
+    let cpu_quota = env_i64("A3S_SEC_CPU_QUOTA");
+    let cpu_period = env_u64("A3S_SEC_CPU_PERIOD");
+    let cpu_shares = env_u64("A3S_SEC_CPU_SHARES");
+    let pids_max = env_u64("A3S_SEC_PIDS_LIMIT");
+    let has_limits = memory_max.is_some_and(|value| value > 0)
+        || memory_low.is_some_and(|value| value > 0)
+        || memory_swap_max.is_some()
+        || cpu_quota.is_some_and(|value| value > 0)
+        || cpu_shares.is_some_and(|value| value > 0)
+        || pids_max.is_some_and(|value| value > 0);
+    if !has_limits {
+        return None;
+    }
+    crate::cgroup::ContainerCgroup::create_for_main(
+        memory_max,
+        memory_low,
+        memory_swap_max,
+        cpu_quota,
+        cpu_period,
+        cpu_shares,
+        pids_max,
+    )
 }
 
 /// Stash the container command for a deferred (IDLE) boot. The command already
@@ -2386,7 +2435,12 @@ fn execute_command(
     user: Option<&str>,
 ) -> ExecOutput {
     #[cfg(target_os = "linux")]
-    let cgroup_procs = container_cgroup_procs_descriptor();
+    let resource_cgroup = create_exec_resource_cgroup(env);
+    #[cfg(target_os = "linux")]
+    let cgroup_procs = resource_cgroup
+        .as_ref()
+        .and_then(|cgroup| cgroup.procs_descriptor())
+        .or_else(container_cgroup_procs_descriptor);
     #[cfg(not(target_os = "linux"))]
     let cgroup_procs: Option<i32> = None;
     let (mut command, timeout) = match build_command(
@@ -2699,9 +2753,17 @@ fn execute_command_streaming(
     writer: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
-    let cgroup_procs = container_cgroup_procs_descriptor();
+    let resource_cgroup = create_exec_resource_cgroup(spec.env);
     #[cfg(target_os = "linux")]
-    let oom_kills_before = container_cgroup_oom_kills();
+    let cgroup_procs = resource_cgroup
+        .as_ref()
+        .and_then(|cgroup| cgroup.procs_descriptor())
+        .or_else(container_cgroup_procs_descriptor);
+    #[cfg(target_os = "linux")]
+    let oom_kills_before = resource_cgroup
+        .as_ref()
+        .map(|cgroup| cgroup_oom_kills_at(&cgroup.procs_path()))
+        .unwrap_or_else(container_cgroup_oom_kills);
     #[cfg(not(target_os = "linux"))]
     let cgroup_procs: Option<i32> = None;
 
@@ -2789,7 +2851,10 @@ fn execute_command_streaming(
     // concurrent process sharing the same exact aggregate limit) exhausted the
     // container budget.
     #[cfg(target_os = "linux")]
-    let oom_killed = container_cgroup_oom_kills() > oom_kills_before;
+    let oom_killed = resource_cgroup
+        .as_ref()
+        .map(|cgroup| cgroup_oom_kills_at(&cgroup.procs_path()) > oom_kills_before)
+        .unwrap_or_else(|| container_cgroup_oom_kills() > oom_kills_before);
     #[cfg(not(target_os = "linux"))]
     let oom_killed = false;
     write_exec_exit(writer, exit_code, oom_killed)
@@ -3511,6 +3576,18 @@ mod tests {
         let output = execute_command(&[], 0, &[], None, None, None, None);
         assert_eq!(output.exit_code, 1);
         assert_eq!(output.stderr, b"Empty command");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn create_exec_resource_cgroup_skips_without_positive_limits() {
+        assert!(create_exec_resource_cgroup(&[]).is_none());
+        assert!(create_exec_resource_cgroup(&["A3S_SEC_MEM_LIMIT=0".into()]).is_none());
+        assert!(create_exec_resource_cgroup(&["A3S_SEC_CPU_QUOTA=0".into()]).is_none());
+        assert!(create_exec_resource_cgroup(&["A3S_SEC_CAP_DROP=ALL".into()]).is_none());
+        // Limits present still require a ready cgroup2 hierarchy; without one
+        // create_for_main returns None — never invent a fake limit.
+        let _ = create_exec_resource_cgroup(&["A3S_SEC_MEM_LIMIT=15728640".into()]);
     }
 
     #[test]

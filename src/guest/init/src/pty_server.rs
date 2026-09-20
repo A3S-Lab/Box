@@ -144,7 +144,7 @@ fn run_pty_accept_loop(sock_fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std:
 /// 6. On process exit → send PtyExit frame
 #[cfg(target_os = "linux")]
 fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
-    use a3s_box_core::pty::{parse_frame, read_frame, write_error, write_exit, PtyFrame};
+    use a3s_box_core::pty::{parse_frame, read_frame, write_error, PtyFrame};
     use nix::pty::openpty;
     use nix::unistd::{dup2, execvp, fork, setsid, ForkResult};
     use std::ffi::CString;
@@ -288,11 +288,21 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
     #[cfg(not(target_os = "linux"))]
     let _ = (&sec_cap_drop, &sec_cap_keep, sec_no_new_privs);
 
-    // Join the same workload cgroup as main and exec. A separate per-PTY cgroup
-    // would turn one aggregate container budget into competing independent
-    // limits and make live updates ambiguous.
+    // Prefer a per-session limited cgroup when CRI pushed A3S_SEC_* resource
+    // limits (#606). Fall back to the pod boot cgroup so interactive exec into
+    // a CLI container still shares the aggregate budget.
     #[cfg(target_os = "linux")]
-    let cgroup_procs = crate::exec_server::container_cgroup_procs_descriptor();
+    let resource_cgroup = crate::exec_server::create_exec_resource_cgroup(&request.env);
+    #[cfg(target_os = "linux")]
+    let cgroup_procs = resource_cgroup
+        .as_ref()
+        .and_then(|cgroup| cgroup.procs_descriptor())
+        .or_else(crate::exec_server::container_cgroup_procs_descriptor);
+    #[cfg(target_os = "linux")]
+    let oom_kills_before = resource_cgroup
+        .as_ref()
+        .map(|cgroup| crate::exec_server::cgroup_oom_kills_at(&cgroup.procs_path()))
+        .unwrap_or(0);
 
     // Set up the container rootfs before the fork — the child shares this mount
     // namespace and chroots into it. The exec path does all of this per spawn;
@@ -501,10 +511,17 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
 
             let exit_code = relay_pty_data(&mut stream, &master_fd, child);
 
-            // Send exit frame
-            write_exit(&mut stream, exit_code).ok();
+            #[cfg(target_os = "linux")]
+            let oom_killed = resource_cgroup.as_ref().is_some_and(|cgroup| {
+                crate::exec_server::cgroup_oom_kills_at(&cgroup.procs_path()) > oom_kills_before
+            });
+            #[cfg(not(target_os = "linux"))]
+            let oom_killed = false;
 
-            info!(exit_code, "PTY session ended");
+            // Send exit frame (include OOM so CRI can report OOMKilled for TTY)
+            a3s_box_core::pty::write_exit_ex(&mut stream, exit_code, oom_killed).ok();
+
+            info!(exit_code, oom_killed, "PTY session ended");
 
             Ok(())
         }

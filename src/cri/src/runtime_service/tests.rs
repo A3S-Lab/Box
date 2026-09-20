@@ -942,7 +942,10 @@ where
 
         sleep(exit_delay).await;
 
-        let exit = a3s_box_core::pty::PtyExit { exit_code };
+        let exit = a3s_box_core::pty::PtyExit {
+            exit_code,
+            oom_killed: false,
+        };
         writer
             .write_frame(&a3s_transport::Frame {
                 frame_type: a3s_transport::FrameType::Error,

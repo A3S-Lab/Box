@@ -40,18 +40,19 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
-<<<<<<< HEAD
 - CRI compiled-in default agent image is `docker.io/library/alpine:latest`
   instead of private `ghcr.io/a3s-box/code:v0.1.0` (#607). Stock
   `RunPodSandbox` without `--agent-image` no longer fails with registry 401.
   Does **not** close B4 or claim Enterprise GA.
-=======
+- CRI container `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` / `A3S_SEC_PIDS_LIMIT`
+  are applied on the guest exec/PTY spawn path (#606). StartContainer no longer
+  drops those controls and joins only the unlimited pod boot cgroup. Does
+  **not** close B4 or claim Enterprise GA.
 - `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
   `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
   so a second prepare run no longer aborts under `set -e` with hundreds of
   EPERM lines. Busy trees fail closed with a clear message. Does **not** close
   B4 or claim Enterprise GA.
->>>>>>> origin/main
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the
