@@ -40,11 +40,19 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
 - Host soak writes `exit_code` / `failed_at` / `failed_command` into
   `summary.txt` before `run_soak_verifier` when `failed_iterations > 0`
   (#608). In-run `verify.out` no longer reports `not-recorded` while the
   EXIT trap alone had the real values. Does **not** close B4 or claim
   Enterprise GA.
+=======
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
+>>>>>>> origin/main
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the
@@ -511,6 +519,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -648,6 +661,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1125,6 +1143,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1275,6 +1298,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1378,6 +1406,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1527,6 +1560,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1828,6 +1866,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -1999,6 +2042,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2063,6 +2111,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2107,6 +2160,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2134,6 +2192,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2179,6 +2242,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2227,6 +2295,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2504,6 +2577,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2628,6 +2706,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2704,6 +2787,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2759,6 +2847,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2850,6 +2943,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2936,6 +3034,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -2988,6 +3091,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3022,6 +3130,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3068,6 +3181,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3114,6 +3232,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3152,6 +3275,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3174,6 +3302,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3241,6 +3374,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3285,6 +3423,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3403,6 +3546,11 @@ image's reach here bypasses VM isolation:
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3471,6 +3619,11 @@ silently ignored are now actually enforced).
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
@@ -3523,6 +3676,11 @@ zero regression (see below).
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
