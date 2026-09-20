@@ -96,7 +96,32 @@ enable_controllers() {
   printf '+cpu +cpuset +memory +pids' >"${target}/cgroup.subtree_control"
 }
 
-rm -rf --one-file-system -- "${cgroup_root}"
+# cgroupfs rejects unlink() of control files, so `rm -rf` always fails on a
+# second run (#613). Remove empty directories depth-first with rmdir only.
+remove_cgroup_tree() {
+  local root="$1"
+  if [[ ! -d "${root}" ]]; then
+    return 0
+  fi
+  local procs
+  procs="$(tr -d '[:space:]' <"${root}/cgroup.procs" 2>/dev/null || true)"
+  if [[ -n "${procs}" ]]; then
+    echo "refusing to remove busy cgroup tree ${root} (still has processes: ${procs})" >&2
+    echo "stop Sandbox boxes using this tree, then re-run prepare." >&2
+    exit 1
+  fi
+  # Depth-first: children first, then parents. Ignore missing dirs.
+  local dir
+  while IFS= read -r -d '' dir; do
+    rmdir -- "${dir}" 2>/dev/null || true
+  done < <(find "${root}" -depth -type d -print0 2>/dev/null || true)
+  if [[ -d "${root}" ]]; then
+    echo "could not fully remove cgroup tree ${root}; remaining entries may still hold processes" >&2
+    exit 1
+  fi
+}
+
+remove_cgroup_tree "${cgroup_root}"
 printf '+cpu +cpuset +memory +pids' >/sys/fs/cgroup/cgroup.subtree_control || true
 mkdir -p "${cgroup_root}"
 enable_controllers "${cgroup_root}"
