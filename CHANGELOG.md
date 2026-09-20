@@ -40,26 +40,20 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 - Unprivileged overlay probe no longer shells out to the `mount` CLI after
   `mount(2)` fails (#609). User-lane `a3s-box run` falls back to copy-rootfs
   without printing `必须以超级用户身份使用 mount` / "must be superuser". Root
   still uses the CLI fallback with stderr discarded. Does **not** close B4
   or claim Enterprise GA.
-=======
-=======
 - CRI container `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` / `A3S_SEC_PIDS_LIMIT`
   are applied on the guest exec/PTY spawn path (#606). StartContainer no longer
   drops those controls and joins only the unlimited pod boot cgroup. Does
   **not** close B4 or claim Enterprise GA.
->>>>>>> origin/main
 - `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
   `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
   so a second prepare run no longer aborts under `set -e` with hundreds of
   EPERM lines. Busy trees fail closed with a clear message. Does **not** close
   B4 or claim Enterprise GA.
->>>>>>> origin/main
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the
