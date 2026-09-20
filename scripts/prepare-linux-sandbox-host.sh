@@ -172,8 +172,11 @@ if [[ -n "${LAUNCHER_SOURCE}" ]]; then
   install -d -m 0755 /usr/local/libexec
   install -m 0755 "${LAUNCHER_SOURCE}" "${SYSTEM_LAUNCHER}"
   # Setuid is required so non-root callers can enter the Sandbox namespaces.
-  chmod 4755 "${SYSTEM_LAUNCHER}"
+  # chown(2) clears S_ISUID whenever owner/group are set (including a no-op
+  # root:root). Own first, then set the bit, or mode collapses to 755 and we
+  # mis-blame nosuid (#612).
   chown root:root "${SYSTEM_LAUNCHER}"
+  chmod 4755 "${SYSTEM_LAUNCHER}"
   # Fail closed on nosuid mounts where chmod 4755 is silently ignored.
   mode="$(stat -c '%a' "${SYSTEM_LAUNCHER}" 2>/dev/null || stat -f '%OLp' "${SYSTEM_LAUNCHER}")"
   owner_uid="$(stat -c '%u' "${SYSTEM_LAUNCHER}" 2>/dev/null || stat -f '%u' "${SYSTEM_LAUNCHER}")"
