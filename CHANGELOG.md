@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI container `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` / `A3S_SEC_PIDS_LIMIT`
+  are applied on the guest exec/PTY spawn path (#606). StartContainer no longer
+  drops those controls and joins only the unlimited pod boot cgroup. Does
+  **not** close B4 or claim Enterprise GA.
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the

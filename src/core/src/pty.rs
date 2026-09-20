@@ -64,6 +64,11 @@ pub struct PtyResize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyExit {
     pub exit_code: i32,
+    /// Set when the process (or its memory cgroup) was killed by the
+    /// out-of-memory killer. Carried back so the CRI can report the container
+    /// exit reason as `OOMKilled`. Defaults to `false` for wire compatibility.
+    #[serde(default)]
+    pub oom_killed: bool,
 }
 
 /// A parsed protocol frame.
@@ -147,7 +152,15 @@ pub fn write_resize(w: &mut impl io::Write, cols: u16, rows: u16) -> io::Result<
 
 /// Write a PtyExit frame.
 pub fn write_exit(w: &mut impl io::Write, exit_code: i32) -> io::Result<()> {
-    let exit = PtyExit { exit_code };
+    write_exit_ex(w, exit_code, false)
+}
+
+/// Write a PtyExit frame, including whether the guest OOM-killed the session.
+pub fn write_exit_ex(w: &mut impl io::Write, exit_code: i32, oom_killed: bool) -> io::Result<()> {
+    let exit = PtyExit {
+        exit_code,
+        oom_killed,
+    };
     let payload = serde_json::to_vec(&exit).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -277,7 +290,10 @@ mod tests {
         let (ft, payload) = read_frame(&mut cursor).unwrap().unwrap();
         let frame = parse_frame(ft, payload).unwrap();
         match frame {
-            PtyFrame::Exit(e) => assert_eq!(e.exit_code, 42),
+            PtyFrame::Exit(e) => {
+                assert_eq!(e.exit_code, 42);
+                assert!(!e.oom_killed);
+            }
             other => panic!("Expected Exit, got {:?}", other),
         }
     }
