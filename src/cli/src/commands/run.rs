@@ -222,6 +222,12 @@ fn validate_run_mode(args: &RunArgs, stdin_is_terminal: bool) -> Result<(), &'st
     if matches!(args.timeout, Some(0)) {
         return Err("--timeout must be greater than zero seconds");
     }
+    if args
+        .timeout
+        .is_some_and(|secs| secs.checked_mul(1_000_000_000).is_none())
+    {
+        return Err("--timeout is too large to express as nanoseconds");
+    }
     if args.tty && !stdin_is_terminal {
         return Err("The -t flag requires a terminal (stdin is not a TTY)");
     }
@@ -394,7 +400,14 @@ fn build_pool_client_run(
         vcpus: args.common.cpus,
         memory_mb,
         exec: args.pool_exec,
-        timeout_ns: args.timeout.map(|secs| secs.saturating_mul(1_000_000_000)),
+        timeout_ns: match args.timeout {
+            None => None,
+            Some(secs) => Some(secs.checked_mul(1_000_000_000).ok_or_else(|| {
+                Box::<dyn std::error::Error>::from(
+                    "--timeout is too large to express as nanoseconds",
+                )
+            })?),
+        },
         cmd: args.cmd.clone(),
     })
 }
