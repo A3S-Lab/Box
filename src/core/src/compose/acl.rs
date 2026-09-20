@@ -652,13 +652,22 @@ fn optional_dns(block: &Block, field: &str, path: &str) -> Result<DnsConfig, Com
     let Some(value) = block.attributes.get(field) else {
         return Ok(DnsConfig::Empty);
     };
-    match value {
-        Value::String(value) => Ok(DnsConfig::Single(value.clone())),
-        Value::List(_) => string_list_value(value, &format!("{path}.{field}")).map(DnsConfig::List),
-        _ => Err(ComposeAclError::invalid(format!(
-            "{path}.{field} must be a string or a list of strings"
-        ))),
-    }
+    let field_path = format!("{path}.{field}");
+    let dns = match value {
+        Value::String(value) => DnsConfig::Single(value.clone()),
+        Value::List(_) => string_list_value(value, &field_path).map(DnsConfig::List)?,
+        _ => {
+            return Err(ComposeAclError::invalid(format!(
+                "{field_path} must be a string or a list of strings"
+            )))
+        }
+    };
+    // Same honesty bar as CLI `--dns`: reject garbage so guest resolv.conf
+    // cannot disagree with the host path. IPv6 stays valid for TSI; Bridge
+    // still requires IPv4 at network setup.
+    crate::dns::parse_dns_servers(&dns.to_vec())
+        .map_err(|error| ComposeAclError::invalid(format!("{field_path}: {error}")))?;
+    Ok(dns)
 }
 
 fn optional_depends_on(
@@ -899,6 +908,35 @@ network "backend" {
             assert!(
                 parse_compose_acl(source, &HashMap::new()).is_err(),
                 "source should fail: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ipv4_and_ipv6_dns_rejects_garbage() {
+        let ipv4 = parse_compose_acl(
+            r#"service "api" { image = "api" dns = "8.8.8.8" }"#,
+            &HashMap::new(),
+        )
+        .expect("IPv4 DNS");
+        assert_eq!(ipv4.services["api"].dns.to_vec(), ["8.8.8.8"]);
+
+        let ipv6 = parse_compose_acl(
+            r#"service "api" { image = "api" dns = ["2001:4860:4860::8888"] }"#,
+            &HashMap::new(),
+        )
+        .expect("IPv6 DNS remains valid for TSI");
+        assert_eq!(ipv6.services["api"].dns.to_vec(), ["2001:4860:4860::8888"]);
+
+        for source in [
+            r#"service "api" { image = "api" dns = "not-an-ip" }"#,
+            r#"service "api" { image = "api" dns = ["8.8.8.8", "dns.google"] }"#,
+            r#"service "api" { image = "api" dns = "" }"#,
+        ] {
+            let error = parse_compose_acl(source, &HashMap::new()).unwrap_err();
+            assert!(
+                error.to_string().contains("dns"),
+                "source={source} error={error}"
             );
         }
     }
