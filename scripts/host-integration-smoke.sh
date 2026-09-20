@@ -996,7 +996,10 @@ run_soak_suite() {
     if [ "$failures" -eq 0 ]; then
         write_soak_summary "pass" "$iteration" "$failures"
     else
-        write_soak_summary "fail" "$iteration" "$failures"
+        # Record exit_code / failed_at / failed_command before the verifier
+        # so verify.out matches the final summary (#608). The EXIT trap would
+        # rewrite summary.txt later, but the in-run gate already ran.
+        write_soak_summary "fail" "$iteration" "$failures" "1"
     fi
 
     log "Soak completed: iterations=$iteration failures=$failures evidence=$SOAK_EVIDENCE_DIR"
