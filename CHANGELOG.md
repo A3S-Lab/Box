@@ -46,6 +46,12 @@ All notable changes to A3S Box will be documented in this file.
   EXIT trap alone had the real values. Does **not** close B4 or claim
   Enterprise GA.
 
+- Unprivileged overlay probe no longer shells out to the `mount` CLI after
+  `mount(2)` fails (#609). User-lane `a3s-box run` falls back to copy-rootfs
+  without printing `必须以超级用户身份使用 mount` / "must be superuser". Root
+  still uses the CLI fallback with stderr discarded. Does **not** close B4
+  or claim Enterprise GA.
+
 - Failed Sandbox create / abandoned `Starting` records can be removed (#623).
   `begin_remove` accepts `Starting`/`Creating`, and a kill rejected while the
   OCI container is still `Creating` converges `Killing` → `Failed` so `rm -f`
