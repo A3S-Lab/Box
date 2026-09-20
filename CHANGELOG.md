@@ -40,11 +40,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
 - Explicit `--dns` values that are not IP addresses fail closed. Bridge /
   passt / netproxy still require IPv4 DNS (IPv6 there used to land in guest
   `resolv.conf` while the host proxy silently dropped it). Default TSI keeps
   IPv6 nameservers because libkrun hijacks AF_INET6. Does **not** close B3 or
   claim Enterprise GA.
+=======
+- CRI `ExecSync` timeouts that cannot fit in `u64` nanoseconds fail closed with
+  `InvalidArgument`. The previous `as u64 * 1_000_000_000` wrapped in release
+  and could schedule a much shorter kill than the caller asked for. Does
+  **not** close B4 or claim Enterprise GA.
+>>>>>>> origin/main
 - Operator `deny` and the default untrusted profile on passt_bridge are
   applied before DNS diversion. A deny of the configured DNS server, including
   a foreign-private resolver the default profile already denies, no longer
