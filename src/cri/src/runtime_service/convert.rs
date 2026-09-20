@@ -505,6 +505,24 @@ pub(super) fn stop_container_timeout_ms(timeout_seconds: i64) -> Option<u64> {
     Some((timeout_seconds as u64).saturating_mul(1_000))
 }
 
+/// Convert CRI ExecSync `timeout` (seconds) to nanoseconds.
+///
+/// `timeout <= 0` means the product default. Values that cannot fit in `u64`
+/// nanoseconds fail closed: the previous `as u64 * 1_000_000_000` wrapped in
+/// release and could schedule a much shorter kill than the caller asked for.
+pub(super) fn exec_sync_timeout_ns(timeout_seconds: i64) -> Result<u64, Status> {
+    if timeout_seconds <= 0 {
+        return Ok(a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS);
+    }
+    (timeout_seconds as u64)
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "ExecSync timeout {timeout_seconds}s does not fit in nanoseconds"
+            ))
+        })
+}
+
 pub(super) fn stop_container_wait_duration(timeout_seconds: i64) -> tokio::time::Duration {
     if timeout_seconds <= 0 {
         return tokio::time::Duration::from_secs(DEFAULT_STOP_CONTAINER_WAIT_SECS);
@@ -910,6 +928,29 @@ mod tests {
         assert_eq!(stop_container_timeout_ms(-10), None);
         assert_eq!(stop_container_timeout_ms(5), Some(5_000));
         assert_eq!(stop_container_timeout_ms(i64::MAX), Some(u64::MAX));
+
+        assert_eq!(
+            exec_sync_timeout_ns(0).unwrap(),
+            a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS
+        );
+        assert_eq!(
+            exec_sync_timeout_ns(-1).unwrap(),
+            a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS
+        );
+        assert_eq!(exec_sync_timeout_ns(5).unwrap(), 5_000_000_000);
+        let overflow = exec_sync_timeout_ns(i64::MAX).unwrap_err();
+        assert_eq!(overflow.code(), tonic::Code::InvalidArgument);
+        assert!(
+            overflow.message().contains("does not fit in nanoseconds"),
+            "{}",
+            overflow.message()
+        );
+        // The wrapped multiply is not the product of seconds×1e9; fail closed
+        // instead of scheduling that accidental value.
+        assert_ne!(
+            (i64::MAX as u64).wrapping_mul(1_000_000_000),
+            (i64::MAX as u64).saturating_mul(1_000_000_000)
+        );
 
         assert_eq!(
             stop_container_wait_duration(0),
