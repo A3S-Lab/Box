@@ -40,18 +40,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
-<<<<<<< HEAD
 - CLI `--timeout` and `--run-pool-timeout` values that cannot fit in `u64`
   nanoseconds fail closed. The previous saturating multiply turned those into
   `u64::MAX`, so a pool kill would never fire, and foreground
   `Instant + Duration` could panic on overflow. Does **not** close B4 or claim
   Enterprise GA.
-=======
 - CRI `ExecSync` timeouts that cannot fit in `u64` nanoseconds fail closed with
   `InvalidArgument`. The previous `as u64 * 1_000_000_000` wrapped in release
   and could schedule a much shorter kill than the caller asked for. Does
   **not** close B4 or claim Enterprise GA.
->>>>>>> origin/main
 - Operator `deny` and the default untrusted profile on passt_bridge are
   applied before DNS diversion. A deny of the configured DNS server, including
   a foreign-private resolver the default profile already denies, no longer
