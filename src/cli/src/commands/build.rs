@@ -160,6 +160,10 @@ fn resolve_run_pool_config(
     if args.run_pool_timeout == 0 {
         return Err("--run-pool-timeout must be greater than 0".into());
     }
+    let timeout_ns = args
+        .run_pool_timeout
+        .checked_mul(1_000_000_000)
+        .ok_or("--run-pool-timeout is too large to express as nanoseconds")?;
 
     let socket = args
         .run_pool_socket
@@ -191,7 +195,7 @@ fn resolve_run_pool_config(
         vcpus: args.run_pool_cpus,
         memory_mb,
         guest_rootfs: DEFAULT_BUILD_RUN_POOL_GUEST_ROOTFS.to_string(),
-        timeout_ns: args.run_pool_timeout.saturating_mul(1_000_000_000),
+        timeout_ns,
         run_cache_dir,
     }))
 }
@@ -381,6 +385,17 @@ mod tests {
         let err = resolve_run_pool_config(&args).unwrap_err().to_string();
 
         assert!(err.contains("--run-pool-timeout"));
+    }
+
+    #[test]
+    fn test_resolve_run_pool_config_rejects_overflow_timeout() {
+        let mut args = build_args();
+        args.run_pool = true;
+        args.run_pool_timeout = u64::MAX;
+
+        let err = resolve_run_pool_config(&args).unwrap_err().to_string();
+
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]
