@@ -149,6 +149,11 @@ fn test_validate_run_mode_rejects_invalid_timeout_modes() {
     let err = validate_run_mode(&args, true).unwrap_err();
     assert!(err.contains("--timeout"));
     assert!(err.contains("tty"));
+
+    let mut args = default_run_args();
+    args.timeout = Some(u64::MAX);
+    let err = validate_run_mode(&args, true).unwrap_err();
+    assert!(err.contains("too large"), "{err}");
 }
 
 #[test]
