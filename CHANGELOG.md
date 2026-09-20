@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
+  `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
+  so a second prepare run no longer aborts under `set -e` with hundreds of
+  EPERM lines. Busy trees fail closed with a clear message. Does **not** close
+  B4 or claim Enterprise GA.
 - Runtime Service advertised-URL publish proof retries for a bounded grace
   instead of one immediate connect (#611). Workloads that take a short time to
   bind no longer fail `apply` with `peer closed before the generation-fenced
