@@ -665,9 +665,8 @@ fn optional_dns(block: &Block, field: &str, path: &str) -> Result<DnsConfig, Com
     // Same honesty bar as CLI `--dns`: reject garbage so guest resolv.conf
     // cannot disagree with the host path. IPv6 stays valid for TSI; Bridge
     // still requires IPv4 at network setup.
-    crate::dns::parse_dns_servers(&dns.to_vec()).map_err(|error| {
-        ComposeAclError::invalid(format!("{field_path}: {error}"))
-    })?;
+    crate::dns::parse_dns_servers(&dns.to_vec())
+        .map_err(|error| ComposeAclError::invalid(format!("{field_path}: {error}")))?;
     Ok(dns)
 }
 
@@ -927,10 +926,7 @@ network "backend" {
             &HashMap::new(),
         )
         .expect("IPv6 DNS remains valid for TSI");
-        assert_eq!(
-            ipv6.services["api"].dns.to_vec(),
-            ["2001:4860:4860::8888"]
-        );
+        assert_eq!(ipv6.services["api"].dns.to_vec(), ["2001:4860:4860::8888"]);
 
         for source in [
             r#"service "api" { image = "api" dns = "not-an-ip" }"#,
