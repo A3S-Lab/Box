@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - `prepare-linux-sandbox-host.sh --install-launcher` runs `chown root:root`
   before `chmod 4755`. Linux `chown(2)` clears the setuid bit, so the previous
   order always left mode `755` and falsely blamed a nosuid filesystem (#612).
@@ -497,6 +502,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -629,6 +639,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1101,6 +1116,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1246,6 +1266,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1344,6 +1369,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1488,6 +1518,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1784,6 +1819,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -1950,6 +1990,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2009,6 +2054,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2048,6 +2098,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2070,6 +2125,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2110,6 +2170,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2153,6 +2218,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2425,6 +2495,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2544,6 +2619,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2615,6 +2695,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2665,6 +2750,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2751,6 +2841,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2832,6 +2927,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2879,6 +2979,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2908,6 +3013,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2949,6 +3059,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -2990,6 +3105,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3023,6 +3143,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3040,6 +3165,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3102,6 +3232,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3141,6 +3276,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3254,6 +3394,11 @@ image's reach here bypasses VM isolation:
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3317,6 +3462,11 @@ silently ignored are now actually enforced).
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
@@ -3364,6 +3514,11 @@ zero regression (see below).
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
