@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::path::PathBuf;
 
 use a3s_box_core::config::ResourceConfig;
-use a3s_box_core::dns::parse_add_host_entries;
+use a3s_box_core::dns::{parse_add_host_entries, parse_ipv4_dns_server};
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
@@ -436,9 +435,7 @@ impl SandboxCreateOptions {
             validate_guest_path("working directory", workdir)?;
         }
         for server in &self.dns_servers {
-            server.parse::<IpAddr>().map_err(|_| {
-                ClientError::Validation(format!("invalid DNS server address '{server}'"))
-            })?;
+            parse_ipv4_dns_server(server).map_err(ClientError::Validation)?;
         }
         Ok(())
     }

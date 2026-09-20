@@ -136,7 +136,9 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
    are applied before passt_bridge diverts TCP/53 or answers a NetworkStore name.
 3. **DNS completeness without lying:** UDP A + AAAA NODATA already; Linux TCP/53
    now uses a real smoltcp TCP owner on passt_bridge (same honesty bar as macOS
-   `#577`); no fake one-packet TCP answers. Full AAAA RRs still open.
+   `#577`); no fake one-packet TCP answers. Explicit `--dns` must be IPv4:
+   IPv6 and garbage fail closed instead of writing `resolv.conf` while the
+   host proxy drops them. Full AAAA RRs still open.
 4. **Host-held secrets (optional path):** placeholders in guest; substitution only on host-terminated TLS to allow-listed SNI/DNS — complementary to today’s Compose `secret_environment` tmpfs (which *does* place secret bytes in the guest). Do not deprecate tmpfs secrets until the TLS path is proven; do not claim MITM where pin-bypass exists. Spike and refusal: `docs/host-held-secrets-spike.md` (no implementation).
 
 **Evidence required:** Packet-level tests for deny defaults; policy unit tests; platform-scoped integration; CHANGELOG/ROADMAP non-claims for incomplete platforms.

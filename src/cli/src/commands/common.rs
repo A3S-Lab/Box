@@ -466,6 +466,8 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
     }
     a3s_box_core::dns::parse_add_host_entries(&common.add_host)
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
+    a3s_box_core::dns::parse_ipv4_dns_servers(&common.dns)
+        .map_err(|e| format!("Invalid --dns: {e}"))?;
 
     let network = resolve_network(common.network.as_deref());
     #[cfg(windows)]
@@ -1286,6 +1288,24 @@ mod tests {
         let err = validate_runtime_options(&args).unwrap_err();
 
         assert!(err.contains("Invalid --add-host"));
+    }
+
+    #[test]
+    fn test_validate_runtime_options_rejects_non_ipv4_dns() {
+        let mut garbage = default_common_args();
+        garbage.dns = vec!["not-an-ip".to_string()];
+        let err = validate_runtime_options(&garbage).unwrap_err();
+        assert!(err.contains("Invalid --dns"), "{err}");
+
+        let mut v6 = default_common_args();
+        v6.dns = vec!["2001:db8::1".to_string()];
+        let err = validate_runtime_options(&v6).unwrap_err();
+        assert!(err.contains("Invalid --dns"), "{err}");
+        assert!(err.contains("IPv6"), "{err}");
+
+        let mut v4 = default_common_args();
+        v4.dns = vec!["1.1.1.1".to_string()];
+        validate_runtime_options(&v4).unwrap();
     }
 
     #[test]

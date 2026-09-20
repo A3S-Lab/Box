@@ -277,6 +277,33 @@ pub fn parse_add_host_entries(entries: &[String]) -> Result<Vec<HostEntry>, Stri
         .collect()
 }
 
+/// Parse one MicroVM DNS server as IPv4.
+///
+/// Bridge netproxy / passt_bridge and the untrusted egress profile are
+/// IPv4-only. An IPv6 or non-IP `--dns` value must not land in guest
+/// `resolv.conf` while the host path silently drops it.
+pub fn parse_ipv4_dns_server(server: &str) -> Result<std::net::Ipv4Addr, String> {
+    let trimmed = server.trim();
+    if trimmed.is_empty() {
+        return Err("DNS server must not be empty".to_string());
+    }
+    match trimmed.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => Ok(v4),
+        Ok(IpAddr::V6(_)) => Err(format!(
+            "DNS server '{trimmed}' is IPv6; MicroVM DNS is IPv4-only until an IPv6 policy exists"
+        )),
+        Err(_) => Err(format!("invalid DNS server address '{trimmed}'")),
+    }
+}
+
+/// Parse every configured DNS server as IPv4, preserving order.
+pub fn parse_ipv4_dns_servers(servers: &[String]) -> Result<Vec<std::net::Ipv4Addr>, String> {
+    servers
+        .iter()
+        .map(|server| parse_ipv4_dns_server(server))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +516,21 @@ search example.com
         assert!(parse_add_host_entry("missing-ip:").is_err());
         assert!(parse_add_host_entry("bad_host:10.0.0.1").is_err());
         assert!(parse_add_host_entry("host:not-an-ip").is_err());
+    }
+
+    #[test]
+    fn parse_ipv4_dns_servers_accepts_v4_rejects_v6_and_garbage() {
+        assert_eq!(
+            parse_ipv4_dns_servers(&["8.8.8.8".into(), "1.1.1.1".into()]).unwrap(),
+            vec![
+                std::net::Ipv4Addr::new(8, 8, 8, 8),
+                std::net::Ipv4Addr::new(1, 1, 1, 1)
+            ]
+        );
+        let v6 = parse_ipv4_dns_server("2001:db8::1").unwrap_err();
+        assert!(v6.contains("IPv6"), "{v6}");
+        assert!(parse_ipv4_dns_server("not-an-ip").is_err());
+        assert!(parse_ipv4_dns_server("").is_err());
+        assert!(parse_ipv4_dns_server("   ").is_err());
     }
 }

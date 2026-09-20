@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Explicit MicroVM `--dns` values that are not IPv4 fail closed at CLI, SDK,
+  and bridge setup. IPv6 and garbage were previously written into guest
+  `resolv.conf` while the host proxy silently dropped them. Does **not** close
+  B3 or claim Enterprise GA.
 - Operator `deny` and the default untrusted profile on passt_bridge are
   applied before DNS diversion. A deny of the configured DNS server, including
   a foreign-private resolver the default profile already denies, no longer
