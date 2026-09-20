@@ -497,12 +497,24 @@ pub(super) async fn ensure_vm_ready(
     Ok(())
 }
 
-pub(super) fn stop_container_timeout_ms(timeout_seconds: i64) -> Option<u64> {
+/// Convert CRI StopContainer `timeout` (seconds) to milliseconds.
+///
+/// `timeout <= 0` means no explicit destroy deadline (`None`). Values that
+/// cannot fit in `u64` milliseconds fail closed: the previous saturating
+/// multiply turned those into `u64::MAX`, so destroy could wait forever.
+pub(super) fn stop_container_timeout_ms(timeout_seconds: i64) -> Result<Option<u64>, Status> {
     if timeout_seconds <= 0 {
-        return None;
+        return Ok(None);
     }
 
-    Some((timeout_seconds as u64).saturating_mul(1_000))
+    (timeout_seconds as u64)
+        .checked_mul(1_000)
+        .map(Some)
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "StopContainer timeout {timeout_seconds}s does not fit in milliseconds"
+            ))
+        })
 }
 
 /// Convert CRI ExecSync `timeout` (seconds) to nanoseconds.
@@ -523,12 +535,16 @@ pub(super) fn exec_sync_timeout_ns(timeout_seconds: i64) -> Result<u64, Status> 
         })
 }
 
-pub(super) fn stop_container_wait_duration(timeout_seconds: i64) -> tokio::time::Duration {
+pub(super) fn stop_container_wait_duration(
+    timeout_seconds: i64,
+) -> Result<tokio::time::Duration, Status> {
     if timeout_seconds <= 0 {
-        return tokio::time::Duration::from_secs(DEFAULT_STOP_CONTAINER_WAIT_SECS);
+        return Ok(tokio::time::Duration::from_secs(
+            DEFAULT_STOP_CONTAINER_WAIT_SECS,
+        ));
     }
 
-    tokio::time::Duration::from_secs(timeout_seconds as u64)
+    Ok(tokio::time::Duration::from_secs(timeout_seconds as u64))
 }
 
 // ── Container event helpers ──────────────────────────────────────────
@@ -924,10 +940,21 @@ mod tests {
 
     #[test]
     fn test_stop_timeout_helpers_and_container_event_response() {
-        assert_eq!(stop_container_timeout_ms(0), None);
-        assert_eq!(stop_container_timeout_ms(-10), None);
-        assert_eq!(stop_container_timeout_ms(5), Some(5_000));
-        assert_eq!(stop_container_timeout_ms(i64::MAX), Some(u64::MAX));
+        assert_eq!(stop_container_timeout_ms(0).unwrap(), None);
+        assert_eq!(stop_container_timeout_ms(-10).unwrap(), None);
+        assert_eq!(stop_container_timeout_ms(5).unwrap(), Some(5_000));
+        let overflow = stop_container_timeout_ms(i64::MAX).unwrap_err();
+        assert_eq!(overflow.code(), tonic::Code::InvalidArgument);
+        assert!(
+            overflow.message().contains("does not fit in milliseconds"),
+            "{}",
+            overflow.message()
+        );
+        // Saturating to u64::MAX would wait forever; fail closed instead.
+        assert_eq!(
+            (i64::MAX as u64).saturating_mul(1_000),
+            u64::MAX
+        );
 
         assert_eq!(
             exec_sync_timeout_ns(0).unwrap(),
@@ -953,11 +980,11 @@ mod tests {
         );
 
         assert_eq!(
-            stop_container_wait_duration(0),
+            stop_container_wait_duration(0).unwrap(),
             tokio::time::Duration::from_secs(DEFAULT_STOP_CONTAINER_WAIT_SECS)
         );
         assert_eq!(
-            stop_container_wait_duration(7),
+            stop_container_wait_duration(7).unwrap(),
             tokio::time::Duration::from_secs(7)
         );
 
