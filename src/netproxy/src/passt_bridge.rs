@@ -147,6 +147,16 @@ fn run_passt_bridge(
                 );
                 continue;
             }
+            // Operator deny is first-match, including DNS. Diverting TCP/53 or
+            // answering NetworkStore names before this check would ignore a
+            // deny of the DNS server and still emit a local reply.
+            if matches!(
+                classify_ethernet_egress(&frame, &egress_rules),
+                EgressLeg::Drop
+            ) {
+                tracing::debug!("passt_bridge dropping IPv4 by egress policy");
+                continue;
+            }
             if let Some(owner) = dns_tcp.as_mut() {
                 if owner.should_divert(&frame) {
                     owner.push_guest_frame(frame.clone());
@@ -290,18 +300,18 @@ fn run_peer_only_bridge(
                 );
                 continue;
             }
+            if matches!(
+                classify_ethernet_egress(&frame, &egress_rules),
+                EgressLeg::Drop
+            ) {
+                continue;
+            }
             if let Some(owner) = dns_tcp.as_mut() {
                 if owner.should_divert(&frame) {
                     owner.push_guest_frame(frame.clone());
                     let _ = bridge.forward_from_guest(&frame);
                     continue;
                 }
-            }
-            if matches!(
-                classify_ethernet_egress(&frame, &egress_rules),
-                EgressLeg::Drop
-            ) {
-                continue;
             }
             // forward_from_guest returns true when the gateway would also need
             // the frame. With passt gone we still deliver peer copies via the
@@ -798,5 +808,108 @@ mod tests {
             decode_frames(&mut invalid).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn operator_deny_drops_dns_tcp_before_local_divert() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac_a = [0x02, 0x42, 10, 91, 0, 2];
+        let bridge_a = BridgePort::bind(directory.path(), mac_a).unwrap();
+        let (mut guest_a, proxy_a) = UnixStream::pair().unwrap();
+        let (passt_a, mut backend_a) = UnixStream::pair().unwrap();
+        guest_a
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        backend_a
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        let guest_ip = Ipv4Addr::new(10, 88, 0, 2);
+        let dns = NetworkDnsConfig {
+            networks_json: directory.path().join("networks.json"),
+            network_name: "n".to_string(),
+            dns_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
+            guest_ip,
+            gateway_ip: Ipv4Addr::new(10, 88, 0, 1),
+            prefix_len: 24,
+        };
+        std::fs::write(&dns.networks_json, b"{}").unwrap();
+        let rules = vec![EgressMatchRule::parse("deny:8.8.8.8/32").unwrap()];
+
+        let thread = std::thread::spawn(move || {
+            run_passt_bridge(
+                proxy_a,
+                passt_a,
+                bridge_a,
+                None,
+                Some(dns),
+                UntrustedEgressScope {
+                    attached_cidr: Some((guest_ip, 24)),
+                },
+                rules,
+            )
+        });
+
+        let frame = tcp_syn_to_gateway(guest_ip, Ipv4Addr::new(8, 8, 8, 8), 53);
+        write_frame(&mut guest_a, &frame);
+
+        let mut header = [0u8; 4];
+        let guest_read = guest_a.read(&mut header);
+        assert!(
+            guest_read.as_ref().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                )
+            }),
+            "denied DNS TCP must not produce a local reply: {guest_read:?}"
+        );
+        let mut byte = [0u8; 1];
+        assert!(
+            matches!(
+                backend_a.read(&mut byte),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    )
+            ),
+            "denied DNS TCP must not reach passt"
+        );
+
+        drop(guest_a);
+        assert!(thread.join().unwrap().is_ok());
+    }
+
+    fn tcp_syn_to_gateway(
+        guest_ip: Ipv4Addr,
+        destination: Ipv4Addr,
+        destination_port: u16,
+    ) -> Vec<u8> {
+        use smoltcp::wire::{IpAddress, Ipv4Packet, TcpPacket};
+
+        let mut frame = vec![0u8; 14 + 20 + 20];
+        frame[..6].copy_from_slice(&crate::device::GATEWAY_MAC.0);
+        frame[6..12].copy_from_slice(&[0x02, 0x42, 10, 88, 0, 2]);
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&40u16.to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 6;
+        frame[26..30].copy_from_slice(&guest_ip.octets());
+        frame[30..34].copy_from_slice(&destination.octets());
+        frame[34..36].copy_from_slice(&50123u16.to_be_bytes());
+        frame[36..38].copy_from_slice(&destination_port.to_be_bytes());
+        frame[46] = 0x50;
+        frame[47] = 0x02;
+        frame[48..50].copy_from_slice(&65535u16.to_be_bytes());
+
+        let mut ipv4 = Ipv4Packet::new_unchecked(&mut frame[14..]);
+        ipv4.fill_checksum();
+        let source = IpAddress::Ipv4(ipv4.src_addr());
+        let dest = IpAddress::Ipv4(ipv4.dst_addr());
+        let mut tcp = TcpPacket::new_unchecked(ipv4.payload_mut());
+        tcp.fill_checksum(&source, &dest);
+        frame
     }
 }

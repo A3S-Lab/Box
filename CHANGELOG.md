@@ -40,6 +40,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Operator `deny` on passt_bridge is applied before DNS diversion. A deny of
+  the configured DNS server no longer gets a local TCP/53 reply or a
+  NetworkStore answer. Does **not** close B3 or claim Enterprise GA.
 - The shim refuses to attach virtio-net by socket path when the inherited
   egress-proxy descriptor is missing. That path connected libkrun straight to
   passt or the macOS backend and skipped the egress proxy. Does **not** close

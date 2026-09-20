@@ -132,7 +132,8 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
    match is rejected: a name is not a packet field. IPv6 Ethernet is dropped
    until an IPv6 policy exists (not an IPv6 DSL). One 802.1Q or 802.1ad tag
    does not hide that header.
-   This is not a CNI plugin.
+   This is not a CNI plugin. Operator deny is applied before passt_bridge
+   diverts TCP/53 or answers a NetworkStore name.
 3. **DNS completeness without lying:** UDP A + AAAA NODATA already; Linux TCP/53
    now uses a real smoltcp TCP owner on passt_bridge (same honesty bar as macOS
    `#577`); no fake one-packet TCP answers. Full AAAA RRs still open.
