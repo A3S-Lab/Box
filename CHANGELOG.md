@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- `prepare-linux-sandbox-host.sh --install-launcher` runs `chown root:root`
+  before `chmod 4755`. Linux `chown(2)` clears the setuid bit, so the previous
+  order always left mode `755` and falsely blamed a nosuid filesystem (#612).
+  Does **not** close B4 or claim Enterprise GA.
 - CRI `StopContainer` timeouts that cannot fit in `u64` milliseconds fail closed
   with `InvalidArgument`. The previous saturating multiply turned those into
   `u64::MAX`, so destroy could wait forever. Workload-stop wait deadlines that
