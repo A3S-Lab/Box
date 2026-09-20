@@ -40,9 +40,11 @@ pub(crate) const SANDBOX_DELEGATED_CGROUP_ROOT_ENV: &str = "A3S_BOX_SANDBOX_DELE
 
 /// Host cgroup root handed to the setuid Sandbox launcher / native OCI owner.
 ///
-/// Default path matches the administrator helper that enables controllers under
-/// the caller's systemd user instance before dropping privileges. An absolute
-/// [`SANDBOX_DELEGATED_CGROUP_ROOT_ENV`] value replaces that default.
+/// When set, [`SANDBOX_DELEGATED_CGROUP_ROOT_ENV`] must be an absolute path to
+/// the tree prepared by `scripts/prepare-linux-sandbox-host.sh` (typically
+/// `/sys/fs/cgroup/a3s-box-sandbox/delegated`). Capability preflight and the
+/// OCI owner both use this same root (#616). If unset, fall back to a path
+/// under the caller's systemd user instance.
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_sandbox_delegated_cgroup_root() -> String {
     if let Ok(path) = std::env::var(SANDBOX_DELEGATED_CGROUP_ROOT_ENV) {

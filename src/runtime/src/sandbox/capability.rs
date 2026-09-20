@@ -771,8 +771,17 @@ fn probe_seccomp_and_privileges(snapshot: &mut SandboxCapabilitySnapshot) {
 fn probe_cgroup_v2() -> CgroupV2Evidence {
     let mountinfo = read_trimmed("/proc/self/mountinfo");
     let mountpoint = mountinfo.as_deref().and_then(parse_cgroup2_mountpoint);
-    let current_path = process_cgroup_v2_path(std::process::id());
-    let controllers: Vec<String> = current_path
+    let process_path = process_cgroup_v2_path(std::process::id());
+    // Prefer the same root the Sandbox OCI owner joins (#616). The systemd
+    // session cgroup is often not writable for the operator; the prepare
+    // script's delegated tree is.
+    let delegated_root = PathBuf::from(super::linux_sandbox_delegated_cgroup_root());
+    let probe_path = if delegated_root.is_dir() {
+        Some(delegated_root)
+    } else {
+        process_path.clone()
+    };
+    let controllers: Vec<String> = probe_path
         .as_ref()
         .and_then(|path| read_trimmed(path.join("cgroup.controllers")))
         .map(|line| line.split_whitespace().map(ToString::to_string).collect())
@@ -780,7 +789,7 @@ fn probe_cgroup_v2() -> CgroupV2Evidence {
     let has_controllers = REQUIRED_CGROUP_CONTROLLERS
         .iter()
         .all(|required| controllers.iter().any(|value| value == required));
-    let delegated = current_path.as_ref().is_some_and(|path| {
+    let delegated = probe_path.as_ref().is_some_and(|path| {
         has_controllers
             && path.join("cgroup.procs").exists()
             && path.join("cgroup.subtree_control").exists()
@@ -791,7 +800,7 @@ fn probe_cgroup_v2() -> CgroupV2Evidence {
 
     CgroupV2Evidence {
         mountpoint,
-        current_path,
+        current_path: probe_path.or(process_path),
         controllers,
         delegated,
     }
@@ -1184,5 +1193,34 @@ mod tests {
         );
         assert!(safe_join_cgroup(Path::new("/sys/fs/cgroup"), "/../../etc").is_none());
         assert!(parse_cgroup_v2_path(mountinfo, "0::/../../etc\n").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_cgroup_v2_prefers_delegated_root_env_over_session_cgroup() {
+        use std::sync::{Mutex, OnceLock};
+
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let temporary = tempfile::tempdir().unwrap();
+        let delegated = temporary.path().join("delegated");
+        std::fs::create_dir_all(&delegated).unwrap();
+        std::fs::write(delegated.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        std::fs::write(delegated.join("cgroup.procs"), "").unwrap();
+        std::fs::write(delegated.join("cgroup.subtree_control"), "").unwrap();
+
+        std::env::set_var(super::super::SANDBOX_DELEGATED_CGROUP_ROOT_ENV, &delegated);
+        let evidence = probe_cgroup_v2();
+        std::env::remove_var(super::super::SANDBOX_DELEGATED_CGROUP_ROOT_ENV);
+
+        assert_eq!(evidence.current_path.as_deref(), Some(delegated.as_path()));
+        assert!(
+            evidence.delegated,
+            "writable delegated root with required controllers must pass preflight (#616)"
+        );
+        assert!(evidence.controllers.iter().any(|c| c == "cpu"));
+        assert!(evidence.controllers.iter().any(|c| c == "memory"));
+        assert!(evidence.controllers.iter().any(|c| c == "pids"));
     }
 }
