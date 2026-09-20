@@ -40,6 +40,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
+=======
+- Compose ACL `dns` values that are not IP addresses fail closed at parse.
+  IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
+  network setup. Garbage hostnames no longer land in guest `resolv.conf`.
+  Does **not** close B3 or claim Enterprise GA.
+>>>>>>> a5a5f830 (fix(compose): fail closed on non-IP dns in ACL)
 - Explicit `--dns` values that are not IP addresses fail closed. Bridge /
   passt / netproxy still require IPv4 DNS (IPv6 there used to land in guest
   `resolv.conf` while the host proxy silently dropped it). Default TSI keeps
