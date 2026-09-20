@@ -481,7 +481,7 @@ with two containers.
 cd crates/box
 export A3S_BOX_CRI_CRICTL=/path/to/crictl
 export A3S_BOX_CRI_SMOKE_IMAGE=busybox:latest
-export A3S_BOX_CRI_SMOKE_AGENT_IMAGE=ghcr.io/a3s-box/code:v0.1.0
+export A3S_BOX_CRI_SMOKE_AGENT_IMAGE=docker.io/library/alpine:latest
 
 scripts/host-integration-smoke.sh --cri
 ```
