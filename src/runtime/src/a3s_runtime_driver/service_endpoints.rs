@@ -24,6 +24,13 @@ const MAX_SERVICE_CONNECTIONS: usize = 64;
 const MAX_UDP_ASSOCIATIONS: usize = 64;
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_PROBE_PAYLOAD: &[u8] = b"a3s-runtime-service-udp-probe";
+/// Bounded grace for the first advertised-URL proof after bind.
+///
+/// `reconcile` runs within milliseconds of Running (or right after readiness).
+/// Workloads that take a short time to `bind()` used to fail one immediate
+/// probe and retire the Service (#611). Retained-lease probes stay single-shot.
+const SERVICE_PUBLISH_PROBE_GRACE: Duration = Duration::from_secs(8);
+const SERVICE_PUBLISH_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RuntimeEndpointKey {
@@ -132,6 +139,10 @@ impl ServiceEndpointOwner {
                 (existing.identity == identity).then(|| existing.endpoints.clone())
             })
         };
+        // First publish after bind gets a bounded grace (#611). Re-probing a
+        // withdrawn retained lease must fail closed quickly so inspect/re-apply
+        // do not burn the grace window and hit the lifecycle control timeout.
+        let mut publish_with_grace = true;
         if let Some(endpoints) = retained {
             let mut reachable = true;
             for endpoint in &endpoints {
@@ -163,6 +174,7 @@ impl ServiceEndpointOwner {
                 }
             } else {
                 self.leases.lock().await.remove(&key);
+                publish_with_grace = false;
             }
         }
 
@@ -283,9 +295,15 @@ impl ServiceEndpointOwner {
             })
             .collect::<Vec<_>>();
         for (port_name, protocol, address) in probe_targets {
-            let probe = match protocol {
-                TransportProtocol::Tcp => probe_advertised_tcp_endpoint(address).await,
-                TransportProtocol::Udp => probe_advertised_udp_endpoint(address).await,
+            let probe = match (protocol, publish_with_grace) {
+                (TransportProtocol::Tcp, true) => {
+                    probe_advertised_tcp_endpoint_with_grace(address).await
+                }
+                (TransportProtocol::Tcp, false) => probe_advertised_tcp_endpoint(address).await,
+                (TransportProtocol::Udp, true) => {
+                    probe_advertised_udp_endpoint_with_grace(address).await
+                }
+                (TransportProtocol::Udp, false) => probe_advertised_udp_endpoint(address).await,
             };
             if let Err(error) = probe {
                 for (_, task) in prepared.drain(..) {
@@ -293,8 +311,13 @@ impl ServiceEndpointOwner {
                     let _ = task.await;
                 }
                 observation.clear_service_endpoints();
+                let grace_note = if publish_with_grace {
+                    format!(" after {SERVICE_PUBLISH_PROBE_GRACE:?} grace")
+                } else {
+                    String::new()
+                };
                 return Err(RuntimeError::ProviderUnavailable(format!(
-                    "Box Runtime Service endpoint {port_name:?} at {address} is not reachable through the advertised host URL: {error}"
+                    "Box Runtime Service endpoint {port_name:?} at {address} is not reachable through the advertised host URL{grace_note}: {error}"
                 )));
             }
         }
@@ -397,7 +420,7 @@ async fn probe_advertised_tcp_endpoint(address: SocketAddr) -> Result<(), String
             biased;
             result = stream.read(&mut buf) => match result {
                 Ok(0) => Err(
-                    "peer closed before the generation-fenced guest relay opened".into(),
+                    "peer closed before the generation-fenced guest relay opened (guest may not be listening yet)".into(),
                 ),
                 Ok(_) => Ok(()),
                 Err(error) => Err(error.to_string()),
@@ -407,6 +430,24 @@ async fn probe_advertised_tcp_endpoint(address: SocketAddr) -> Result<(), String
     })
     .await
     .map_err(|_| format!("timed out probing advertised endpoint {address}"))?
+}
+
+async fn probe_advertised_tcp_endpoint_with_grace(address: SocketAddr) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + SERVICE_PUBLISH_PROBE_GRACE;
+    let mut last_error = String::new();
+    loop {
+        match probe_advertised_tcp_endpoint(address).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = error;
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(SERVICE_PUBLISH_PROBE_INTERVAL).await;
+            }
+        }
+    }
+    Err(last_error)
 }
 
 /// Prove the advertised UDP URL can accept a datagram without immediate error.
@@ -429,6 +470,24 @@ async fn probe_advertised_udp_endpoint(address: SocketAddr) -> Result<(), String
     })
     .await
     .map_err(|_| format!("timed out probing advertised UDP endpoint {address}"))?
+}
+
+async fn probe_advertised_udp_endpoint_with_grace(address: SocketAddr) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + SERVICE_PUBLISH_PROBE_GRACE;
+    let mut last_error = String::new();
+    loop {
+        match probe_advertised_udp_endpoint(address).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = error;
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(SERVICE_PUBLISH_PROBE_INTERVAL).await;
+            }
+        }
+    }
+    Err(last_error)
 }
 
 async fn serve_tcp_endpoint(

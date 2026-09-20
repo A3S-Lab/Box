@@ -378,6 +378,53 @@ async fn rejecting_guest_relay_does_not_publish_advertised_endpoints() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_guest_accept_still_publishes_within_publish_grace() {
+    struct DelayedAcceptConnector {
+        ready_after: std::sync::Mutex<Option<std::time::Instant>>,
+        held_peers: Mutex<Vec<DuplexStream>>,
+    }
+
+    #[async_trait]
+    impl ExecutionPortConnector for DelayedAcceptConnector {
+        async fn connect_port(
+            &self,
+            _execution_id: &ExecutionId,
+            _generation: ExecutionGeneration,
+            _port: NonZeroU16,
+            _timeout: Duration,
+        ) -> ExecutionManagerResult<ExecutionPortStream> {
+            let mut gate = self.ready_after.lock().unwrap();
+            let deadline = *gate.get_or_insert_with(|| {
+                std::time::Instant::now() + std::time::Duration::from_millis(1_200)
+            });
+            if std::time::Instant::now() < deadline {
+                return Err(ExecutionManagerError::Unavailable(
+                    "MicroVM port 8080 rejected the connection".into(),
+                ));
+            }
+            let (connector_stream, workload_stream) = tokio::io::duplex(1_024);
+            self.held_peers.lock().unwrap().push(workload_stream);
+            Ok(Box::pin(connector_stream))
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(DriverFakeBackend::default());
+    let connector = Arc::new(DelayedAcceptConnector {
+        ready_after: std::sync::Mutex::new(None),
+        held_peers: Mutex::new(Vec::new()),
+    });
+    let driver =
+        fake_driver_with_backend_and_connector(&directory, backend, Arc::clone(&connector));
+    let spec = service_spec("service-endpoint-delayed", 1, &[("api", 8_080)]);
+    let running = driver
+        .apply(&spec, &accepted(&spec))
+        .await
+        .expect("publish probe must retry until the guest starts accepting within grace (#611)");
+    assert!(!running.service_endpoints().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_service_lease_is_withdrawn_when_guest_relay_later_rejects() {
     struct FlipConnector {
         reject: std::sync::atomic::AtomicBool,

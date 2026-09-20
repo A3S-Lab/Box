@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Runtime Service advertised-URL publish proof retries for a bounded grace
+  instead of one immediate connect (#611). Workloads that take a short time to
+  bind no longer fail `apply` with `peer closed before the generation-fenced
+  guest relay opened` and get retired. Permanent guest rejection still fails
+  closed after the grace. Does **not** close B3/B4 or claim Enterprise GA.
 - CRI `StopContainer` timeouts that cannot fit in `u64` milliseconds fail closed
   with `InvalidArgument`. The previous saturating multiply turned those into
   `u64::MAX`, so destroy could wait forever. Workload-stop wait deadlines that
