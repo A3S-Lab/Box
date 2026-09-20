@@ -331,7 +331,7 @@ impl BoxRuntimeService {
         let destroyed = self
             .destroy_sandbox_vm(
                 &container.sandbox_id,
-                stop_container_timeout_ms(timeout_seconds),
+                stop_container_timeout_ms(timeout_seconds)?,
             )
             .await?;
 
@@ -363,8 +363,14 @@ impl BoxRuntimeService {
         };
 
         let _ = stop_tx.send(());
-        let wait_for = stop_container_wait_duration(timeout_seconds);
-        let deadline = tokio::time::Instant::now() + wait_for;
+        let wait_for = stop_container_wait_duration(timeout_seconds)?;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(wait_for)
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "StopContainer timeout {timeout_seconds}s overflows the wait deadline"
+                ))
+            })?;
 
         loop {
             if let Some(current) = self.store.containers.get(&container.id).await {

@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI `StopContainer` timeouts that cannot fit in `u64` milliseconds fail closed
+  with `InvalidArgument`. The previous saturating multiply turned those into
+  `u64::MAX`, so destroy could wait forever. Workload-stop wait deadlines that
+  overflow `Instant` also fail closed. Does **not** close B4 or claim
+  Enterprise GA.
 - Compose ACL `dns` values that are not IP addresses fail closed at parse.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
