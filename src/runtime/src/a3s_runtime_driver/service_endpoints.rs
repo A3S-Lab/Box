@@ -434,20 +434,17 @@ async fn probe_advertised_tcp_endpoint(address: SocketAddr) -> Result<(), String
 
 async fn probe_advertised_tcp_endpoint_with_grace(address: SocketAddr) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + SERVICE_PUBLISH_PROBE_GRACE;
-    let mut last_error = String::new();
     loop {
         match probe_advertised_tcp_endpoint(address).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                last_error = error;
                 if tokio::time::Instant::now() >= deadline {
-                    break;
+                    return Err(error);
                 }
                 tokio::time::sleep(SERVICE_PUBLISH_PROBE_INTERVAL).await;
             }
         }
     }
-    Err(last_error)
 }
 
 /// Prove the advertised UDP URL can accept a datagram without immediate error.
@@ -474,20 +471,17 @@ async fn probe_advertised_udp_endpoint(address: SocketAddr) -> Result<(), String
 
 async fn probe_advertised_udp_endpoint_with_grace(address: SocketAddr) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + SERVICE_PUBLISH_PROBE_GRACE;
-    let mut last_error = String::new();
     loop {
         match probe_advertised_udp_endpoint(address).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                last_error = error;
                 if tokio::time::Instant::now() >= deadline {
-                    break;
+                    return Err(error);
                 }
                 tokio::time::sleep(SERVICE_PUBLISH_PROBE_INTERVAL).await;
             }
         }
     }
-    Err(last_error)
 }
 
 async fn serve_tcp_endpoint(
