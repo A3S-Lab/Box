@@ -704,11 +704,28 @@ where
     // exec connections at once.
     const MAX_CONCURRENT_PROBES: usize = 16;
     futures::stream::iter(probes)
-        .map(|(box_id, health_check)| {
-            let timeout_ns = health::probe_timeout_ns(&health_check);
-            let fut = probe(box_id.clone(), health_check.cmd, timeout_ns);
-            async move { (box_id, fut.await, chrono::Utc::now()) }
-        })
+        .map(
+            |(box_id, health_check)| match health::probe_timeout_ns(&health_check) {
+                Ok(timeout_ns) => {
+                    let fut = probe(box_id.clone(), health_check.cmd, timeout_ns);
+                    futures::future::Either::Right(async move {
+                        (box_id, fut.await, chrono::Utc::now())
+                    })
+                }
+                Err(error) => {
+                    tracing::error!(
+                        box_id = %box_id,
+                        %error,
+                        "skipping health probe: timeout does not fit in nanoseconds"
+                    );
+                    futures::future::Either::Left(std::future::ready((
+                        box_id,
+                        false,
+                        chrono::Utc::now(),
+                    )))
+                }
+            },
+        )
         .buffer_unordered(MAX_CONCURRENT_PROBES)
         .collect()
         .await

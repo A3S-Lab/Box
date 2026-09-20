@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Operator `deny` and the default untrusted profile on passt_bridge are
   applied before DNS diversion. A deny of the configured DNS server, including
   a foreign-private resolver the default profile already denies, no longer
