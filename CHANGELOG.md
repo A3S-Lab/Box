@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Unprivileged overlay probe no longer shells out to the `mount` CLI after
+  `mount(2)` fails (#609). User-lane `a3s-box run` falls back to copy-rootfs
+  without printing `必须以超级用户身份使用 mount` / "must be superuser". Root
+  still uses the CLI fallback with stderr discarded. Does **not** close B4
+  or claim Enterprise GA.
 - Sandbox capability preflight probes `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT`
   (the same tree the OCI owner joins) instead of only the systemd session
   cgroup (#616). Documented operator Sandbox starts no longer fail when the
