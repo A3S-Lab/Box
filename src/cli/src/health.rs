@@ -33,6 +33,10 @@ pub fn spawn_health_checker(
     #[cfg(not(windows))]
     {
         let _ = exec_socket_path;
+        // Reject absurd timeouts before spawning: saturating to u64::MAX made
+        // probes never fire, and Instant+Duration can panic on overflow.
+        let _ = probe_timeout_ns(&health_check)?;
+        let _ = health_probe_timing(&health_check)?;
         Ok(tokio::spawn(async move {
             run_health_loop(box_id, health_check, None).await;
         }))
@@ -52,7 +56,10 @@ pub fn spawn_health_checker(
 /// immediately acquire a new generation lock.
 #[cfg(not(windows))]
 pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), String> {
-    if record.health_check.is_none() {
+    if let Some(health_check) = record.health_check.as_ref() {
+        let _ = probe_timeout_ns(health_check)?;
+        let _ = health_probe_timing(health_check)?;
+    } else {
         return Ok(());
     }
     let generation = health_generation(record)
@@ -224,8 +231,20 @@ async fn run_health_loop(box_id: String, hc: HealthCheck, expected_generation: O
     // Schedule the first probe at the end of start_period instead of waiting
     // for an additional interval. This matches the runtime health scheduler
     // and removes an avoidable interval from Compose dependency convergence.
-    let mut probe_schedule = health_probe_schedule(&hc);
-    let timeout_ns = probe_timeout_ns(&hc);
+    let Ok(mut probe_schedule) = health_probe_schedule(&hc) else {
+        tracing::error!(
+            box_id = %box_id,
+            "refusing health probes: start/interval/timeout cannot be scheduled"
+        );
+        return;
+    };
+    let Ok(timeout_ns) = probe_timeout_ns(&hc) else {
+        tracing::error!(
+            box_id = %box_id,
+            "refusing health probes: timeout does not fit in nanoseconds"
+        );
+        return;
+    };
 
     loop {
         probe_schedule.tick().await;
@@ -260,20 +279,26 @@ async fn run_health_loop(box_id: String, hc: HealthCheck, expected_generation: O
 }
 
 #[cfg(not(windows))]
-fn health_probe_schedule(hc: &HealthCheck) -> tokio::time::Interval {
-    let (first_probe_delay, interval) = health_probe_timing(hc);
-    let first_probe_at = tokio::time::Instant::now() + first_probe_delay;
+fn health_probe_schedule(hc: &HealthCheck) -> Result<tokio::time::Interval, String> {
+    let (first_probe_delay, interval) = health_probe_timing(hc)?;
+    let first_probe_at = tokio::time::Instant::now()
+        .checked_add(first_probe_delay)
+        .ok_or_else(|| "health check start period is too large to schedule".to_string())?;
     let mut schedule = tokio::time::interval_at(first_probe_at, interval);
     schedule.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    schedule
+    Ok(schedule)
 }
 
 #[cfg(not(windows))]
-fn health_probe_timing(hc: &HealthCheck) -> (std::time::Duration, std::time::Duration) {
-    (
+fn health_probe_timing(
+    hc: &HealthCheck,
+) -> Result<(std::time::Duration, std::time::Duration), String> {
+    // Instant+Duration panics on overflow; refuse absurd start/interval instead.
+    let _ = probe_timeout_ns(hc)?;
+    Ok((
         std::time::Duration::from_secs(hc.start_period_secs),
         std::time::Duration::from_secs(hc.interval_secs.max(1)),
-    )
+    ))
 }
 
 #[cfg(not(windows))]
@@ -375,8 +400,13 @@ pub(crate) async fn run_probe(
 }
 
 #[cfg(any(not(windows), test))]
-pub(crate) fn probe_timeout_ns(hc: &HealthCheck) -> u64 {
-    hc.timeout_secs.saturating_mul(1_000_000_000)
+pub(crate) fn probe_timeout_ns(hc: &HealthCheck) -> Result<u64, String> {
+    hc.timeout_secs.checked_mul(1_000_000_000).ok_or_else(|| {
+        format!(
+            "health check timeout {}s does not fit in nanoseconds",
+            hc.timeout_secs
+        )
+    })
 }
 
 #[cfg(any(not(windows), test))]
@@ -460,7 +490,7 @@ mod tests {
             start_period_secs: 7,
         };
         assert_eq!(
-            health_probe_timing(&hc),
+            health_probe_timing(&hc).unwrap(),
             (
                 std::time::Duration::from_secs(7),
                 std::time::Duration::from_secs(30)
@@ -469,8 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timeout_ns_overflow_safe() {
-        // Large timeout_secs must not overflow u64
+    fn test_timeout_ns_overflow_fails_closed() {
         let hc = HealthCheck {
             cmd: vec!["true".to_string()],
             interval_secs: 30,
@@ -478,13 +507,14 @@ mod tests {
             retries: 3,
             start_period_secs: 0,
         };
-        assert_eq!(probe_timeout_ns(&hc), 5_000_000_000);
+        assert_eq!(probe_timeout_ns(&hc).unwrap(), 5_000_000_000);
 
         let big_hc = HealthCheck {
             timeout_secs: u64::MAX,
             ..hc
         };
-        assert_eq!(probe_timeout_ns(&big_hc), u64::MAX); // saturates instead of overflowing
+        let err = probe_timeout_ns(&big_hc).unwrap_err();
+        assert!(err.contains("does not fit in nanoseconds"), "{err}");
     }
 
     #[test]

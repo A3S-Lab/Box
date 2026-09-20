@@ -44,6 +44,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - CLI `--timeout` and `--run-pool-timeout` values that cannot fit in `u64`
   nanoseconds fail closed. The previous saturating multiply turned those into
   `u64::MAX`, so a pool kill would never fire, and foreground
@@ -488,6 +492,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Native Linux `box-owner.json` omits `keep_network_device_authority` when
   false (legacy field set); local SDK smoke accepts the optional bool when
   present. Restores Python owner-death evidence checks after keep-authority
@@ -616,6 +624,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Runtime `NetworkMode::Outbound` is advertised and mapped to MicroVM/libkrun
   TSI socket-proxy egress only (#172). SandboxViaOci keeps `None`/`Service`
   (loopback netns + host→guest relays) and rejects Outbound as
@@ -1084,6 +1096,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - MicroVM guest file downloads retry once on ambiguous transport loss (fresh
   stream / session rebind), matching read-only filesystem ops. No guest journal
   and no `request_id` — downloads are side-effect-free. Does **not** flip B2 or
@@ -1225,6 +1241,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - `ExecClient::filesystem` retries once on a fresh stream for read-only ops
   (`Stat`, `ListDir`) when the guest transport is ambiguous. Mutating ops
   (`MakeDir`, `Move`, `Remove`) stay single-shot until guest journals exist —
@@ -1319,6 +1339,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - OCI container `kill` and `delete` retry once on retryable `Unavailable` with
   the **same** durable operation identity. Replay relies on natural
   idempotency (already-stopped kill / NotFound delete → success), not invented
@@ -1459,6 +1483,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - KVM MicroVM live-session keyed captured exec retries OCI retryable
   `Unavailable` with the **same** `request_id` (parity with Native Live #300).
   Distinct `{id}.retry-N` keys orphan `active_operation` claims and can block
@@ -1751,6 +1779,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Align CI/release A3S_OCI_RUNTIME_REV with the Cargo 3s-oci-sdk pin (9d6eeb).
 
 - Linux Sandbox `native-linux-service` owners now migrate into a child of the
@@ -1913,6 +1945,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Warm-pool shutdown joins in-progress replenishment before draining idle VMs,
   and destroys owned VMs with bounded concurrency. In-flight request ownership
   is retained until cleanup completes, preventing orphaned shims and sockets.
@@ -1968,6 +2004,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Pool socket framing now rejects payloads above 16 MiB and times out partial
   request reads, preventing malformed local clients from causing unbounded
   allocation or permanently occupied connection tasks.
@@ -2003,6 +2043,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Legacy `VmLocalExecutionBackend` now derives and persists Sandbox image-owned
   anonymous-volume identities during the durable create reservation. Sandbox
   launches no longer fail the ownership-drift check when the OCI image declares
@@ -2021,6 +2065,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Clean macOS source builds now keep Homebrew LLVM out of the global dynamic
   loader search path used by libkrun's nested Cargo process. Bindgen continues
   to discover Homebrew libclang through its scoped paths, while nested `rustc`
@@ -2057,6 +2105,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - Published `a3s-box-runtime` packages now retain the audited raw-byte ext4
   writer through the explicit `a3s-box-mkext4` package. Registry consumers no
   longer fall back to upstream `mkext4` and fail to compile the guest-native
@@ -2096,6 +2148,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Fail-closed OCI isolation before CLI product mutation.** `run` and `create`
   now ask the active migration router to preflight the selected isolation before
   named-volume creation or image-cache access. OCI-routed MicroVM requests
@@ -2364,6 +2420,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **OCI lifecycle identity after a failed scale attempt.** Box now includes the
   exact runtime container target in OCI `create` and `start` operation IDs.
   Replaying one execution remains stable, while a replacement execution for
@@ -2479,6 +2539,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Generation and isolation fidelity.** Stale generation requests return
   `conflict`; command and filesystem bridge operations reconnect through the
   persisted execution record instead of assuming MicroVM isolation; Go and
@@ -2546,6 +2610,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Windows release toolchain target.** Windows Actions install the Linux musl
   target required to build the bundled guest init alongside native WHPX
   binaries.
@@ -2592,6 +2660,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Bounded guest entrypoint transport.** Workload executable, arguments,
   working directory, user, and stdin mode are now carried in a validated,
   size-limited rootfs file instead of libkrun's bounded guest kernel command
@@ -2674,6 +2746,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **A3S Runtime recovery and certification stability.** Terminal Sandbox
   owners and recovered log workers are reaped with PID identity fencing,
   naturally exited in-process owners are reclaimed, exec reserves time to
@@ -2751,6 +2827,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Sandbox runtime hardening.** Runtime and shim operations now fence process
   and cgroup identity, clean detached and failed executions, preserve split
   structured logs and rootfs state across cache transitions, tolerate
@@ -2794,6 +2874,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Runtime correctness across lifecycle, networking, and storage.** Fixes
   include detached health scheduling, Compose variable defaults, quoted build
   arguments, commit metadata preservation, bridge peer and published Redis data
@@ -2819,6 +2903,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **SDK crates.io publishing metadata.** `a3s-box-sdk` now declares crates.io
   version requirements for its internal Box dependencies, allowing release
   automation to publish the SDK crate.
@@ -2856,6 +2944,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **macOS release builds no longer require unsafe host `RUN`.** Dockerfile builds
   with `RUN` now have a supported isolated local path on Apple Silicon, including
   `linux/amd64` BuildKit builds.
@@ -2893,6 +2985,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Rootfs writes through `/etc` symlinks.** Rootfs setup now writes generated
   files such as `/etc/nsswitch.conf` inside the guest rootfs even when `/etc` is
   an absolute symlink, fixing images such as `quay.io/skopeo/stable`.
@@ -2922,6 +3018,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **pnpm package-cache toolchain reuse.** `--package-cache pnpm` now persists
   Corepack's prepared pnpm toolchain with `COREPACK_HOME=/a3s-cache/pnpm/corepack`
   in addition to the pnpm store, avoiding repeated toolchain downloads across
@@ -2935,6 +3035,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Dockerfile BuildKit cache mounts.** `a3s-box build` now parses
   `RUN --mount=type=cache,target=... <command>` instead of passing the
   `--mount` flag to `/bin/sh`, and fails clearly for unsupported mount types.
@@ -2993,6 +3097,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Concurrent same-image pipelines could corrupt each other's rootfs cache.**
   `RootfsCache::prune` (run after a cache-miss `put`) evicted least-recently-used
   entries with no in-use guard, so it could `remove_dir_all` a cache entry that
@@ -3028,6 +3136,10 @@ All notable changes to A3S Box will be documented in this file.
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **VMM shim now survives teardown of its launcher's session.** `VmController` puts the
   libkrun shim in its own session (`setsid` via `pre_exec`) so a process-group/cgroup
   kill of a foreground launcher (e.g. a containerd-shim `a3s-box run`) no longer reaps
@@ -3137,6 +3249,10 @@ image's reach here bypasses VM isolation:
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Daemonless lifecycle concurrency races** (the `monitor` daemon, CLI
   processes, and CRI server coordinate via a per-write flock that does not span an
   `await`):
@@ -3196,6 +3312,10 @@ silently ignored are now actually enforced).
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **Resource limits (cgroup) now actually enforced** — `--cpu-quota`/`--cpu-period`/
   `--cpu-shares`, `--pids-limit`, `--memory-reservation`, and `--memory-swap` are
   plumbed to and applied by the in-guest per-container cgroup on the run, CRI,
@@ -3239,6 +3359,10 @@ zero regression (see below).
   IPv4 and IPv6 remain valid (TSI can use IPv6); Bridge still requires IPv4 at
   network setup. Garbage hostnames no longer land in guest `resolv.conf`.
   Does **not** close B3 or claim Enterprise GA.
+- Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
+  The previous saturating multiply turned those into `u64::MAX` so probes never
+  fired, and scheduling `Instant + start_period` could panic. Does **not**
+  close B4 or claim Enterprise GA.
 - **CLI state machine** — route every status-update command (`stop`, `start`,
   `kill`, `pause`, `unpause`, `rename`, `restart`) through the atomic
   `StateFile` primitives, closing a load-modify-save TOCTOU that could clobber
