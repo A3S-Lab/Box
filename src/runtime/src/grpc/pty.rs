@@ -237,7 +237,7 @@ impl StreamingPty {
                 self.done = true;
                 Ok(Some(ExecEvent::Exit(ExecExit {
                     exit_code: exit.exit_code,
-                    oom_killed: false,
+                    oom_killed: exit.oom_killed,
                 })))
             }
             a3s_box_core::pty::FRAME_PTY_ERROR => {
@@ -559,7 +559,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let exit = a3s_box_core::pty::PtyExit { exit_code: 9 };
+            let exit = a3s_box_core::pty::PtyExit {
+                exit_code: 9,
+                oom_killed: false,
+            };
             writer
                 .write_frame(&a3s_transport::Frame {
                     frame_type: a3s_transport::FrameType::Error,

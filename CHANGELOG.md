@@ -40,6 +40,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI container `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` / `A3S_SEC_PIDS_LIMIT`
+  are applied on the guest exec/PTY spawn path (#606). StartContainer no longer
+  drops those controls and joins only the unlimited pod boot cgroup. Does
+  **not** close B4 or claim Enterprise GA.
 - `prepare-linux-sandbox-host.sh` removes existing cgroup trees with depth-first
   `rmdir` instead of `rm -rf` (#613). cgroupfs rejects unlinking control files,
   so a second prepare run no longer aborts under `set -e` with hundreds of
