@@ -40,10 +40,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+<<<<<<< HEAD
 - Health-check timeouts that cannot fit in `u64` nanoseconds fail closed.
   The previous saturating multiply turned those into `u64::MAX` so probes never
   fired, and scheduling `Instant + start_period` could panic. Does **not**
   close B4 or claim Enterprise GA.
+=======
+- Explicit `--dns` values that are not IP addresses fail closed. Bridge /
+  passt / netproxy still require IPv4 DNS (IPv6 there used to land in guest
+  `resolv.conf` while the host proxy silently dropped it). Default TSI keeps
+  IPv6 nameservers because libkrun hijacks AF_INET6. Does **not** close B3 or
+  claim Enterprise GA.
+>>>>>>> origin/main
 - CRI `ExecSync` timeouts that cannot fit in `u64` nanoseconds fail closed with
   `InvalidArgument`. The previous `as u64 * 1_000_000_000` wrapped in release
   and could schedule a much shorter kill than the caller asked for. Does

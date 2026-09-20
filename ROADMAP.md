@@ -956,7 +956,8 @@ open and harness reports still keep
   Domain match, full
   AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
-  open. Does **not** flip `b2_process_session_recovery_closed`.
+  open. Explicit `--dns` must be an IP address; Bridge requires IPv4 (TSI
+  keeps IPv6). Does **not** flip `b2_process_session_recovery_closed`.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata
