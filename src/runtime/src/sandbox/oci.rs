@@ -272,7 +272,10 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
                 .map_err(oci_error)?,
         )
         .args(vec![input.init_path.clone()])
-        .env(compile_environment(&input.init_environment)?)
+        .env(compile_environment(
+            &input.init_environment,
+            input.share_host_network,
+        )?)
         .cwd(PathBuf::from("/"))
         .capabilities(compile_capabilities(&input.requested_capabilities)?)
         .no_new_privileges(true)
@@ -503,6 +506,7 @@ const RESERVED_BOOTSTRAP_ENVIRONMENT: &[&str] = &[
     "A3S_EXEC_LISTENER_FD",
     "A3S_PTY_LISTENER_FD",
     "A3S_INIT_LOG_FD",
+    "A3S_SANDBOX_SHARE_HOST_NETWORK",
 ];
 
 fn validated_environment(
@@ -523,12 +527,26 @@ fn validated_environment(
     Ok(values)
 }
 
-fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> {
+fn compile_environment(
+    environment: &[(String, String)],
+    share_host_network: bool,
+) -> Result<Vec<String>> {
     let mut values = validated_environment(environment)?;
+    for reserved in RESERVED_BOOTSTRAP_ENVIRONMENT {
+        values.remove(*reserved);
+    }
     values.insert("A3S_BOOTSTRAP_MODE".to_string(), "host-sandbox".to_string());
     values.insert("A3S_EXEC_LISTENER_FD".to_string(), "3".to_string());
     values.insert("A3S_PTY_LISTENER_FD".to_string(), "4".to_string());
     values.insert("A3S_INIT_LOG_FD".to_string(), "5".to_string());
+    // Host-netns Outbound shares the host stack; guest-init must not SIOCSIFFLAGS
+    // host `lo` (userns CAP_NET_ADMIN is not real host CAP_NET_ADMIN → EPERM).
+    if share_host_network {
+        values.insert(
+            "A3S_SANDBOX_SHARE_HOST_NETWORK".to_string(),
+            "1".to_string(),
+        );
+    }
 
     Ok(values
         .into_iter()
@@ -1937,6 +1955,10 @@ mod tests {
             .unwrap()
             .iter()
             .any(|option| option == "ro"));
+        let env = value["process"]["env"].as_array().unwrap();
+        assert!(env
+            .iter()
+            .any(|value| value == "A3S_SANDBOX_SHARE_HOST_NETWORK=1"));
     }
 
     #[test]
