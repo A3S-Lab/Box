@@ -75,17 +75,44 @@ pub(super) async fn run(
         let mut outbound = fixture.cases.task(
             "network-outbound",
             &format!(
-                "wget -q -T 5 -O /dev/null http://127.0.0.1:{outbound_port} && printf 'r17-network-outbound-ok\\n'"
+                "command -v wget >/dev/null || {{ printf 'r17-no-wget\\n' >&2; exit 42; }}; \
+                 wget -q -T 5 -O /dev/null http://127.0.0.1:{outbound_port} \
+                   || {{ printf 'r17-wget-failed\\n' >&2; ls /sys/class/net >&2 || true; exit 43; }}; \
+                 printf 'r17-network-outbound-ok\\n'"
             ),
             15_000,
         );
         outbound.spec.network.mode = NetworkMode::Outbound;
         let outbound_observation = client.apply(&outbound).await?;
+        let outbound_record = fixture.record_for(&outbound.spec).await.ok();
+        let oci_network_ns = outbound_record.as_ref().and_then(|record| {
+            let path = record.box_dir.join("sandbox/bundle/config.json");
+            let raw = std::fs::read_to_string(path).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            let namespaces = value.pointer("/linux/namespaces")?.as_array()?;
+            Some(
+                namespaces
+                    .iter()
+                    .any(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("network")),
+            )
+        });
         require(
             outbound_observation.state == RuntimeUnitState::Succeeded,
-            "NetworkMode::Outbound workload could not reach the host loopback listener",
+            format!(
+                "NetworkMode::Outbound workload could not reach the host loopback listener: \
+                 state={:?} failure={:?} exit_code={:?} oci_has_network_ns={:?} network={:?}",
+                outbound_observation.state,
+                outbound_observation.failure,
+                outbound_record.as_ref().and_then(|r| r.exit_code),
+                oci_network_ns,
+                outbound_record
+                    .as_ref()
+                    .and_then(|r| r.managed_execution.as_ref())
+                    .map(|m| &m.request.config.network),
+            ),
         )?;
-        let outbound_record = fixture.record_for(&outbound.spec).await?;
+        let outbound_record = outbound_record
+            .ok_or_else(|| super::protocol("outbound fixture lost managed metadata"))?;
         let outbound_config = &outbound_record
             .managed_execution
             .as_ref()
@@ -103,6 +130,10 @@ pub(super) async fn run(
         require(
             outbound_config.network == expected_mode,
             "NetworkMode::Outbound was not mapped to the isolation egress path",
+        )?;
+        require(
+            oci_network_ns != Some(true),
+            "Sandbox Outbound OCI bundle still created a private network namespace",
         )?;
         accept
             .await
