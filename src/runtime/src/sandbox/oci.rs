@@ -33,6 +33,18 @@ pub const PORTABLE_MICROVM_BUNDLE_SCHEMA: &str = "a3s.box.portable-microvm-bundl
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+/// Host-netns Sandbox cannot mount sysfs and must not rbind whole `/sys`
+/// (host cgroup2 → EBUSY on the agent cgroup mount). Bind these sysfs
+/// subtrees instead; omit `/sys/fs` so `/sys/fs/cgroup` stays free.
+const HOST_NETNS_SYS_BINDS: &[&str] = &[
+    "/sys/devices",
+    "/sys/class",
+    "/sys/bus",
+    "/sys/block",
+    "/sys/dev",
+    "/sys/kernel",
+    "/sys/module",
+];
 const SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES: i64 = 128 * 1024 * 1024;
 const SANDBOX_CONTROL_PIDS_HEADROOM: i64 = 128;
 const SBIN_INIT: &str = "/sbin/init";
@@ -837,39 +849,6 @@ fn compile_mounts(
     user_tmpfs: &[SandboxTmpfs],
     share_host_network: bool,
 ) -> Result<Vec<Mount>> {
-    // Host-netns + user-ns cannot mount a fresh sysfs (EPERM): sysfs is keyed
-    // to the network namespace and the remapped root lacks privilege to create
-    // one in the shared host netns. Bind the host /sys read-only instead — the
-    // same adaptation runc/crun use for --network=host under userns.
-    //
-    // Use non-recursive `bind` (not `rbind`): a recursive bind would carry the
-    // host's nested cgroup2 mount at /sys/fs/cgroup, and the agent-required
-    // read-only cgroup2 mount on that destination then fails with EBUSY. A
-    // plain bind exposes sysfs without nested mounts so the dedicated cgroup
-    // mount below can own /sys/fs/cgroup.
-    let sys_mount = if share_host_network {
-        MountBuilder::default()
-            .destination(PathBuf::from("/sys"))
-            .typ("bind".to_string())
-            .source(PathBuf::from("/sys"))
-            .options(vec![
-                "bind".to_string(),
-                "rprivate".to_string(),
-                "nosuid".to_string(),
-                "noexec".to_string(),
-                "nodev".to_string(),
-                "ro".to_string(),
-            ])
-            .build()
-            .map_err(oci_error)?
-    } else {
-        mount(
-            "/sys",
-            "sysfs",
-            "sysfs",
-            &["nosuid", "noexec", "nodev", "ro"],
-        )?
-    };
     let mut mounts = vec![
         mount("/proc", "proc", "proc", &["nosuid", "noexec", "nodev"])?,
         mount(
@@ -914,17 +893,36 @@ fn compile_mounts(
             "mqueue",
             &["nosuid", "noexec", "nodev"],
         )?,
-        sys_mount,
-        mount(
-            "/sys/fs/cgroup",
-            "cgroup",
-            "cgroup",
-            // The runtime owns the complete topology and passes only two
-            // pre-opened membership descriptors to trusted guest-init. Paths
-            // remain read-only to the Sandbox user namespace.
-            &["nosuid", "noexec", "nodev", "relatime", "ro"],
-        )?,
     ];
+    // Host-netns + user-ns cannot mount a fresh sysfs (EPERM): sysfs is keyed
+    // to the network namespace and the remapped root lacks privilege to create
+    // one in the shared host netns. Do not rbind whole host `/sys` either —
+    // that carries the host cgroup2 mount and EBUSYs the agent-required
+    // `/sys/fs/cgroup` cgroup2 mount; a non-recursive whole-`/sys` bind fails
+    // with EINVAL under the OCI agent. Bind the sysfs subtrees Sandbox needs
+    // and keep the dedicated cgroup mount below (same split runc/crun use for
+    // --network=host under userns).
+    if share_host_network {
+        for path in HOST_NETNS_SYS_BINDS {
+            mounts.push(host_sys_bind(path)?);
+        }
+    } else {
+        mounts.push(mount(
+            "/sys",
+            "sysfs",
+            "sysfs",
+            &["nosuid", "noexec", "nodev", "ro"],
+        )?);
+    }
+    mounts.push(mount(
+        "/sys/fs/cgroup",
+        "cgroup",
+        "cgroup",
+        // The runtime owns the complete topology and passes only two
+        // pre-opened membership descriptors to trusted guest-init. Paths
+        // remain read-only to the Sandbox user namespace.
+        &["nosuid", "noexec", "nodev", "relatime", "ro"],
+    )?);
     mounts.push(mount(
         "/tmp",
         "tmpfs",
@@ -1044,6 +1042,23 @@ fn compile_mounts(
     }
 
     Ok(mounts)
+}
+
+fn host_sys_bind(path: &str) -> Result<Mount> {
+    MountBuilder::default()
+        .destination(PathBuf::from(path))
+        .typ("bind".to_string())
+        .source(PathBuf::from(path))
+        .options(vec![
+            "rbind".to_string(),
+            "rprivate".to_string(),
+            "nosuid".to_string(),
+            "noexec".to_string(),
+            "nodev".to_string(),
+            "ro".to_string(),
+        ])
+        .build()
+        .map_err(oci_error)
 }
 
 fn mount(destination: &str, typ: &str, source: &str, options: &[&str]) -> Result<Mount> {
@@ -1875,31 +1890,41 @@ mod tests {
         for required in ["user", "mount", "pid", "ipc", "uts", "cgroup"] {
             assert!(namespaces.contains(required), "missing {required}");
         }
-        let sys = value["mounts"]
+        let sys_binds: Vec<_> = value["mounts"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|mount| mount["destination"] == "/sys")
-            .expect("/sys mount");
-        assert_eq!(sys["type"], "bind");
-        assert_eq!(sys["source"], "/sys");
-        assert!(sys["options"]
+            .filter(|mount| {
+                mount["destination"]
+                    .as_str()
+                    .is_some_and(|destination| destination.starts_with("/sys/"))
+                    && mount["destination"] != "/sys/fs/cgroup"
+            })
+            .collect();
+        assert_eq!(sys_binds.len(), HOST_NETNS_SYS_BINDS.len());
+        for path in HOST_NETNS_SYS_BINDS {
+            let sys = sys_binds
+                .iter()
+                .find(|mount| mount["destination"] == *path)
+                .unwrap_or_else(|| panic!("missing {path} bind"));
+            assert_eq!(sys["type"], "bind");
+            assert_eq!(sys["source"], *path);
+            assert!(sys["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option == "rbind"));
+            assert!(sys["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option == "ro"));
+        }
+        assert!(value["mounts"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|option| option == "bind"));
-        assert!(sys["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|option| option != "rbind"));
-        assert!(sys["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|option| option == "ro"));
-        // Non-recursive /sys bind leaves /sys/fs/cgroup free for the agent
-        // contract's read-only cgroup2 mount.
+            .all(|mount| mount["destination"] != "/sys"));
         let cgroup = value["mounts"]
             .as_array()
             .unwrap()
