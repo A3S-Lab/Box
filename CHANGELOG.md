@@ -29,6 +29,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- `docs/cri-conformance.md` labels the 2.2.0 73/7 `critest` table as a
+  **historical** baseline, not a tip scoreboard. Tip must re-prove Resources /
+  OOMKilled (and every other bullet) with a tip SHA host report; `#606` restored
+  the exec/PTY `A3S_SEC_*` consumer but does not invent a new critest result.
+  Does **not** close B4 or claim Enterprise GA / full CRI conformance.
 - Publish existing-host WSL2 `/dev/kvm` greened KVM Live
   `a3s.box.linux-kvm-live-session.v5` report digest
   `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
