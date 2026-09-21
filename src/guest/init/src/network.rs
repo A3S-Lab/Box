@@ -113,11 +113,27 @@ pub fn configure_guest_network() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// True when Runtime `Outbound` mapped Sandbox to host-netns (`NetworkMode::Host`).
+///
+/// Set by the Box OCI compiler as `A3S_SANDBOX_SHARE_HOST_NETWORK=1`. Guest-init
+/// must not bring up host `lo` in that mode: userns CAP_NET_ADMIN does not grant
+/// real host network admin, so `SIOCSIFFLAGS` fails with EPERM and aborts boot.
+pub fn sandbox_shares_host_network() -> bool {
+    matches!(
+        std::env::var("A3S_SANDBOX_SHARE_HOST_NETWORK")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 /// Bring up only loopback for an OCI host Sandbox.
 ///
 /// The OCI runtime already created the isolated network namespace. Sandbox
 /// mode deliberately ignores MicroVM passt environment variables and exposes
-/// no egress interface in its first release.
+/// no egress interface in its first release. Callers must skip this when
+/// [`sandbox_shares_host_network`] is true.
 #[cfg(target_os = "linux")]
 pub fn configure_sandbox_loopback() -> Result<(), Box<dyn std::error::Error>> {
     info!("Bringing up Sandbox loopback interface");

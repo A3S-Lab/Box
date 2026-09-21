@@ -72,6 +72,13 @@ pub enum NetworkMode {
         network: String,
     },
 
+    /// Share the host network namespace (omit OCI `network` ns).
+    ///
+    /// Used by Sandbox Runtime `Outbound` Tasks that need real host egress
+    /// (for example Durable Cell publication to S0). Weaker network isolation
+    /// than a private netns; never combine with published ports or Bridge.
+    Host,
+
     /// No networking at all.
     None,
 }
@@ -81,6 +88,7 @@ impl fmt::Display for NetworkMode {
         match self {
             NetworkMode::Tsi => write!(f, "tsi"),
             NetworkMode::Bridge { network } => write!(f, "bridge:{}", network),
+            NetworkMode::Host => write!(f, "host"),
             NetworkMode::None => write!(f, "none"),
         }
     }
@@ -896,6 +904,7 @@ mod tests {
     fn test_network_mode_display() {
         assert_eq!(NetworkMode::Tsi.to_string(), "tsi");
         assert_eq!(NetworkMode::None.to_string(), "none");
+        assert_eq!(NetworkMode::Host.to_string(), "host");
         assert_eq!(
             NetworkMode::Bridge {
                 network: "mynet".to_string()

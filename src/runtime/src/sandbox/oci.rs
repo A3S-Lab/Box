@@ -33,6 +33,18 @@ pub const PORTABLE_MICROVM_BUNDLE_SCHEMA: &str = "a3s.box.portable-microvm-bundl
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+/// Host-netns Sandbox cannot mount sysfs and must not rbind whole `/sys`
+/// (host cgroup2 → EBUSY on the agent cgroup mount). Bind these sysfs
+/// subtrees instead; omit `/sys/fs` so `/sys/fs/cgroup` stays free.
+const HOST_NETNS_SYS_BINDS: &[&str] = &[
+    "/sys/devices",
+    "/sys/class",
+    "/sys/bus",
+    "/sys/block",
+    "/sys/dev",
+    "/sys/kernel",
+    "/sys/module",
+];
 const SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES: i64 = 128 * 1024 * 1024;
 const SANDBOX_CONTROL_PIDS_HEADROOM: i64 = 128;
 const SBIN_INIT: &str = "/sbin/init";
@@ -204,6 +216,9 @@ pub struct SandboxBundleSpec {
     /// Optional host iface already staged in the owner netns (`linux.netDevices` key).
     /// Guest name is always `eth0`. Absent for loopback-only Sandbox GA.
     pub host_net_device: Option<String>,
+    /// When true, omit the OCI `network` namespace and share the host netns.
+    /// Used for Runtime `Outbound` → `NetworkMode::Host` on Sandbox.
+    pub share_host_network: bool,
 }
 
 /// Container process compiled for the long-lived A3S OCI Runtime owner.
@@ -257,7 +272,10 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
                 .map_err(oci_error)?,
         )
         .args(vec![input.init_path.clone()])
-        .env(compile_environment(&input.init_environment)?)
+        .env(compile_environment(
+            &input.init_environment,
+            input.share_host_network,
+        )?)
         .cwd(PathBuf::from("/"))
         .capabilities(compile_capabilities(&input.requested_capabilities)?)
         .no_new_privileges(true)
@@ -402,7 +420,7 @@ fn compile_spec(
     let mut linux = LinuxBuilder::default()
         .uid_mappings(compile_id_mappings(&input.id_mappings.uid_mappings)?)
         .gid_mappings(compile_id_mappings(&input.id_mappings.gid_mappings)?)
-        .namespaces(compile_namespaces()?)
+        .namespaces(compile_namespaces(input.share_host_network)?)
         .resources(compile_resources(&input.resources)?)
         .cgroups_path(PathBuf::from(format!("a3s-box/{}", input.box_id)))
         .devices(compile_devices()?)
@@ -470,7 +488,11 @@ fn compile_spec(
                 .build()
                 .map_err(oci_error)?,
         )
-        .mounts(compile_mounts(&input.mounts, &input.tmpfs)?)
+        .mounts(compile_mounts(
+            &input.mounts,
+            &input.tmpfs,
+            input.share_host_network,
+        )?)
         .process(process)
         .hostname(input.hostname.clone())
         .annotations(annotations)
@@ -484,6 +506,7 @@ const RESERVED_BOOTSTRAP_ENVIRONMENT: &[&str] = &[
     "A3S_EXEC_LISTENER_FD",
     "A3S_PTY_LISTENER_FD",
     "A3S_INIT_LOG_FD",
+    "A3S_SANDBOX_SHARE_HOST_NETWORK",
 ];
 
 fn validated_environment(
@@ -504,12 +527,26 @@ fn validated_environment(
     Ok(values)
 }
 
-fn compile_environment(environment: &[(String, String)]) -> Result<Vec<String>> {
+fn compile_environment(
+    environment: &[(String, String)],
+    share_host_network: bool,
+) -> Result<Vec<String>> {
     let mut values = validated_environment(environment)?;
+    for reserved in RESERVED_BOOTSTRAP_ENVIRONMENT {
+        values.remove(*reserved);
+    }
     values.insert("A3S_BOOTSTRAP_MODE".to_string(), "host-sandbox".to_string());
     values.insert("A3S_EXEC_LISTENER_FD".to_string(), "3".to_string());
     values.insert("A3S_PTY_LISTENER_FD".to_string(), "4".to_string());
     values.insert("A3S_INIT_LOG_FD".to_string(), "5".to_string());
+    // Host-netns Outbound shares the host stack; guest-init must not SIOCSIFFLAGS
+    // host `lo` (userns CAP_NET_ADMIN is not real host CAP_NET_ADMIN → EPERM).
+    if share_host_network {
+        values.insert(
+            "A3S_SANDBOX_SHARE_HOST_NETWORK".to_string(),
+            "1".to_string(),
+        );
+    }
 
     Ok(values
         .into_iter()
@@ -697,24 +734,28 @@ fn compile_id_mappings(mappings: &[IdMapping]) -> Result<Vec<oci_spec::runtime::
         .collect()
 }
 
-fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
-    [
+fn compile_namespaces(share_host_network: bool) -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
+    let mut types = vec![
         LinuxNamespaceType::User,
         LinuxNamespaceType::Mount,
         LinuxNamespaceType::Pid,
         LinuxNamespaceType::Ipc,
         LinuxNamespaceType::Uts,
-        LinuxNamespaceType::Network,
         LinuxNamespaceType::Cgroup,
-    ]
-    .into_iter()
-    .map(|typ| {
-        LinuxNamespaceBuilder::default()
-            .typ(typ)
-            .build()
-            .map_err(oci_error)
-    })
-    .collect()
+    ];
+    if !share_host_network {
+        // Keep network before cgroup for stable GA ordering.
+        types.insert(5, LinuxNamespaceType::Network);
+    }
+    types
+        .into_iter()
+        .map(|typ| {
+            LinuxNamespaceBuilder::default()
+                .typ(typ)
+                .build()
+                .map_err(oci_error)
+        })
+        .collect()
 }
 
 fn compile_portable_microvm_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
@@ -821,7 +862,11 @@ fn minimal_device_numbers() -> &'static [(&'static str, i64, i64)] {
     ]
 }
 
-fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> Result<Vec<Mount>> {
+fn compile_mounts(
+    user_mounts: &[SandboxMount],
+    user_tmpfs: &[SandboxTmpfs],
+    share_host_network: bool,
+) -> Result<Vec<Mount>> {
     let mut mounts = vec![
         mount("/proc", "proc", "proc", &["nosuid", "noexec", "nodev"])?,
         mount(
@@ -866,44 +911,58 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "mqueue",
             &["nosuid", "noexec", "nodev"],
         )?,
-        mount(
+    ];
+    // Host-netns + user-ns cannot mount a fresh sysfs (EPERM): sysfs is keyed
+    // to the network namespace and the remapped root lacks privilege to create
+    // one in the shared host netns. Do not rbind whole host `/sys` either —
+    // that carries the host cgroup2 mount and EBUSYs the agent-required
+    // `/sys/fs/cgroup` cgroup2 mount; a non-recursive whole-`/sys` bind fails
+    // with EINVAL under the OCI agent. Bind the sysfs subtrees Sandbox needs
+    // and keep the dedicated cgroup mount below (same split runc/crun use for
+    // --network=host under userns).
+    if share_host_network {
+        for path in HOST_NETNS_SYS_BINDS {
+            mounts.push(host_sys_bind(path)?);
+        }
+    } else {
+        mounts.push(mount(
             "/sys",
             "sysfs",
             "sysfs",
             &["nosuid", "noexec", "nodev", "ro"],
-        )?,
-        mount(
-            "/sys/fs/cgroup",
-            "cgroup",
-            "cgroup",
-            // The runtime owns the complete topology and passes only two
-            // pre-opened membership descriptors to trusted guest-init. Paths
-            // remain read-only to the Sandbox user namespace.
-            &["nosuid", "noexec", "nodev", "relatime", "ro"],
-        )?,
-        mount(
-            "/tmp",
-            "tmpfs",
-            "tmpfs",
-            &[
-                "nosuid",
-                "nodev",
-                "mode=1777",
-                &format!("size={DEFAULT_TMPFS_SIZE}"),
-            ],
-        )?,
-        mount(
-            "/run",
-            "tmpfs",
-            "tmpfs",
-            &[
-                "nosuid",
-                "nodev",
-                "mode=755",
-                &format!("size={DEFAULT_TMPFS_SIZE}"),
-            ],
-        )?,
-    ];
+        )?);
+    }
+    mounts.push(mount(
+        "/sys/fs/cgroup",
+        "cgroup",
+        "cgroup",
+        // The runtime owns the complete topology and passes only two
+        // pre-opened membership descriptors to trusted guest-init. Paths
+        // remain read-only to the Sandbox user namespace.
+        &["nosuid", "noexec", "nodev", "relatime", "ro"],
+    )?);
+    mounts.push(mount(
+        "/tmp",
+        "tmpfs",
+        "tmpfs",
+        &[
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            &format!("size={DEFAULT_TMPFS_SIZE}"),
+        ],
+    )?);
+    mounts.push(mount(
+        "/run",
+        "tmpfs",
+        "tmpfs",
+        &[
+            "nosuid",
+            "nodev",
+            "mode=755",
+            &format!("size={DEFAULT_TMPFS_SIZE}"),
+        ],
+    )?);
 
     let mut destinations: HashSet<PathBuf> = mounts
         .iter()
@@ -1001,6 +1060,23 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
     }
 
     Ok(mounts)
+}
+
+fn host_sys_bind(path: &str) -> Result<Mount> {
+    MountBuilder::default()
+        .destination(PathBuf::from(path))
+        .typ("bind".to_string())
+        .source(PathBuf::from(path))
+        .options(vec![
+            "rbind".to_string(),
+            "rprivate".to_string(),
+            "nosuid".to_string(),
+            "noexec".to_string(),
+            "nodev".to_string(),
+            "ro".to_string(),
+        ])
+        .build()
+        .map_err(oci_error)
 }
 
 fn mount(destination: &str, typ: &str, source: &str, options: &[&str]) -> Result<Mount> {
@@ -1596,6 +1672,7 @@ mod tests {
             execution_plan_digest: format!("sha256:{}", "a".repeat(64)),
             runtime_digest: format!("sha256:{}", "b".repeat(64)),
             host_net_device: None,
+            share_host_network: false,
         }
     }
 
@@ -1814,6 +1891,74 @@ mod tests {
             .unwrap()
             .iter()
             .any(|option| option == "rw"));
+    }
+
+    #[test]
+    fn host_network_omits_the_oci_network_namespace() {
+        let mut input = sample_input();
+        input.share_host_network = true;
+        let value = as_json(&compile_oci_spec(&input).unwrap());
+        let namespaces: HashSet<_> = value["linux"]["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["type"].as_str().unwrap())
+            .collect();
+        assert!(!namespaces.contains("network"));
+        for required in ["user", "mount", "pid", "ipc", "uts", "cgroup"] {
+            assert!(namespaces.contains(required), "missing {required}");
+        }
+        let sys_binds: Vec<_> = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|mount| {
+                mount["destination"]
+                    .as_str()
+                    .is_some_and(|destination| destination.starts_with("/sys/"))
+                    && mount["destination"] != "/sys/fs/cgroup"
+            })
+            .collect();
+        assert_eq!(sys_binds.len(), HOST_NETNS_SYS_BINDS.len());
+        for path in HOST_NETNS_SYS_BINDS {
+            let sys = sys_binds
+                .iter()
+                .find(|mount| mount["destination"] == *path)
+                .unwrap_or_else(|| panic!("missing {path} bind"));
+            assert_eq!(sys["type"], "bind");
+            assert_eq!(sys["source"], *path);
+            assert!(sys["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option == "rbind"));
+            assert!(sys["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option == "ro"));
+        }
+        assert!(value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mount| mount["destination"] != "/sys"));
+        let cgroup = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/sys/fs/cgroup")
+            .expect("cgroup mount");
+        assert_eq!(cgroup["type"], "cgroup");
+        assert!(cgroup["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "ro"));
+        let env = value["process"]["env"].as_array().unwrap();
+        assert!(env
+            .iter()
+            .any(|value| value == "A3S_SANDBOX_SHARE_HOST_NETWORK=1"));
     }
 
     #[test]

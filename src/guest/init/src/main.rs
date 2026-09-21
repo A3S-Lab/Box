@@ -331,8 +331,12 @@ mod linux {
         };
 
         // Step 3: Configure guest network (if passt mode is active).
+        // Host-netns Outbound shares the host stack: do not SIOCSIFFLAGS host
+        // `lo` from the userns (EPERM). Private-netns Sandbox still needs lo up.
         if bootstrap_mode.is_host_sandbox() {
-            network::configure_sandbox_loopback()?;
+            if !network::sandbox_shares_host_network() {
+                network::configure_sandbox_loopback()?;
+            }
         } else {
             network::configure_guest_network()?;
         }

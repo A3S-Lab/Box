@@ -151,8 +151,10 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
     }
     if !config.port_map.is_empty() {
         // Published ports for SandboxViaOci require Bridge + keep-authority (prepare installs DNAT).
-        if !(matches!(config.network, NetworkMode::Bridge { .. })
-            && crate::network::sandbox_named_bridge_opt_in_enabled())
+        // Host netns has no DNAT staging path and must not publish ports.
+        if matches!(config.network, NetworkMode::Host)
+            || !(matches!(config.network, NetworkMode::Bridge { .. })
+                && crate::network::sandbox_named_bridge_opt_in_enabled())
         {
             unsupported.push("published ports");
         }
@@ -163,6 +165,13 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
         && !crate::network::sandbox_named_bridge_opt_in_enabled()
     {
         unsupported.push("named bridge networking");
+    }
+    if matches!(config.network, NetworkMode::Host)
+        && (!config.dns.is_empty() || !config.add_hosts.is_empty())
+    {
+        // Host netns uses the host resolver path; guest DNS customization would
+        // look like isolation while still sharing the host stack.
+        unsupported.push("host networking with custom DNS or add-hosts");
     }
     if !config.sysctls.is_empty() {
         unsupported.push("custom sysctls");
