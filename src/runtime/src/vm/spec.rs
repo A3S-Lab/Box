@@ -42,8 +42,8 @@ fn env_nonempty(name: &str) -> Option<String> {
 pub(crate) mod guest_control;
 
 use guest_control::{
-    secure_guest_control_file, stage_guest_boot_config, stage_guest_terminal_control,
-    write_guest_boot_config,
+    persist_redacted_staged_environment, secure_guest_control_file, stage_guest_boot_config,
+    stage_guest_terminal_control, write_guest_boot_config,
 };
 
 impl VmManager {
@@ -340,12 +340,6 @@ impl VmManager {
                     env
                 }
                 GuestControlTransport::VirtioFsBootBundle => {
-                    let boot_config = GuestBootConfig::new(
-                        exec_config,
-                        container_env,
-                        GuestHostConfig::default(),
-                    );
-                    fs_mounts.push(stage_guest_boot_config(layout, &boot_config)?);
                     let box_dir = self.home_dir.join("boxes").join(&self.box_id);
                     let capture_diff_baseline = self.rootfs_provider.guest_owns_diff_baseline()
                         && crate::rootfs::guest_diff_baseline_required(&box_dir)?;
@@ -353,6 +347,13 @@ impl VmManager {
                         &box_dir,
                         capture_diff_baseline,
                     )?);
+                    persist_redacted_staged_environment(&box_dir, &container_env)?;
+                    let boot_config = GuestBootConfig::new(
+                        exec_config,
+                        container_env,
+                        GuestHostConfig::default(),
+                    );
+                    fs_mounts.push(stage_guest_boot_config(layout, &boot_config)?);
                     vec![(
                         GUEST_BOOT_CONFIG_ENV.to_string(),
                         GUEST_BOOT_CONFIG_PATH.to_string(),

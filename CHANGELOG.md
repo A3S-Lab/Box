@@ -54,6 +54,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- R17 MicroVM security evidence reads the redacted virtio-fs secret-binding
+  manifest from `runtime-control/staged-environment` instead of a rootfs
+  `/.a3s-box-env` the boot bundle no longer writes (#629). The provider-build
+  matcher accepts the product's `tee/sev-snp-simulated` and
+  `tee/sev-snp-hardware` suffix. Secret values stay in the consumed boot
+  bundle, not in that durable file. Does **not** close B2/B4 or claim
+  Enterprise GA. KVM/SEV-SNP profile runs remain host evidence, not this
+  change by itself.
 - Foreground Sandbox `run` keeps a real OCI exit code of 0 (#630). MicroVM
   still refuses to treat a provider zero as success when guest-init never
   wrote a terminal marker. Does **not** close B2/B4 or claim Enterprise GA.
