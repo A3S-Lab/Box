@@ -368,7 +368,15 @@ impl VmLocalExecutionBackend {
         // Cached shim/provider zero is not guest success. Authenticate against
         // durable workload status before projecting Stopped (#404/#408 parity).
         #[cfg(not(target_os = "windows"))]
-        let authenticated = crate::rootfs::resolve_workload_exit_code(&record.box_dir, exit_code);
+        let authenticated = crate::rootfs::resolve_workload_exit_code_for(
+            &record.box_dir,
+            exit_code,
+            if record.isolation.is_sandbox() {
+                crate::rootfs::ProviderExitPolicy::TrustProvider
+            } else {
+                crate::rootfs::ProviderExitPolicy::RequireGuestProof
+            },
+        );
         #[cfg(target_os = "windows")]
         let authenticated = authenticate_windows_managed_terminal_exit(
             &record.box_dir,

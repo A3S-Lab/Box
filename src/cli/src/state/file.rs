@@ -266,9 +266,14 @@ impl StateFile {
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    record.exit_code = a3s_box_runtime::rootfs::resolve_workload_exit_code(
+                    record.exit_code = a3s_box_runtime::rootfs::resolve_workload_exit_code_for(
                         &record.box_dir,
                         record.exit_code,
+                        if record.isolation.is_sandbox() {
+                            a3s_box_runtime::rootfs::ProviderExitPolicy::TrustProvider
+                        } else {
+                            a3s_box_runtime::rootfs::ProviderExitPolicy::RequireGuestProof
+                        },
                     );
                 }
                 record.status = "dead".to_string();
