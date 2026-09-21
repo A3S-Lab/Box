@@ -1495,6 +1495,30 @@ impl OciLocalExecutionBackend {
     }
 
     #[cfg(all(feature = "vm", target_os = "linux"))]
+    async fn reclaim_owner_after_dead_device_policy_helper(
+        &self,
+        error: ExecutionManagerError,
+    ) -> ExecutionManagerError {
+        let ExecutionManagerError::Unavailable(message) = &error else {
+            return error;
+        };
+        if !super::oci_owner::is_rootless_device_policy_helper_dead(message) {
+            return error;
+        }
+        let Some(recovery) = self.native_linux_owner.as_ref() else {
+            return error;
+        };
+        match super::oci_owner::force_reclaim_unusable_native_linux_owner(&recovery.service_root) {
+            Ok(()) => ExecutionManagerError::Unavailable(format!(
+                "{message}; reclaimed native Linux OCI owner after rootless device-policy helper death — retry create"
+            )),
+            Err(reclaim_error) => ExecutionManagerError::Unavailable(format!(
+                "{message}; also failed to reclaim native Linux OCI owner after device-policy helper death: {reclaim_error}"
+            )),
+        }
+    }
+
+    #[cfg(all(feature = "vm", target_os = "linux"))]
     async fn ensure_native_linux_owner(&self) -> ExecutionManagerResult<()> {
         let Some(recovery) = self.native_linux_owner.as_ref() else {
             return Ok(());
@@ -1951,6 +1975,10 @@ impl LocalExecutionBackend for OciLocalExecutionBackend {
                 )))
             }
             Err(error) => {
+                #[cfg(all(feature = "vm", target_os = "linux"))]
+                let error = self
+                    .reclaim_owner_after_dead_device_policy_helper(error)
+                    .await;
                 // Unknown create/start outcomes must be reconciled, not erased.
                 // Cleanup product preparation only when the runtime proves no
                 // current generation exists for the deterministic ID.
