@@ -841,13 +841,19 @@ fn compile_mounts(
     // to the network namespace and the remapped root lacks privilege to create
     // one in the shared host netns. Bind the host /sys read-only instead — the
     // same adaptation runc/crun use for --network=host under userns.
+    //
+    // Use non-recursive `bind` (not `rbind`): a recursive bind would carry the
+    // host's nested cgroup2 mount at /sys/fs/cgroup, and the agent-required
+    // read-only cgroup2 mount on that destination then fails with EBUSY. A
+    // plain bind exposes sysfs without nested mounts so the dedicated cgroup
+    // mount below can own /sys/fs/cgroup.
     let sys_mount = if share_host_network {
         MountBuilder::default()
             .destination(PathBuf::from("/sys"))
             .typ("bind".to_string())
             .source(PathBuf::from("/sys"))
             .options(vec![
-                "rbind".to_string(),
+                "bind".to_string(),
                 "rprivate".to_string(),
                 "nosuid".to_string(),
                 "noexec".to_string(),
@@ -909,11 +915,7 @@ fn compile_mounts(
             &["nosuid", "noexec", "nodev"],
         )?,
         sys_mount,
-    ];
-    // rbind of host /sys already carries /sys/fs/cgroup. A second cgroup mount
-    // on that destination fails with EBUSY (R17 Sandbox Outbound / host-netns).
-    if !share_host_network {
-        mounts.push(mount(
+        mount(
             "/sys/fs/cgroup",
             "cgroup",
             "cgroup",
@@ -921,8 +923,8 @@ fn compile_mounts(
             // pre-opened membership descriptors to trusted guest-init. Paths
             // remain read-only to the Sandbox user namespace.
             &["nosuid", "noexec", "nodev", "relatime", "ro"],
-        )?);
-    }
+        )?,
+    ];
     mounts.push(mount(
         "/tmp",
         "tmpfs",
@@ -1885,18 +1887,31 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|option| option == "rbind"));
+            .any(|option| option == "bind"));
+        assert!(sys["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|option| option != "rbind"));
         assert!(sys["options"]
             .as_array()
             .unwrap()
             .iter()
             .any(|option| option == "ro"));
-        // rbind /sys already exposes host cgroupfs; a second cgroup mount EBUSYs.
-        assert!(value["mounts"]
+        // Non-recursive /sys bind leaves /sys/fs/cgroup free for the agent
+        // contract's read-only cgroup2 mount.
+        let cgroup = value["mounts"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|mount| mount["destination"] != "/sys/fs/cgroup"));
+            .find(|mount| mount["destination"] == "/sys/fs/cgroup")
+            .expect("cgroup mount");
+        assert_eq!(cgroup["type"], "cgroup");
+        assert!(cgroup["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "ro"));
     }
 
     #[test]
