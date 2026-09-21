@@ -45,6 +45,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Native Linux OCI create failures that prove the rootless device-policy helper
+  is dead reclaim the still-PID-alive Host (#623 secondary). A Host that
+  accepts RPCs after helper SIGKILL/Broken pipe is no longer reused; the next
+  ensure spawns a fresh owner. Does **not** close B2/B4 or claim Enterprise GA.
 - CRI compiled-in default agent image is `docker.io/library/alpine:latest`
   instead of private `ghcr.io/a3s-box/code:v0.1.0` (#607). Stock
   `RunPodSandbox` without `--agent-image` no longer fails with registry 401.
