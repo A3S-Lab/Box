@@ -75,10 +75,9 @@ pub(super) async fn run(
         let mut outbound = fixture.cases.task(
             "network-outbound",
             &format!(
-                "command -v wget >/dev/null || {{ printf 'r17-no-wget\\n' >&2; exit 42; }}; \
-                 wget -q -T 5 -O /dev/null http://127.0.0.1:{outbound_port} \
-                   || {{ printf 'r17-wget-failed\\n' >&2; ls /sys/class/net >&2 || true; exit 43; }}; \
-                 printf 'r17-network-outbound-ok\\n'"
+                "ec=1; command -v wget >/dev/null || ec=42; \
+                 if [ \"$ec\" -eq 1 ]; then wget -q -T 5 -O /dev/null http://127.0.0.1:{outbound_port} && ec=0 || ec=43; fi; \
+                 printf '%s\\n' \"$ec\" > /workspace/r17-outbound-ec; exit \"$ec\""
             ),
             15_000,
         );
@@ -100,7 +99,8 @@ pub(super) async fn run(
             outbound_observation.state == RuntimeUnitState::Succeeded,
             format!(
                 "NetworkMode::Outbound workload could not reach the host loopback listener: \
-                 state={:?} failure={:?} exit_code={:?} oci_has_network_ns={:?} network={:?}",
+                 state={:?} failure={:?} exit_code={:?} oci_has_network_ns={:?} network={:?} \
+                 workspace_ec={:?}",
                 outbound_observation.state,
                 outbound_observation.failure,
                 outbound_record.as_ref().and_then(|r| r.exit_code),
@@ -109,6 +109,10 @@ pub(super) async fn run(
                     .as_ref()
                     .and_then(|r| r.managed_execution.as_ref())
                     .map(|m| &m.request.config.network),
+                outbound_record.as_ref().map(|record| {
+                    std::fs::read_to_string(record.box_dir.join("workspace/r17-outbound-ec"))
+                        .unwrap_or_else(|error| format!("missing ({error})"))
+                }),
             ),
         )?;
         let outbound_record = outbound_record
