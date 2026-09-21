@@ -9,7 +9,16 @@ suite so regressions are visible and progress is measurable.
 > workspace `[patch.crates-io]`); before it, `crictl`/`critest` could not connect
 > at all — every RPC failed CRI-API validation with `PROTOCOL_ERROR`.
 
-## Latest run
+## Historical baseline (2.2.0)
+
+> **Not a tip scoreboard.** The table below is the last published full
+> `critest` capture (`a3s-box` **2.2.0**, 2026-06-15). Tip has moved many
+> commits since; do **not** treat these counts as current Enterprise GA /
+> conformance evidence. Re-run `critest` on tip and replace this section when
+> a new tip SHA + host report exists. Notably, tip before `#606` dropped
+> `A3S_SEC_MEM_LIMIT` / `CPU_*` on the CRI exec/PTY path so the Resources /
+> OOMKilled claim below was **not** true on tip until that fix landed — the
+> 2.2.0 row is historical, not a blank check for tip.
 
 | Field | Value |
 |-------|-------|
@@ -23,9 +32,10 @@ Up from the original **21 Passed / 59 Failed** (2.0.4) and the **44 Passed**
 mid-point. With registry mirrors configured (so the e2e webserver/helper images
 resolve) plus per-container capabilities, image-defined users/groups, pod DNS,
 crash-recovery reaping, standard `/dev` nodes, routable pod IPs, **OOMKilled
-detection**, **MaskedPaths**, and an **SPDY port-forward bridge**, the suite
-passes 73 of the 80 specs that run. Every one of the 7 remaining failures is
-architectural (microVM-per-pod) or environmental — none is a logic defect.
+detection**, **MaskedPaths**, and an **SPDY port-forward bridge**, that 2.2.0
+capture passed 73 of the 80 specs that ran. Every one of the 7 remaining
+failures in **that** capture was architectural (microVM-per-pod) or
+environmental — not a license to claim tip has zero logic defects.
 Re-verified on `main` for the 2.2.0 release with **zero regression** from that
 release's CRI fixes (lifecycle/stats, streaming cleanup, empty-ref rejection,
 `rmi` short-tag resolution).
@@ -49,7 +59,13 @@ critest --runtime-endpoint unix:///tmp/a3s-box.sock \
 > which isolates the 7 architectural failures from the 2 portforward specs
 > accounted for below.
 
-## What passes (73)
+## What the 2.2.0 capture passed (73)
+
+> Scope: the historical 2.2.0 run above. Tip must re-prove each bullet with a
+> tip SHA host report before treating it as current. `#606` restored guest
+> exec/PTY consumption of `A3S_SEC_MEM_LIMIT` / `A3S_SEC_CPU_*` /
+> `A3S_SEC_PIDS_LIMIT` so the Resources / OOMKilled path can work on tip again;
+> that is a code fix, not a new critest scoreboard.
 
 - **Pod + container lifecycle:** `RunPodSandbox` (boots a microVM),
   `PodSandboxStatus`, `CreateContainer`, `StartContainer`, `ContainerStatus`,
@@ -131,9 +147,13 @@ unchanged.
 ## Methodology
 
 The baseline is captured so each fix is measurable. Re-run after each CRI feature
-lands and update the "Latest run" table; the goal is to drive Failed → 0
-(excluding documented architectural/environmental items) and graduate
-`a3s-box-cri` to a conformant, mature CRI runtime. At 73/82 the remaining
-failures are inherent to the microVM-per-pod model (host namespaces, per-container
-PID, mount propagation, AppArmor's shared-host-kernel assumption) or specific to
-this test node (the port-forward CNI DNAT); none is an outstanding logic defect.
+lands and update (or replace) the historical table with a **tip** SHA + host
+report; the goal is to drive Failed → 0 (excluding documented
+architectural/environmental items) and graduate `a3s-box-cri` toward a
+conformant, mature CRI runtime. At the 2.2.0 73/82 capture, the remaining
+failures were inherent to the microVM-per-pod model (host namespaces,
+per-container PID, mount propagation, AppArmor's shared-host-kernel assumption)
+or specific to that test node (the port-forward CNI DNAT). Tip may still carry
+logic defects until a tip scoreboard says otherwise — do not project the 2.2.0
+“no logic defect” claim forward. This document does **not** close B4 or claim
+Enterprise GA / full CRI conformance.
