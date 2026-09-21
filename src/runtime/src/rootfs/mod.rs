@@ -165,6 +165,16 @@ pub(crate) fn guest_rootfs_handoff_complete(box_dir: &Path) -> bool {
     )
 }
 
+/// How a provider-reported exit code may fill in a missing guest marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderExitPolicy {
+    /// MicroVM: a provider zero without a guest marker is not success.
+    RequireGuestProof,
+    /// Sandbox: the OCI wait status is the workload result. There is no
+    /// guest-init marker to expect.
+    TrustProvider,
+}
+
 /// Read the exit code persisted by guest-init.
 ///
 /// New MicroVMs publish through the private terminal-control sidecar. Legacy
@@ -182,7 +192,23 @@ pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
 /// entirely, only a legacy rootfs marker or a **nonzero** provider status is
 /// accepted — a provider zero is never substituted for missing guest state
 /// (same invent-success refusal as pending/invalid).
+///
+/// Sandbox callers that have an OCI wait status must use
+/// [`resolve_workload_exit_code_for`] with [`ProviderExitPolicy::TrustProvider`].
 pub fn resolve_workload_exit_code(box_dir: &Path, provider_exit_code: Option<i32>) -> Option<i32> {
+    resolve_workload_exit_code_for(
+        box_dir,
+        provider_exit_code,
+        ProviderExitPolicy::RequireGuestProof,
+    )
+}
+
+/// Same as [`resolve_workload_exit_code`], with an explicit provider policy.
+pub fn resolve_workload_exit_code_for(
+    box_dir: &Path,
+    provider_exit_code: Option<i32>,
+    policy: ProviderExitPolicy,
+) -> Option<i32> {
     match read_guest_terminal_status(box_dir) {
         TerminalStatusRead::Complete(status) => return Some(status.exit_code),
         // A staged-but-empty terminal file belongs to the current generation.
@@ -213,7 +239,12 @@ pub fn resolve_workload_exit_code(box_dir: &Path, provider_exit_code: Option<i32
                 .ok()
                 .and_then(|contents| contents.trim().parse::<i32>().ok())
         })
-        .or_else(|| provider_exit_code.filter(|exit_code| *exit_code != 0))
+        .or_else(|| match policy {
+            ProviderExitPolicy::RequireGuestProof => {
+                provider_exit_code.filter(|exit_code| *exit_code != 0)
+            }
+            ProviderExitPolicy::TrustProvider => provider_exit_code,
+        })
 }
 
 /// A temporarily attached persistent rootfs.
@@ -692,6 +723,35 @@ mod tests {
         assert_eq!(resolve_workload_exit_code(temp.path(), Some(0)), None);
         assert_eq!(resolve_workload_exit_code(temp.path(), None), None);
         assert_eq!(resolve_workload_exit_code(temp.path(), Some(9)), Some(9));
+    }
+
+    #[test]
+    fn sandbox_provider_zero_is_authoritative_without_a_guest_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_workload_exit_code_for(temp.path(), Some(0), ProviderExitPolicy::TrustProvider),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_workload_exit_code_for(temp.path(), None, ProviderExitPolicy::TrustProvider),
+            None
+        );
+
+        // A staged-but-empty terminal file is still not success, even for Sandbox.
+        let terminal = temp
+            .path()
+            .join("runtime-control")
+            .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(&terminal, []).unwrap();
+        assert_eq!(
+            resolve_workload_exit_code_for(temp.path(), Some(0), ProviderExitPolicy::TrustProvider),
+            None
+        );
+        assert_eq!(
+            resolve_workload_exit_code_for(temp.path(), Some(4), ProviderExitPolicy::TrustProvider),
+            Some(4)
+        );
     }
 
     #[test]
