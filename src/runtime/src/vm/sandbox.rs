@@ -236,10 +236,7 @@ impl VmManager {
                 execution_plan_digest,
                 runtime_digest,
                 host_net_device: None,
-                share_host_network: matches!(
-                    self.config.network,
-                    a3s_box_core::NetworkMode::Host
-                ),
+                share_host_network: matches!(self.config.network, a3s_box_core::NetworkMode::Host),
             };
             let oci_spec = compile_oci_spec(&bundle_spec)?;
             write_bundle(&bundle_dir, &oci_spec, &execution_plan, &capabilities)?;
@@ -530,10 +527,7 @@ impl VmManager {
                 execution_plan_digest: digest_json(execution_plan)?,
                 runtime_digest,
                 host_net_device,
-                share_host_network: matches!(
-                    self.config.network,
-                    a3s_box_core::NetworkMode::Host
-                ),
+                share_host_network: matches!(self.config.network, a3s_box_core::NetworkMode::Host),
             };
             let oci_spec = compile_runtime_owned_oci_spec(&bundle_spec, &runtime_process)?;
             write_bundle(&bundle_dir, &oci_spec, execution_plan, capabilities)?;
