@@ -329,7 +329,7 @@ fn network_name(record: &BoxRecord) -> Option<&str> {
         .as_deref()
         .or(match &record.network_mode {
             NetworkMode::Bridge { network } => Some(network.as_str()),
-            NetworkMode::Tsi | NetworkMode::None => None,
+            NetworkMode::Tsi | NetworkMode::None | NetworkMode::Host => None,
         })
 }
 

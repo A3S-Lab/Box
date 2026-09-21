@@ -204,6 +204,9 @@ pub struct SandboxBundleSpec {
     /// Optional host iface already staged in the owner netns (`linux.netDevices` key).
     /// Guest name is always `eth0`. Absent for loopback-only Sandbox GA.
     pub host_net_device: Option<String>,
+    /// When true, omit the OCI `network` namespace and share the host netns.
+    /// Used for Runtime `Outbound` → `NetworkMode::Host` on Sandbox.
+    pub share_host_network: bool,
 }
 
 /// Container process compiled for the long-lived A3S OCI Runtime owner.
@@ -402,7 +405,7 @@ fn compile_spec(
     let mut linux = LinuxBuilder::default()
         .uid_mappings(compile_id_mappings(&input.id_mappings.uid_mappings)?)
         .gid_mappings(compile_id_mappings(&input.id_mappings.gid_mappings)?)
-        .namespaces(compile_namespaces()?)
+        .namespaces(compile_namespaces(input.share_host_network)?)
         .resources(compile_resources(&input.resources)?)
         .cgroups_path(PathBuf::from(format!("a3s-box/{}", input.box_id)))
         .devices(compile_devices()?)
@@ -697,24 +700,28 @@ fn compile_id_mappings(mappings: &[IdMapping]) -> Result<Vec<oci_spec::runtime::
         .collect()
 }
 
-fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
-    [
+fn compile_namespaces(share_host_network: bool) -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
+    let mut types = vec![
         LinuxNamespaceType::User,
         LinuxNamespaceType::Mount,
         LinuxNamespaceType::Pid,
         LinuxNamespaceType::Ipc,
         LinuxNamespaceType::Uts,
-        LinuxNamespaceType::Network,
         LinuxNamespaceType::Cgroup,
-    ]
-    .into_iter()
-    .map(|typ| {
-        LinuxNamespaceBuilder::default()
-            .typ(typ)
-            .build()
-            .map_err(oci_error)
-    })
-    .collect()
+    ];
+    if !share_host_network {
+        // Keep network before cgroup for stable GA ordering.
+        types.insert(5, LinuxNamespaceType::Network);
+    }
+    types
+        .into_iter()
+        .map(|typ| {
+            LinuxNamespaceBuilder::default()
+                .typ(typ)
+                .build()
+                .map_err(oci_error)
+        })
+        .collect()
 }
 
 fn compile_portable_microvm_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
@@ -1596,6 +1603,7 @@ mod tests {
             execution_plan_digest: format!("sha256:{}", "a".repeat(64)),
             runtime_digest: format!("sha256:{}", "b".repeat(64)),
             host_net_device: None,
+            share_host_network: false,
         }
     }
 
@@ -1814,6 +1822,23 @@ mod tests {
             .unwrap()
             .iter()
             .any(|option| option == "rw"));
+    }
+
+    #[test]
+    fn host_network_omits_the_oci_network_namespace() {
+        let mut input = sample_input();
+        input.share_host_network = true;
+        let value = as_json(&compile_oci_spec(&input).unwrap());
+        let namespaces: HashSet<_> = value["linux"]["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["type"].as_str().unwrap())
+            .collect();
+        assert!(!namespaces.contains("network"));
+        for required in ["user", "mount", "pid", "ipc", "uts", "cgroup"] {
+            assert!(namespaces.contains(required), "missing {required}");
+        }
     }
 
     #[test]

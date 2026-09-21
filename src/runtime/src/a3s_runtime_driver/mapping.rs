@@ -291,17 +291,14 @@ fn compile_network_mode(
         // vsock connector. Enabling TSI here would redirect the guest-side
         // loopback connection to the host instead of the local workload.
         RuntimeNetworkMode::None | RuntimeNetworkMode::Service => Ok(NetworkMode::None),
-        // Outbound is libkrun TSI socket-proxy egress. SandboxViaOci keeps a
-        // private netns with loopback only (no TSI), so advertising or mapping
-        // Outbound there would be a false capability claim.
-        RuntimeNetworkMode::Outbound => {
-            if execution_isolation != ExecutionIsolation::Microvm {
-                return Err(RuntimeError::UnsupportedCapabilities(vec![
-                    "network_mode:Outbound".into(),
-                ]));
-            }
-            Ok(NetworkMode::Tsi)
-        }
+        // Outbound egress:
+        // - MicroVM → libkrun TSI socket-proxy
+        // - Sandbox → host netns (`NetworkMode::Host`); private loopback netns
+        //   has no TSI, so host-netns is the honest Sandbox egress path.
+        RuntimeNetworkMode::Outbound => match execution_isolation {
+            ExecutionIsolation::Microvm => Ok(NetworkMode::Tsi),
+            ExecutionIsolation::Sandbox => Ok(NetworkMode::Host),
+        },
     }
 }
 

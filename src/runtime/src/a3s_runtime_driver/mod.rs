@@ -583,14 +583,14 @@ impl RuntimeDriver for BoxRuntimeDriver {
             // Runtime uses `Sandbox` as the provider-neutral isolation
             // class. `execution_isolation` selects Box's concrete backend.
             isolation_levels,
-            // Outbound requires MicroVM/libkrun TSI. Sandbox stays None+Service
-            // only (loopback netns + host→guest relays; no workload egress).
+            // Outbound: MicroVM uses libkrun TSI; Sandbox uses host-netns.
+            // Both advertise Outbound so Cloud publication Tasks can admit.
             network_modes: {
-                let mut modes = vec![NetworkMode::None, NetworkMode::Service];
-                if self.execution_isolation == ExecutionIsolation::Microvm {
-                    modes.insert(1, NetworkMode::Outbound);
-                }
-                modes
+                vec![
+                    NetworkMode::None,
+                    NetworkMode::Outbound,
+                    NetworkMode::Service,
+                ]
             },
             mount_kinds,
             health_check_kinds: vec![

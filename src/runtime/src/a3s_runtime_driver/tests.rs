@@ -115,7 +115,7 @@ fn driver_allows_explicit_shared_kernel_selection() {
 }
 
 #[tokio::test]
-async fn sandbox_capabilities_omit_outbound_without_egress() {
+async fn sandbox_capabilities_advertise_outbound_via_host_netns() {
     let directory = tempfile::tempdir().unwrap();
     let driver = BoxRuntimeDriver::new_with_isolation(
         BoxRuntimeDriverConfig {
@@ -135,15 +135,21 @@ async fn sandbox_capabilities_omit_outbound_without_egress() {
     let capabilities = driver.capabilities().await.unwrap();
     assert_eq!(
         capabilities.network_modes,
-        vec![NetworkMode::None, NetworkMode::Service]
+        vec![
+            NetworkMode::None,
+            NetworkMode::Outbound,
+            NetworkMode::Service
+        ]
     );
     let mut outbound = spec(RuntimeUnitClass::Task);
     outbound.network.mode = NetworkMode::Outbound;
-    assert!(matches!(
-        creation_request(&outbound, ExecutionIsolation::Sandbox),
-        Err(a3s_runtime::RuntimeError::UnsupportedCapabilities(missing))
-            if missing == vec!["network_mode:Outbound"]
-    ));
+    assert_eq!(
+        creation_request(&outbound, ExecutionIsolation::Sandbox)
+            .unwrap()
+            .config
+            .network,
+        a3s_box_core::NetworkMode::Host
+    );
 }
 
 #[tokio::test]

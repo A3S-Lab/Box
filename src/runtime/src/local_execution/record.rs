@@ -31,7 +31,7 @@ pub(crate) fn build_managed_record(
     let box_dir = home_dir.join("boxes").join(execution_id.as_str());
     let network_name = match &config.network {
         NetworkMode::Bridge { network } => Some(network.clone()),
-        NetworkMode::Tsi | NetworkMode::None => None,
+        NetworkMode::Tsi | NetworkMode::None | NetworkMode::Host => None,
     };
     let env = config.extra_env.iter().cloned().collect::<HashMap<_, _>>();
     let labels = request

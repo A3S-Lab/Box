@@ -56,7 +56,6 @@ pub(super) async fn run(
 
     let capabilities = client.capabilities().await?;
     if capabilities.network_modes.contains(&NetworkMode::Outbound) {
-        // MicroVM/TSI: guest 127.0.0.1 connects are proxied onto the host stack.
         let outbound_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| super::external("bind outbound network oracle", error))?;
@@ -93,9 +92,17 @@ pub(super) async fn run(
             .ok_or_else(|| super::protocol("outbound fixture lost managed metadata"))?
             .request
             .config;
+        let expected_mode = if matches!(
+            outbound_config.isolation,
+            a3s_box_core::ExecutionIsolation::Sandbox
+        ) {
+            BoxNetworkMode::Host
+        } else {
+            BoxNetworkMode::Tsi
+        };
         require(
-            outbound_config.network == BoxNetworkMode::Tsi,
-            "NetworkMode::Outbound was not mapped to TSI egress",
+            outbound_config.network == expected_mode,
+            "NetworkMode::Outbound was not mapped to the isolation egress path",
         )?;
         accept
             .await
@@ -105,17 +112,9 @@ pub(super) async fn run(
             .remove_unit(client, &outbound.spec, "network-outbound")
             .await?;
     } else {
-        // Sandbox: Outbound is not advertised; apply must fail closed.
-        let mut outbound = fixture.cases.task(
-            "network-outbound-unsupported",
-            "printf 'r17-network-outbound-should-reject\\n'",
-            5_000,
-        );
-        outbound.spec.network.mode = NetworkMode::Outbound;
-        require(
-            client.apply(&outbound).await.is_err(),
-            "Sandbox provider accepted NetworkMode::Outbound without egress",
-        )?;
+        return Err(super::protocol(
+            "provider omitted NetworkMode::Outbound after Sandbox host-netns support",
+        ));
     }
 
     let script = "while :; do { printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 15\\r\\nConnection: close\\r\\n\\r\\nr17-service-tcp'; } | nc -l -p 18080; done";
