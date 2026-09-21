@@ -90,6 +90,54 @@ impl NativeLinuxOwnerRecord {
     }
 }
 
+/// True when an OCI create/lifecycle error indicates the rootless device-policy
+/// helper is dead while the Host process may still be accepting RPCs (#623
+/// secondary). Matching is intentionally narrow so unrelated Unavailable
+/// errors do not tear down a healthy owner.
+pub(crate) fn is_rootless_device_policy_helper_dead(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let mentions_helper = lower.contains("device-policy helper")
+        || lower.contains("rootless device-policy")
+        || lower.contains("helper channel is unavailable");
+    if !mentions_helper {
+        return false;
+    }
+    lower.contains("broken pipe")
+        || lower.contains("exited with signal")
+        || lower.contains("helper exited")
+        || lower.contains("os error 32")
+        || lower.contains("unavailable")
+}
+
+/// SIGKILL an identity-fenced native Linux OCI owner that is still PID-alive
+/// but unable to apply device policy, then remove its socket/record so the
+/// next [`ensure_native_linux_oci_owner`] spawns a fresh Host.
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub(crate) fn force_reclaim_unusable_native_linux_owner(
+    service_root: &Path,
+) -> ExecutionManagerResult<()> {
+    validate_service_root(service_root)?;
+    let socket_path = service_root.join(OWNER_SOCKET_NAME);
+    let record_path = service_root.join(OWNER_RECORD_NAME);
+    let Some(record) = load_owner_record(&record_path, &socket_path)? else {
+        reclaim_dead_owner_socket(&socket_path)?;
+        return Ok(());
+    };
+    if record.is_alive() {
+        let identity = RecoveryProcessIdentity {
+            pid: record.pid,
+            start_time_ticks: record.pid_start_time,
+        };
+        signal_identity_gone(
+            "unusable native Linux OCI owner (dead device-policy helper)",
+            &identity,
+        )?;
+    }
+    let _ = std::fs::remove_file(&record_path);
+    reclaim_dead_owner_socket(&socket_path)?;
+    Ok(())
+}
+
 /// Options for [`ensure_native_linux_oci_owner`].
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EnsureNativeLinuxOwnerOptions {
@@ -991,6 +1039,22 @@ mod tests {
         record.validate(&socket).unwrap();
         assert!(record.artifacts_match(&artifacts));
         assert!(record.validate(Path::new("/tmp/other.sock")).is_err());
+    }
+
+    #[test]
+    fn device_policy_helper_death_detector_is_narrow() {
+        assert!(is_rootless_device_policy_helper_dead(
+            "A3S OCI create: rootless device-policy helper exited with signal 9: Broken pipe (os error 32)"
+        ));
+        assert!(is_rootless_device_policy_helper_dead(
+            "helper channel is unavailable: helper exited with signal 9"
+        ));
+        assert!(!is_rootless_device_policy_helper_dead(
+            "A3S OCI create: execution backend unavailable: socket connect refused"
+        ));
+        assert!(!is_rootless_device_policy_helper_dead(
+            "A3S OCI create rejected the lifecycle boundary: conflict"
+        ));
     }
 
     #[test]
