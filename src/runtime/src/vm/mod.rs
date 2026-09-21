@@ -24,6 +24,7 @@ pub(crate) use layout::{
 };
 pub use maintenance::archive_stopped_guest_native_rootfs;
 pub(crate) use spec::cleanup_virtiofs_ro_shares;
+#[cfg(test)]
 pub(crate) use spec::guest_control::MICROVM_STAGED_ENVIRONMENT_FILE;
 
 use std::path::{Path, PathBuf};

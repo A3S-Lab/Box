@@ -316,7 +316,9 @@ pub(super) fn microvm_hypervisor_identity(provider_build: &str) -> Option<&str> 
     let hypervisor = parts.next()?;
     match parts.next() {
         None => Some(hypervisor),
-        Some(tee) if tee.starts_with("tee/") && tee.len() > "tee/".len() && parts.next().is_none() => {
+        Some(tee)
+            if tee.starts_with("tee/") && tee.len() > "tee/".len() && parts.next().is_none() =>
+        {
             Some(hypervisor)
         }
         _ => None,
