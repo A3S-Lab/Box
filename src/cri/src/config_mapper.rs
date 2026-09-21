@@ -18,7 +18,13 @@ use crate::cri_api::{port_mapping, PodSandboxConfig};
 /// Annotation keys for A3S Box configuration.
 pub const ANN_AGENT_IMAGE: &str = "a3s.box/agent-image";
 pub const ANN_NETWORK: &str = "a3s.box/network";
-pub const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/a3s-box/code:v0.1.0";
+/// Default sandbox agent/rootfs image when `--agent-image` /
+/// `A3S_BOX_CRI_AGENT_IMAGE` / `a3s.box/agent-image` are unset.
+///
+/// Must be anonymously pullable. The previous `ghcr.io/a3s-box/code:v0.1.0`
+/// default returned HTTP 401 for every stock `RunPodSandbox` (#607). Matches
+/// `docs/cri-conformance.md` guidance to use alpine for out-of-box CRI.
+pub const DEFAULT_AGENT_IMAGE: &str = "docker.io/library/alpine:latest";
 const ANN_VCPUS: &str = "a3s.box/vcpus";
 const ANN_MEMORY_MB: &str = "a3s.box/memory-mb";
 const ANN_DISK_MB: &str = "a3s.box/disk-mb";

@@ -40,6 +40,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- CRI compiled-in default agent image is `docker.io/library/alpine:latest`
+  instead of private `ghcr.io/a3s-box/code:v0.1.0` (#607). Stock
+  `RunPodSandbox` without `--agent-image` no longer fails with registry 401.
+  Does **not** close B4 or claim Enterprise GA.
+
 - Host soak writes `exit_code` / `failed_at` / `failed_command` into
   `summary.txt` before `run_soak_verifier` when `failed_iterations > 0`
   (#608). In-run `verify.out` no longer reports `not-recorded` while the
