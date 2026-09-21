@@ -909,7 +909,11 @@ fn compile_mounts(
             &["nosuid", "noexec", "nodev"],
         )?,
         sys_mount,
-        mount(
+    ];
+    // rbind of host /sys already carries /sys/fs/cgroup. A second cgroup mount
+    // on that destination fails with EBUSY (R17 Sandbox Outbound / host-netns).
+    if !share_host_network {
+        mounts.push(mount(
             "/sys/fs/cgroup",
             "cgroup",
             "cgroup",
@@ -917,30 +921,30 @@ fn compile_mounts(
             // pre-opened membership descriptors to trusted guest-init. Paths
             // remain read-only to the Sandbox user namespace.
             &["nosuid", "noexec", "nodev", "relatime", "ro"],
-        )?,
-        mount(
-            "/tmp",
-            "tmpfs",
-            "tmpfs",
-            &[
-                "nosuid",
-                "nodev",
-                "mode=1777",
-                &format!("size={DEFAULT_TMPFS_SIZE}"),
-            ],
-        )?,
-        mount(
-            "/run",
-            "tmpfs",
-            "tmpfs",
-            &[
-                "nosuid",
-                "nodev",
-                "mode=755",
-                &format!("size={DEFAULT_TMPFS_SIZE}"),
-            ],
-        )?,
-    ];
+        )?);
+    }
+    mounts.push(mount(
+        "/tmp",
+        "tmpfs",
+        "tmpfs",
+        &[
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            &format!("size={DEFAULT_TMPFS_SIZE}"),
+        ],
+    )?);
+    mounts.push(mount(
+        "/run",
+        "tmpfs",
+        "tmpfs",
+        &[
+            "nosuid",
+            "nodev",
+            "mode=755",
+            &format!("size={DEFAULT_TMPFS_SIZE}"),
+        ],
+    )?);
 
     let mut destinations: HashSet<PathBuf> = mounts
         .iter()
@@ -1887,6 +1891,12 @@ mod tests {
             .unwrap()
             .iter()
             .any(|option| option == "ro"));
+        // rbind /sys already exposes host cgroupfs; a second cgroup mount EBUSYs.
+        assert!(value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mount| mount["destination"] != "/sys/fs/cgroup"));
     }
 
     #[test]

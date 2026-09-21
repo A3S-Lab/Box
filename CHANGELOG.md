@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Sandbox Runtime `NetworkMode::Outbound` maps to host netns
+  (`NetworkMode::Host`) with a read-only rbind of host `/sys` and no second
+  `/sys/fs/cgroup` cgroup mount (#627). Private Sandbox loopback has no TSI;
+  host-netns is the honest egress path. A second cgroup mount after `/sys`
+  rbind fails with EBUSY. This is not CNI and does **not** close B3.
 - Network `--egress` first-match IPv4 rules (`allow|deny:CIDR[:tcp|udp[:PORT]]`)
   enforced on macOS netproxy and Linux passt_bridge before the default
   untrusted profile. Domain names are rejected (a name is not on the packet).
