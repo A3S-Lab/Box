@@ -73,15 +73,8 @@ pub(super) fn verify_provider_least_privilege(
             verify_sandbox_least_privilege(record)
         }
         ExecutionIsolation::Microvm => {
-            let hypervisor = provider_build
-                .split_once(" isolation/microvm hypervisor/")
-                .filter(|(prefix, backend)| {
-                    prefix.starts_with("a3s-box/")
-                        && !backend.is_empty()
-                        && !backend.chars().any(char::is_whitespace)
-                });
             require(
-                hypervisor.is_some(),
+                microvm_hypervisor_identity(provider_build).is_some(),
                 format!("MicroVM provider build identity is incomplete: {provider_build:?}"),
             )?;
             verify_microvm_process_identity(fixture, record)
@@ -310,9 +303,33 @@ fn verify_microvm_secret_persistence(record: &crate::BoxRecord) -> Result<()> {
     verify_environment_manifest("MicroVM", &staged_environment)
 }
 
+/// Hypervisor token from a provider build string.
+///
+/// The product appends `tee/sev-snp-simulated` or `tee/sev-snp-hardware` after
+/// the hypervisor name. That suffix is part of the identity, not a second
+/// hypervisor, and must not make the security profile reject the build.
+pub(super) fn microvm_hypervisor_identity(provider_build: &str) -> Option<&str> {
+    let (_, rest) = provider_build
+        .split_once(" isolation/microvm hypervisor/")
+        .filter(|(prefix, rest)| prefix.starts_with("a3s-box/") && !rest.is_empty())?;
+    let mut parts = rest.split_whitespace();
+    let hypervisor = parts.next()?;
+    match parts.next() {
+        None => Some(hypervisor),
+        Some(tee) if tee.starts_with("tee/") && tee.len() > "tee/".len() && parts.next().is_none() => {
+            Some(hypervisor)
+        }
+        _ => None,
+    }
+}
+
 fn read_microvm_staged_environment(record: &crate::BoxRecord) -> Result<Vec<u8>> {
     let relative = RUNTIME_ENV_PATH.trim_start_matches('/');
     let candidates = [
+        record
+            .box_dir
+            .join("runtime-control")
+            .join(crate::vm::MICROVM_STAGED_ENVIRONMENT_FILE),
         record.box_dir.join("merged").join(relative),
         record.box_dir.join("rootfs/.a3s-rootfs").join(relative),
         record.box_dir.join("rootfs").join(relative),
@@ -363,4 +380,55 @@ fn verify_environment_manifest(provider: &str, staged_environment: &[u8]) -> Res
             "{provider} staged environment omitted the non-secret environment binding manifest"
         ),
     )
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::microvm_hypervisor_identity;
+
+    #[test]
+    fn accepts_hypervisor_with_optional_tee_suffix() {
+        assert_eq!(
+            microvm_hypervisor_identity("a3s-box/3.2.7 isolation/microvm hypervisor/KVM"),
+            Some("KVM")
+        );
+        assert_eq!(
+            microvm_hypervisor_identity(
+                "a3s-box/3.2.7 isolation/microvm hypervisor/KVM tee/sev-snp-simulated"
+            ),
+            Some("KVM")
+        );
+        assert_eq!(
+            microvm_hypervisor_identity(
+                "a3s-box/3.2.7 isolation/microvm hypervisor/KVM tee/sev-snp-hardware"
+            ),
+            Some("KVM")
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_extra_identity_tokens() {
+        assert_eq!(
+            microvm_hypervisor_identity("not-a3s isolation/microvm hypervisor/KVM"),
+            None
+        );
+        assert_eq!(
+            microvm_hypervisor_identity("a3s-box/3.2.7 isolation/microvm hypervisor/"),
+            None
+        );
+        assert_eq!(
+            microvm_hypervisor_identity("a3s-box/3.2.7 isolation/microvm hypervisor/KVM other"),
+            None
+        );
+        assert_eq!(
+            microvm_hypervisor_identity(
+                "a3s-box/3.2.7 isolation/microvm hypervisor/KVM tee/sev-snp-simulated extra"
+            ),
+            None
+        );
+        assert_eq!(
+            microvm_hypervisor_identity("a3s-box/3.2.7 isolation/microvm hypervisor/KVM tee/"),
+            None
+        );
+    }
 }

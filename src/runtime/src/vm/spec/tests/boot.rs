@@ -171,6 +171,58 @@ fn test_build_microvm_spec_stages_one_read_only_boot_bundle_off_rootfs() {
         ]
     );
     assert_eq!(bundle.host, GuestHostConfig::default());
+    let staged = std::fs::read_to_string(
+        vm.home_dir
+            .join("boxes")
+            .join(&vm.box_id)
+            .join("runtime-control")
+            .join(crate::vm::MICROVM_STAGED_ENVIRONMENT_FILE),
+    )
+    .unwrap();
+    assert!(
+        !staged.contains("IMAGE_VALUE") && !staged.contains("CLI_VALUE"),
+        "non-secret process environment must not be copied into the durable manifest"
+    );
+}
+
+#[test]
+fn test_microvm_boot_bundle_persists_only_the_secret_binding_manifest() {
+    use a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST;
+    use base64::Engine;
+
+    let dir = tempdir().unwrap();
+    let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
+    let manifest = r#"[{"variable":"TOKEN","path":"/.a3s-box-secrets/abc/000.secret"}]"#;
+    let mut vm = test_vm_manager(BoxConfig {
+        extra_env: vec![
+            ("TOKEN".to_string(), "super-secret-token-value".to_string()),
+            (
+                SECRET_ENVIRONMENT_MANIFEST.to_string(),
+                manifest.to_string(),
+            ),
+        ],
+        ..Default::default()
+    });
+
+    let spec = vm.build_microvm_instance_spec(&layout).unwrap();
+
+    assert!(!layout.rootfs_path.join(".a3s-box-env").exists());
+    let staged = std::fs::read_to_string(
+        vm.home_dir
+            .join("boxes")
+            .join(&vm.box_id)
+            .join("runtime-control")
+            .join(crate::vm::MICROVM_STAGED_ENVIRONMENT_FILE),
+    )
+    .unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(manifest.as_bytes());
+    assert_eq!(staged, format!("{SECRET_ENVIRONMENT_MANIFEST}={encoded}\n"));
+    assert!(!staged.contains("super-secret-token-value"));
+    let bundle = staged_boot_config(&spec);
+    assert!(bundle
+        .environment
+        .iter()
+        .any(|(key, value)| key == "TOKEN" && value == "super-secret-token-value"));
 }
 
 #[test]

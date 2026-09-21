@@ -5,6 +5,13 @@ use a3s_box_core::rootfs_baseline::GUEST_DIFF_BASELINE_FILE_NAME;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Host-side redacted copy of the virtio-fs staged environment.
+///
+/// The boot bundle itself is removed after guest-init consumes it. This file
+/// keeps only the non-secret binding manifest so a later security check can
+/// see what was staged without a plaintext environment left on the box.
+pub(crate) const MICROVM_STAGED_ENVIRONMENT_FILE: &str = "staged-environment";
+
 pub(super) fn secure_guest_control_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -185,6 +192,35 @@ pub(super) fn stage_guest_terminal_control(
         host_path: control_dir,
         read_only: false,
     })
+}
+
+/// Persist the non-secret environment manifest beside terminal control.
+///
+/// Virtio-fs boot does not write `/.a3s-box-env` onto the guest rootfs. The
+/// full environment lives in the boot bundle until the guest consumes it.
+/// Secret values stay out of this file; only `A3S_BOX_SECRET_ENV_V1` is kept,
+/// base64-encoded the same way as the legacy rootfs env file.
+pub(super) fn persist_redacted_staged_environment(
+    box_dir: &Path,
+    container_env: &[(String, String)],
+) -> Result<()> {
+    use a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST;
+    use base64::Engine;
+
+    let body: String = container_env
+        .iter()
+        .filter(|(key, _)| key == SECRET_ENVIRONMENT_MANIFEST)
+        .map(|(key, value)| {
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes());
+            format!("{key}={encoded}\n")
+        })
+        .collect();
+    let path = crate::oci::rootfs::replace_guest_file_no_follow(
+        &box_dir.join("runtime-control"),
+        MICROVM_STAGED_ENVIRONMENT_FILE,
+        body.into_bytes(),
+    )?;
+    secure_guest_control_file(&path)
 }
 
 #[cfg(test)]
