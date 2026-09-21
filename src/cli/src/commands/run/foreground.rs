@@ -179,6 +179,7 @@ pub(super) async fn run_foreground(
                     break foreground_health_stop_reason(foreground_workload_exit_code(
                         &ctx.box_dir,
                         ctx.record.exit_code,
+                        ctx.record.isolation,
                     ));
                 }
             }
@@ -235,7 +236,8 @@ pub(super) async fn run_foreground(
         );
     }
 
-    let persisted_exit_code = foreground_workload_exit_code(&ctx.box_dir, ctx.record.exit_code);
+    let persisted_exit_code =
+        foreground_workload_exit_code(&ctx.box_dir, ctx.record.exit_code, ctx.record.isolation);
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     let archive_start = std::time::Instant::now();
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -374,8 +376,14 @@ pub(super) fn foreground_health_stop_reason(exit_code: Option<i32>) -> Foregroun
 pub(super) fn foreground_workload_exit_code(
     box_dir: &std::path::Path,
     recorded_exit_code: Option<i32>,
+    isolation: a3s_box_core::ExecutionIsolation,
 ) -> Option<i32> {
-    a3s_box_runtime::rootfs::resolve_workload_exit_code(box_dir, recorded_exit_code)
+    let policy = if isolation.is_sandbox() {
+        a3s_box_runtime::rootfs::ProviderExitPolicy::TrustProvider
+    } else {
+        a3s_box_runtime::rootfs::ProviderExitPolicy::RequireGuestProof
+    };
+    a3s_box_runtime::rootfs::resolve_workload_exit_code_for(box_dir, recorded_exit_code, policy)
 }
 
 async fn managed_process_alive(ctx: &mut RunContext) -> bool {

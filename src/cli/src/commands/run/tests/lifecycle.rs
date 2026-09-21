@@ -263,7 +263,11 @@ fn test_foreground_workload_exit_code_refuses_invented_provider_zero() {
     // No terminal status / legacy marker: clean recorded start exit must not
     // invent guest success (resolve_workload_exit_code Absent parity).
     assert_eq!(
-        foreground_workload_exit_code(temporary.path(), Some(0)),
+        foreground_workload_exit_code(
+            temporary.path(),
+            Some(0),
+            a3s_box_core::ExecutionIsolation::Microvm
+        ),
         None
     );
 
@@ -271,8 +275,25 @@ fn test_foreground_workload_exit_code_refuses_invented_provider_zero() {
     std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
     std::fs::write(exit_path, "7\n").unwrap();
     assert_eq!(
-        foreground_workload_exit_code(temporary.path(), Some(1)),
+        foreground_workload_exit_code(
+            temporary.path(),
+            Some(1),
+            a3s_box_core::ExecutionIsolation::Microvm
+        ),
         Some(7)
+    );
+}
+
+#[test]
+fn test_foreground_sandbox_trusts_provider_exit_zero() {
+    let temporary = tempfile::tempdir().unwrap();
+    assert_eq!(
+        foreground_workload_exit_code(
+            temporary.path(),
+            Some(0),
+            a3s_box_core::ExecutionIsolation::Sandbox
+        ),
+        Some(0)
     );
 }
 
