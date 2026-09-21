@@ -68,10 +68,11 @@ they advertise. `NetworkMode::None` and `NetworkMode::Service` remain
 loopback-only and do not grant workload egress: Sandbox uses a private netns
 with host→guest Service relays; MicroVM keeps explicit vsock IPC without
 libkrun TSI socket interception for those modes. `NetworkMode::Outbound` is
-advertised only for MicroVM isolation and maps to default TSI socket-proxy
-egress so the guest can reach host/external destinations. Sandbox does not
-advertise Outbound and rejects it as `UnsupportedCapabilities` until a real
-Sandbox L3 egress path exists.
+advertised for both isolation backends: MicroVM maps it to default TSI
+socket-proxy egress; Sandbox maps it to `NetworkMode::Host`
+(`share_host_network`: omit the OCI network namespace, bind selected host
+`/sys` subtrees read-only, and skip guest-init host-`lo` bring-up). Neither
+Outbound path grants Service loopback publication.
 
 Callers that need Runtime Secrets compose the driver with exactly one
 `BoxSecretMaterializer`:

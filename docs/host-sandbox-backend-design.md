@@ -197,10 +197,20 @@ a stale execution from accepting a new generation's requests.
 
 ## Network intent
 
-The current Box Sandbox compiler always creates a fresh network namespace and
+The current Box Sandbox compiler creates a fresh network namespace by default and
 guest-init brings up loopback only. Named bridge networking and published ports
 are rejected during plan resolution. Exact-host and donor-shared namespace
-profiles are not public Box modes.
+profiles are not public CLI modes.
+
+Runtime `NetworkMode::Outbound` is the exception: Sandbox Tasks map to Box
+`NetworkMode::Host` (`share_host_network`), which omits the OCI network
+namespace so the workload inherits the host stack while retaining
+mount/PID/user/cgroup isolation. That path bind-mounts selected host
+`/sys/{devices,class,bus,block,dev,kernel,module}` trees read-only (userns
+cannot mount fresh sysfs) and sets `A3S_SANDBOX_SHARE_HOST_NETWORK=1` so
+guest-init skips `SIOCSIFFLAGS` on host `lo`. MicroVM Outbound maps to TSI
+socket impersonation for the same egress contract. Neither Outbound path
+grants Service loopback publication.
 
 The A3S Runtime provider may declare `service` networking for TCP ports. Box
 keeps the Sandbox on that same private loopback-only profile, binds an ephemeral
@@ -208,8 +218,9 @@ host-loopback listener for every declared port, and relays accepted streams
 through the generation-fenced `ExecutionPortConnector`. Runtime evidence is the
 only endpoint publication. Listener and relay ownership stays in memory and is
 reconstructed from the durable execution on apply or inspect; stop, removal,
-provider loss, generation replacement, and driver drop close it. This does not
-grant workload egress and does not advertise UDP or named networking.
+provider loss, generation replacement, and driver drop close it. Private
+`none`/`service` Sandboxes do not grant workload egress and do not advertise UDP
+or named networking.
 
 The Linux MicroVM provider preserves the same Runtime contract without TSI.
 For `none` and `service`, the shim disables libkrun socket interception but
