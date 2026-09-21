@@ -473,7 +473,11 @@ fn compile_spec(
                 .build()
                 .map_err(oci_error)?,
         )
-        .mounts(compile_mounts(&input.mounts, &input.tmpfs)?)
+        .mounts(compile_mounts(
+            &input.mounts,
+            &input.tmpfs,
+            input.share_host_network,
+        )?)
         .process(process)
         .hostname(input.hostname.clone())
         .annotations(annotations)
@@ -828,7 +832,38 @@ fn minimal_device_numbers() -> &'static [(&'static str, i64, i64)] {
     ]
 }
 
-fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> Result<Vec<Mount>> {
+fn compile_mounts(
+    user_mounts: &[SandboxMount],
+    user_tmpfs: &[SandboxTmpfs],
+    share_host_network: bool,
+) -> Result<Vec<Mount>> {
+    // Host-netns + user-ns cannot mount a fresh sysfs (EPERM): sysfs is keyed
+    // to the network namespace and the remapped root lacks privilege to create
+    // one in the shared host netns. Bind the host /sys read-only instead — the
+    // same adaptation runc/crun use for --network=host under userns.
+    let sys_mount = if share_host_network {
+        MountBuilder::default()
+            .destination(PathBuf::from("/sys"))
+            .typ("bind".to_string())
+            .source(PathBuf::from("/sys"))
+            .options(vec![
+                "rbind".to_string(),
+                "rprivate".to_string(),
+                "nosuid".to_string(),
+                "noexec".to_string(),
+                "nodev".to_string(),
+                "ro".to_string(),
+            ])
+            .build()
+            .map_err(oci_error)?
+    } else {
+        mount(
+            "/sys",
+            "sysfs",
+            "sysfs",
+            &["nosuid", "noexec", "nodev", "ro"],
+        )?
+    };
     let mut mounts = vec![
         mount("/proc", "proc", "proc", &["nosuid", "noexec", "nodev"])?,
         mount(
@@ -873,12 +908,7 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "mqueue",
             &["nosuid", "noexec", "nodev"],
         )?,
-        mount(
-            "/sys",
-            "sysfs",
-            "sysfs",
-            &["nosuid", "noexec", "nodev", "ro"],
-        )?,
+        sys_mount,
         mount(
             "/sys/fs/cgroup",
             "cgroup",
@@ -1839,6 +1869,24 @@ mod tests {
         for required in ["user", "mount", "pid", "ipc", "uts", "cgroup"] {
             assert!(namespaces.contains(required), "missing {required}");
         }
+        let sys = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/sys")
+            .expect("/sys mount");
+        assert_eq!(sys["type"], "bind");
+        assert_eq!(sys["source"], "/sys");
+        assert!(sys["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "rbind"));
+        assert!(sys["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "ro"));
     }
 
     #[test]
