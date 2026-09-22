@@ -303,7 +303,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
 | P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
-| P2 | OCI DedicatedVm production cutover gates for Linux/KVM | B | Deleting libkrun before §4.5 |
+| P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); qualification Live greened (`81ecd79e…`); production default still open | B | Deleting libkrun before §4.5; HVF/WHPX production |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |
 | P3 | Compose MicroVM on unified manager; CRI shim ownership | E | Conformance badges |
 
