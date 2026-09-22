@@ -1772,6 +1772,7 @@ mod tests {
 
     // --- Namespace error tests ---
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn setgroups_permitted_matches_proc_file_when_present() {
         // On hosts without userns denial the helper must not invent a deny.

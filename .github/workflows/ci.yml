@@ -37,7 +37,11 @@ jobs:
           python3 scripts/verify-linux-native-live-session-report.py --self-test
           python3 scripts/verify-linux-kvm-live-session-report.py --self-test
       - name: Verify setuid-launcher proof honesty checker
-        run: python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py --self-test
+        run: |
+          python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py --self-test
+          bash scripts/proof-linux-sandbox-setuid-launcher.sh --self-test
+      - name: Verify libkrun build-lib finder (#575)
+        run: bash scripts/find-libkrun-build-libs.sh --self-test
       - name: Verify MicroVM transport-retry honesty checker
         run: python3 scripts/verify-microvm-transport-retry-honesty.py --self-test && python3 scripts/verify-microvm-transport-retry-honesty.py
       - name: Verify process-restart filesystem honesty checker

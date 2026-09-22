@@ -63,10 +63,22 @@ sudo bash scripts/proof-linux-sandbox-setuid-launcher.sh \
 The script installs via `prepare-linux-sandbox-host.sh --install-launcher`,
 refuses nosuid installs where `chmod 4755` does not stick, unsets the CI
 setpriv wrapper, and runs a non-root `a3s-box run --isolation sandbox` smoke.
-Report schema: `a3s.box.linux-sandbox-setuid-launcher-proof.v1`. Verify with
+The parent does not treat cgroup v2 ancestor EACCES as a failed spawn: mode 4755
+`a3s-oci` adopts effective gid 0, clears supplementary groups, and migrates
+into the delegated child while it is still effective uid 0. The smoke status is that
+run's status: a failing run is `rc` nonzero in the report error, not a
+captured `rc=0`. `bash scripts/proof-linux-sandbox-setuid-launcher.sh --self-test`
+checks that capture on any host and does not start a Sandbox. Report schema:
+`a3s.box.linux-sandbox-setuid-launcher-proof.v1`. Verify with
 `python3 scripts/verify-linux-sandbox-setuid-launcher-proof.py REPORT.json`
-(fail-closed honesty checker; CI runs `--self-test`). This gate is
-not required to flip B2 or MicroVM cutover.
+(fail-closed honesty checker; CI runs both `--self-test` commands). This gate
+does not start the operator path by itself and is not required to flip B2 or
+MicroVM cutover. A passing report still requires a suid-capable Linux host.
+
+Tip lab note (2026-09-22, Ubuntu Orb aarch64, no `/dev/kvm`): tip-built
+`a3s-oci` installed as mode `4755` launcher; official proof script returned
+`status=passed` with `b2_process_session_recovery_closed=false`. Does **not**
+replace the CI binder above or close Enterprise MicroVM GA.
 
 ## Proven Sandbox surfaces
 

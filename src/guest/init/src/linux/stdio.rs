@@ -19,7 +19,8 @@ static STDIO_RELAYS: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinH
 /// re-opening works while `logs` and the split stdout/stderr streams are preserved.
 ///
 /// File descriptors for the main-process stdio relay (set up before the fork,
-/// with the relay threads started only *after* the fork — see `start_stdio_relays`).
+/// with the relay threads started only *after* the fork and *after* the exec
+/// accept loop starts — see `start_stdio_relays` and guest-init Step 8).
 #[cfg(target_os = "linux")]
 pub(super) struct StdioRelayFds {
     /// Pipe write-ends handed to the child as fd 1/2.

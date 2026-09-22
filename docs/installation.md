@@ -121,6 +121,15 @@ The script:
   when `--install-launcher` is supplied (required on production hosts; discovery
   also checks env and packaged paths).
 
+A mode `4755` launcher elevates effective uid only. The operator's real gid and
+supplementary groups stay until `a3s-oci` adopts effective gid 0, clears
+groups, and migrates into the Box-created child under the delegated root while
+it is still effective uid 0. The unprivileged parent does not need write access
+to the cgroup v2 common ancestor. Do not install mode `6755` or a separate
+wrapper for that identity: the in-process adopt path is the product contract.
+A Linux tip proof that the documented steps start a Sandbox is still required
+before claiming the operator path closed.
+
 Do **not** set `A3S_BOX_OCI_MIGRATION` for the Sandbox GA default. Use
 `A3S_BOX_OCI_MIGRATION=off` only for MicroVM-only hosts without OCI prep.
 

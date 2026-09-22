@@ -69,9 +69,12 @@ From the repository root on a physical Apple Silicon Mac:
 ```bash
 unset A3S_DEPS_STUB
 rustup target add aarch64-unknown-linux-musl
+# Prefer the just recipe (falls back to zigbuild when musl-gcc is absent):
+just build-guest release
 cd src
-cargo zigbuild --locked --release -p a3s-box-guest-init \
-  --target aarch64-unknown-linux-musl
+# Or invoke zigbuild directly:
+# cargo zigbuild --locked --release -p a3s-box-guest-init \
+#   --target aarch64-unknown-linux-musl
 cargo build --locked --release -p a3s-box-cli -p a3s-box-shim
 codesign --entitlements shim/entitlements.plist --force -s - \
   target/release/a3s-box-shim

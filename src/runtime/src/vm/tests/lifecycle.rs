@@ -328,6 +328,43 @@ async fn test_cleanup_boot_failure_retains_ephemeral_dir_for_durable_exit_zero()
 }
 
 #[tokio::test]
+async fn test_cleanup_boot_failure_preserves_when_durable_exit_precedes_shim_exit() {
+    // readiness can observe guest terminal status while the shim is still
+    // draining. That must still count as a completed short task so the first
+    // guest-native generation is not discarded before commit/restart.
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-durable-exit-before-shim".to_string();
+    let config = BoxConfig {
+        persistent: true,
+        ..BoxConfig::default()
+    };
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+    // Handler still looks live when cleanup begins (shim drain race).
+    *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: false }));
+
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    let marker = box_dir.join("rootfs/guest-mutation");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, b"keep-me").unwrap();
+    let control = box_dir.join("runtime-control");
+    std::fs::create_dir_all(&control).unwrap();
+    std::fs::write(
+        control.join(a3s_box_core::guest_exec::GUEST_TERMINAL_STATUS_FILE_NAME),
+        serde_json::to_vec(&a3s_box_core::guest_exec::GuestTerminalStatus::new(0)).unwrap(),
+    )
+    .unwrap();
+
+    vm.cleanup_boot_failure().await;
+
+    assert_eq!(vm.exit_code(), Some(0));
+    assert!(vm.preserve_rootfs_on_boot_failure);
+    assert!(vm.retain_box_dir_after_boot_terminal);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"keep-me");
+}
+
+#[tokio::test]
 async fn test_cleanup_boot_completion_preserves_first_persistent_rootfs() {
     let tmp = tempfile::tempdir().unwrap();
     let box_id = "box-persistent-completed-during-boot".to_string();

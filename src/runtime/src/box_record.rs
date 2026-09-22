@@ -517,6 +517,9 @@ impl ManagedExecutionMetadata {
             last_restart: None,
             last_resource_update: None,
             finished_at: None,
+            // Warm-pause default: false means filesystem-only cold pause and
+            // restricts which managed states are valid. New records start warm
+            // until an explicit cold pause claim flips the flag.
             paused_with_memory: true,
         })
     }

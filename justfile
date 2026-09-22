@@ -56,7 +56,23 @@ build-guest profile="release" target="":
     esac
 
     cd src
-    cargo build -p a3s-box-guest-init --target "$target" $profile_flag
+    # Prefer the native musl toolchain when present. On Apple Silicon HVF hosts
+    # (and Windows WHPX cross builds) fall back to cargo-zigbuild — the same
+    # path documented in docs/ci-hvf-runner.md and scripts/host-integration-smoke.sh.
+    case "$target" in
+        aarch64-unknown-linux-musl) musl_cc="aarch64-linux-musl-gcc" ;;
+        x86_64-unknown-linux-musl) musl_cc="x86_64-linux-musl-gcc" ;;
+        *) musl_cc="" ;;
+    esac
+    if [ -n "$musl_cc" ] && command -v "$musl_cc" >/dev/null 2>&1; then
+        cargo build -p a3s-box-guest-init --target "$target" $profile_flag
+    elif command -v cargo-zigbuild >/dev/null 2>&1; then
+        echo "musl cross-compiler not found; using cargo zigbuild for $target" >&2
+        cargo zigbuild -p a3s-box-guest-init --target "$target" $profile_flag
+    else
+        echo "Cannot build guest-init for $target: install $musl_cc (musl-tools) or cargo-zigbuild (+ zig)" >&2
+        exit 1
+    fi
 
     if [ "{{profile}}" = "release" ]; then
         case "$target" in
@@ -246,30 +262,12 @@ test-vm *ARGS:
     set -e
     cd src
 
-    # Locate libkrun/libkrunfw from cargo build output. The crate package is
-    # `a3s-libkrun-sys` (legacy glob `libkrun-sys-*` kept for older trees);
-    # Linux emits `lib64`, macOS/other Unix emit `lib` (#575).
-    find_libkrun_dir() {
-        local component="$1"
-        local path
-        for profile in debug release; do
-            for crate in a3s-libkrun-sys libkrun-sys; do
-                for libdir in lib64 lib; do
-                    path=$(ls -td "target/${profile}/build/${crate}-*/out/libkrun/${component}/${libdir}" 2>/dev/null | head -1 || true)
-                    if [ -n "$path" ]; then
-                        echo "$path"
-                        return 0
-                    fi
-                done
-            done
-        done
-        return 1
-    }
+    # Locate libkrun/libkrunfw from cargo build output (#575). Shared finder
+    # expands unquoted globs and uses out/${component}/{lib,lib64} — not a
+    # quoted path and not out/libkrun/${component}/...
+    eval "$(../scripts/find-libkrun-build-libs.sh --target-root target --export)"
 
-    LIBKRUN_LIB=$(find_libkrun_dir libkrun || true)
-    LIBKRUNFW_LIB=$(find_libkrun_dir libkrunfw || true)
-
-    if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
+    if [ -z "${LIBKRUN_LIB:-}" ] || [ -z "${LIBKRUNFW_LIB:-}" ]; then
         echo "❌ libkrun not found. Run 'just build' or 'just release' first."
         exit 1
     fi
@@ -302,28 +300,10 @@ test-tee *ARGS:
     set -e
     cd src
 
-    # Same lib discovery as `just test-vm` (#575): a3s-libkrun-sys + lib64 on Linux.
-    find_libkrun_dir() {
-        local component="$1"
-        local path
-        for profile in debug release; do
-            for crate in a3s-libkrun-sys libkrun-sys; do
-                for libdir in lib64 lib; do
-                    path=$(ls -td "target/${profile}/build/${crate}-*/out/libkrun/${component}/${libdir}" 2>/dev/null | head -1 || true)
-                    if [ -n "$path" ]; then
-                        echo "$path"
-                        return 0
-                    fi
-                done
-            done
-        done
-        return 1
-    }
+    # Same lib discovery as `just test-vm` (#575).
+    eval "$(../scripts/find-libkrun-build-libs.sh --target-root target --export)"
 
-    LIBKRUN_LIB=$(find_libkrun_dir libkrun || true)
-    LIBKRUNFW_LIB=$(find_libkrun_dir libkrunfw || true)
-
-    if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
+    if [ -z "${LIBKRUN_LIB:-}" ] || [ -z "${LIBKRUNFW_LIB:-}" ]; then
         echo "❌ libkrun not found. Run 'just build' or 'just release' first."
         exit 1
     fi

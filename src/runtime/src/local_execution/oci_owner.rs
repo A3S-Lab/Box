@@ -18,6 +18,9 @@ const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-owner";
 const OWNER_SOCKET_NAME: &str = "runtime.sock";
 const NATIVE_SESSION_SUPERVISOR_ENV: &str = "A3S_OCI_NATIVE_SESSION_SUPERVISOR";
+/// Destination cgroup for an operator setuid owner. The parent cannot write
+/// the cgroup v2 common ancestor; `a3s-oci` migrates after exec while euid is 0.
+const OWNER_CGROUP_ENV: &str = "A3S_BOX_OWNER_CGROUP";
 pub(crate) use a3s_box_core::OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV as KEEP_NETWORK_DEVICE_AUTHORITY_ENV;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -469,6 +472,9 @@ fn spawn_owner(
     let elevate_wrapper = std::env::var_os("A3S_BOX_CI_SETPRIV_WRAPPER")
         .filter(|value| !value.is_empty())
         .filter(|_| unsafe { libc::geteuid() } != 0);
+    // Operator path: this process is not root and will exec the setuid launcher.
+    // CI setpriv is a wrapper, not that launcher.
+    let operator_setuid = elevate_wrapper.is_none() && unsafe { libc::geteuid() } != 0;
     if keep_network_device_authority && elevate_wrapper.is_some() {
         return Err(ExecutionManagerError::Unavailable(format!(
             "{KEEP_NETWORK_DEVICE_AUTHORITY_ENV} is incompatible with A3S_BOX_CI_SETPRIV_WRAPPER; matched-root keep-authority cannot use the lab setpriv drop path"
@@ -508,6 +514,11 @@ fn spawn_owner(
     // operator-launched Hosts that omit the env stay Host-bound. Does not
     // flip B2 harness close or MicroVM cutover.
     command.env(NATIVE_SESSION_SUPERVISOR_ENV, "1");
+    if operator_setuid {
+        if let Some(ref cgroup) = owner_cgroup {
+            command.env(OWNER_CGROUP_ENV, cgroup);
+        }
+    }
     // SAFETY: the closure only performs async-signal-safe session and
     // cgroup.procs migration syscalls between fork and exec and does not
     // access shared Rust state.
@@ -516,12 +527,21 @@ fn spawn_owner(
     // drops to the real UID before publishing the SDK socket. Migrate into a
     // child below the empty delegated root so rootless open accepts host-owned
     // membership without moving the Sandbox CI harness out of its probe cgroup.
-    // Keep-authority omits that flag so the owner stays Privileged and can
-    // advertise a3s.oci.attachments.v3.
+    // An operator setuid exec is still the unprivileged uid in this pre_exec
+    // hook, so an EACCES from the cgroup v2 common ancestor is deferred to
+    // a3s-oci (A3S_BOX_OWNER_CGROUP). Keep-authority omits that flag so the
+    // owner stays Privileged and can advertise a3s.oci.attachments.v3.
     unsafe {
         command.pre_exec(move || {
             if let Some(ref cgroup) = owner_cgroup {
-                migrate_current_task_into_cgroup(cgroup)?;
+                if let Err(error) = migrate_current_task_into_cgroup(cgroup) {
+                    if !super::operator_cgroup::defer_unprivileged_cgroup_migration(
+                        operator_setuid,
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
+                }
             }
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());

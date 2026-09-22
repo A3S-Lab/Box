@@ -794,11 +794,21 @@ impl VmManager {
                 )));
             }
             // Stay Paused until exec heartbeat proves operable again.
-            if !self.exec_endpoint_still_authenticated().await {
-                return Err(BoxError::StateError(
-                    "VM resumed host process but guest exec did not re-authenticate; leaving Paused"
-                        .to_string(),
-                ));
+            // Cross-process resume recovers without a retained ExecClient, so
+            // give the SIGCONT'd guest a short poll window before failing
+            // closed (#424).
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if self.exec_endpoint_still_authenticated().await {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(BoxError::StateError(
+                        "VM resumed host process but guest exec did not re-authenticate; leaving Paused"
+                            .to_string(),
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             *self.state.write().await = BoxState::Ready;
             tracing::info!(box_id = %self.box_id, pid, "VM resumed");

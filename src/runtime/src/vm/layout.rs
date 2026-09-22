@@ -585,8 +585,9 @@ impl VmManager {
     }
 
     /// Fail closed for unprivileged directory MicroVM when image metadata
-    /// declares foreign UIDs/GIDs (#562). Sandbox userns and guest-native
-    /// ext4/WHPX paths must not use this gate.
+    /// declares foreign UIDs (#562). Sandbox userns and guest-native
+    /// ext4/WHPX paths must not use this gate. Foreign gids with uid 0 are
+    /// admitted (alpine shadow); guest-init skips virtio-fs lchown EPERM.
     fn admit_unprivileged_microvm_directory_rootfs(&self, rootfs_path: &Path) -> Result<()> {
         if self.config.isolation.is_sandbox() {
             return Ok(());

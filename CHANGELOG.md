@@ -38,6 +38,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- `docs/installation.md` documents the mode `4755` operator Sandbox contract:
+  `a3s-oci` adopts effective gid 0, clears supplementary groups, and migrates
+  into the delegated child after setuid exec; do not install `6755` or a
+  wrapper for that identity (#628). A Linux tip proof that the documented
+  steps start a Sandbox is still required. Does **not** close B2 or claim
+  Enterprise GA.
 - `docs/cri-conformance.md` labels the 2.2.0 73/7 `critest` table as a
   **historical** baseline, not a tip scoreboard. Tip must re-prove Resources /
   OOMKilled (and every other bullet) with a tip SHA host report; `#606` restored
@@ -54,6 +60,62 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Guest-init starts the exec accept loop immediately after the container fork
+  returns (and before stdio relay / PTY warm-up) so short workloads can finish
+  the host heartbeat while those spin up (#576). Fork stays single-threaded;
+  this does **not** replace a Linux directory-rootfs tip `run --rm … /bin/true`
+  proof, close B2, or claim Enterprise GA.
+- `just build-guest` falls back to `cargo zigbuild` when musl-gcc is absent
+  (HVF / WHPX cross-build hosts). Does **not** close B2 or claim Enterprise GA.
+- `just test-vm` / `just test-tee` locate libkrun via
+  `scripts/find-libkrun-build-libs.sh`: unquoted cargo globs and
+  `out/{libkrun,libkrunfw}/{lib,lib64}` (no nested `out/libkrun/libkrun/…`)
+  (#575 reopen). `--self-test` locks the layout on any host; tip `--print` on
+  Ubuntu Orb resolved real `out/libkrun/lib64` + `out/libkrunfw/lib64` under a
+  Linux release `target`. Does **not** close B2 or claim Enterprise GA; it does
+  not replace a Linux tip `just test-vm` run (needs `/dev/kvm`).
+- Unprivileged Linux directory MicroVM same-UID admission rejects foreign
+  **UIDs** only (#562). Alpine `etc/shadow` (`0:42`) no longer blocks the
+  documented user-lane soak; guest-init already skips virtio-fs `lchown`
+  EPERM during metadata replay. Tip probe on Ubuntu Orb (no `/dev/kvm`):
+  non-root `run --rm alpine:3.20 -- true` reached guest-init install and shim
+  spawn (no same-UID reject); boot then failed closed without KVM. nginx /
+  postgres-class images that declare a non-root UID still fail closed before
+  create. Does **not** close B2, claim Enterprise GA, prove KVM short-task
+  `#576`, or make foreign-UID images runnable without root / ext4.
+- Exec readiness waits within the common terminal poll bound when the provider
+  has exited but the host-backed guest exit is not visible yet (#576). Short
+  `--rm` tasks that publish exit 0 a few polls after the shim looks exited keep
+  that authenticated code for startup reconciliation; bare provider zero still
+  fails closed without inventing success. Does **not** close B2 or claim
+  Enterprise GA, and does not replace a Linux directory-rootfs tip proof.
+- `prepare-linux-sandbox-host.sh` reclaim of an existing Sandbox cgroup tree
+  walks every leaf `cgroup.procs`, refuses only live PIDs, best-effort migrates
+  zombies, and uses `cgroup.kill` when present (#613 / setuid proof re-runs).
+  Official `proof-linux-sandbox-setuid-launcher.sh` on Ubuntu Orb returned
+  `status=passed` with `b2_process_session_recovery_closed=false`. Does **not**
+  close B2 or claim Enterprise GA.
+- Operator Sandbox setuid spawn no longer requires the unprivileged parent to
+  write the cgroup v2 common ancestor. `pre_exec` defers that EACCES to
+  `a3s-oci`, which adopts effective gid 0, clears supplementary groups, and
+  migrates into the delegated child while the mode 4755 launcher is still
+  effective uid 0. CI setpriv (already egid 0 and `--clear-groups`) is
+  unchanged. Re-verified on Ubuntu Orb (no KVM): non-root
+  `run --rm --isolation sandbox alpine:3.20 -- true|false|sh -c 'exit 3'`
+  with a tip-built mode 4755 launcher returned 0/1/3 without
+  `A3S_BOX_CI_SETPRIV_WRAPPER`. This does **not** close B2, claim Enterprise
+  GA, or replace a KVM tip MicroVM / soak matrix.
+- The Linux setuid-launcher proof records the `a3s-box run` status. A bare
+  `2>&1` on its own line inside the capture was a successful null command, so
+  a failing operator Sandbox run was reported as `rc=0` (#628). This does not
+  make that run start (cgroup migration still happens before the setuid
+  launcher is root, and mode 4755 does not clear the operator egid) and does
+  **not** close B2 or claim Enterprise GA.
+- Cross-process warm unpause projects `Paused` when attach cannot authenticate
+  a SIGSTOP'd shim and the durable state is `Paused` or the `Resuming` claim
+  that still owns that shim. `paused_with_memory` still defaults true, so a
+  live start is not marked paused, and a filesystem-only resume is not. Does
+  **not** close B2 or claim Enterprise GA.
 - R17 MicroVM security evidence reads the redacted virtio-fs secret-binding
   manifest from `runtime-control/staged-environment` instead of a rootfs
   `/.a3s-box-env` the boot bundle no longer writes (#629). The provider-build

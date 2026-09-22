@@ -67,10 +67,22 @@ pub fn acquire(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// Returns `Ok(false)` for host-sandbox and legacy boot paths that did not
 /// acquire the private channel.
 pub fn persist(exit_code: i32) -> Result<bool, Box<dyn std::error::Error>> {
+    persist_status(GuestTerminalStatus::new(exit_code))
+}
+
+/// Persist the workload exit code together with a verified rootfs handoff.
+///
+/// Publish exit and quiescence in one write so the host cannot observe a
+/// durable exit code and tear down the shim before the guest finishes
+/// remounting the block root read-only.
+pub fn persist_quiesced(exit_code: i32) -> Result<bool, Box<dyn std::error::Error>> {
+    persist_status(GuestTerminalStatus::new(exit_code).with_rootfs_quiesced())
+}
+
+fn persist_status(status: GuestTerminalStatus) -> Result<bool, Box<dyn std::error::Error>> {
     let Some(file) = TERMINAL_STATUS_FILE.get() else {
         return Ok(false);
     };
-    let status = GuestTerminalStatus::new(exit_code);
     status.validate()?;
     let bytes = serde_json::to_vec(&status)?;
     if bytes.len() > MAX_GUEST_TERMINAL_STATUS_BYTES {

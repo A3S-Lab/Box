@@ -565,8 +565,10 @@ rootfs-metadata ownership replay: the share retains Host UIDs and guest
 `chown` is refused by design. The **default omit-isolation MicroVM** user lane
 on Linux is the same capability boundary: directory rootfs is exposed through
 same-UID virtio-fs, layer UID/GID restore is root-only, and unprivileged `run`
-fails closed when image metadata declares UIDs/GIDs outside `{0, host euid/egid}`
+fails closed when image metadata declares UIDs outside `{0, host euid}`
 instead of creating a box whose entrypoint then dies on `chown` `EPERM`.
+Foreign gids with uid 0 (for example alpine `etc/shadow` as `0:42`) are
+admitted: guest-init skips virtio-fs `lchown` EPERM during metadata replay.
 Windows WHPX still converts image metadata to
 `a3s.oci.rootfs-metadata.v1` so the guest can restore Linux ownership that
 NTFS cannot store. Image-declared

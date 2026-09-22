@@ -1012,3 +1012,33 @@ async fn handle_from_manager_allows_paused_for_pause_lease_bookkeeping() {
         .expect("Paused may retain a pause lease handle");
     assert_eq!(handle.pid, Some(std::process::id()));
 }
+
+#[test]
+fn warm_pause_attach_projects_paused_only_for_stopped_warm_runtime() {
+    use crate::BoxState;
+
+    let created = BoxState::Created;
+    assert_eq!(
+        project_warm_pause_attach_state(true, ManagedExecutionState::Paused, created),
+        BoxState::Paused
+    );
+    assert_eq!(
+        project_warm_pause_attach_state(true, ManagedExecutionState::Resuming, created),
+        BoxState::Paused
+    );
+    assert_eq!(
+        project_warm_pause_attach_state(true, ManagedExecutionState::Running, created),
+        BoxState::Created,
+        "default paused_with_memory must not mark a live start Paused"
+    );
+    assert_eq!(
+        project_warm_pause_attach_state(false, ManagedExecutionState::Resuming, created),
+        BoxState::Created,
+        "filesystem-only resume must not invent a memory pause"
+    );
+    assert_eq!(
+        project_warm_pause_attach_state(true, ManagedExecutionState::Resuming, BoxState::Ready),
+        BoxState::Ready,
+        "an authenticated attach stays Ready"
+    );
+}

@@ -389,6 +389,79 @@ async fn test_wait_for_exec_ready_rejects_provider_exit_without_guest_status() {
     assert!(vm.exec_client.is_none());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_wait_for_exec_ready_polls_for_delayed_guest_exit_before_heartbeat() {
+    // #576: short tasks can publish the host-backed exit a few polls after the
+    // shim looks exited. Readiness must wait within the terminal bound and keep
+    // the authenticated code — never invent Ready from that exit alone.
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-exec-delayed-guest-exit".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let durable_exit_path = tmp
+        .path()
+        .join("boxes")
+        .join(&box_id)
+        .join("rootfs/.a3s_exit_code");
+    *vm.handler.write().await = Some(Box::new(DelayedCompletionHandler {
+        polls: Arc::clone(&polls),
+        available_after: 2,
+        durable_exit_path: Some(durable_exit_path),
+    }));
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock")),
+    )
+    .await
+    .expect("delayed guest exit must resolve inside the terminal poll bound")
+    .expect_err("delayed guest exit must not invent Ready")
+    .to_string();
+
+    assert!(
+        error.contains("exited with code 0") || error.contains("before the guest exec server"),
+        "{error}"
+    );
+    assert_eq!(vm.exit_code(), Some(0));
+    assert!(polls.load(Ordering::SeqCst) >= 3);
+    assert!(vm.exec_client.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_wait_for_exec_ready_refuses_provider_zero_when_guest_exit_never_arrives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let box_id = "box-exec-provider-zero-no-guest".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(tmp.path().join("boxes").join(&box_id).join("logs")).unwrap();
+    *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 0 }));
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock")),
+    )
+    .await
+    .expect("provider-zero poll must finish within the terminal bound")
+    .expect_err("provider zero without guest proof must fail closed")
+    .to_string();
+
+    assert!(
+        error.contains("before the guest exec server became ready"),
+        "{error}"
+    );
+    assert_eq!(
+        vm.exit_code(),
+        None,
+        "must not invent shim_exit_code from bare provider zero"
+    );
+    assert!(vm.exec_client.is_none());
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn test_wait_for_exec_available_fails_closed_without_heartbeat() {

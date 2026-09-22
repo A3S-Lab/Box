@@ -162,27 +162,56 @@ impl VmManager {
                     hint: None,
                 });
             }
-            if let Some(ref handler) = *self.handler.read().await {
-                if handler.has_exited() {
-                    #[cfg(unix)]
-                    {
-                        if let Some(exit_code) = crate::rootfs::read_persisted_exit_code(&box_dir) {
-                            self.shim_exit_code = Some(exit_code);
-                            tracing::debug!(
-                                exit_code,
-                                "Guest completed before exec server became ready"
-                            );
-                            return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
+            {
+                let mut handlers = self.handler.write().await;
+                if let Some(ref mut handler) = handlers.as_mut() {
+                    if handler.has_exited() {
+                        #[cfg(unix)]
+                        {
+                            // Short one-shots often publish the host-backed
+                            // terminal status a few polls after the shim looks
+                            // exited (#576). Wait within the common terminal
+                            // bound *before* returning so boot cleanup can keep
+                            // authenticated exit 0 on ephemeral `--rm` boxes.
+                            // Never invent Ready, and never treat bare provider
+                            // zero as guest success when the poll times out.
+                            if let Some(exit_code) =
+                                crate::rootfs::read_persisted_exit_code(&box_dir)
+                            {
+                                self.shim_exit_code = Some(exit_code);
+                                tracing::debug!(
+                                    exit_code,
+                                    "Guest completed before exec server became ready"
+                                );
+                                return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
+                            }
+                            if let Some(exit_code) = super::wait_for_delayed_terminal_exit(
+                                handler.as_mut(),
+                                &box_dir,
+                                &self.box_id,
+                            )
+                            .await
+                            {
+                                self.shim_exit_code = Some(exit_code);
+                                tracing::debug!(
+                                    exit_code,
+                                    "Guest completed before exec server became ready"
+                                );
+                                return Err(vm_exited_before_exec_ready(&box_dir, Some(exit_code)));
+                            }
+                            return Err(vm_exited_before_exec_ready(&box_dir, None));
                         }
-                        return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
-                    }
-                    #[cfg(windows)]
-                    {
-                        // Bare has_exited without a reaped/collected result must
-                        // not invent Ok(()) — durable guest status is checked
-                        // below; otherwise fail closed like Unix.
-                        if super::windows_guest_persisted_exit_code(&box_dir).is_none() {
-                            return Err(vm_exited_before_exec_ready(&box_dir, handler.exit_code()));
+                        #[cfg(windows)]
+                        {
+                            // Bare has_exited without a reaped/collected result must
+                            // not invent Ok(()) — durable guest status is checked
+                            // below; otherwise fail closed like Unix.
+                            if super::windows_guest_persisted_exit_code(&box_dir).is_none() {
+                                return Err(vm_exited_before_exec_ready(
+                                    &box_dir,
+                                    handler.exit_code(),
+                                ));
+                            }
                         }
                     }
                 }

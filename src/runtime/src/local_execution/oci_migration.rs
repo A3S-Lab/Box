@@ -734,6 +734,7 @@ fn legacy_backend(
 
 /// How Linux selected the native Sandbox OCI composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // DefaultSandbox is selected only on Linux host paths.
 enum NativeLinuxMigrationSelection {
     /// Env absent on Linux: default SandboxViaOci; soft if owner not ready.
     DefaultSandbox,

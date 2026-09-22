@@ -579,12 +579,15 @@ fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMeta
 ///
 /// Layer UID/GID restore is root-only. Under `geteuid() != 0`, extract collapses
 /// on-disk ownership to the host identity while metadata still records tar
-/// UIDs/GIDs. Guest `chown` to those foreign IDs returns `EPERM` on same-UID
+/// UIDs/GIDs. Guest `chown` to a foreign **UID** returns `EPERM` on same-UID
 /// virtio-fs, so nginx/postgres-class images die after create. Fail closed here
 /// instead of inventing a live-then-dead box.
 ///
-/// Allowed when every recorded uid is in `{0, euid}` and every gid is in
-/// `{0, egid}`. Guest-native ext4 / Sandbox userns paths must not call this.
+/// Allowed when every recorded uid is in `{0, euid}`. Foreign **gid** alone
+/// (for example alpine `etc/shadow` as `0:42`) is not a reject: guest-init
+/// skips virtio-fs `lchown` EPERM during metadata replay and keeps mode
+/// restore. Workloads that must own a non-root UID still fail closed via the
+/// uid check. Guest-native ext4 / Sandbox userns paths must not call this.
 /// Missing metadata is treated as empty (admit).
 #[cfg(unix)]
 pub(crate) fn admit_unprivileged_same_uid_directory_rootfs(rootfs: &Path) -> Result<()> {
@@ -593,19 +596,18 @@ pub(crate) fn admit_unprivileged_same_uid_directory_rootfs(rootfs: &Path) -> Res
     if euid == 0 {
         return Ok(());
     }
-    let egid = unsafe { libc::getegid() } as u64;
     let euid = euid as u64;
     let metadata = load_image_metadata(rootfs)?;
-    let foreign = metadata.values().any(|entry| {
-        (entry.uid != 0 && entry.uid != euid) || (entry.gid != 0 && entry.gid != egid)
-    });
-    if !foreign {
+    let foreign_uid = metadata
+        .values()
+        .any(|entry| entry.uid != 0 && entry.uid != euid);
+    if !foreign_uid {
         return Ok(());
     }
     Err(BoxError::BoxBootError {
-        message: "unprivileged MicroVM rejected: Linux directory rootfs is same-UID virtio-fs only; this image declares UIDs/GIDs outside {0, host euid/egid}".into(),
+        message: "unprivileged MicroVM rejected: Linux directory rootfs is same-UID virtio-fs only; this image declares UIDs outside {0, host euid}".into(),
         hint: Some(
-            "Guest chown to those IDs returns EPERM, and unprivileged extract cannot restore layer ownership. Re-run as root (e.g. sudo a3s-box run), use a same-UID image, or a transport that stores Linux ownership (macOS guest-native ext4 / Windows WHPX portable metadata).".into(),
+            "Guest chown to those UIDs returns EPERM, and unprivileged extract cannot restore layer ownership. Re-run as root (e.g. sudo a3s-box run), use a same-UID image, or a transport that stores Linux ownership (macOS guest-native ext4 / Windows WHPX portable metadata). Foreign gids with uid 0 (for example alpine shadow) are admitted; guest-init skips virtio-fs lchown EPERM during metadata replay.".into(),
         ),
     })
 }
@@ -2351,9 +2353,14 @@ mod tests {
 
     #[cfg(unix)]
     fn write_image_metadata_for_admit(target: &Path, uid: u64, gid: u64) {
+        write_image_metadata_path_for_admit(target, "var/lib/app", uid, gid);
+    }
+
+    #[cfg(unix)]
+    fn write_image_metadata_path_for_admit(target: &Path, archive_path: &str, uid: u64, gid: u64) {
         let entry = RootfsMetadataEntry {
             path_base64: base64::engine::general_purpose::STANDARD
-                .encode(archive_metadata_path_bytes(Path::new("var/lib/app"))),
+                .encode(archive_metadata_path_bytes(Path::new(archive_path))),
             kind: RootfsEntryKind::Directory,
             mode: 0o755,
             uid,
@@ -2364,6 +2371,9 @@ mod tests {
         };
         let manifest = RootfsMetadataManifest::new(vec![entry]);
         let path = target.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
@@ -2397,6 +2407,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn admit_same_uid_allows_alpine_shadow_gid_when_unprivileged() {
+        // #562 reopen: alpine etc/shadow is uid 0 gid 42. Guest-init skips
+        // virtio-fs lchown EPERM; rejecting that gid blocked user-lane soak.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        write_image_metadata_path_for_admit(&target, "etc/shadow", 0, 42);
+        admit_unprivileged_same_uid_directory_rootfs(&target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn admit_same_uid_rejects_foreign_uid_metadata_when_unprivileged() {
         if unsafe { libc::geteuid() } == 0 {
             return;
@@ -2410,6 +2435,27 @@ mod tests {
         assert!(
             text.contains("same-UID virtio-fs"),
             "unexpected error: {text}"
+        );
+        assert!(
+            text.contains("UIDs outside"),
+            "error must name the uid gate, not a false gid reject: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admit_same_uid_rejects_foreign_uid_even_with_root_gid() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&target).unwrap();
+        write_image_metadata_for_admit(&target, 101, 0);
+        let error = admit_unprivileged_same_uid_directory_rootfs(&target).unwrap_err();
+        assert!(
+            error.to_string().contains("same-UID virtio-fs"),
+            "unexpected error: {error}"
         );
     }
 

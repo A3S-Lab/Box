@@ -428,27 +428,43 @@ fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), Box<dyn std:
 /// SandboxViaOci prefers an OCI-mapped metadata baseline when mapping
 /// artifacts exist (same contract as live/stopped `diff`); otherwise falls
 /// back to a host walk for compatibility roots.
+///
+/// Guest-native macOS ext4 has no durable host-visible `rootfs/`/`merged/`
+/// tree: the guest publishes the pristine baseline during boot. Short-lived
+/// Tasks may also tear down the ext4 generation before this helper runs, so
+/// accept an already-installed baseline or publish the guest handoff instead
+/// of inventing a host walk that cannot exist.
 pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) else {
-        return Err(format!(
-            "refusing to invent a rootfs diff baseline without a resolved rootfs under {}",
+    if !a3s_box_runtime::rootfs::guest_diff_baseline_required(box_dir)? {
+        return Ok(());
+    }
+
+    if let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) {
+        #[cfg(target_os = "linux")]
+        {
+            if a3s_box_runtime::sandbox::rootfs::try_create_managed_sandbox_diff_baseline_if_absent(
+                box_dir,
+                &rootfs_dir,
+            )? {
+                return Ok(());
+            }
+        }
+        a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
+        return Ok(());
+    }
+
+    // No host-visible rootfs: publish the guest control-file handoff when
+    // present (including after short-lived Tasks remove the ext4 generation).
+    match a3s_box_runtime::rootfs::publish_guest_diff_baseline(box_dir) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!(
+            "refusing to invent a rootfs diff baseline without a resolved rootfs under {} ({error})",
             box_dir.display()
         )
-        .into());
-    };
-    #[cfg(target_os = "linux")]
-    {
-        if a3s_box_runtime::sandbox::rootfs::try_create_managed_sandbox_diff_baseline_if_absent(
-            box_dir,
-            &rootfs_dir,
-        )? {
-            return Ok(());
-        }
+        .into()),
     }
-    a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
-    Ok(())
 }
 
 /// Compatibility alias for the CLI-level diff tests.
@@ -499,6 +515,54 @@ mod tests {
         let present = dir.path().join(DIFF_BASELINE_FILE);
         std::fs::write(&present, "{}").unwrap();
         ensure_diff_baseline_present(&present).unwrap();
+    }
+
+    #[test]
+    fn create_baseline_accepts_already_published_guest_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let box_dir = dir.path();
+        // No host-visible rootfs — only the guest-published map that boot
+        // installs for guest-native providers.
+        std::fs::write(box_dir.join(DIFF_BASELINE_FILE), "{}").unwrap();
+        create_box_baseline_snapshot(box_dir).unwrap();
+    }
+
+    #[test]
+    fn create_baseline_publishes_guest_handoff_without_host_rootfs() {
+        use std::collections::BTreeMap;
+
+        use a3s_box_core::rootfs_baseline::{GuestDiffBaseline, GUEST_DIFF_BASELINE_FILE_NAME};
+
+        let dir = tempfile::tempdir().unwrap();
+        let box_dir = dir.path();
+        let control = box_dir.join("runtime-control");
+        std::fs::create_dir_all(&control).unwrap();
+        let baseline = GuestDiffBaseline::new(BTreeMap::from([(
+            "/bin/sh".to_string(),
+            RootfsFileInfo {
+                size: 1,
+                mode: 0o100755,
+                is_dir: false,
+            },
+        )]));
+        std::fs::write(
+            control.join(GUEST_DIFF_BASELINE_FILE_NAME),
+            serde_json::to_vec(&baseline).unwrap(),
+        )
+        .unwrap();
+        create_box_baseline_snapshot(box_dir).unwrap();
+        assert!(box_dir.join(DIFF_BASELINE_FILE).is_file());
+    }
+
+    #[test]
+    fn create_baseline_still_fails_closed_without_rootfs_or_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = create_box_baseline_snapshot(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("refusing to invent a rootfs diff baseline"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

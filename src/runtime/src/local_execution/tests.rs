@@ -414,12 +414,6 @@ fn request(external_id: &str) -> CreateExecutionRequest {
     }
 }
 
-fn sandbox_request(external_id: &str) -> CreateExecutionRequest {
-    let mut request = request(external_id);
-    request.config.isolation = ExecutionIsolation::Sandbox;
-    request
-}
-
 fn operation(value: &str) -> OperationId {
     OperationId::new(value).unwrap()
 }

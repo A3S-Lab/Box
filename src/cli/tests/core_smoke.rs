@@ -1519,6 +1519,7 @@ fn real_core_postgres_scram_survives_sequential_published_connections() {
     smoke.ok(&["rm", "-f", &smoke.name]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
@@ -1569,6 +1570,7 @@ fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
     assert_contains(&output, "virtiofs-tar-pass-5", "virtiofs tar output");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
@@ -1726,6 +1728,7 @@ fn real_core_named_volume_persists_across_stop_restart() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_volume_backed_init_script_success_and_failure() {

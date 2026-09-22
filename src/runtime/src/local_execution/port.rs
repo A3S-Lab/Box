@@ -5,9 +5,11 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use a3s_box_core::ExecutionBackend;
+#[cfg(target_os = "linux")]
+use a3s_box_core::ExecutionUdpPortIo;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionPortConnector, ExecutionPortStream, ExecutionUdpPort, ExecutionUdpPortIo,
+    ExecutionPortConnector, ExecutionPortStream, ExecutionUdpPort,
 };
 use async_trait::async_trait;
 #[cfg(target_os = "linux")]

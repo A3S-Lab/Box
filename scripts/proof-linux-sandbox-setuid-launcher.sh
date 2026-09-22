@@ -9,8 +9,37 @@
 #
 # Observation-only. Does not flip B2, MicroVM cutover, or claim every distro.
 # Fail closed when the target filesystem is nosuid (chmod 4755 ignored).
+# The captured run status must be the a3s-box status. A bare `2>&1` on its own
+# line inside $(...) is a successful null command and hides a failing run (#628).
 
 set -euo pipefail
+
+# Run a command, keep combined output, and store that command's status in
+# CAPTURE_RC. `2>&1` stays on the same simple command. The function itself
+# returns 0 so `set -e` cannot discard the recorded status.
+capture_command_status() {
+  local output
+  set +e
+  output="$("$@" 2>&1)"
+  CAPTURE_RC=$?
+  set -e
+  CAPTURED_OUTPUT="${output}"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  capture_command_status bash -c 'echo boom >&2; exit 9'
+  if [[ "${CAPTURE_RC}" -ne 9 || "${CAPTURED_OUTPUT}" != *boom* ]]; then
+    echo "proof capture self-test: failing command reported rc=${CAPTURE_RC} output=${CAPTURED_OUTPUT}" >&2
+    exit 1
+  fi
+  capture_command_status true
+  if [[ "${CAPTURE_RC}" -ne 0 ]]; then
+    echo "proof capture self-test: successful command reported rc=${CAPTURE_RC}" >&2
+    exit 1
+  fi
+  echo "setuid-launcher proof capture self-test passed"
+  exit 0
+fi
 
 usage() {
   cat <<'EOF'
@@ -130,20 +159,17 @@ chown "${PROOF_UID}:${PROOF_GID}" "${HOME_DIR}"
 
 STATUS="failed"
 ERROR=""
-set +e
-PROOF_OUTPUT="$(
+capture_command_status \
   sudo -u "#${PROOF_UID}" -g "#${PROOF_GID}" \
-    env -u A3S_BOX_CI_SETPRIV_WRAPPER -u A3S_BOX_CI_SETPRIV_MATCHED_CREDS -u A3S_BOX_OCI_MIGRATION \
-    "PATH=${BOX_BIN}:${PATH}" \
-    "HOME=${HOME_DIR}" \
-    "A3S_HOME=${HOME_DIR}" \
-    "A3S_BOX_SANDBOX_OCI_LAUNCHER=${SYSTEM_LAUNCHER}" \
-    "A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT=${DELEGATED_CGROUP}" \
-    "${BOX_BIN}/a3s-box" run --rm --isolation sandbox "${IMAGE}" -- /bin/sh -c 'printf setuid-launcher-ok; exit 0'
-  2>&1
-)"
-RC=$?
-set -e
+  env -u A3S_BOX_CI_SETPRIV_WRAPPER -u A3S_BOX_CI_SETPRIV_MATCHED_CREDS -u A3S_BOX_OCI_MIGRATION \
+  "PATH=${BOX_BIN}:${PATH}" \
+  "HOME=${HOME_DIR}" \
+  "A3S_HOME=${HOME_DIR}" \
+  "A3S_BOX_SANDBOX_OCI_LAUNCHER=${SYSTEM_LAUNCHER}" \
+  "A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT=${DELEGATED_CGROUP}" \
+  "${BOX_BIN}/a3s-box" run --rm --isolation sandbox "${IMAGE}" -- /bin/sh -c 'printf setuid-launcher-ok; exit 0'
+RC="${CAPTURE_RC}"
+PROOF_OUTPUT="${CAPTURED_OUTPUT}"
 if [[ "${RC}" -eq 0 ]] && grep -q 'setuid-launcher-ok' <<<"${PROOF_OUTPUT}"; then
   STATUS="passed"
 else

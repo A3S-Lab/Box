@@ -32,6 +32,30 @@ use crate::{
 
 type SharedVm = Arc<Mutex<VmManager>>;
 
+/// A SIGSTOP'd shim cannot answer the exec heartbeat, so cross-process attach
+/// leaves `Created`. Project `Paused` only when the durable lifecycle is a warm
+/// pause or the resume claim that still owns that stopped shim.
+///
+/// `paused_with_memory` defaults true, so a still-running start must stay
+/// `Created` (#424). Cold resume (`paused_with_memory == false`) must not
+/// invent a memory pause. An attach that already authenticated stays as-is.
+fn project_warm_pause_attach_state(
+    paused_with_memory: bool,
+    managed: ManagedExecutionState,
+    attached: crate::BoxState,
+) -> crate::BoxState {
+    let warm_stopped_runtime = paused_with_memory
+        && matches!(
+            managed,
+            ManagedExecutionState::Paused | ManagedExecutionState::Resuming
+        );
+    if warm_stopped_runtime && attached == crate::BoxState::Created {
+        crate::BoxState::Paused
+    } else {
+        attached
+    }
+}
+
 /// Runtime adapter that owns live [`VmManager`] handles and reconstructs them
 /// from durable runtime evidence after a control-plane restart.
 #[derive(Clone)]
@@ -288,6 +312,18 @@ impl VmLocalExecutionBackend {
             state = manager.state().await;
         }
 
+        // SIGSTOP demotes health to false by design. A Paused manager is not
+        // terminal — project the durable pause lease instead of inventing an
+        // exit-status wait (#424).
+        if state == crate::BoxState::Paused {
+            let handle = self.handle_from_manager(record, &manager).await?;
+            return Ok(LocalExecutionObservation {
+                state: ExecutionState::Paused,
+                handle: Some(handle),
+                exit_code: None,
+            });
+        }
+
         if !manager
             .health_check()
             .await
@@ -390,9 +426,10 @@ impl VmLocalExecutionBackend {
                 manager.shim_exit_code = None;
             }
         }
+        let state = manager.state().await;
         let exit_code = authenticated.ok_or_else(|| {
             ExecutionManagerError::Unavailable(format!(
-                "runtime reported execution {} as terminal before its exact exit status became available",
+                "runtime reported execution {} as terminal before its exact exit status became available (state={state:?}, provider_exit={exit_code:?})",
                 record.id
             ))
         })?;
@@ -501,6 +538,7 @@ impl VmLocalExecutionBackend {
         record: &BoxRecord,
         located: LocatedProcess,
     ) -> ExecutionManagerResult<SharedVm> {
+        let metadata = self.metadata(record)?;
         let mut manager = self.new_manager(record)?;
         let socket_dir = crate::vm::runtime_socket_dir(&self.home_dir, &record.id);
         manager
@@ -515,6 +553,17 @@ impl VmLocalExecutionBackend {
             && crate::process::pid_start_time(located.pid) != located.start_time
         {
             return Err(ExecutionManagerError::NotFound(execution_id(record)?));
+        }
+        // Cross-process pause recovery: a SIGSTOP'd shim cannot answer the exec
+        // heartbeat, so attach leaves Created. Project Paused only for a warm
+        // pause that is already durable or claimed for resume.
+        let attached = project_warm_pause_attach_state(
+            metadata.paused_with_memory,
+            managed_state(record)?,
+            manager.state().await,
+        );
+        if attached == crate::BoxState::Paused {
+            *manager.state.write().await = crate::BoxState::Paused;
         }
         let recovered = Arc::new(Mutex::new(manager));
         match self.managers.entry(record.id.clone()) {

@@ -545,10 +545,21 @@ fn passt_process_name_is_known(name: &str) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn pid_is_passt(_pid: i32) -> bool {
-    // No procfs to consult; passt is Linux-only, so this path is unreachable in
-    // practice — preserve the prior kill-by-pid-file behavior.
-    true
+fn pid_is_passt(pid: i32) -> bool {
+    // No /proc. passt itself is Linux-only, but unit tests and any non-Linux
+    // build still exercise terminate_passt. Treat ESRCH as "gone" so a stale
+    // pid file can be wiped after a no-op SIGTERM; if the pid still exists,
+    // preserve the prior kill-by-pid-file conservatism.
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(pid, 0) only probes existence/permissions.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 impl super::NetworkBackend for PasstManager {

@@ -672,6 +672,7 @@ impl BoxRuntimeService {
         let Some(mut vm) = vm else {
             return Ok(false);
         };
+        #[cfg(target_os = "linux")]
         let box_id = vm.box_id().to_string();
 
         match timeout_ms {

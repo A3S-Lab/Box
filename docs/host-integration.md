@@ -73,8 +73,13 @@ rustup target add aarch64-unknown-linux-musl
 scripts/host-integration-smoke.sh --core
 ```
 
-If direct cross-build linking fails on the host, install `cargo-zigbuild` and
-use `cargo zigbuild -p a3s-box-guest-init --target aarch64-unknown-linux-musl`
+If direct cross-build linking fails on the host, `just build-guest` falls back to
+`cargo zigbuild` when musl-gcc is absent. You can also install `cargo-zigbuild`
+and run:
+
+```bash
+cargo zigbuild -p a3s-box-guest-init --target aarch64-unknown-linux-musl
+```
 instead.
 
 On macOS, `src/target/debug/a3s-box-guest-init` is a host Mach-O binary; on

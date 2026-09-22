@@ -3326,6 +3326,7 @@ mod tests {
         command.spawn().expect("spawn long-running test child")
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn published_main_pid_acks_any_repeated_spawn_main() {
         assert_eq!(published_main_pid(42), Some(42));

@@ -202,8 +202,8 @@ mod linux {
         // Run init process
         if let Err(e) = run_init() {
             error!("Init process failed: {}", e);
-            persist_exit_code(1);
-            quiesce_rootfs_for_handoff();
+            flush_stdio_relays();
+            persist_exit_after_rootfs_handoff(1);
             eprintln!("a3s-box guest init failed: {e}");
             process::exit(1);
         }
@@ -505,6 +505,11 @@ mod linux {
             .map(|v| v == "1")
             .unwrap_or(false);
 
+        // Stdio relay fds held across fork; threads start only after the exec
+        // accept loop so short workloads (#576) can finish heartbeat first.
+        #[cfg(target_os = "linux")]
+        let mut pending_stdio: Option<(i32, i32, i32, i32)> = None;
+
         let container_pid = if deferred_main {
             info!("BOX_DEFERRED_MAIN=1 — booting IDLE; container main deferred to a spawn-main control frame");
             // Stash the parsed command so a later spawn-main trigger runs it as main.
@@ -549,16 +554,16 @@ mod linux {
             )?;
             info!("Container process started with PID {}", container_pid_raw);
 
-            // Close our copies of the write-ends (the container is now the sole writer),
-            // then start the relay threads. Starting them AFTER the fork keeps guest-init
-            // single-threaded across the container `fork()` (fork-safety).
+            // Close our copies of the write-ends (the container is now the sole writer).
+            // Defer relay threads until after the exec accept loop starts. Threads
+            // still start only AFTER fork (fork-safety).
             #[cfg(target_os = "linux")]
             if let Some(r) = relay {
                 unsafe {
                     libc::close(r.out_w);
                     libc::close(r.err_w);
                 }
-                start_stdio_relays(r.out_r, r.console_out, r.err_r, r.console_err);
+                pending_stdio = Some((r.out_r, r.console_out, r.err_r, r.console_err));
             }
 
             // Make the main container PID available to the exec server so a host
@@ -568,16 +573,21 @@ mod linux {
             nix::unistd::Pid::from_raw(container_pid_raw as i32)
         };
 
-        expose_container_env_to_exec(&exec_config);
-
-        // Step 8: Start the exec server accept loop on the socket bound in Step 2.6.
-        // (set_container_pid above ran first, so a host signal-main frame still finds
-        // the PID once the loop is serving.)
+        // Step 8: Start the exec accept loop before stdio relays / PTY so readiness
+        // can authenticate while those warm up (#576). Heartbeat has no container-pid
+        // dependency; signal-main already has the PID when the spawn arm ran.
         std::thread::spawn(move || {
             if let Err(e) = exec_server::serve_exec_server(exec_listener) {
                 error!("Exec server failed: {}", e);
             }
         });
+
+        #[cfg(target_os = "linux")]
+        if let Some((out_r, console_out, err_r, console_err)) = pending_stdio {
+            start_stdio_relays(out_r, console_out, err_r, console_err);
+        }
+
+        expose_container_env_to_exec(&exec_config);
 
         // Step 8.25: Start Windows host-port forward control client when enabled.
         if !bootstrap_mode.is_host_sandbox() {
@@ -788,11 +798,13 @@ mod linux {
                         info!("Container process {} exited with status {}", pid, code);
                     }
                     persist_terminal_rootfs_metadata();
-                    persist_exit_code(code);
                     // Flush the stdout/stderr relays so the container's last output
                     // reaches the console before this process::exit halts the VM.
                     flush_stdio_relays();
-                    quiesce_rootfs_for_handoff();
+                    // Quiesce the block root BEFORE publishing terminal status so
+                    // the host cannot observe exit_code and SIGTERM the shim while
+                    // the journal still needs recovery.
+                    persist_exit_after_rootfs_handoff(code);
                     // MicroVM logging still needs a bounded handoff before PID 1
                     // halts the VMM. Host Sandbox logging has a generation-owned
                     // worker that waits for the runtime owner to close both writers and drains
@@ -856,11 +868,11 @@ mod linux {
             }
             match waitpid(container_pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(_, status)) => {
-                    persist_exit_code(status);
+                    persist_exit_after_rootfs_handoff(status);
                     process::exit(status);
                 }
                 Ok(WaitStatus::Signaled(_, signal, _)) => {
-                    persist_exit_code(128 + signal as i32);
+                    persist_exit_after_rootfs_handoff(128 + signal as i32);
                     process::exit(128 + signal as i32);
                 }
                 Ok(WaitStatus::StillAlive) => {
@@ -878,11 +890,45 @@ mod linux {
     /// New MicroVMs use the private pre-opened terminal channel. The rootfs
     /// marker remains as a compatibility fallback for Sandbox and directory-root
     /// providers whose writable tree is safely host-visible.
+    #[allow(dead_code)] // retained for compatibility call sites / tests
     fn persist_exit_code(code: i32) {
         use std::io::Write;
         if let Err(error) = terminal_status::persist(code) {
             warn!(%error, "Failed to persist guest terminal status");
         }
+        if let Ok(mut file) = std::fs::File::create(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH) {
+            let _ = write!(file, "{code}");
+            let _ = file.sync_all();
+        }
+    }
+
+    /// Quiesce a guest-owned block root, then publish exit + handoff together.
+    fn persist_exit_after_rootfs_handoff(code: i32) {
+        use std::io::Write;
+
+        let quiesced = match root_transport::quiesce_for_handoff() {
+            Ok(true) => {
+                info!("Quiesced guest-owned rootfs before publishing terminal status");
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                error!(%error, "Failed to quiesce guest-owned rootfs before VM exit");
+                false
+            }
+        };
+
+        let persist_result = if quiesced {
+            terminal_status::persist_quiesced(code)
+        } else {
+            terminal_status::persist(code)
+        };
+        if let Err(error) = persist_result {
+            warn!(%error, "Failed to persist guest terminal status");
+        } else if quiesced {
+            info!("Published guest-owned rootfs handoff acknowledgement");
+        }
+
         if let Ok(mut file) = std::fs::File::create(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH) {
             let _ = write!(file, "{code}");
             let _ = file.sync_all();

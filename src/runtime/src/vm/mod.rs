@@ -632,11 +632,19 @@ impl VmManager {
             // reconciliation even on ephemeral `--rm` boxes. Provider-only
             // nonzero crash codes without guest evidence still wipe ephemeral
             // dirs (exit_code() can re-auth from the cached nonzero).
+            //
+            // readiness can observe the guest terminal status while the shim is
+            // still draining (#411). In that window `completed_before_cleanup`
+            // is still false at entry, but discarding a published guest-native
+            // generation would break persistent stop/commit/restart. A durable
+            // guest exit alone proves the workload finished during readiness.
             let durable_guest_exit = crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
-            if self.config.persistent && self.shim_exit_code.is_some() && completed_before_cleanup {
+            let completed_during_readiness = completed_before_cleanup || durable_guest_exit;
+            if self.config.persistent && self.shim_exit_code.is_some() && completed_during_readiness
+            {
                 self.preserve_rootfs_on_boot_failure = true;
             }
-            if durable_guest_exit && completed_before_cleanup {
+            if durable_guest_exit {
                 self.preserve_rootfs_on_boot_failure = true;
                 self.retain_box_dir_after_boot_terminal = true;
             }

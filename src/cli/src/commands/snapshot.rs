@@ -324,6 +324,7 @@ fn validate_snapshot_source_state(record: &crate::state::BoxRecord) -> Result<()
 
 /// Stopped managed Sandbox snapshots must persist OCI-mapped terminal metadata
 /// via `save_managed`, not host subordinate UIDs from a bare `save`.
+#[cfg(target_os = "linux")]
 fn stopped_sandbox_uses_managed_metadata(record: &crate::state::BoxRecord) -> bool {
     super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record)
 }
@@ -750,6 +751,7 @@ mod tests {
         validate_snapshot_source_state(&record).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn stopped_sandbox_selects_managed_metadata_capture() {
         use a3s_box_core::{

@@ -98,16 +98,32 @@ enable_controllers() {
 
 # cgroupfs rejects unlink() of control files, so `rm -rf` always fails on a
 # second run (#613). Remove empty directories depth-first with rmdir only.
+# Leaf owner cgroups can retain zombie PIDs after Sandbox exit; migrate dead
+# tasks out (or cgroup.kill the subtree) before reclaiming the tree.
 remove_cgroup_tree() {
   local root="$1"
   if [[ ! -d "${root}" ]]; then
     return 0
   fi
-  local procs
-  procs="$(tr -d '[:space:]' <"${root}/cgroup.procs" 2>/dev/null || true)"
-  if [[ -n "${procs}" ]]; then
-    echo "refusing to remove busy cgroup tree ${root} (still has processes: ${procs})" >&2
-    echo "stop Sandbox boxes using this tree, then re-run prepare." >&2
+  if [[ -f "${root}/cgroup.kill" ]]; then
+    printf '1\n' >"${root}/cgroup.kill" 2>/dev/null || true
+  fi
+  local procs_file pid live=0
+  while IFS= read -r -d '' procs_file; do
+    while read -r pid; do
+      [[ -n "${pid}" ]] || continue
+      if [[ -d "/proc/${pid}" ]]; then
+        live=1
+        echo "refusing to remove busy cgroup tree ${root} (still has live process ${pid} in ${procs_file})" >&2
+        echo "stop Sandbox boxes using this tree, then re-run prepare." >&2
+        exit 1
+      fi
+      # Dead/zombie entries block rmdir until they leave the leaf. Best-effort
+      # migrate into the root cgroup so reclaim can proceed.
+      printf '%s\n' "${pid}" >/sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+    done <"${procs_file}"
+  done < <(find "${root}" -name cgroup.procs -print0 2>/dev/null || true)
+  if [[ "${live}" -ne 0 ]]; then
     exit 1
   fi
   # Depth-first: children first, then parents. Ignore missing dirs.
