@@ -1184,7 +1184,7 @@ fn parse_linux_kvm_environment(
     // Box-owned Host. Default omit-isolation stays Box-libkrun until gate 5.
     #[cfg(target_os = "linux")]
     {
-        return parse_linux_kvm_packaged_box_owned(
+        parse_linux_kvm_packaged_box_owned(
             home_dir,
             host_root_override,
             service_root,
@@ -1192,7 +1192,7 @@ fn parse_linux_kvm_environment(
             service_shim,
             service_manifest,
         )
-        .map(Some);
+        .map(Some)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1278,25 +1278,23 @@ fn resolve_linux_kvm_owner_artifacts(
 
     #[cfg(target_os = "linux")]
     {
-        if override_bin.is_some() && override_shim.is_some() && override_manifest.is_some() {
-            return Ok((
-                override_bin.expect("checked"),
-                override_shim.expect("checked"),
-                override_manifest.expect("checked"),
-            ));
+        match (override_bin, override_shim, override_manifest) {
+            (Some(bin), Some(shim), Some(manifest)) => Ok((bin, shim, manifest)),
+            (runtime_path, shim_path, system_image_manifest) => {
+                let discovered = super::oci_kvm_packaged::discover_packaged_linux_kvm_artifacts(
+                    super::oci_kvm_packaged::PackagedLinuxKvmOverrides {
+                        runtime_path,
+                        shim_path,
+                        system_image_manifest,
+                    },
+                )?;
+                Ok((
+                    discovered.runtime_path,
+                    discovered.shim_path,
+                    discovered.system_image_manifest,
+                ))
+            }
         }
-        let discovered = super::oci_kvm_packaged::discover_packaged_linux_kvm_artifacts(
-            super::oci_kvm_packaged::PackagedLinuxKvmOverrides {
-                runtime_path: override_bin,
-                shim_path: override_shim,
-                system_image_manifest: override_manifest,
-            },
-        )?;
-        Ok((
-            discovered.runtime_path,
-            discovered.shim_path,
-            discovered.system_image_manifest,
-        ))
     }
 
     #[cfg(not(target_os = "linux"))]

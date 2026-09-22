@@ -212,7 +212,7 @@ mod tests {
         fs::write(root.join(MANIFEST_FILENAME), b"{}\n").unwrap();
 
         let found = discover_packaged_linux_kvm_artifacts_in(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             PackagedLinuxKvmOverrides::default(),
         )
         .unwrap();
@@ -242,7 +242,7 @@ mod tests {
         fs::write(root.join("system-image").join(MANIFEST_FILENAME), b"{}\n").unwrap();
 
         let found = discover_packaged_linux_kvm_artifacts_in(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             PackagedLinuxKvmOverrides::default(),
         )
         .unwrap();
@@ -273,7 +273,7 @@ mod tests {
         fs::write(alt.join("custom-manifest.json"), b"{}\n").unwrap();
 
         let found = discover_packaged_linux_kvm_artifacts_in(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             PackagedLinuxKvmOverrides {
                 runtime_path: Some(alt.join("custom-oci")),
                 shim_path: Some(alt.join("custom-shim")),
@@ -304,7 +304,7 @@ mod tests {
         let _ = fs::remove_dir_all(&empty);
         fs::create_dir_all(&empty).unwrap();
         let error = discover_packaged_linux_kvm_artifacts_in(
-            &[empty.clone()],
+            std::slice::from_ref(&empty),
             PackagedLinuxKvmOverrides::default(),
         )
         .unwrap_err();
