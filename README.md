@@ -324,8 +324,10 @@ The endpoint must be supplied for an **external** qualification Host so that
 service cannot activate by accident. For **opt-in packaged** Box-owned Host
 ensure, omit `A3S_BOX_OCI_KVM_ENDPOINT` and install `a3s-oci`,
 `a3s-oci-krun-shim`, and `system-image.json` on the packaged discovery path
-(or set the `A3S_BOX_KVM_OCI_SERVICE_*` overrides). Absent-env default
-omit-isolation remains Box-libkrun until binder gate 5. The profile matches
+(or set the `A3S_BOX_KVM_OCI_SERVICE_*` overrides). On Linux/KVM hosts with
+those packages installed, leaving `A3S_BOX_OCI_MIGRATION` unset now selects
+the same packaged DedicatedVm path (binder gate 5); set `=off` to keep
+Box-libkrun. The profile matches
 the WHPX qualification constraints: one vCPU, 512 MiB, `network=none`, and no
 TEE, mounts, volumes, devices, sidecars, Snapshot, or persistence. Rust
 applications can construct `LinuxKvmOciMigrationConfig` explicitly or use
@@ -339,8 +341,8 @@ env vars and do **not** pre-bind the endpoint. The qualification script
 (with session-owner create forced and orphan session-owner/shim reap on fresh
 construction; Live retained-manager reopen does not reap). External
 operator-launched Hosts remain supported when `BOX_OWNED` is unset.
-This is still qualification-only; it does not promote KVM MicroVM to production
-or change default omit→MicroVM routing.
+This is Linux/KVM production for omit-isolation when packages are present
+(binder gates 1–6); it does not promote HVF/WHPX or claim Enterprise GA.
 
 For the exact public-lifecycle vertical slice (create replay, Box-manager
 reopen, start, exact exit status, delete, residual cleanup, plus Host Service

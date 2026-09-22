@@ -1,6 +1,8 @@
 # Linux/KVM MicroVM OCI cutover evidence binder
 
-Status: **qualification-only** (not production for omit-isolation)
+Status: **Linux/KVM omit-isolation production cutover tip-proven** (gates 1–6);
+gates 7–8 and Enterprise GA remain open. HVF/WHPX production cutover is out of
+scope.
 
 Scope: Linux/KVM `DedicatedVm` via A3S OCI Runtime. HVF and WHPX production
 cutover are out of this binder. Sandbox shared-kernel GA is
@@ -13,11 +15,11 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 
 | Setting | Behavior |
 | --- | --- |
-| `A3S_BOX_OCI_MIGRATION` absent | Linux default: `SandboxViaOci` for Sandbox; **omit-isolation MicroVM stays Box-libkrun** |
-| `off` / `legacy` | VM-only backend |
+| `A3S_BOX_OCI_MIGRATION` absent | Linux: Sandbox → `SandboxViaOci`; omit-isolation / `microvm` → packaged Box-owned DedicatedVm when `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json` are discoverable (gate 5 tip-proven). Missing packages soft-fall to Box-libkrun instead of hard-failing. |
+| `off` / `legacy` | VM-only backend (Box-libkrun for omit-isolation) — gate 6 tip-proven |
 | `sandbox` / `on` | Sandbox → OCI; MicroVM stays Box-libkrun |
 | `microvm` / `all` + `A3S_BOX_OCI_KVM_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host) |
-| `microvm` / `all` without endpoint | Opt-in: packaged `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json` → Box-owned Host ensure; tip stamps `oci_sdk` + `dedicated-vm` (gates 1–4 tip-proven with OCI #348 + Box #646/#647 tips; awaiting merge/pin). Default omit-isolation stays Box-libkrun until gate 5 |
+| `microvm` / `all` without endpoint | Explicit opt-in packaged Box-owned Host (same artifacts as absent default) |
 | WHPX / HVF production composition | **Not claimed** |
 
 Production cutover for this binder means: on Linux (including WSL2 `/dev/kvm`),
@@ -46,10 +48,10 @@ unless the row explicitly remains qualification-only.
 | 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset stamps `oci_sdk` + `dedicated-vm` |
 | 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | **tip-proven on `main` tips** — OCI #348 + Box #646/#647 landed; FS via Live; pin `f08555c9…` |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | **tip-proven** — Live digest `9dff1de4…` (`box_owned_ensure_proven`) |
-| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — next after pin + regression (gates 6–7) |
-| 6 | Explicit `off` keeps Box-libkrun | required regression |
-| 7 | No silent Sandbox↔MicroVM fallback | required invariant |
-| 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | open — with 5 |
+| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | **tip-proven** — unset `A3S_BOX_OCI_MIGRATION` + packaged artifacts → create/start stamps `oci_sdk` + `dedicated-vm`; `run --rm` guest exit 0 |
+| 6 | Explicit `off` keeps Box-libkrun | **tip-proven** — `A3S_BOX_OCI_MIGRATION=off` create stamps `box_vm` |
+| 7 | No silent Sandbox↔MicroVM fallback | required invariant — open |
+| 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | open — after gate 7 + README Still-open edit |
 
 ## Explicit non-claims
 
@@ -61,13 +63,19 @@ unless the row explicitly remains qualification-only.
 - Fixture `process_restart` as driver Live evidence.
 - CNI / Axis C–E surfaces in the same cutover PR.
 
-## Operator proof sketch (after gate 2)
+## Operator proof sketch (gate 5 default)
 
 ```bash
-# After packaged discovery lands: no A3S_BOX_OCI_KVM_ENDPOINT.
-export A3S_BOX_OCI_MIGRATION=microvm   # or all
-# Prove omit-isolation create/start/exec/stop on a host with /dev/kvm.
-a3s-box run --rm alpine:3.20 -- /bin/true
-```
+# Packaged a3s-oci + a3s-oci-krun-shim + system-image.json on PATH / beside a3s-box.
+# Leave A3S_BOX_OCI_MIGRATION and A3S_BOX_OCI_KVM_ENDPOINT unset.
+unset A3S_BOX_OCI_MIGRATION A3S_BOX_OCI_KVM_ENDPOINT
+a3s-box create --cpus 1 --memory 512m --network none --name g5 alpine:3.20 -- /bin/true
+a3s-box start g5
+# Expect managed_execution.runtime_route=oci_sdk and oci_runtime.isolation=dedicated-vm
+a3s-box stop g5 && a3s-box rm -f g5
 
-Until gates 1–4 pass on tip `main`, keep MicroVM default on Box-libkrun.
+# Gate 6 regression
+export A3S_BOX_OCI_MIGRATION=off
+a3s-box create --cpus 1 --memory 512m --network none --name offbox alpine:3.20 -- /bin/true
+# Expect runtime_route=box_vm
+```

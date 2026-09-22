@@ -15,8 +15,8 @@ All notable changes to A3S Box will be documented in this file.
   when artifacts are missing. Tip-proven on WSL2: stamps `oci_sdk` +
   `dedicated-vm`; Live digest `9dff1de4…` (Box `51f0deea…`); create/start/exec
   greened. Stop/delete + exit parity follow #644 / OCI #348 / Box #646–#647.
-  Default omit-isolation stays Box-libkrun until binder gate 5. Does **not**
-  claim Enterprise GA.
+  Gate 5 now defaults absent-env omit-isolation to that packaged path when
+  artifacts are present. Does **not** claim Enterprise GA.
 - Sandbox Runtime `NetworkMode::Outbound` maps to host netns
   (`NetworkMode::Host`) with read-only binds of host `/sys/{devices,class,bus,
   block,dev,kernel,module}` plus the usual read-only `/sys/fs/cgroup` cgroup
@@ -54,6 +54,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Linux/KVM binder gate 5: an absent `A3S_BOX_OCI_MIGRATION` soft-activates
+  packaged Box-owned DedicatedVm when `a3s-oci`, `a3s-oci-krun-shim`, and
+  `system-image.json` are discoverable; missing packages soft-fall to
+  Box-libkrun instead of hard-failing. Tip-proven on WSL2 `/dev/kvm`: unset
+  env create/start stamps `oci_sdk` + `dedicated-vm`, `run --rm` exits 0;
+  explicit `off` keeps `box_vm` (gate 6). Does **not** close gate 7/8,
+  HVF/WHPX production, or claim Enterprise GA.
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `f08555c9f9e9c1b9576366aebad6425b38389150` (#348). Product KVM/HVF Host
   owners treat durable Live session-owner terminate as shutdown success so
