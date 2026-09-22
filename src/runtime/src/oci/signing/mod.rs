@@ -136,6 +136,7 @@ async fn fetch_cosign_signature(
     registry: &str,
     repository: &str,
     manifest_digest: &str,
+    protocol: oci_distribution::client::ClientProtocol,
 ) -> Result<Option<CosignSignatureData>> {
     let sig_tag = cosign_signature_tag(manifest_digest);
     let reference_str = format!("{}/{}:{}", registry, repository, sig_tag);
@@ -146,7 +147,7 @@ async fn fetch_cosign_signature(
     })?;
 
     let config = ClientConfig {
-        protocol: oci_distribution::client::ClientProtocol::Https,
+        protocol,
         ..Default::default()
     };
     let client = Client::new(config);
@@ -245,16 +246,25 @@ pub async fn verify_image_signature(
     registry: &str,
     repository: &str,
     manifest_digest: &str,
+    protocol: oci_distribution::client::ClientProtocol,
 ) -> VerifyResult {
     match policy {
         SignaturePolicy::Skip => VerifyResult::Skipped,
 
         SignaturePolicy::CosignKey { public_key } => {
-            verify_cosign_key(public_key, registry, repository, manifest_digest).await
+            verify_cosign_key(public_key, registry, repository, manifest_digest, protocol).await
         }
 
         SignaturePolicy::CosignKeyless { issuer, identity } => {
-            verify_cosign_keyless(issuer, identity, registry, repository, manifest_digest).await
+            verify_cosign_keyless(
+                issuer,
+                identity,
+                registry,
+                repository,
+                manifest_digest,
+                protocol,
+            )
+            .await
         }
     }
 }
@@ -272,6 +282,7 @@ async fn verify_cosign_key(
     registry: &str,
     repository: &str,
     manifest_digest: &str,
+    protocol: oci_distribution::client::ClientProtocol,
 ) -> VerifyResult {
     // 1. Read the PEM public key
     let pem_bytes = match std::fs::read(public_key_path) {
@@ -292,7 +303,8 @@ async fn verify_cosign_key(
     };
 
     // 2. Fetch the cosign signature artifact
-    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest).await {
+    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await
+    {
         Ok(Some(data)) => data,
         Ok(None) => return VerifyResult::NoSignature,
         Err(e) => {
@@ -352,9 +364,11 @@ async fn verify_cosign_keyless(
     registry: &str,
     repository: &str,
     manifest_digest: &str,
+    protocol: oci_distribution::client::ClientProtocol,
 ) -> VerifyResult {
     // 1. Fetch the cosign signature artifact
-    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest).await {
+    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await
+    {
         Ok(Some(data)) => data,
         Ok(None) => return VerifyResult::NoSignature,
         Err(e) => {
@@ -604,6 +618,7 @@ mod tests {
             "docker.io",
             "library/alpine",
             "sha256:abc",
+            oci_distribution::client::ClientProtocol::Https,
         )
         .await;
         assert_eq!(result, VerifyResult::Skipped);
@@ -615,7 +630,14 @@ mod tests {
             public_key: "/nonexistent/cosign.pub".to_string(),
         };
         let result =
-            verify_image_signature(&policy, "docker.io", "library/alpine", "sha256:abc").await;
+            verify_image_signature(
+                &policy,
+                "docker.io",
+                "library/alpine",
+                "sha256:abc",
+                oci_distribution::client::ClientProtocol::Https,
+            )
+            .await;
         match result {
             VerifyResult::Failed(msg) => assert!(msg.contains("Failed to read public key")),
             other => panic!("Expected Failed, got {:?}", other),
@@ -632,7 +654,14 @@ mod tests {
             identity: "user@example.com".to_string(),
         };
         let result =
-            verify_image_signature(&policy, "docker.io", "library/alpine", "sha256:abc").await;
+            verify_image_signature(
+                &policy,
+                "docker.io",
+                "library/alpine",
+                "sha256:abc",
+                oci_distribution::client::ClientProtocol::Https,
+            )
+            .await;
         // Should not be Verified (no real signature exists)
         assert!(!result.is_ok());
     }
@@ -1010,6 +1039,7 @@ mod tests {
             "a3s/app",
             "sha256:abc123",
             "registry.example.com/a3s/app:latest",
+            oci_distribution::client::ClientProtocol::Https,
         )
         .await
         .unwrap_err();
@@ -1029,6 +1059,7 @@ mod tests {
             "a3s/app",
             "sha256:abc123",
             "registry.example.com/a3s/app:latest",
+            oci_distribution::client::ClientProtocol::Https,
         )
         .await
         .unwrap_err();
@@ -1048,6 +1079,7 @@ mod tests {
             "a3s/app",
             "sha256:abc123",
             "registry.example.com/a3s/app:latest",
+            oci_distribution::client::ClientProtocol::Https,
         )
         .await
         .unwrap_err();

@@ -64,7 +64,7 @@ impl RegistryProtocol {
         }
     }
 
-    fn client_protocol(self) -> ClientProtocol {
+    pub fn client_protocol(self) -> ClientProtocol {
         match self {
             Self::Https => ClientProtocol::Https,
             Self::Http => ClientProtocol::Http,
@@ -360,6 +360,7 @@ impl RegistryPuller {
             &reference.registry,
             &reference.repository,
             &manifest_digest,
+            self.protocol.client_protocol(),
         )
         .await;
 
