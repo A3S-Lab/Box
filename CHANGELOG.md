@@ -39,6 +39,12 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
+  `f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578` (#347). Guest MakeDir/upload treat
+  host-backed virtiofs `fchown` EPERM/EACCES as optional so unprivileged WSL
+  KVM Live keyed filesystem gates stay honest. Tip KVM Live v5 digest
+  `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5` (Box
+  `68f99abb…`). Does **not** close B2 or claim Enterprise GA.
+- Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `eb11e6426daec74f6070fb3361d51b153f56db4e`. That tip adopts effective gid 0,
   clears supplementary groups, and migrates `A3S_BOX_OWNER_CGROUP` after a
   mode `4755` exec (#628). Box still defers the unprivileged parent's cgroup
@@ -61,12 +67,14 @@ All notable changes to A3S Box will be documented in this file.
   Does **not** close B4 or claim Enterprise GA / full CRI conformance.
 - Publish existing-host WSL2 `/dev/kvm` greened KVM Live
   `a3s.box.linux-kvm-live-session.v5` report digest
-  `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
-  (Box tip `d8854a4c646e330122a3d338a5b4c736360d8c9b`; OCI tip
-  `fb390b69a2d61b5fd1f7ecdcd79724dc94c876ca`; tip-rebuilt KVM system image with
-  reconnect-capable musl agent). ROADMAP / README / sandbox-ga-evidence and the
-  schema-alignment gate now require that digest and forbid stale “v5 greening
-  pending” claims. Does **not** flip B2 or invent digests.
+  `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`
+  (Box tip `68f99abb226e98ddd3479605ba71e8e5357bdf7e`; OCI tip
+  `f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578` / #347 virtiofs optional fchown;
+  tip-rebuilt KVM system image with reconnect-capable musl agent). ROADMAP /
+  README / sandbox-ga-evidence and the schema-alignment gate now require that
+  digest and forbid stale "v5 greening pending" claims. Prior digest
+  `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373` remains
+  historical. Does **not** flip B2 or invent digests.
 
 ### Fixed
 

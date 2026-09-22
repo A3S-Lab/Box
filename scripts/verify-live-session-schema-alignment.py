@@ -128,7 +128,7 @@ def evaluate_tree(root: Path) -> list[str]:
                     )
             else:
                 digest = (
-                    "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373"
+                    "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5"
                 )
                 if digest not in text:
                     failures.append(
@@ -173,7 +173,7 @@ def evaluate_tree(root: Path) -> list[str]:
             "a3s.box.linux-kvm-live-session.v5",
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd",
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21",
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5",
         ):
             if required not in text:
                 failures.append(f"README.md missing honesty phrase {required!r}")
@@ -250,7 +250,7 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
         (root / "README.md").write_text(
@@ -259,7 +259,7 @@ def self_test() -> int:
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
         (root / ".github/workflows/ci.yml").write_text(
@@ -281,7 +281,7 @@ def self_test() -> int:
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -294,7 +294,7 @@ def self_test() -> int:
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
 
@@ -305,7 +305,7 @@ def self_test() -> int:
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -321,7 +321,7 @@ def self_test() -> int:
             "a3s.box.linux-kvm-live-session.v5\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
 
@@ -332,7 +332,7 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -362,7 +362,7 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
             encoding="utf-8",
         )
 
