@@ -320,11 +320,15 @@ export A3S_BOX_OCI_KVM_ENDPOINT=/run/a3s/oci-kvm-box/runtime.sock
 a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
 ```
 
-The endpoint must be supplied explicitly so the experimental KVM service cannot
-activate by accident. The profile matches the WHPX qualification constraints:
-one vCPU, 512 MiB, `network=none`, and no TEE, mounts, volumes, devices,
-sidecars, Snapshot, or persistence. Rust applications can construct
-`LinuxKvmOciMigrationConfig` explicitly or use
+The endpoint must be supplied for an **external** qualification Host so that
+service cannot activate by accident. For **opt-in packaged** Box-owned Host
+ensure, omit `A3S_BOX_OCI_KVM_ENDPOINT` and install `a3s-oci`,
+`a3s-oci-krun-shim`, and `system-image.json` on the packaged discovery path
+(or set the `A3S_BOX_KVM_OCI_SERVICE_*` overrides). Absent-env default
+omit-isolation remains Box-libkrun until binder gate 5. The profile matches
+the WHPX qualification constraints: one vCPU, 512 MiB, `network=none`, and no
+TEE, mounts, volumes, devices, sidecars, Snapshot, or persistence. Rust
+applications can construct `LinuxKvmOciMigrationConfig` explicitly or use
 `A3sBoxClient::with_configured_paths(...).await`.
 
 For Box-owned Host ensure/recovery (identity-fenced `box-owner.json`, refuse

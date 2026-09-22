@@ -13,6 +13,8 @@ mod logs;
 mod oci_backend;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 mod oci_kvm_owner;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+mod oci_kvm_packaged;
 #[cfg(feature = "vm")]
 mod oci_log_projection;
 #[cfg(feature = "vm")]
