@@ -763,6 +763,11 @@ fn admit_launch(isolation: a3s_box_core::ExecutionIsolation) -> ExecutionManager
         .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))
 }
 
+fn admit_create(isolation: a3s_box_core::ExecutionIsolation) -> ExecutionManagerResult<()> {
+    crate::host_check::admit_isolation_class(isolation)
+        .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))
+}
+
 async fn destroy_after_observation(
     manager: &mut VmManager,
     preserve_rootfs: bool,
@@ -824,11 +829,14 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         &self,
         isolation: a3s_box_core::ExecutionIsolation,
     ) -> ExecutionManagerResult<()> {
+        // CLI and explicit readiness probes open the hypervisor.
         admit_launch(isolation)
     }
 
     async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
-        self.preflight_isolation(record.isolation).await
+        // Durable create only checks the host class so stub CI and metadata
+        // tests can reserve without kvm-group access. `start` still opens it.
+        admit_create(record.isolation)
     }
 
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {

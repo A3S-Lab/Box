@@ -81,11 +81,11 @@ All notable changes to A3S Box will be documented in this file.
   host. Does **not** invent a Windows warm pool.
 - Windows `run -t` / `exec -t` / `attach -t` now fail before box creation or
   inventory mutation. MicroVM launch admission (WHPX on Windows, KVM on Linux)
-  and Sandbox driver admission run in backend preflight, so a missing
-  hypervisor or Sandbox runtime fails before a box directory is created and
-  does not retarget the other isolation class. The default Windows kernel
-  stays the bundled libkrunfw image. Does **not** close B2, B3, or B5, and
-  does **not** remove the libkrun path.
+  and Sandbox driver admission run in CLI `preflight_isolation` and backend
+  `start`, so a missing hypervisor fails before named volumes or boot. Durable
+  create only checks the host isolation class (device present / OS family) so
+  stub CI without kvm-group access can still reserve metadata. Does **not**
+  close B2, B3, or B5, and does **not** remove the libkrun path.
 - Guest-init starts the exec accept loop immediately after the container fork
   returns (and before stdio relay / PTY warm-up) so short workloads can finish
   the host heartbeat while those spin up (#576). Fork stays single-threaded;

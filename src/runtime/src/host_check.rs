@@ -21,6 +21,10 @@ pub struct VirtualizationSupport {
 /// The requested class is unchanged. A missing MicroVM hypervisor or a missing
 /// Sandbox driver fails here, before a box directory or VM exists. Windows
 /// never substitutes KVM or a WSL distro, and Linux never substitutes WHPX.
+///
+/// This is the launch-ready probe: Linux opens `/dev/kvm`, Windows queries WHPX.
+/// Call it from CLI `preflight_isolation` and from `start`, not from durable
+/// create reservation (unit tests and stub CI often lack kvm-group access).
 pub fn admit_requested_isolation(isolation: a3s_box_core::ExecutionIsolation) -> Result<()> {
     match isolation {
         a3s_box_core::ExecutionIsolation::Microvm => check_virtualization_support().map(|_| ()),
@@ -28,6 +32,81 @@ pub fn admit_requested_isolation(isolation: a3s_box_core::ExecutionIsolation) ->
             crate::sandbox::probe_sandbox_capabilities(None).require_ready()?;
             Ok(())
         }
+    }
+}
+
+/// Reject an isolation class this OS cannot host, without opening the device.
+///
+/// Used by durable create reservation so metadata/unit tests can stamp a
+/// MicroVM route when `/dev/kvm` exists but is not group-accessible. Launch
+/// still requires [`admit_requested_isolation`]. Sandbox stays Linux-only.
+pub fn admit_isolation_class(isolation: a3s_box_core::ExecutionIsolation) -> Result<()> {
+    match isolation {
+        a3s_box_core::ExecutionIsolation::Microvm => admit_microvm_host_class(),
+        a3s_box_core::ExecutionIsolation::Sandbox => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(BoxError::ConfigError(
+                    "Sandbox isolation is supported only on Linux; use MicroVM isolation on this host"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn admit_microvm_host_class() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            return Err(BoxError::ConfigError(
+                "KVM is not available: /dev/kvm not found. \
+                 Ensure KVM kernel modules are loaded (modprobe kvm kvm_intel or kvm_amd)."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Err(BoxError::ConfigError(
+                "A3S Box on macOS requires Apple Silicon (ARM64). Intel Macs are not supported."
+                    .to_string(),
+            ))
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Ok(())
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Err(BoxError::ConfigError(
+                "A3S Box on Windows currently requires x86_64 for the WHPX backend.".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err(BoxError::ConfigError(
+            "Unsupported platform: A3S Box requires macOS (Apple Silicon), Linux with KVM, or Windows with WHPX"
+                .to_string(),
+        ))
     }
 }
 
@@ -268,6 +347,33 @@ mod tests {
                     "missing Sandbox driver must name the Sandbox probe: {message}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn create_class_admission_does_not_require_opening_the_hypervisor() {
+        let isolation = a3s_box_core::ExecutionIsolation::Microvm;
+        match admit_isolation_class(isolation) {
+            Ok(()) => {}
+            Err(error) => {
+                let message = error.to_string();
+                rejects_wsl_wording(&message);
+                assert!(
+                    !message.to_lowercase().contains("access denied"),
+                    "class admit must not open /dev/kvm: {message}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("kvm group"),
+                    "class admit must not require kvm group: {message}"
+                );
+            }
+        }
+        assert_eq!(isolation, a3s_box_core::ExecutionIsolation::Microvm);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let sandbox = a3s_box_core::ExecutionIsolation::Sandbox;
+            let error = admit_isolation_class(sandbox).expect_err("Sandbox off Linux");
+            assert!(error.to_string().contains("only on Linux"));
         }
     }
 
