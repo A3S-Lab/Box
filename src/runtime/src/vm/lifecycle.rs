@@ -416,8 +416,7 @@ impl VmManager {
                         Ok(metadata) if metadata.is_dir() => {}
                         _ => continue,
                     }
-                    match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&root)
-                    {
+                    match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&root) {
                         Ok(true) => {
                             finalized_any = true;
                             tracing::info!(
