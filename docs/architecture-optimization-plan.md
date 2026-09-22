@@ -61,10 +61,11 @@ Feature parity with other microVM projects is **not** an axiom.
 
 - **Linux Sandbox GA** via `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent: lifecycle, exec, filesystem, pause/resume, snapshot, restart, cleanup, Native Live observation (tip harness v7). See [sandbox-ga-evidence.md](sandbox-ga-evidence.md).
 - Default omit-isolation on Linux/KVM with packaged OCI artifacts is OCI
-  DedicatedVm (binder gate 5 tip-proven); HVF/WHPX production cutover and
+  DedicatedVm (binder gates 1–8 tip-proven); HVF/WHPX production cutover and
   Enterprise GA remain open. Explicit `A3S_BOX_OCI_MIGRATION=off` keeps
   Box-libkrun.
-- KVM / WHPX MicroVM → OCI compositions are **qualification-only**, not production claims.
+- HVF / WHPX MicroVM → OCI compositions remain **qualification-only**, not
+  production claims.
 
 ### 2.2 What is partial / open (do not optimize as if closed)
 
