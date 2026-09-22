@@ -409,36 +409,12 @@ impl VmManager {
                 // active provider (copy vs overlay). Finalize every present root
                 // so stopped export/diff/commit see the same generation.
                 let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-                let mut finalized_any = false;
-                for root_name in ["merged", "rootfs", "upper"] {
-                    let root = box_dir.join(root_name);
-                    match std::fs::symlink_metadata(&root) {
-                        Ok(metadata) if metadata.is_dir() => {}
-                        _ => continue,
-                    }
-                    match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&root) {
-                        Ok(true) => {
-                            finalized_any = true;
-                            tracing::info!(
-                                box_id = %self.box_id,
-                                path = %root.display(),
-                                "Published terminal rootfs metadata after Windows guest exit"
-                            );
-                        }
-                        Ok(false) => tracing::debug!(
-                            box_id = %self.box_id,
-                            path = %root.display(),
-                            "No Windows terminal rootfs metadata required host finalization"
-                        ),
-                        Err(error) => tracing::warn!(
-                            box_id = %self.box_id,
-                            path = %root.display(),
-                            error = %error,
-                            "Refused to publish invalid Windows terminal rootfs metadata"
-                        ),
-                    }
-                }
-                if !finalized_any {
+                if windows_stop::finalize_box_terminal_rootfs_metadata(&box_dir) {
+                    tracing::info!(
+                        box_id = %self.box_id,
+                        "Published terminal rootfs metadata after Windows guest exit"
+                    );
+                } else {
                     tracing::debug!(
                         box_id = %self.box_id,
                         "No Windows terminal rootfs metadata tmp was present after guest exit"

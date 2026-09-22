@@ -162,19 +162,26 @@ pub async fn graceful_stop(pid: u32, _signal: i32, _timeout: u64) -> StopOutcome
 }
 
 /// Gracefully stop a box by asking the guest to deliver `signal` to the
-/// container's main process over the exec socket, then waiting for the VM (shim
-/// `pid`) to exit on its own; force-kill after `timeout` seconds.
+/// container's main process, then waiting for the VM (shim `pid`) to exit on
+/// its own; force-kill after `timeout` seconds.
+///
+/// On Unix, delivery uses the guest exec socket. On Windows, delivery uses the
+/// host `stop.signal` file under `socket_dir` (the WHPX control worker forwards
+/// it into the guest); `exec_socket` is unused because Windows exec is a named
+/// pipe path, not a directory that holds control files.
 ///
 /// Signalling the shim directly does not reach the container: libkrun renames
 /// the shim and a host signal kills the VM abruptly without running the
 /// container's stop handler. Delivering the signal inside the guest lets the
 /// container run its own shutdown (honouring the image STOPSIGNAL), after which
-/// guest init exits and the VM stops cleanly. If the guest exec server cannot be
-/// reached (older box, socket gone), falls back to signalling the shim.
+/// guest init exits and the VM stops cleanly. If the guest control channel
+/// cannot be reached (older box, socket gone), falls back to signalling the
+/// shim.
 #[cfg(unix)]
 pub async fn graceful_stop_via_guest(
     pid: u32,
     exec_socket: &std::path::Path,
+    _socket_dir: &std::path::Path,
     signal: i32,
     timeout: u64,
 ) -> StopOutcome {
@@ -213,10 +220,82 @@ pub async fn graceful_stop_via_guest(
 pub async fn graceful_stop_via_guest(
     pid: u32,
     _exec_socket: &std::path::Path,
+    socket_dir: &std::path::Path,
     signal: i32,
     timeout: u64,
 ) -> StopOutcome {
-    graceful_stop(pid, signal, timeout).await
+    if !is_process_alive(pid) {
+        return StopOutcome::AlreadyExited;
+    }
+
+    // Snapshot restore and other unmanaged MicroVM records stop through this
+    // path. Managed `run`/`create` go through ExecutionManager → VmManager, which
+    // already stages stop.signal. Legacy Windows stop must do the same: a host
+    // TerminateProcess on the shim skips guest persist and leaves export fail-
+    // closed (#638).
+    let request = match a3s_box_runtime::stage_windows_guest_stop_request(socket_dir, signal) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Failed to stage Windows guest stop request; force-stopping shim"
+            );
+            return graceful_stop(pid, signal, timeout).await;
+        }
+    };
+
+    let timeout_ms = timeout.saturating_mul(1000);
+    let delivery_timeout = std::time::Duration::from_millis(
+        timeout_ms.min(a3s_box_runtime::WINDOWS_STOP_DELIVERY_TIMEOUT_MS),
+    );
+    let delivery_started = std::time::Instant::now();
+    let delivered = match a3s_box_runtime::wait_windows_guest_stop_delivered(
+        &request,
+        delivery_timeout,
+    )
+    .await
+    {
+        Ok(delivered) => delivered,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Failed while waiting for Windows guest stop request delivery"
+            );
+            false
+        }
+    };
+    let delivery_elapsed_ms =
+        u64::try_from(delivery_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let remaining_timeout_ms = timeout_ms.saturating_sub(delivery_elapsed_ms);
+    let wait_ms = if delivered {
+        remaining_timeout_ms.saturating_add(a3s_box_runtime::WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS)
+    } else {
+        remaining_timeout_ms
+    };
+
+    let start = std::time::Instant::now();
+    let outcome = loop {
+        if !is_process_alive(pid) {
+            break StopOutcome::GracefulExit;
+        }
+        if start.elapsed().as_millis() >= wait_ms as u128 {
+            terminate_process(pid);
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            break StopOutcome::ForceKilled;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    };
+
+    if let Some(box_dir) = socket_dir.parent() {
+        let _ = a3s_box_runtime::finalize_box_terminal_rootfs_metadata(box_dir);
+    }
+    if let Err(error) = a3s_box_runtime::clear_windows_guest_stop_request(socket_dir) {
+        tracing::warn!(
+            error = %error,
+            "Failed to clear Windows guest stop request after shim stop"
+        );
+    }
+    outcome
 }
 
 /// Deliver `signal` to the container's main process inside the guest over the

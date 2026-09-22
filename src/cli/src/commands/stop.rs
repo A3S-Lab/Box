@@ -111,13 +111,21 @@ async fn stop_one(
 
     // Exec socket used to deliver the stop signal inside the guest.
     let exec_socket = crate::socket_paths::exec(&record);
+    let socket_dir = crate::socket_paths::control_dir(&record);
 
     // Deliver the stop signal to the container (honouring its STOPSIGNAL), then
     // wait for the VM to exit; SIGKILL the shim after the timeout.
     lifecycle::resume_paused_for_termination(&record, pid, "stop")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let stop_outcome = Some(
-        process::graceful_stop_via_guest(pid, &exec_socket, stop_signal, effective_timeout).await,
+        process::graceful_stop_via_guest(
+            pid,
+            &exec_socket,
+            &socket_dir,
+            stop_signal,
+            effective_timeout,
+        )
+        .await,
     );
 
     if auto_remove {

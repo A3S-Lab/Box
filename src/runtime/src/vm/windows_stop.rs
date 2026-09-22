@@ -2,20 +2,24 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Host wait budget for the control worker to consume a staged stop request.
+pub const STOP_DELIVERY_TIMEOUT_MS: u64 = 5_000;
+
+/// Extra host wait after delivery so a persistent guest can rewrite terminal
+/// rootfs metadata (and the WHPX host can finalize virtio-fs `.tmp` publishes).
+pub const GUEST_FINALIZATION_TIMEOUT_MS: u64 = 30_000;
+
 /// A finished workload or an exited shim will not consume a new stop file.
 ///
 /// Waiting out the forwarding deadline only delays teardown. The caller still
 /// runs handler shutdown so a live shim is reaped.
-pub(crate) fn delivery_required(
-    workload_already_finished: bool,
-    provider_already_exited: bool,
-) -> bool {
+pub fn delivery_required(workload_already_finished: bool, provider_already_exited: bool) -> bool {
     !workload_already_finished && !provider_already_exited
 }
 
 use a3s_box_core::exec::{WINDOWS_STOP_REQUEST_FILE, WINDOWS_STOP_REQUEST_TEMP_FILE};
 
-pub(crate) fn request_path(socket_dir: &Path) -> PathBuf {
+pub fn request_path(socket_dir: &Path) -> PathBuf {
     socket_dir.join(WINDOWS_STOP_REQUEST_FILE)
 }
 
@@ -40,12 +44,12 @@ fn remove_control_file(path: &Path) -> io::Result<()> {
     }
 }
 
-pub(crate) fn clear(socket_dir: &Path) -> io::Result<()> {
+pub fn clear(socket_dir: &Path) -> io::Result<()> {
     remove_control_file(&request_path(socket_dir))?;
     remove_control_file(&temporary_path(socket_dir))
 }
 
-pub(crate) fn stage(socket_dir: &Path, signal: i32) -> io::Result<PathBuf> {
+pub fn stage(socket_dir: &Path, signal: i32) -> io::Result<PathBuf> {
     if !(1..=64).contains(&signal) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -67,7 +71,7 @@ pub(crate) fn stage(socket_dir: &Path, signal: i32) -> io::Result<PathBuf> {
 
 /// Wait until the forwarding worker removes a staged request after writing it
 /// to the connected guest control channel.
-pub(crate) async fn wait_until_delivered(request: &Path, timeout: Duration) -> io::Result<bool> {
+pub async fn wait_until_delivered(request: &Path, timeout: Duration) -> io::Result<bool> {
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
     let deadline = tokio::time::Instant::now() + timeout;
@@ -93,6 +97,29 @@ pub(crate) async fn wait_until_delivered(request: &Path, timeout: Duration) -> i
         }
         tokio::time::sleep(POLL_INTERVAL.min(remaining)).await;
     }
+}
+
+/// Publish any guest-written terminal metadata `.tmp` under a stopped box's
+/// writable roots. Returns whether at least one root published a terminal file.
+pub fn finalize_box_terminal_rootfs_metadata(box_dir: &Path) -> bool {
+    let mut finalized_any = false;
+    for root_name in ["merged", "rootfs", "upper"] {
+        let root = box_dir.join(root_name);
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => continue,
+        }
+        match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&root) {
+            Ok(true) => finalized_any = true,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                path = %root.display(),
+                error = %error,
+                "Refused to publish invalid Windows terminal rootfs metadata"
+            ),
+        }
+    }
+    finalized_any
 }
 
 #[cfg(test)]
@@ -176,5 +203,20 @@ mod tests {
             .await
             .unwrap());
         assert!(request.exists());
+    }
+
+    #[test]
+    fn finalize_publishes_tmp_under_rootfs() {
+        let directory = tempfile::tempdir().unwrap();
+        let rootfs = directory.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let temporary = rootfs.join(".a3s_rootfs_metadata_v1.json.tmp");
+        let terminal = rootfs.join(".a3s_rootfs_metadata_v1.json");
+        let manifest = a3s_box_core::rootfs_metadata::RootfsMetadataManifest::new(Vec::new());
+        std::fs::write(&temporary, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        assert!(finalize_box_terminal_rootfs_metadata(directory.path()));
+        assert!(terminal.is_file());
+        assert!(!temporary.exists());
     }
 }
