@@ -249,23 +249,26 @@ pub async fn graceful_stop_via_guest(
         timeout_ms.min(a3s_box_runtime::WINDOWS_STOP_DELIVERY_TIMEOUT_MS),
     );
     let delivery_started = std::time::Instant::now();
-    let delivered =
-        match a3s_box_runtime::wait_windows_guest_stop_delivered(&request, delivery_timeout).await {
-            Ok(delivered) => delivered,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "Failed while waiting for Windows guest stop request delivery"
-                );
-                false
-            }
-        };
+    let delivered = match a3s_box_runtime::wait_windows_guest_stop_delivered(
+        &request,
+        delivery_timeout,
+    )
+    .await
+    {
+        Ok(delivered) => delivered,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Failed while waiting for Windows guest stop request delivery"
+            );
+            false
+        }
+    };
     let delivery_elapsed_ms =
         u64::try_from(delivery_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let remaining_timeout_ms = timeout_ms.saturating_sub(delivery_elapsed_ms);
     let wait_ms = if delivered {
-        remaining_timeout_ms
-            .saturating_add(a3s_box_runtime::WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS)
+        remaining_timeout_ms.saturating_add(a3s_box_runtime::WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS)
     } else {
         remaining_timeout_ms
     };
