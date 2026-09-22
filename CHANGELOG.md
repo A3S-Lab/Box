@@ -14,8 +14,9 @@ All notable changes to A3S Box will be documented in this file.
   (`service_root/runtime.sock`, `service_root/runtime` handoff). Fail-closed
   when artifacts are missing. Tip-proven on WSL2: stamps `oci_sdk` +
   `dedicated-vm`; Live digest `9dff1de4…` (Box `51f0deea…`); create/start/exec
-  greened. Stop/delete still open (#644). Default omit-isolation stays
-  Box-libkrun until binder gate 5. Does **not** claim Enterprise GA.
+  greened. Stop/delete + exit parity follow #644 / OCI #348 / Box #646–#647.
+  Default omit-isolation stays Box-libkrun until binder gate 5. Does **not**
+  claim Enterprise GA.
 - Sandbox Runtime `NetworkMode::Outbound` maps to host netns
   (`NetworkMode::Host`) with read-only binds of host `/sys/{devices,class,bus,
   block,dev,kernel,module}` plus the usual read-only `/sys/fs/cgroup` cgroup
@@ -93,6 +94,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux/KVM DedicatedVm OCI qualification accepts `config.persistent` so
+  Docker-like `create` / non-`--rm` `run` (which set persistent to retain the
+  writable layer until remove) are not rejected as unqualified. Tip-proven on
+  WSL2 packaged opt-in: create/start/exec/stop/rm and non-`--rm` run with
+  `oci_sdk` + `dedicated-vm`. Does **not** claim gate 5 or Enterprise GA.
 - Windows legacy CLI `stop` (unmanaged MicroVM records, including
   `snapshot restore`) stages `stop.signal` under `box_dir/sockets` (not the
   named-pipe parent of `exec_socket`), waits for guest exit with the same

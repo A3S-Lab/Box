@@ -719,11 +719,10 @@ fn validate_dedicated_vm_qualification(
         || config.privileged
         || config.read_only
         || config.sidecar.is_some()
-        || config.persistent
     {
         return Err(unqualified(
             profile,
-            "custom mounts, controls, privileges, sidecars, and persistence are not qualified for this OCI profile",
+            "custom mounts, controls, privileges, and sidecars are not qualified for this OCI profile",
         ));
     }
     let policy = &metadata.request.policy;
