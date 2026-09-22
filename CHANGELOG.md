@@ -70,6 +70,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Windows legacy CLI `stop` (unmanaged MicroVM records, including
+  `snapshot restore`) stages `stop.signal` under `box_dir/sockets` (not the
+  named-pipe parent of `exec_socket`), waits for guest exit with the same
+  delivery/finalization budgets as managed `VmManager` teardown, and finalizes
+  WHPX terminal rootfs metadata before returning. Snapshot-restored boxes can
+  be stopped and re-exported instead of fail-closing on a missing
+  `.a3s_rootfs_metadata_v1.json` (#638).
 - A root-owned `/tmp/a3s-box-sockets` that is not mode `1777` no longer
   blocks later unprivileged MicroVM boots. The process uses
   `/tmp/a3s-box-sockets-<uid>` when it cannot repair the shared root.

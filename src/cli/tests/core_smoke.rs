@@ -2199,23 +2199,18 @@ fn real_core_filesystem_image_snapshot_commands() {
 
     #[cfg(windows)]
     {
-        // WHPX proves restore via guest-visible content. Stopped re-export after
-        // snapshot-restore still requires a guest terminal-metadata rewrite into
-        // the per-box root; the source-box stopped export above already covers
-        // the Windows export/metadata contract claimed in docs/windows-whpx.md.
-        let restored_content = smoke.ok(&[
-            "exec",
-            &restored_box,
-            "--",
-            "cat",
-            "/root/core-smoke-storage.txt",
-        ]);
+        // WHPX: stop must rewrite terminal metadata via stop.signal (legacy and
+        // managed paths). Prove stopped re-export of a snapshot-restored box.
+        smoke.ok(&["stop", "-t", "90", &restored_box]);
+        let restored_tar = smoke.home_path().join("core-smoke-restored.tar");
+        let restored_tar_arg = restored_tar.to_string_lossy().to_string();
+        smoke.ok(&["export", &restored_box, "--output", &restored_tar_arg]);
+        let restored_text = tar_entry_text(&restored_tar, "/root/core-smoke-storage.txt")
+            .expect("read restored file");
         assert_eq!(
-            restored_content.trim(),
-            "core-smoke-storage-ok",
+            restored_text, "core-smoke-storage-ok",
             "restored guest content"
         );
-        smoke.ok(&["stop", "-t", "60", &restored_box]);
     }
 
     #[cfg(not(windows))]

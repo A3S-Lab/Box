@@ -190,6 +190,12 @@ pub use tee::{AttestationReport, AttestationRequest, PlatformInfo};
 // VM
 #[cfg(feature = "vm")]
 pub use vm::{archive_stopped_guest_native_rootfs, BoxState, PullProgressFn, VmManager};
+#[cfg(all(feature = "vm", target_os = "windows"))]
+pub use vm::{
+    clear_windows_guest_stop_request, finalize_box_terminal_rootfs_metadata,
+    stage_windows_guest_stop_request, wait_windows_guest_stop_delivered,
+    WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS, WINDOWS_STOP_DELIVERY_TIMEOUT_MS,
+};
 #[cfg(feature = "vm")]
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, RawBlockDevice, ShimHandler,

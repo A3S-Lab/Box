@@ -13,6 +13,14 @@ mod sandbox;
 mod spec;
 #[cfg(windows)]
 mod windows_stop;
+#[cfg(windows)]
+pub use windows_stop::{
+    clear as clear_windows_guest_stop_request, finalize_box_terminal_rootfs_metadata,
+    stage as stage_windows_guest_stop_request,
+    wait_until_delivered as wait_windows_guest_stop_delivered,
+    GUEST_FINALIZATION_TIMEOUT_MS as WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS,
+    STOP_DELIVERY_TIMEOUT_MS as WINDOWS_STOP_DELIVERY_TIMEOUT_MS,
+};
 
 #[cfg(unix)]
 pub(crate) use crate::grpc::{
@@ -125,10 +133,6 @@ const WINDOWS_GUEST_EXIT_CODE: &str = ".a3s_exit_code";
 const WINDOWS_GUEST_STDOUT: &str = "guest-init.stdout.log";
 #[cfg(target_os = "windows")]
 const WINDOWS_GUEST_STDERR: &str = "guest-init.stderr.log";
-#[cfg(target_os = "windows")]
-const WINDOWS_STOP_DELIVERY_TIMEOUT_MS: u64 = 5_000;
-#[cfg(target_os = "windows")]
-const WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS: u64 = 30_000;
 #[cfg(target_os = "windows")]
 const WINDOWS_GUEST_RESULT_MARKER: &str = ".a3s_host_result_collected";
 #[cfg(target_os = "windows")]

@@ -63,6 +63,11 @@ pub fn exec(record: &BoxRecord) -> PathBuf {
     record.box_dir.join("sockets").join("exec.sock")
 }
 
+/// Host directory that holds Windows `stop.signal` and sibling control files.
+pub fn control_dir(record: &BoxRecord) -> PathBuf {
+    record.box_dir.join("sockets")
+}
+
 pub fn pty(record: &BoxRecord) -> PathBuf {
     sibling(record, "pty.sock")
 }

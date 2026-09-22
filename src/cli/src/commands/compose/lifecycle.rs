@@ -306,7 +306,15 @@ pub(super) async fn stop_service_process(svc: &ServiceBox) {
     } else {
         svc.exec_socket_path.clone()
     };
-    crate::process::graceful_stop_via_guest(pid, &exec_socket, stop_signal, stop_timeout).await;
+    let socket_dir = svc.box_dir.join("sockets");
+    crate::process::graceful_stop_via_guest(
+        pid,
+        &exec_socket,
+        &socket_dir,
+        stop_signal,
+        stop_timeout,
+    )
+    .await;
 }
 
 /// Stop, remove, and clean a compose service under the shared per-box
