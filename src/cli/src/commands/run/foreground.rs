@@ -180,6 +180,7 @@ pub(super) async fn run_foreground(
                         &ctx.box_dir,
                         ctx.record.exit_code,
                         ctx.record.isolation,
+                        run_context_uses_oci(&ctx),
                     ));
                 }
             }
@@ -236,8 +237,12 @@ pub(super) async fn run_foreground(
         );
     }
 
-    let persisted_exit_code =
-        foreground_workload_exit_code(&ctx.box_dir, ctx.record.exit_code, ctx.record.isolation);
+    let persisted_exit_code = foreground_workload_exit_code(
+        &ctx.box_dir,
+        ctx.record.exit_code,
+        ctx.record.isolation,
+        run_context_uses_oci(&ctx),
+    );
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     let archive_start = std::time::Instant::now();
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -377,8 +382,12 @@ pub(super) fn foreground_workload_exit_code(
     box_dir: &std::path::Path,
     recorded_exit_code: Option<i32>,
     isolation: a3s_box_core::ExecutionIsolation,
+    trust_oci_wait: bool,
 ) -> Option<i32> {
-    let policy = if isolation.is_sandbox() {
+    // Sandbox and OCI-routed DedicatedVm/MicroVM publish an authenticated
+    // container wait status. Trust that provider exit; do not require a second
+    // guest `.a3s_exit_code` proof (legacy libkrun MicroVM still does).
+    let policy = if trust_oci_wait || isolation.is_sandbox() {
         a3s_box_runtime::rootfs::ProviderExitPolicy::TrustProvider
     } else {
         a3s_box_runtime::rootfs::ProviderExitPolicy::RequireGuestProof

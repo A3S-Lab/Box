@@ -266,7 +266,8 @@ fn test_foreground_workload_exit_code_refuses_invented_provider_zero() {
         foreground_workload_exit_code(
             temporary.path(),
             Some(0),
-            a3s_box_core::ExecutionIsolation::Microvm
+            a3s_box_core::ExecutionIsolation::Microvm,
+            false,
         ),
         None
     );
@@ -278,7 +279,8 @@ fn test_foreground_workload_exit_code_refuses_invented_provider_zero() {
         foreground_workload_exit_code(
             temporary.path(),
             Some(1),
-            a3s_box_core::ExecutionIsolation::Microvm
+            a3s_box_core::ExecutionIsolation::Microvm,
+            false,
         ),
         Some(7)
     );
@@ -291,9 +293,36 @@ fn test_foreground_sandbox_trusts_provider_exit_zero() {
         foreground_workload_exit_code(
             temporary.path(),
             Some(0),
-            a3s_box_core::ExecutionIsolation::Sandbox
+            a3s_box_core::ExecutionIsolation::Sandbox,
+            false,
         ),
         Some(0)
+    );
+}
+
+#[test]
+fn test_foreground_oci_routed_microvm_trusts_provider_exit_zero() {
+    let temporary = tempfile::tempdir().unwrap();
+    // OCI DedicatedVm wait status is authenticated container exit — same as
+    // Sandbox TrustProvider. Without this, RequireGuestProof drops 0 and
+    // foreground invents exit 1 (#644 gate 3 exit parity).
+    assert_eq!(
+        foreground_workload_exit_code(
+            temporary.path(),
+            Some(0),
+            a3s_box_core::ExecutionIsolation::Microvm,
+            true,
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        foreground_workload_exit_code(
+            temporary.path(),
+            Some(17),
+            a3s_box_core::ExecutionIsolation::Microvm,
+            true,
+        ),
+        Some(17)
     );
 }
 
