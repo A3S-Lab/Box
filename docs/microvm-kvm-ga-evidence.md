@@ -31,7 +31,7 @@ the same fail-closed soft/hard rules Sandbox GA uses.
 | --- | --- |
 | KVM Live tip v5 (observation) | Existing-host WSL2 digest SHA-256 `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5` (Box `68f99abb…`; OCI `f7ab2b7a…` / #347 virtiofs optional fchown). `b2_process_session_recovery_closed=false`. |
 | Packaged opt-in Live tip v5 (Box-owned) | WSL2 digest SHA-256 `9dff1de47585472644e37e2971bf7df487bf353c5b07bc01bbf5b0ed84eb0e5f` (Box `51f0deea…` / #643; OCI `f7ab2b7a…`; tip system image). `kvm_microvm_live_claimed`, `retained_stream_handle_proven`, `retained_filesystem_proven`, `box_owned_ensure_proven`; B2 stays false. |
-| Packaged opt-in create/start/exec/stop/delete | Tip (OCI `7fc78e7` / #348 + Box exit TrustProvider #646 + persistent allow #647): endpoint unset + `A3S_BOX_OCI_MIGRATION=microvm` → `oci_sdk` / `dedicated-vm`; `create`/`start`/`exec`/`stop`/`rm` and `run --rm` / non-`--rm` with guest `exit 0` → process rc 0, `exit_code` 0, `owner.stderr` empty. Awaiting merge to `main` + OCI pin. |
+| Packaged opt-in create/start/exec/stop/delete | On `main` after OCI #348 + Box #646/#647 + pin `f08555c9…`: endpoint unset + `A3S_BOX_OCI_MIGRATION=microvm` → `oci_sdk` / `dedicated-vm`; create/start/exec/stop/rm and run with guest `exit 0` → rc 0 / `exit_code` 0. |
 | Vertical-slice KVM OCI qualification | `scripts/linux-kvm-oci-qualification.sh` + examples (qualification endpoint / Box-owned Host). Phase-2 recovery handoff timeout still open. |
 | Box-owned KVM Host ensure + Live reopen | `oci_kvm_owner` + Live harness `--box-owned`. |
 
@@ -44,9 +44,9 @@ unless the row explicitly remains qualification-only.
 | --- | --- | --- |
 | 1 | Packaged artifact discovery for KVM Host (runtime/shim/system-image) without qualification-only env | **tip-proven** — #643 (`oci_kvm_packaged`); owner record used discovered paths |
 | 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset stamps `oci_sdk` + `dedicated-vm` |
-| 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | **tip-proven on tips** — OCI #348 + Box #646/#647; FS via Live; land + pin before treating as `main` |
+| 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | **tip-proven on `main` tips** — OCI #348 + Box #646/#647 landed; FS via Live; pin `f08555c9…` |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | **tip-proven** — Live digest `9dff1de4…` (`box_owned_ensure_proven`) |
-| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — blocked until gate 3 tips are on `main` + OCI pin |
+| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — next after pin + regression (gates 6–7) |
 | 6 | Explicit `off` keeps Box-libkrun | required regression |
 | 7 | No silent Sandbox↔MicroVM fallback | required invariant |
 | 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | open — with 5 |

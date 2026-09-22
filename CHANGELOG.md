@@ -55,6 +55,11 @@ All notable changes to A3S Box will be documented in this file.
 ### Changed
 
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
+  `f08555c9f9e9c1b9576366aebad6425b38389150` (#348). Product KVM/HVF Host
+  owners treat durable Live session-owner terminate as shutdown success so
+  packaged DedicatedVm stop/delete no longer fails the utility-VM contract
+  (#644). Does **not** flip gate 5 or claim Enterprise GA.
+- Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578` (#347). Guest MakeDir/upload treat
   host-backed virtiofs `fchown` EPERM/EACCES as optional so unprivileged WSL
   KVM Live keyed filesystem gates stay honest. Tip KVM Live v5 digest

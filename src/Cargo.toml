@@ -126,7 +126,7 @@ ring = "0.17"
 a3s-acl = { version = "0.3.0", git = "https://github.com/A3S-Lab/ACL.git", rev = "5317e166222495585909d81f2caffdca90273c99" }
 a3s-transport = { version = "0.1.1", package = "a3s-common" }
 a3s-runtime = { version = "=0.5.0", git = "https://github.com/A3S-Lab/Runtime.git", rev = "aeb1dd96b5d3f823464d51fcabe99b6052874aee" }
-a3s-oci-sdk = { version = "=0.3.1", git = "https://github.com/A3S-Lab/OCI-Runtime.git", rev = "f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578" }
+a3s-oci-sdk = { version = "=0.3.1", git = "https://github.com/A3S-Lab/OCI-Runtime.git", rev = "f08555c9f9e9c1b9576366aebad6425b38389150" }
 
 # Metrics
 prometheus = "0.13"
