@@ -12,9 +12,10 @@ All notable changes to A3S Box will be documented in this file.
   `A3S_BOX_OCI_KVM_ENDPOINT`. Opt-in `A3S_BOX_OCI_MIGRATION=microvm|all` with
   the endpoint unset builds a Box-owned ensure config
   (`service_root/runtime.sock`, `service_root/runtime` handoff). Fail-closed
-  when artifacts are missing. Binder gates 1–2 wiring only — tip create/Live
-  prove and default omit→DedicatedVm (gates 3–5) stay open. Does **not** flip
-  default MicroVM routing or claim Enterprise GA.
+  when artifacts are missing. Tip-proven on WSL2: stamps `oci_sdk` +
+  `dedicated-vm`; Live digest `9dff1de4…` (Box `51f0deea…`); create/start/exec
+  greened. Stop/delete still open (#644). Default omit-isolation stays
+  Box-libkrun until binder gate 5. Does **not** claim Enterprise GA.
 - Sandbox Runtime `NetworkMode::Outbound` maps to host netns
   (`NetworkMode::Host`) with read-only binds of host `/sys/{devices,class,bus,
   block,dev,kernel,module}` plus the usual read-only `/sys/fs/cgroup` cgroup
