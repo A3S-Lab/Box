@@ -401,14 +401,17 @@ Native Live tip `a3s.box.linux-native-live-session.v7`, this observation-greens
 the ROADMAP process-session recovery matrix; the B2 exit gate remains open and
 harness reports still keep `b2_process_session_recovery_closed=false` (reports
 never self-certify B2 close). **Existing-host greened** tip `a3s.box.linux-kvm-live-session.v5` on WSL2
-`/dev/kvm` (Box `d8854a4c646e330122a3d338a5b4c736360d8c9b`; OCI
-`fb390b69a2d61b5fd1f7ecdcd79724dc94c876ca`; tip-rebuilt KVM system image with
-reconnect-capable musl agent): report SHA-256
-`cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
+`/dev/kvm` (Box `68f99abb226e98ddd3479605ba71e8e5357bdf7e`; OCI
+`f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578` / #347 virtiofs optional fchown
+after create; tip-rebuilt KVM system image with reconnect-capable musl agent):
+report SHA-256
+`81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`
 (`status=passed`, `kvm_microvm_live_claimed=true`,
 `retained_stream_handle_proven=true`, `retained_filesystem_proven=true`,
 keyed Move/Remove + upload/download/ListDir after reattach;
-`b2_process_session_recovery_closed=false`). Prior v2-scoped digest
+`b2_process_session_recovery_closed=false`). Prior digest
+`cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373` and OCI
+tips `fb390b69…` / `d8854a4c…` remain historical. Prior v2-scoped digest
 `2fe8c2cb53ab6f8a30f8c736cfdc04f41c9fe766b9830dc94d44f09de17454d7` and OCI pin
 `05a3b2bddff0668703caafc48f38514a139ee81a` / filesystem #289 remain historical.
 Does not flip default create Host-bound policy, cutover, or B2.
@@ -476,7 +479,7 @@ on PR #358 / run `34805883757` (report `box_commit_sha` `76dc560e…`; OCI
 false). Prior WSL2 v4-scoped digests remain historical
 (`36f91361…` / `8454044d…` on CI run `34542747784`). KVM tip v5 is
 existing-host greened
-(`cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`). Does not
+(`81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`). Does not
 flip default create Host-bound policy, cutover, or B2.
 
 ### Exercise the qualification-only WHPX handoff on Windows

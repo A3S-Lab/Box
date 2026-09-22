@@ -41,9 +41,11 @@ Authoritative hosted gate. Steps that matter for GA:
    `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
    (linux-arm64). Does **not** flip B2. KVM tip v5 existing-host greened
    digest SHA-256
+   `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`
+   (WSL2 `/dev/kvm`; Box `68f99abb…`; OCI `f7ab2b7a…` / #347 virtiofs
+   optional fchown after create; tip-rebuilt system image); prior digest
    `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
-   (WSL2 `/dev/kvm`; Box `d8854a4c…`; OCI `fb390b69…`; tip-rebuilt system
-   image); does **not** flip B2.
+   remains historical. Does **not** flip B2.
 
 ## Operator setuid launcher evidence (self-hosted)
 
@@ -106,7 +108,7 @@ replace the CI binder above or close Enterprise MicroVM GA.
 - Inventing KVM Live digests or flipping `b2_process_session_recovery_closed`
   from observation greening (Native Live v7 is CI-greened; KVM tip v5 is
   existing-host greened
-  `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`).
+  `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`).
 - Cloud `BX0.3` / hardware TEE.
 - CI setpriv as a substitute for an operator setuid install at
   `/usr/local/libexec/a3s-box-sandbox-oci-launcher` (use the self-hosted

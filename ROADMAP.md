@@ -647,16 +647,19 @@ retain process or filesystem sessions after its owner dies.
     `a3s.box.live-session.keyed-remove.before-owner-kill`) and ListDir /
     download of the moved tree after reattach. Fail-closed verifier requires
     those ids. Does **not** close B2 or invent digests. **Existing-host
-    greened** on WSL2 `/dev/kvm` (Box tip `d8854a4c646e330122a3d338a5b4c736360d8c9b`;
-    OCI tip `fb390b69a2d61b5fd1f7ecdcd79724dc94c876ca`; tip-rebuilt KVM system
-    image with reconnect-capable musl agent): report SHA-256
-    `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373`
+    greened** on WSL2 `/dev/kvm` (Box tip `68f99abb226e98ddd3479605ba71e8e5357bdf7e`;
+    OCI tip `f7ab2b7a93c56a14d9c27b569eb9aeeec40e9578` / #347 virtiofs optional
+    fchown after create; tip-rebuilt KVM system image with reconnect-capable
+    musl agent): report SHA-256
+    `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`
     (`status=passed`, `kvm_microvm_live_claimed=true`,
     `retained_stream_handle_proven=true`, `retained_filesystem_proven=true`,
     `file_upload_before_kill=true`, `file_download_after_reattach=true`,
     `list_dir_after_reattach=true`, `live_kill_after_reopen=true`,
-    `removed=true`; `b2_process_session_recovery_closed=false`). Prior
-    published digests above remain v2-scoped historical evidence.
+    `removed=true`; `b2_process_session_recovery_closed=false`). Prior digest
+    `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373` (Box
+    `d8854a4c…` / OCI `fb390b69…`) remains historical. Prior published digests
+    above remain v2-scoped historical evidence.
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
