@@ -72,6 +72,7 @@ pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
             &reference.repository,
             &result.manifest_digest,
             &push_reference,
+            protocol.client_protocol(),
         )
         .await?;
 

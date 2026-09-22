@@ -1,6 +1,7 @@
 //! Image signing (cosign-compatible): create and push a signature artifact.
 
 use a3s_box_core::error::{BoxError, Result};
+use oci_distribution::client::ClientProtocol;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::{Client, Reference};
 
@@ -28,12 +29,14 @@ pub struct SignResult {
 /// * `repository` - Repository path (e.g., "myorg/myimage")
 /// * `manifest_digest` - Digest of the pushed manifest (e.g., "sha256:abc123...")
 /// * `docker_reference` - Full image reference (e.g., "ghcr.io/myorg/myimage:latest")
+/// * `protocol` - Same registry transport as the image push (`--plain-http` / `--tls-verify`)
 pub async fn sign_image(
     private_key_path: &str,
     registry: &str,
     repository: &str,
     manifest_digest: &str,
     docker_reference: &str,
+    protocol: ClientProtocol,
 ) -> Result<SignResult> {
     use p256::ecdsa::signature::Signer;
 
@@ -89,7 +92,7 @@ pub async fn sign_image(
             })?;
 
     let config = oci_distribution::client::ClientConfig {
-        protocol: oci_distribution::client::ClientProtocol::Https,
+        protocol,
         ..Default::default()
     };
     let client = Client::new(config);
