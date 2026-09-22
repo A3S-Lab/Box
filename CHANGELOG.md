@@ -38,6 +38,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
+  `eb11e6426daec74f6070fb3361d51b153f56db4e`. That tip adopts effective gid 0,
+  clears supplementary groups, and migrates `A3S_BOX_OWNER_CGROUP` after a
+  mode `4755` exec (#628). Box still defers the unprivileged parent's cgroup
+  ancestor denial and requires a tip-built launcher for operator proof. Does
+  **not** close B2 or claim Enterprise GA until a host tip proof passes.
 - `docs/installation.md` documents the mode `4755` operator Sandbox contract:
   `a3s-oci` adopts effective gid 0, clears supplementary groups, and migrates
   into the delegated child after setuid exec; do not install `6755` or a
