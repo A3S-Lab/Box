@@ -59,8 +59,10 @@ All notable changes to A3S Box will be documented in this file.
   `system-image.json` are discoverable; missing packages soft-fall to
   Box-libkrun instead of hard-failing. Tip-proven on WSL2 `/dev/kvm`: unset
   env create/start stamps `oci_sdk` + `dedicated-vm`, `run --rm` exits 0;
-  explicit `off` keeps `box_vm` (gate 6). Does **not** close gate 7/8,
-  HVF/WHPX production, or claim Enterprise GA.
+  explicit `off` keeps `box_vm` (gate 6); omit-isolation stays MicroVM class
+  while Sandbox hard-fails closed without silent MicroVM (gate 7); README
+  Still-open closes Linux/KVM omit→OCI only (gate 8). Does **not** claim
+  HVF/WHPX production or Enterprise GA.
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `f08555c9f9e9c1b9576366aebad6425b38389150` (#348). Product KVM/HVF Host
   owners treat durable Live session-owner terminate as shutdown success so

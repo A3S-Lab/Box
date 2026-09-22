@@ -1,8 +1,7 @@
 # Linux/KVM MicroVM OCI cutover evidence binder
 
-Status: **Linux/KVM omit-isolation production cutover tip-proven** (gates 1–6);
-gates 7–8 and Enterprise GA remain open. HVF/WHPX production cutover is out of
-scope.
+Status: **Linux/KVM omit-isolation production cutover tip-proven** (gates 1–8);
+Enterprise GA, HVF/WHPX production cutover remain open.
 
 Scope: Linux/KVM `DedicatedVm` via A3S OCI Runtime. HVF and WHPX production
 cutover are out of this binder. Sandbox shared-kernel GA is
@@ -50,8 +49,8 @@ unless the row explicitly remains qualification-only.
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | **tip-proven** — Live digest `9dff1de4…` (`box_owned_ensure_proven`) |
 | 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | **tip-proven** — unset `A3S_BOX_OCI_MIGRATION` + packaged artifacts → create/start stamps `oci_sdk` + `dedicated-vm`; `run --rm` guest exit 0 |
 | 6 | Explicit `off` keeps Box-libkrun | **tip-proven** — `A3S_BOX_OCI_MIGRATION=off` create stamps `box_vm` |
-| 7 | No silent Sandbox↔MicroVM fallback | required invariant — open |
-| 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | open — after gate 7 + README Still-open edit |
+| 7 | No silent Sandbox↔MicroVM fallback | **tip-proven** — unset env: omit-isolation stamps `microvm`/`oci_sdk` (not sandbox); `--isolation sandbox` hard-fails when Sandbox owner is not launch-ready (never silent MicroVM) |
+| 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | **done in this cutover** — README Still-open no longer lists Linux/KVM omit→OCI as open; WHPX/HVF + Enterprise GA remain open |
 
 ## Explicit non-claims
 

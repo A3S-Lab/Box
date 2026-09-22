@@ -40,8 +40,10 @@ snapshots, health, restart policy, logs, and cleanup.
 
 The current 3.2 execution model has two explicit paths:
 
-- omitting `--isolation` selects a dedicated-kernel MicroVM managed by Box
-  through libkrun;
+- omitting `--isolation` selects a dedicated-kernel MicroVM; on Linux/KVM with
+  packaged `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json`, new records
+  default to OCI DedicatedVm via a Box-owned Host (binder gates 1–6). Explicit
+  `A3S_BOX_OCI_MIGRATION=off` or missing packages keep Box-managed libkrun;
 - `--isolation sandbox` selects the shared-host-kernel path on a qualified
   Linux host, with lifecycle execution delegated through the pinned
   [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime) SDK.
@@ -57,14 +59,12 @@ reroute their lifecycle, recovery, or cleanup, and a selected OCI failure is
 never retried on the Box backend. On Linux, the CLI, machine bridge, and the
 async Rust SDK constructor default new Sandbox records to the production
 bundle provider and long-lived pinned runtime owner (`SandboxViaOci`) without
-requiring `A3S_BOX_OCI_MIGRATION`. Explicit `A3S_BOX_OCI_MIGRATION=off` keeps
-the VM-only backend; explicit `sandbox`/`on` selects the same composition but
-hard-fails when the OCI owner is not launch-ready. When the default cannot
-start the owner, MicroVM continue on the legacy backend and Sandbox
-preflight fails closed. Linux also has an explicit qualification-only `microvm`/`all`
-composition for the externally launched OCI Runtime
-`box-kvm-qualification-service`; it requires `A3S_BOX_OCI_KVM_ENDPOINT`, is not
-enabled by default, and is not yet a production claim. Windows x86_64 likewise
+requiring `A3S_BOX_OCI_MIGRATION`. The same absent-env path soft-activates
+packaged DedicatedVm for omit-isolation when KVM artifacts are discoverable.
+Explicit `A3S_BOX_OCI_MIGRATION=off` keeps the VM-only backend; explicit
+`sandbox`/`on` selects SandboxViaOci but hard-fails when the OCI owner is not
+launch-ready (never silent MicroVM). Linux `microvm`/`all` remains available
+for external qualification Hosts via `A3S_BOX_OCI_KVM_ENDPOINT`. Windows x86_64
 has an explicit qualification-only `microvm`/`all` composition for the
 externally launched OCI Runtime WHPX service; it is not enabled by default and
 is not yet a production claim.
@@ -161,17 +161,16 @@ artifacts are published from the same versioned release tag. See the
 > Host harness reports still keep
 > `b2_process_session_recovery_closed=false` (reports never self-certify B2
 > close). Fixture `process_restart` is not driver Live evidence.
-> **Still open (out of Sandbox GA):** default MicroVM → OCI cutover (Linux/KVM
-> production gates tracked in [microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md);
-> qualification Live tip greened), WHPX/HVF MicroVM *production* composition
-> (qualification-only remains), and broader
-> Cloud `BX0.3` hardware-TEE claims. Box-owned native Host spawn now forces
+> **Still open (out of Sandbox GA):** WHPX/HVF MicroVM *production* composition
+> (qualification-only remains), Linux/KVM binder gate residual docs sync on
+> release line, and broader Cloud `BX0.3` hardware-TEE claims. Linux/KVM
+> omit-isolation → OCI DedicatedVm production cutover is tip-proven
+> (gates 1–7 in [microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md));
+> Enterprise GA is not claimed. Box-owned native Host spawn now forces
 > supervised create (`A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`) for production
 > `SandboxViaOci`; external Hosts that omit the env remain Host-bound.
 > Fresh construction reaps supervised orphans when reclaiming a dead Host
-> (stopped-only); retained-manager Live reopen does not. The default
-> omit-isolation → MicroVM split above is still authoritative until a
-> separate MicroVM cutover ships.
+> (stopped-only); retained-manager Live reopen does not.
 > Follow the checked gates in the [migration roadmap](ROADMAP.md).
 
 ## Start with one workload
