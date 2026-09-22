@@ -404,28 +404,45 @@ impl VmManager {
 
             #[cfg(windows)]
             if _handler_stopped && self.config.persistent {
-                let rootfs = self
-                    .home_dir
-                    .join("boxes")
-                    .join(&self.box_id)
-                    .join("rootfs");
-                match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&rootfs) {
-                    Ok(true) => tracing::info!(
+                // Match terminal-metadata staging: guest virtiofs may land the
+                // `.tmp` publish under rootfs, upper, or merged depending on the
+                // active provider (copy vs overlay). Finalize every present root
+                // so stopped export/diff/commit see the same generation.
+                let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+                let mut finalized_any = false;
+                for root_name in ["merged", "rootfs", "upper"] {
+                    let root = box_dir.join(root_name);
+                    match std::fs::symlink_metadata(&root) {
+                        Ok(metadata) if metadata.is_dir() => {}
+                        _ => continue,
+                    }
+                    match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&root) {
+                        Ok(true) => {
+                            finalized_any = true;
+                            tracing::info!(
+                                box_id = %self.box_id,
+                                path = %root.display(),
+                                "Published terminal rootfs metadata after Windows guest exit"
+                            );
+                        }
+                        Ok(false) => tracing::debug!(
+                            box_id = %self.box_id,
+                            path = %root.display(),
+                            "No Windows terminal rootfs metadata required host finalization"
+                        ),
+                        Err(error) => tracing::warn!(
+                            box_id = %self.box_id,
+                            path = %root.display(),
+                            error = %error,
+                            "Refused to publish invalid Windows terminal rootfs metadata"
+                        ),
+                    }
+                }
+                if !finalized_any {
+                    tracing::debug!(
                         box_id = %self.box_id,
-                        path = %rootfs.display(),
-                        "Published terminal rootfs metadata after Windows guest exit"
-                    ),
-                    Ok(false) => tracing::debug!(
-                        box_id = %self.box_id,
-                        path = %rootfs.display(),
-                        "No Windows terminal rootfs metadata required host finalization"
-                    ),
-                    Err(error) => tracing::warn!(
-                        box_id = %self.box_id,
-                        path = %rootfs.display(),
-                        error = %error,
-                        "Refused to publish invalid Windows terminal rootfs metadata"
-                    ),
+                        "No Windows terminal rootfs metadata tmp was present after guest exit"
+                    );
                 }
             }
         }

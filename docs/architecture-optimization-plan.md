@@ -101,7 +101,7 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 
 - One retained manager across owner replacement without inventing exit status.
 - Keyed replay for mutating FS and exec under lost responses.
-- Short-lived workloads that exit before exec-ready still persist authenticated terminal state (already partially landed; keep regression-locked). Guest-init starts the exec accept loop immediately after the container fork returns (before stdio relay / PTY warm-up) so heartbeat can win that race without violating fork-safety; Linux directory-rootfs tip proof for `#576` remains open.
+- Short-lived workloads that exit before exec-ready still persist authenticated terminal state (already partially landed; keep regression-locked). Guest-init starts the exec accept loop immediately after the container fork returns (before stdio relay / PTY warm-up) so heartbeat can win that race without violating fork-safety; Linux directory-rootfs tip proof for `#576` cleared on WSL (2026-09-22: `run --rm alpine:3.20 -- /bin/true` 5/5 rc 0 with `LD_LIBRARY_PATH=/usr/local/lib/a3s-box`; tracker `#631` closed).
 
 **Evidence required:** Native Live + KVM Live matrices; still no self-certifying `b2_process_session_recovery_closed=true` from a single report.
 
@@ -299,7 +299,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | --- | --- | --- | --- |
 | P0 | Keep B2 evidence honest; fix real Live/recovery failures only | A | Flipping `b2_process_session_recovery_closed` |
 | P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580` | C | CNI; Sandbox bridge GA |
-| P0 | Operator Sandbox setuid cgroup + egid adopt (`#628`) — tip-proven on Ubuntu Orb (no KVM) with mode 4755 launcher; KVM Live / soak still open | A | Claiming GA from Sandbox-only short-rm |
+| P0 | Operator Sandbox setuid cgroup + egid adopt (`#628`) — tip-proven on Ubuntu Orb + closed on `main` via `#636` / Orb proof note; KVM Live / soak still open | A | Claiming GA from Sandbox-only short-rm |
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
 | P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |

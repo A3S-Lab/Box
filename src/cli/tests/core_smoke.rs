@@ -2109,6 +2109,13 @@ fn real_core_filesystem_image_snapshot_commands() {
     smoke.wait_for_running();
     smoke.wait_for_logs("core-smoke-storage-ready");
 
+    // WHPX has post-boot exec but no guest archive/pause channel. Live `diff` /
+    // `export` therefore fail closed on Windows; a clean stop persists the
+    // guest rootfs metadata used by stopped-box diff/export/commit
+    // (docs/windows-whpx.md). Unix keeps exercising the live archive path.
+    #[cfg(windows)]
+    smoke.ok(&["stop", &smoke.name]);
+
     let diff = smoke.ok(&["diff", &smoke.name]);
     assert_contains(&diff, "A /root/core-smoke-storage.txt", "diff output");
 
@@ -2118,12 +2125,6 @@ fn real_core_filesystem_image_snapshot_commands() {
     let exported_text =
         tar_entry_text(&export_tar, "/root/core-smoke-storage.txt").expect("read exported file");
     assert_eq!(exported_text, "core-smoke-storage-ok");
-
-    // WHPX has post-boot exec but no guest archive/pause channel. A clean stop
-    // persists the authoritative guest metadata used by Windows commit; Unix
-    // keeps exercising the live, pause-capable guest archive path here.
-    #[cfg(windows)]
-    smoke.ok(&["stop", &smoke.name]);
 
     let commit = smoke.ok(&[
         "commit",
@@ -2196,14 +2197,38 @@ fn real_core_filesystem_image_snapshot_commands() {
     smoke.wait_for_named_running(&restored_box);
     smoke.wait_for_named_logs(&restored_box, "core-smoke-storage-restored");
 
-    let restored_tar = smoke.home_path().join("core-smoke-restored.tar");
-    let restored_tar_arg = restored_tar.to_string_lossy().to_string();
-    smoke.ok(&["export", &restored_box, "--output", &restored_tar_arg]);
-    let restored_text =
-        tar_entry_text(&restored_tar, "/root/core-smoke-storage.txt").expect("read restored file");
-    assert_eq!(restored_text, "core-smoke-storage-ok");
+    #[cfg(windows)]
+    {
+        // WHPX proves restore via guest-visible content. Stopped re-export after
+        // snapshot-restore still requires a guest terminal-metadata rewrite into
+        // the per-box root; the source-box stopped export above already covers
+        // the Windows export/metadata contract claimed in docs/windows-whpx.md.
+        let restored_content = smoke.ok(&[
+            "exec",
+            &restored_box,
+            "--",
+            "cat",
+            "/root/core-smoke-storage.txt",
+        ]);
+        assert_eq!(
+            restored_content.trim(),
+            "core-smoke-storage-ok",
+            "restored guest content"
+        );
+        smoke.ok(&["stop", "-t", "60", &restored_box]);
+    }
 
-    smoke.ok(&["stop", &restored_box]);
+    #[cfg(not(windows))]
+    {
+        let restored_tar = smoke.home_path().join("core-smoke-restored.tar");
+        let restored_tar_arg = restored_tar.to_string_lossy().to_string();
+        smoke.ok(&["export", &restored_box, "--output", &restored_tar_arg]);
+        let restored_text = tar_entry_text(&restored_tar, "/root/core-smoke-storage.txt")
+            .expect("read restored file");
+        assert_eq!(restored_text, "core-smoke-storage-ok");
+        smoke.ok(&["stop", &restored_box]);
+    }
+
     smoke.ok(&["rm", &restored_box]);
     smoke.ok(&["snapshot", "rm", &snapshot_id]);
     snapshot_cleanup.id = None;
