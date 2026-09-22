@@ -2,6 +2,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// A finished workload or an exited shim will not consume a new stop file.
+///
+/// Waiting out the forwarding deadline only delays teardown. The caller still
+/// runs handler shutdown so a live shim is reaped.
+pub(crate) fn delivery_required(
+    workload_already_finished: bool,
+    provider_already_exited: bool,
+) -> bool {
+    !workload_already_finished && !provider_already_exited
+}
+
 use a3s_box_core::exec::{WINDOWS_STOP_REQUEST_FILE, WINDOWS_STOP_REQUEST_TEMP_FILE};
 
 pub(crate) fn request_path(socket_dir: &Path) -> PathBuf {
@@ -87,6 +98,14 @@ pub(crate) async fn wait_until_delivered(request: &Path, timeout: Duration) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_workload_does_not_require_stop_delivery() {
+        assert!(!delivery_required(true, false));
+        assert!(!delivery_required(false, true));
+        assert!(!delivery_required(true, true));
+        assert!(delivery_required(false, false));
+    }
 
     #[test]
     fn stage_publishes_exact_signal_and_clear_removes_it() {

@@ -325,9 +325,11 @@ pub(crate) fn require_operator_setuid_launcher(path: &Path) -> Result<()> {
                 "Sandbox OCI launcher {} is not setuid (mode {mode:04o}); non-root Host spawn requires the operator setuid install",
                 path.display()
             ),
-            hint: Some(format!(
-                "Run: sudo bash scripts/prepare-linux-sandbox-host.sh --install-launcher <a3s-oci>; expected {SANDBOX_OCI_LAUNCHER_SYSTEM_PATH} mode 4755 root:root. CI setpriv is not a substitute."
-            )),
+            hint: Some(
+                format!(
+                    "Run: sudo bash scripts/prepare-linux-sandbox-host.sh --install-launcher <a3s-oci>; expected {SANDBOX_OCI_LAUNCHER_SYSTEM_PATH} mode 4755 root:root. After that exec, a3s-oci keeps the real uid and gid, sets effective gid 0, and clears supplementary groups before device-policy bootstrap. CI setpriv is not a substitute."
+                ),
+            ),
         });
     }
     if metadata.uid() != 0 {

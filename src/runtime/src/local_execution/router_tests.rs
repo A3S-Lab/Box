@@ -146,6 +146,118 @@ impl LocalExecutionBackend for RoutedProbeBackend {
     }
 }
 
+#[test]
+fn migration_policies_stay_the_existing_set() {
+    let policies = [
+        OciMigrationPolicy::LegacyOnly,
+        OciMigrationPolicy::SandboxViaOci,
+        OciMigrationPolicy::AllViaOci,
+        OciMigrationPolicy::MicrovmViaOci,
+    ];
+    let names: Vec<_> = policies.into_iter().map(policy_name).collect();
+    assert_eq!(
+        names,
+        [
+            "legacy-only",
+            "sandbox-via-oci",
+            "all-via-oci",
+            "microvm-via-oci",
+        ]
+    );
+}
+
+fn policy_name(policy: OciMigrationPolicy) -> &'static str {
+    match policy {
+        OciMigrationPolicy::LegacyOnly => "legacy-only",
+        OciMigrationPolicy::SandboxViaOci => "sandbox-via-oci",
+        OciMigrationPolicy::AllViaOci => "all-via-oci",
+        OciMigrationPolicy::MicrovmViaOci => "microvm-via-oci",
+    }
+}
+
+#[tokio::test]
+async fn sandbox_preflight_error_does_not_retarget_to_microvm() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("boxes.json");
+    let legacy = Arc::new(RoutedProbeBackend::default());
+    let oci = Arc::new(RoutedProbeBackend::default());
+    oci.reject_isolation_preflight();
+    let manager = LocalExecutionManager::new(
+        &state_path,
+        temporary.path(),
+        Arc::new(LocalExecutionBackendRouter::new(
+            legacy.clone(),
+            oci.clone(),
+            OciMigrationPolicy::SandboxViaOci,
+        )),
+    );
+
+    let error = manager
+        .preflight_isolation(ExecutionIsolation::Sandbox)
+        .await
+        .expect_err("sandbox preflight must fail on the selected backend");
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert_eq!(legacy.isolation_preflights(), 0);
+    assert_eq!(oci.observed_isolations(), vec![ExecutionIsolation::Sandbox]);
+
+    manager
+        .preflight_isolation(ExecutionIsolation::Microvm)
+        .await
+        .expect("microvm stays on the legacy backend after the sandbox error");
+    assert_eq!(
+        legacy.observed_isolations(),
+        vec![ExecutionIsolation::Microvm]
+    );
+    assert_eq!(oci.observed_isolations(), vec![ExecutionIsolation::Sandbox]);
+    assert!(!state_path.exists());
+    assert!(!temporary.path().join("boxes").exists());
+}
+
+#[tokio::test]
+async fn microvm_preflight_error_does_not_retarget_to_sandbox() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("boxes.json");
+    let legacy = Arc::new(RoutedProbeBackend::default());
+    let oci = Arc::new(RoutedProbeBackend::default());
+    legacy.reject_isolation_preflight();
+    let manager = LocalExecutionManager::new(
+        &state_path,
+        temporary.path(),
+        Arc::new(LocalExecutionBackendRouter::new(
+            legacy.clone(),
+            oci.clone(),
+            OciMigrationPolicy::LegacyOnly,
+        )),
+    );
+
+    let error = manager
+        .preflight_isolation(ExecutionIsolation::Microvm)
+        .await
+        .expect_err("microvm preflight must fail on the selected backend");
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert_eq!(oci.isolation_preflights(), 0);
+    assert_eq!(
+        legacy.observed_isolations(),
+        vec![ExecutionIsolation::Microvm]
+    );
+
+    let sandbox_error = manager
+        .preflight_isolation(ExecutionIsolation::Sandbox)
+        .await
+        .expect_err("sandbox stays on the legacy backend after the microvm error");
+    assert!(matches!(
+        sandbox_error,
+        ExecutionManagerError::Unavailable(_)
+    ));
+    assert_eq!(oci.isolation_preflights(), 0);
+    assert_eq!(
+        legacy.observed_isolations(),
+        vec![ExecutionIsolation::Microvm, ExecutionIsolation::Sandbox]
+    );
+    assert!(!state_path.exists());
+    assert!(!temporary.path().join("boxes").exists());
+}
+
 #[tokio::test]
 async fn selected_oci_isolation_preflight_fails_closed_without_fallback_or_state() {
     let temporary = tempfile::tempdir().unwrap();

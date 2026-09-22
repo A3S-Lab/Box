@@ -16,6 +16,21 @@ pub struct VirtualizationSupport {
     pub details: String,
 }
 
+/// Reject an isolation class this host cannot launch.
+///
+/// The requested class is unchanged. A missing MicroVM hypervisor or a missing
+/// Sandbox driver fails here, before a box directory or VM exists. Windows
+/// never substitutes KVM or a WSL distro, and Linux never substitutes WHPX.
+pub fn admit_requested_isolation(isolation: a3s_box_core::ExecutionIsolation) -> Result<()> {
+    match isolation {
+        a3s_box_core::ExecutionIsolation::Microvm => check_virtualization_support().map(|_| ()),
+        a3s_box_core::ExecutionIsolation::Sandbox => {
+            crate::sandbox::probe_sandbox_capabilities(None).require_ready()?;
+            Ok(())
+        }
+    }
+}
+
 /// Check if the current host supports hardware virtualization.
 ///
 /// Returns `Ok(VirtualizationSupport)` if supported, or an error explaining why not.
@@ -180,19 +195,93 @@ fn check_windows_whpx() -> Result<VirtualizationSupport> {
 mod tests {
     use super::*;
 
+    fn rejects_wsl_wording(message: &str) {
+        let lower = message.to_lowercase();
+        assert!(
+            !lower.contains("wsl"),
+            "virtualization diagnostic must not send the operator to WSL: {message}"
+        );
+    }
+
     #[test]
-    fn test_check_virtualization_support() {
-        // This test will pass or fail depending on the host system
-        // It's mainly useful for manual testing
+    fn virtualization_probe_names_this_host_and_does_not_require_wsl() {
         match check_virtualization_support() {
             Ok(support) => {
-                println!("Virtualization supported:");
-                println!("  Backend: {}", support.backend);
-                println!("  Details: {}", support.details);
+                #[cfg(windows)]
+                assert_eq!(support.backend, "WHPX");
+                #[cfg(target_os = "linux")]
+                assert_eq!(support.backend, "KVM");
+                #[cfg(target_os = "macos")]
+                assert!(support.backend.contains("Hypervisor"));
+                rejects_wsl_wording(&support.backend);
+                rejects_wsl_wording(&support.details);
             }
-            Err(e) => {
-                println!("Virtualization not supported: {}", e);
+            Err(error) => {
+                let message = error.to_string();
+                rejects_wsl_wording(&message);
+                #[cfg(windows)]
+                assert!(
+                    message.contains("WHPX")
+                        || message.to_lowercase().contains("hypervisor")
+                        || message.contains("x86_64"),
+                    "{message}"
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    assert!(
+                        message.contains("KVM") || message.contains("/dev/kvm"),
+                        "{message}"
+                    );
+                    assert!(!message.contains("WHPX"), "{message}");
+                }
+                #[cfg(windows)]
+                assert!(!message.contains("KVM"), "{message}");
             }
         }
+    }
+
+    #[test]
+    fn sandbox_admission_keeps_the_requested_class() {
+        let isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        let result = admit_requested_isolation(isolation);
+        assert_eq!(isolation, a3s_box_core::ExecutionIsolation::Sandbox);
+        match result {
+            Ok(()) => {
+                #[cfg(not(target_os = "linux"))]
+                panic!("shared-kernel Sandbox must fail closed off Linux");
+            }
+            Err(error) => {
+                let message = error.to_string();
+                rejects_wsl_wording(&message);
+                assert!(
+                    !message.contains("WHPX"),
+                    "Sandbox admission must not select WHPX: {message}"
+                );
+                #[cfg(not(target_os = "linux"))]
+                assert!(
+                    message.contains("only on Linux"),
+                    "missing Sandbox support must name Linux: {message}"
+                );
+                #[cfg(target_os = "linux")]
+                assert!(
+                    message.contains("Sandbox"),
+                    "missing Sandbox driver must name the Sandbox probe: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn microvm_admission_does_not_rewrite_to_sandbox() {
+        let isolation = a3s_box_core::ExecutionIsolation::Microvm;
+        if let Err(error) = admit_requested_isolation(isolation) {
+            let message = error.to_string().to_lowercase();
+            assert!(
+                !message.contains("sandbox"),
+                "MicroVM preflight must not offer Sandbox as a replacement: {message}"
+            );
+            rejects_wsl_wording(&message);
+        }
+        assert_eq!(isolation, a3s_box_core::ExecutionIsolation::Microvm);
     }
 }

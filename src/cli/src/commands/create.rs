@@ -107,21 +107,8 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let manager = super::configured_local_execution_manager(&home).await?;
     manager.preflight_isolation(isolation).await?;
 
-    // Resolve named volumes only after the selected route is launch-ready.
-    let mut resolved_volumes = Vec::new();
-    let mut volume_names = Vec::new();
-    for vol_spec in &args.common.volumes {
-        let (resolved, vol_name) = super::volume::resolve_named_volume(vol_spec)?;
-        if let Some(name) = vol_name {
-            volume_names.push(name);
-        }
-        resolved_volumes.push(resolved);
-    }
-    config.volumes = resolved_volumes;
-
-    // Image-defined lifecycle defaults are read only after the selected
-    // backend proves that this isolation currently has a launch-ready route.
-    // Record creation repeats mutable capability checks before reservation.
+    // Cached image metadata is read after preflight and before named-volume
+    // creation so an image HEALTHCHECK is rejected without creating the volume.
     let image_config = common::cached_image_config(&args.common.image).await?;
     let health_check = common::effective_health_check(
         &args.common,
@@ -129,8 +116,13 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
             .as_ref()
             .and_then(|config| config.health_check.as_ref()),
     );
-    common::validate_health_check_support(health_check.as_ref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let volume_store = a3s_box_runtime::VolumeStore::default_path()?;
+    let (resolved_volumes, volume_names) = super::volume::resolve_volume_specs_after_health_gate(
+        &volume_store,
+        &args.common.volumes,
+        health_check.as_ref(),
+    )?;
+    config.volumes = resolved_volumes;
     let effective_stop_signal = common::effective_stop_signal(
         args.common.stop_signal.as_deref(),
         image_config

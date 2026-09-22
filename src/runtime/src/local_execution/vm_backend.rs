@@ -758,6 +758,11 @@ impl VmLocalExecutionBackend {
     }
 }
 
+fn admit_launch(isolation: a3s_box_core::ExecutionIsolation) -> ExecutionManagerResult<()> {
+    crate::host_check::admit_requested_isolation(isolation)
+        .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))
+}
+
 async fn destroy_after_observation(
     manager: &mut VmManager,
     preserve_rootfs: bool,
@@ -815,7 +820,19 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         Ok(LocalExecutionResourcePlan { anonymous_volumes })
     }
 
+    async fn preflight_isolation(
+        &self,
+        isolation: a3s_box_core::ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        admit_launch(isolation)
+    }
+
+    async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.preflight_isolation(record.isolation).await
+    }
+
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        admit_launch(record.isolation)?;
         super::record::validate_record_health(record)?;
         self.metadata(record)?;
         let box_dir = record.box_dir.clone();

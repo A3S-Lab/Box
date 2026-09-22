@@ -38,6 +38,60 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
 }
 
 #[tokio::test]
+async fn launch_preflight_fails_closed_before_a_box_directory_exists() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+
+    let microvm = backend
+        .preflight_isolation(ExecutionIsolation::Microvm)
+        .await;
+    let sandbox = backend
+        .preflight_isolation(ExecutionIsolation::Sandbox)
+        .await;
+
+    assert!(
+        !temporary.path().join("boxes").exists(),
+        "preflight must not create a box directory"
+    );
+    assert!(!temporary.path().join("boxes.json").exists());
+
+    if let Err(error) = microvm {
+        let message = error.to_string().to_lowercase();
+        assert!(!message.contains("sandbox"), "{message}");
+        assert!(!message.contains("wsl"), "{message}");
+        #[cfg(windows)]
+        assert!(
+            message.contains("whpx")
+                || message.contains("hypervisor")
+                || message.contains("x86_64"),
+            "{message}"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                message.contains("kvm") || message.contains("/dev/kvm"),
+                "{message}"
+            );
+            assert!(!message.contains("whpx"), "{message}");
+        }
+    }
+
+    match sandbox {
+        Ok(()) => {
+            #[cfg(not(target_os = "linux"))]
+            panic!("Sandbox preflight must fail closed off Linux");
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(!message.to_lowercase().contains("wsl"), "{message}");
+            assert!(!message.contains("WHPX"), "{message}");
+            #[cfg(not(target_os = "linux"))]
+            assert!(message.contains("only on Linux"), "{message}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn sandbox_resource_planning_persists_image_volume_ownership_without_runtime_side_effects() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());

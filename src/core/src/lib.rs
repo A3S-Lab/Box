@@ -61,7 +61,7 @@ pub use network::{
 };
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::{
-    BridgeNetworkBackend, HostGuestChannel, Platform, PlatformCapabilities, VmBackend,
+    BridgeNetworkBackend, HostFamily, HostGuestChannel, Platform, PlatformCapabilities, VmBackend,
 };
 pub use port::{
     normalize_and_resolve_port_maps, normalize_port_maps, parse_port_mapping,

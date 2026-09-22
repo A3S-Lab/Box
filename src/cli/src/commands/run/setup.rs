@@ -18,6 +18,13 @@ pub(super) struct RunRecordPolicy {
 pub(super) async fn setup_and_boot(
     args: &RunArgs,
 ) -> Result<RunContext, Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    if args.tty {
+        return Err(crate::platform::unsupported_command(
+            "run -it",
+            "interactive PTY support",
+        ));
+    }
     let create_start = std::time::Instant::now();
     common::validate_runtime_options(&args.common)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -109,13 +116,8 @@ pub(super) async fn setup_and_boot(
     .await?;
     manager.preflight_isolation(config.isolation).await?;
 
-    let (resolved_volumes, volume_names) = resolve_volumes(&volume_specs)?;
-    config.volumes = resolved_volumes;
-
-    // Freeze image-defined lifecycle defaults into the managed creation
-    // request. Pulling is cache-first and happens only after both the pure
-    // configuration check and the selected backend's launch-readiness probe.
-    // Record creation repeats mutable capability checks before reservation.
+    // Image config is cache-first and happens after preflight so an image
+    // HEALTHCHECK can be rejected before named-volume creation.
     let image_config_start = std::time::Instant::now();
     let image_config = pull_image_config(args, std::sync::Arc::clone(&pull_progress_fn)).await?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
@@ -124,8 +126,14 @@ pub(super) async fn setup_and_boot(
     );
     let health_check =
         common::effective_health_check(&args.common, image_config.health_check.as_ref());
-    common::validate_health_check_support(health_check.as_ref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let volume_store = a3s_box_runtime::VolumeStore::default_path()?;
+    let (resolved_volumes, volume_names) =
+        super::super::volume::resolve_volume_specs_after_health_gate(
+            &volume_store,
+            &volume_specs,
+            health_check.as_ref(),
+        )?;
+    config.volumes = resolved_volumes;
     let effective_stop_signal = common::effective_stop_signal(
         args.common.stop_signal.as_deref(),
         image_config.stop_signal.as_deref(),

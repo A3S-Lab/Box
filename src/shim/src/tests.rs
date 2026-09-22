@@ -96,6 +96,20 @@ fn validates_complete_sandbox_log_worker_identity() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn default_windows_kernel_is_bundled_and_opens_no_host_path() {
+    let selection = WindowsKernelSelection::from_env(None);
+    assert_eq!(selection, WindowsKernelSelection::Bundled);
+    assert!(!selection.reads_host_file());
+    assert!(!format!("{selection:?}").to_lowercase().contains("wsl"));
+
+    let external =
+        WindowsKernelSelection::from_env(Some(std::ffi::OsStr::new(r"C:\kernels\vmlinux")));
+    assert!(external.reads_host_file());
+    assert!(!format!("{external:?}").to_lowercase().contains("wsl"));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn test_windows_kernel_format_from_magic() {
     assert_eq!(
         kernel_format_from_magic([0x7f, b'E', b'L', b'F']),

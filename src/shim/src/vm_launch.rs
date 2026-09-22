@@ -767,9 +767,51 @@ pub(super) unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     }
 }
 
+/// Windows guest kernel chosen before libkrun opens a file.
+///
+/// The bundled libkrunfw image is the default. An external path is used only
+/// when `A3S_BOX_KERNEL` is set, and that path is never discovered from a WSL
+/// package directory.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WindowsKernelSelection {
+    /// Bundled WHPX kernel. No host path is opened.
+    Bundled,
+    /// Explicit `A3S_BOX_KERNEL` override.
+    External(PathBuf),
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsKernelSelection {
+    pub(super) fn from_env(value: Option<&std::ffi::OsStr>) -> Self {
+        match value {
+            Some(path) => Self::External(PathBuf::from(path)),
+            None => Self::Bundled,
+        }
+    }
+
+    pub(super) fn reads_host_file(&self) -> bool {
+        matches!(self, Self::External(_))
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn configure_windows_kernel(ctx: &KrunContext) -> Result<()> {
-    let Some(kernel_path) = std::env::var_os("A3S_BOX_KERNEL").map(PathBuf::from) else {
+    apply_windows_kernel_selection(
+        ctx,
+        WindowsKernelSelection::from_env(std::env::var_os("A3S_BOX_KERNEL").as_deref()),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_kernel_selection(
+    ctx: &KrunContext,
+    selection: WindowsKernelSelection,
+) -> Result<()> {
+    if !selection.reads_host_file() {
+        return Ok(());
+    }
+    let WindowsKernelSelection::External(kernel_path) = selection else {
         return Ok(());
     };
 
@@ -780,7 +822,7 @@ pub(super) fn configure_windows_kernel(ctx: &KrunContext) -> Result<()> {
                 kernel_path.display()
             ),
             hint: Some(
-                "Provide an x86_64 ELF vmlinux or the kernel file from an official WSL package"
+                "Provide an x86_64 ELF vmlinux or a PE/COFF kernel image. Leave A3S_BOX_KERNEL unset to use the bundled WHPX kernel."
                     .to_string(),
             ),
         });
@@ -828,7 +870,7 @@ pub(super) fn detect_windows_kernel_format(path: &Path) -> Result<u32> {
             path.display()
         ),
         hint: Some(
-            "Expected an ELF vmlinux or the PE/COFF kernel file from an official WSL package"
+            "Expected an ELF vmlinux or a PE/COFF kernel image. The default WHPX path uses the bundled kernel and does not read a WSL package."
                 .to_string(),
         ),
     })

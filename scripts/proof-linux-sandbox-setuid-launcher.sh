@@ -118,6 +118,10 @@ if [[ "$(id -u)" -eq 0 && -z "${SUDO_UID:-}" ]]; then
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
+  if [[ ! -d "${DELEGATED_CGROUP}" ]] && ! sudo -n true >/dev/null 2>&1; then
+    echo "non-root Sandbox operator path was not started: missing delegated cgroup ${DELEGATED_CGROUP}; sudo requires a password; this is not an A3S_BOX_CI_SETPRIV_WRAPPER pass" >&2
+    exit 2
+  fi
   echo "re-executing under sudo for setuid install + cgroup prep" >&2
   exec sudo -E env \
     "PATH=${PATH}" \

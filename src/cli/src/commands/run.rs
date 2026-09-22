@@ -206,33 +206,41 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     run_foreground(ctx, &args).await
 }
 
-fn validate_run_mode(args: &RunArgs, stdin_is_terminal: bool) -> Result<(), &'static str> {
+fn validate_run_mode(args: &RunArgs, stdin_is_terminal: bool) -> Result<(), String> {
     if args.detach && args.tty {
-        return Err("Cannot use -t (tty) with -d (detach)");
+        return Err("Cannot use -t (tty) with -d (detach)".to_string());
     }
     if args.interactive && args.no_stdin {
-        return Err("Cannot use --interactive with --no-stdin");
+        return Err("Cannot use --interactive with --no-stdin".to_string());
     }
     if args.timeout.is_some() && args.detach {
-        return Err("Cannot use --timeout with -d (detach)");
+        return Err("Cannot use --timeout with -d (detach)".to_string());
     }
     if args.timeout.is_some() && args.tty {
-        return Err("Cannot use --timeout with -t (tty)");
+        return Err("Cannot use --timeout with -t (tty)".to_string());
     }
     if matches!(args.timeout, Some(0)) {
-        return Err("--timeout must be greater than zero seconds");
+        return Err("--timeout must be greater than zero seconds".to_string());
     }
     if args
         .timeout
         .is_some_and(|secs| secs.checked_mul(1_000_000_000).is_none())
     {
-        return Err("--timeout is too large to express as nanoseconds");
+        return Err("--timeout is too large to express as nanoseconds".to_string());
+    }
+    // Windows has no interactive PTY channel. Reject `-t` before boot even
+    // when stdin is a terminal; a later failure would already have created a box.
+    #[cfg(windows)]
+    if args.tty {
+        return Err(
+            crate::platform::unsupported_command("run -it", "interactive PTY support").to_string(),
+        );
     }
     if args.tty && !stdin_is_terminal {
-        return Err("The -t flag requires a terminal (stdin is not a TTY)");
+        return Err("The -t flag requires a terminal (stdin is not a TTY)".to_string());
     }
     if args.pool || args.pool_autostart {
-        validate_pool_run_mode(args)?;
+        validate_pool_run_mode(args).map_err(ToOwned::to_owned)?;
     }
     Ok(())
 }

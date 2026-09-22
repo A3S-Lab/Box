@@ -418,6 +418,12 @@ fn operation(value: &str) -> OperationId {
     OperationId::new(value).unwrap()
 }
 
+fn sandbox_request(external_id: &str) -> CreateExecutionRequest {
+    let mut request = request(external_id);
+    request.config.isolation = ExecutionIsolation::Sandbox;
+    request
+}
+
 #[test]
 fn managed_record_rejects_invalid_microvm_vcpu_count() {
     let directory = tempfile::tempdir().unwrap();

@@ -89,7 +89,7 @@ mod oci_secret_attachments;
 mod oci_session;
 mod oci_storage_attachments;
 mod operations;
-mod operator_cgroup;
+pub(crate) mod operator_cgroup;
 mod port;
 mod prepared_rootfs;
 mod record;

@@ -114,13 +114,17 @@ the Cargo target directory.
 | `diff`, `export`, stopped-box `commit`, and stopped-box filesystem snapshots | Validated through clean-stop metadata capture, committed-image re-run, snapshot restore, restart, and re-export. Running-box host-path capture remains unavailable because WHPX has no post-boot guest archive channel. |
 | Container health checks | Not currently supported; `--health-*` requests and persisted health checks fail before workload start |
 | Bridge networks and Compose service networking | Not currently supported on Windows |
-| Interactive PTY (`attach -it` and `exec -it`) | Not currently supported on Windows; non-interactive `exec` is supported |
+| Interactive PTY (`run -t`, `attach -it`, `exec -it`, and `shell`) | Not currently supported on Windows; these commands fail before box creation or lifecycle mutation. Non-interactive `exec` is supported |
 | Shared-kernel Sandbox isolation | Not supported on Windows; `--isolation sandbox` fails before box creation |
 | Memory snapshot-fork, TEE, and CRI | Not supported on Windows; `--tee` / `--tee-simulate` fail before box creation |
 | `pause` / `unpause` | Not supported on Windows MicroVM/WHPX; commands fail closed before lifecycle mutation |
 
-Requests such as `--cpus 2`, `--health-cmd ...`, `--isolation sandbox`, or
-`--tee` fail before image pull / box creation with an explicit WHPX diagnostic.
+Requests such as `--cpus 2`, `--health-cmd ...`, `--isolation sandbox`,
+`--tee`, or `run -t` fail before image pull / box creation. A missing WHPX
+hypervisor fails in that same preflight, before a box directory or VM is
+created, and the diagnostic does not redirect the operator to WSL. The default
+boot kernel is the one bundled in `libkrunfw.dll`; `A3S_BOX_KERNEL` is an
+explicit override and is not resolved from a WSL package path.
 `--no-healthcheck` remains available to disable an image-defined health check.
 Qualification-mode `run` and `create` also require
 the configured OCI service to advertise one launch-ready `DedicatedVm` driver

@@ -215,29 +215,115 @@ impl fmt::Display for BridgeNetworkBackend {
     }
 }
 
+/// Host family that owns one execution contract.
+///
+/// The contract is pure data. Windows and Linux (including a Linux guest
+/// such as WSL) can be checked without a hypervisor, and neither family
+/// selects the other's runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostFamily {
+    /// Linux host, including WSL. MicroVM uses KVM; control uses a Unix socket.
+    Linux,
+    /// macOS host. MicroVM uses HVF through libkrun.
+    Macos,
+    /// Native Windows host. MicroVM uses WHPX; control uses a named pipe.
+    Windows,
+    /// Any other operating system. No VM backend is advertised.
+    Other,
+}
+
+impl HostFamily {
+    /// Family of the process that is actually running.
+    pub fn current() -> Self {
+        Self::from_os(std::env::consts::OS)
+    }
+
+    /// Map a Rust `std::env::consts::OS` name to a host family.
+    pub fn from_os(os: &str) -> Self {
+        match os {
+            "linux" => Self::Linux,
+            "macos" => Self::Macos,
+            "windows" => Self::Windows,
+            _ => Self::Other,
+        }
+    }
+}
+
 impl PlatformCapabilities {
+    /// Capabilities for one host family.
+    ///
+    /// `architecture` uses OCI names (`amd64`, `arm64`). The result does not
+    /// read the hypervisor, a WSL distro name, or a kernel package path.
+    pub fn for_host(family: HostFamily, architecture: impl Into<String>) -> Self {
+        let architecture = architecture.into();
+        match family {
+            HostFamily::Linux => Self {
+                os: "linux".to_string(),
+                architecture,
+                vm_backend: VmBackend::Krun,
+                host_guest_channel: HostGuestChannel::UnixSocket,
+                unix_sockets: true,
+                named_pipes: false,
+                netproxy: false,
+                bridge_network_backend: BridgeNetworkBackend::Passt,
+                bridge_outbound_nat: true,
+                published_ports: true,
+                tee_attestation: true,
+                sealed_storage: true,
+                interactive_pty: true,
+            },
+            HostFamily::Macos => Self {
+                os: "macos".to_string(),
+                architecture,
+                vm_backend: VmBackend::Krun,
+                host_guest_channel: HostGuestChannel::UnixSocket,
+                unix_sockets: true,
+                named_pipes: false,
+                netproxy: true,
+                bridge_network_backend: BridgeNetworkBackend::Netproxy,
+                bridge_outbound_nat: false,
+                published_ports: true,
+                tee_attestation: true,
+                sealed_storage: true,
+                interactive_pty: true,
+            },
+            HostFamily::Windows => Self {
+                os: "windows".to_string(),
+                architecture,
+                vm_backend: VmBackend::Whpx,
+                host_guest_channel: HostGuestChannel::NamedPipe,
+                unix_sockets: false,
+                named_pipes: true,
+                netproxy: false,
+                bridge_network_backend: BridgeNetworkBackend::Unsupported,
+                bridge_outbound_nat: false,
+                published_ports: true,
+                tee_attestation: false,
+                sealed_storage: false,
+                interactive_pty: false,
+            },
+            HostFamily::Other => Self {
+                os: "unknown".to_string(),
+                architecture,
+                vm_backend: VmBackend::Unsupported,
+                host_guest_channel: HostGuestChannel::Unsupported,
+                unix_sockets: false,
+                named_pipes: false,
+                netproxy: false,
+                bridge_network_backend: BridgeNetworkBackend::Unsupported,
+                bridge_outbound_nat: false,
+                published_ports: false,
+                tee_attestation: false,
+                sealed_storage: false,
+                interactive_pty: false,
+            },
+        }
+    }
+
     /// Detect capabilities for the current host.
     pub fn current() -> Self {
         let host = Platform::host();
-
-        Self {
-            os: std::env::consts::OS.to_string(),
-            architecture: host.architecture,
-            vm_backend: current_vm_backend(),
-            host_guest_channel: current_host_guest_channel(),
-            unix_sockets: cfg!(unix),
-            named_pipes: cfg!(windows),
-            netproxy: cfg!(target_os = "macos"),
-            bridge_network_backend: current_bridge_network_backend(),
-            // Linux passt provides full outbound NAT. The macOS netproxy
-            // deliberately exposes only DNS and TCP host proxying, so it must
-            // not advertise full NAT (which would also imply UDP and ICMP).
-            bridge_outbound_nat: cfg!(target_os = "linux"),
-            published_ports: cfg!(unix) || cfg!(windows),
-            tee_attestation: cfg!(unix),
-            sealed_storage: cfg!(unix),
-            interactive_pty: cfg!(unix),
-        }
+        Self::for_host(HostFamily::current(), host.architecture)
     }
 
     /// Whether the host can run the VM runtime directly.
@@ -267,51 +353,6 @@ impl PlatformCapabilities {
             BridgeNetworkBackend::Unsupported => "unsupported".to_string(),
         }
     }
-}
-
-#[cfg(unix)]
-fn current_vm_backend() -> VmBackend {
-    VmBackend::Krun
-}
-
-#[cfg(windows)]
-fn current_vm_backend() -> VmBackend {
-    VmBackend::Whpx
-}
-
-#[cfg(not(any(unix, windows)))]
-fn current_vm_backend() -> VmBackend {
-    VmBackend::Unsupported
-}
-
-#[cfg(unix)]
-fn current_host_guest_channel() -> HostGuestChannel {
-    HostGuestChannel::UnixSocket
-}
-
-#[cfg(windows)]
-fn current_host_guest_channel() -> HostGuestChannel {
-    HostGuestChannel::NamedPipe
-}
-
-#[cfg(not(any(unix, windows)))]
-fn current_host_guest_channel() -> HostGuestChannel {
-    HostGuestChannel::Unsupported
-}
-
-#[cfg(target_os = "linux")]
-fn current_bridge_network_backend() -> BridgeNetworkBackend {
-    BridgeNetworkBackend::Passt
-}
-
-#[cfg(target_os = "macos")]
-fn current_bridge_network_backend() -> BridgeNetworkBackend {
-    BridgeNetworkBackend::Netproxy
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn current_bridge_network_backend() -> BridgeNetworkBackend {
-    BridgeNetworkBackend::Unsupported
 }
 
 /// Normalize architecture names to OCI conventions.
@@ -501,5 +542,42 @@ mod tests {
         assert!(summary.contains("netproxy"));
         assert!(summary.contains("outbound TCP proxying supported"));
         assert!(!capabilities.bridge_outbound_nat);
+    }
+
+    #[test]
+    fn windows_and_linux_contracts_stay_on_their_own_runtimes() {
+        let windows = PlatformCapabilities::for_host(HostFamily::Windows, "amd64");
+        assert_eq!(windows.os, "windows");
+        assert_eq!(windows.vm_backend, VmBackend::Whpx);
+        assert_eq!(windows.host_guest_channel, HostGuestChannel::NamedPipe);
+        assert!(windows.named_pipes);
+        assert!(!windows.unix_sockets);
+        assert!(!windows.interactive_pty);
+        assert!(!windows.tee_attestation);
+        assert!(!windows.supports_bridge_networking());
+        assert!(windows.supports_native_vm());
+
+        let linux = PlatformCapabilities::for_host(HostFamily::Linux, "amd64");
+        assert_eq!(linux.os, "linux");
+        assert_eq!(linux.vm_backend, VmBackend::Krun);
+        assert_eq!(linux.host_guest_channel, HostGuestChannel::UnixSocket);
+        assert!(linux.unix_sockets);
+        assert!(!linux.named_pipes);
+        assert!(linux.interactive_pty);
+        assert_ne!(linux.vm_backend, VmBackend::Whpx);
+        assert_ne!(linux.host_guest_channel, HostGuestChannel::NamedPipe);
+
+        let macos = PlatformCapabilities::for_host(HostFamily::Macos, "arm64");
+        assert_eq!(macos.vm_backend, VmBackend::Krun);
+        assert_eq!(macos.host_guest_channel, HostGuestChannel::UnixSocket);
+        assert_ne!(macos.vm_backend, VmBackend::Whpx);
+
+        let current = PlatformCapabilities::current();
+        let expected =
+            PlatformCapabilities::for_host(HostFamily::current(), current.architecture.clone());
+        assert_eq!(current, expected);
+        assert_eq!(HostFamily::from_os("linux"), HostFamily::Linux);
+        assert_eq!(HostFamily::from_os("windows"), HostFamily::Windows);
+        assert_eq!(HostFamily::from_os("Ubuntu"), HostFamily::Other);
     }
 }
