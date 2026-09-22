@@ -44,6 +44,10 @@ All notable changes to A3S Box will be documented in this file.
   mode `4755` exec (#628). Box still defers the unprivileged parent's cgroup
   ancestor denial and requires a tip-built launcher for operator proof. Does
   **not** close B2 or claim Enterprise GA until a host tip proof passes.
+- Hosted CI Test grants `/dev/kvm` read/write to the job user when the device
+  exists so MicroVM CLI `preflight_isolation` can open it. Production still
+  fails closed on EACCES. Does **not** invent kvm-group membership on operator
+  hosts.
 - `docs/installation.md` documents the mode `4755` operator Sandbox contract:
   `a3s-oci` adopts effective gid 0, clears supplementary groups, and migrates
   into the delegated child after setuid exec; do not install `6755` or a

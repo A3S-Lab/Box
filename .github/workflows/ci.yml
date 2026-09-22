@@ -363,6 +363,16 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: src
+      - name: Allow KVM device for MicroVM CLI admission
+        run: |
+          # CLI preflight_isolation opens /dev/kvm before create/run. Hosted
+          # runners often expose the node while leaving the job user outside
+          # group kvm. Grant rw for this job only so admission matches a normal
+          # kvm-group operator; do not weaken the production open check.
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod a+rw /dev/kvm
+            test -r /dev/kvm && test -w /dev/kvm
+          fi
       - name: Test workspace libraries
         shell: bash
         run: |
