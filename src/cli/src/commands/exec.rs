@@ -87,6 +87,14 @@ pub(crate) async fn connect_pty_with_retry(
 pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::exec::ExecRequest;
 
+    #[cfg(windows)]
+    if args.tty {
+        return Err(crate::platform::unsupported_command(
+            "exec --tty",
+            "interactive PTY support",
+        ));
+    }
+
     let user = common::normalize_user_option(args.user.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     common::validate_workdir_option(args.workdir.as_deref())
@@ -108,19 +116,14 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     }
 
-    // If -t is specified, use interactive PTY mode
+    // If -t is specified, use interactive PTY mode. Windows rejected `-t`
+    // before any state load.
+    #[cfg(not(windows))]
     if args.tty {
         if args.request_id.is_some() {
             return Err("Cannot use --request-id with -t/--tty".into());
         }
 
-        #[cfg(windows)]
-        return Err(crate::platform::unsupported_command(
-            "exec --tty",
-            "interactive PTY support",
-        ));
-
-        #[cfg(not(windows))]
         return if oci_session {
             execute_managed_pty(args, &record, user).await
         } else {

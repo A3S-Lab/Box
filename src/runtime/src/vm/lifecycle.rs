@@ -109,30 +109,66 @@ impl VmManager {
                 false
             };
         if let Some(mut handler) = self.handler.write().await.take() {
+            let workload_already_finished =
+                crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
+            let provider_already_exited =
+                if handler.exit_code().is_some() || handler.has_exited() || !handler.is_running() {
+                    true
+                } else {
+                    match handler.try_wait_exit() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::debug!(
+                                box_id = %self.box_id,
+                                %error,
+                                "Could not poll provider exit before guest stop delivery"
+                            );
+                            handler.has_exited()
+                        }
+                    }
+                };
             #[cfg(windows)]
-            let stop_request = match windows_stop::stage(&self.socket_dir(), signal) {
-                Ok(path) => {
-                    tracing::debug!(
-                        box_id = %self.box_id,
-                        signal,
-                        path = %path.display(),
-                        "Staged Windows guest stop request"
-                    );
-                    Some(path)
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        box_id = %self.box_id,
-                        signal,
-                        error = %error,
-                        "Failed to stage Windows guest stop request; force-stop fallback remains active"
-                    );
-                    None
+            let stop_request = if !windows_stop::delivery_required(
+                workload_already_finished,
+                provider_already_exited,
+            ) {
+                tracing::debug!(
+                    box_id = %self.box_id,
+                    provider_already_exited,
+                    workload_already_finished,
+                    "Skipping Windows guest stop delivery; workload already exited"
+                );
+                None
+            } else {
+                match windows_stop::stage(&self.socket_dir(), signal) {
+                    Ok(path) => {
+                        tracing::debug!(
+                            box_id = %self.box_id,
+                            signal,
+                            path = %path.display(),
+                            "Staged Windows guest stop request"
+                        );
+                        Some(path)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            box_id = %self.box_id,
+                            signal,
+                            error = %error,
+                            "Failed to stage Windows guest stop request; force-stop fallback remains active"
+                        );
+                        None
+                    }
                 }
             };
 
             #[cfg(windows)]
-            let handler_timeout_ms = if timeout_ms == 0 {
+            let handler_timeout_ms = if !windows_stop::delivery_required(
+                workload_already_finished,
+                provider_already_exited,
+            ) || timeout_ms == 0
+            {
                 0
             } else if let Some(request) = stop_request.as_deref() {
                 let delivery_started = std::time::Instant::now();
@@ -180,27 +216,6 @@ impl VmManager {
             } else {
                 timeout_ms
             };
-            #[cfg(unix)]
-            let workload_already_finished =
-                crate::rootfs::read_persisted_exit_code(&box_dir).is_some();
-            #[cfg(unix)]
-            let provider_already_exited =
-                if handler.exit_code().is_some() || handler.has_exited() || !handler.is_running() {
-                    true
-                } else {
-                    match handler.try_wait_exit() {
-                        Ok(Some(_)) => true,
-                        Ok(None) => false,
-                        Err(error) => {
-                            tracing::debug!(
-                                box_id = %self.box_id,
-                                %error,
-                                "Could not poll provider exit before guest stop delivery"
-                            );
-                            handler.has_exited()
-                        }
-                    }
-                };
             #[cfg(unix)]
             let guest_stop_delivered = {
                 // Skip guest-control stop when the workload already published a

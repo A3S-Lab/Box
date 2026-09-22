@@ -758,6 +758,16 @@ impl VmLocalExecutionBackend {
     }
 }
 
+fn admit_launch(isolation: a3s_box_core::ExecutionIsolation) -> ExecutionManagerResult<()> {
+    crate::host_check::admit_requested_isolation(isolation)
+        .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))
+}
+
+fn admit_create(isolation: a3s_box_core::ExecutionIsolation) -> ExecutionManagerResult<()> {
+    crate::host_check::admit_isolation_class(isolation)
+        .map_err(|error| ExecutionManagerError::Unavailable(error.to_string()))
+}
+
 async fn destroy_after_observation(
     manager: &mut VmManager,
     preserve_rootfs: bool,
@@ -815,7 +825,22 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         Ok(LocalExecutionResourcePlan { anonymous_volumes })
     }
 
+    async fn preflight_isolation(
+        &self,
+        isolation: a3s_box_core::ExecutionIsolation,
+    ) -> ExecutionManagerResult<()> {
+        // CLI and explicit readiness probes open the hypervisor.
+        admit_launch(isolation)
+    }
+
+    async fn preflight(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        // Durable create only checks the host class so stub CI and metadata
+        // tests can reserve without kvm-group access. `start` still opens it.
+        admit_create(record.isolation)
+    }
+
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        admit_launch(record.isolation)?;
         super::record::validate_record_health(record)?;
         self.metadata(record)?;
         let box_dir = record.box_dir.clone();

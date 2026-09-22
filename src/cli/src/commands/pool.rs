@@ -1033,6 +1033,18 @@ async fn destroy_leased_vm(
 }
 
 async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate args on every host before the platform gate so Windows still
+    // reports `--size 0` instead of only "not supported".
+    if args.size == 0 {
+        return Err("--size must be greater than 0".into());
+    }
+    if args.size > args.max {
+        return Err(format!("--size ({}) cannot exceed --max ({})", args.size, args.max).into());
+    }
+    if args.boot_concurrency == 0 {
+        return Err("--boot-concurrency must be greater than 0".into());
+    }
+
     #[cfg(windows)]
     {
         let _ = args;
@@ -1044,18 +1056,6 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
 
     #[cfg(not(windows))]
     {
-        if args.size == 0 {
-            return Err("--size must be greater than 0".into());
-        }
-        if args.size > args.max {
-            return Err(
-                format!("--size ({}) cannot exceed --max ({})", args.size, args.max).into(),
-            );
-        }
-        if args.boot_concurrency == 0 {
-            return Err("--boot-concurrency must be greater than 0".into());
-        }
-
         // Pool VM ownership is in-memory only. After a previous daemon SIGKILL,
         // orphan shims stay reparented to init with box dirs under A3S_HOME.
         // Reap them before bind/prewarm so pool stop / capacity cannot hide

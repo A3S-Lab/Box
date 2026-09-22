@@ -753,6 +753,34 @@ fn test_windows_sandbox_and_tee_fail_before_creating_box() {
         &["network", "create", "win-bridge-rejected"],
         "bridge networking is not supported on Windows",
     );
+
+    let (stdout, stderr, success) = cli.output(&[
+        "run",
+        "-t",
+        "--rm",
+        "docker.io/library/alpine:latest",
+        "--",
+        "true",
+    ]);
+    assert!(
+        !success,
+        "tty run unexpectedly succeeded: {stdout}\n{stderr}"
+    );
+    assert!(
+        stderr.contains("interactive PTY"),
+        "missing tty fail-closed diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Creating box") && !stdout.contains("Creating box"),
+        "tty run must fail before Creating box: stdout={stdout:?} stderr={stderr:?}"
+    );
+    cli.fails(
+        &["exec", "-t", "missing-box", "--", "true"],
+        "interactive PTY",
+    );
+    cli.fails(&["attach", "-t", "missing-box"], "interactive PTY");
+    assert!(!cli.home_path().join("boxes.json").exists());
+    assert!(!cli.home_path().join("boxes").exists());
 }
 
 #[cfg(target_os = "windows")]

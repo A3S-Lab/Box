@@ -222,30 +222,25 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
 pub fn resolve_named_volume(
     volume_spec: &str,
 ) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = volume_spec.split(':').collect();
-    if parts.len() < 2 {
+    if named_volume_name(volume_spec).is_none() {
         return Ok((volume_spec.to_string(), None));
     }
-
-    let host_part = parts[0];
-    let bytes = volume_spec.as_bytes();
-    let has_windows_drive_prefix = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/');
-
-    // Unix absolute/relative paths and Windows drive/UNC paths are bind mounts.
-    if host_part.starts_with('/')
-        || host_part.starts_with('.')
-        || host_part.starts_with('\\')
-        || has_windows_drive_prefix
-    {
-        return Ok((volume_spec.to_string(), None));
-    }
-
-    // Treat as named volume
-    let volume_name = host_part;
     let store = VolumeStore::default_path()?;
+    resolve_named_volume_with_store(&store, volume_spec)
+}
+
+/// Resolve one spec against an explicit store.
+///
+/// Bind mounts and non-mount specs do not touch the store. Named volumes are
+/// created in `store`.
+pub(crate) fn resolve_named_volume_with_store(
+    store: &VolumeStore,
+    volume_spec: &str,
+) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let Some(volume_name) = named_volume_name(volume_spec) else {
+        return Ok((volume_spec.to_string(), None));
+    };
+    let parts: Vec<&str> = volume_spec.split(':').collect();
 
     // Auto-create the volume if it doesn't exist (Docker behavior). Atomic
     // under the store's cross-process lock, so two concurrent first-time
@@ -260,6 +255,51 @@ pub fn resolve_named_volume(
     }
 
     Ok((resolved, Some(volume_name.to_string())))
+}
+
+/// Validate the effective health check, then resolve volume specs.
+///
+/// Image HEALTHCHECK rejection must not create a named volume. Callers that
+/// already know the effective check use this instead of resolving first.
+pub(crate) fn resolve_volume_specs_after_health_gate(
+    store: &VolumeStore,
+    volume_specs: &[String],
+    health_check: Option<&crate::state::HealthCheck>,
+) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+    super::common::validate_health_check_support(health_check)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let mut resolved = Vec::new();
+    let mut names = Vec::new();
+    for spec in volume_specs {
+        let (resolved_spec, volume_name) = resolve_named_volume_with_store(store, spec)?;
+        if let Some(volume_name) = volume_name {
+            names.push(volume_name);
+        }
+        resolved.push(resolved_spec);
+    }
+    Ok((resolved, names))
+}
+
+/// Named-volume name when `volume_spec` is not a bind mount or a bare token.
+fn named_volume_name(volume_spec: &str) -> Option<&str> {
+    let parts: Vec<&str> = volume_spec.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let host_part = parts[0];
+    let bytes = volume_spec.as_bytes();
+    let has_windows_drive_prefix = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    if host_part.starts_with('/')
+        || host_part.starts_with('.')
+        || host_part.starts_with('\\')
+        || has_windows_drive_prefix
+    {
+        return None;
+    }
+    Some(host_part)
 }
 
 /// Attach named volumes to a box in the VolumeStore.
@@ -494,5 +534,47 @@ mod tests {
         let (resolved, name) = resolve_named_volume("/host:/guest:ro").unwrap();
         assert_eq!(resolved, "/host:/guest:ro");
         assert!(name.is_none());
+    }
+
+    #[test]
+    fn health_gate_creates_named_volume_when_no_health_check_is_effective() {
+        let (dir, store) = temp_store();
+        let (resolved, names) = resolve_volume_specs_after_health_gate(
+            &store,
+            &["healthprobe:/data".to_string()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(names, vec!["healthprobe".to_string()]);
+        assert!(resolved[0].ends_with(":/data") || resolved[0].ends_with(":\\data"));
+        assert!(store.get("healthprobe").unwrap().is_some());
+        assert!(dir.path().join("volumes").join("healthprobe").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn image_health_check_is_rejected_before_named_volume_creation() {
+        let (dir, store) = temp_store();
+        let health = crate::state::HealthCheck {
+            cmd: vec!["CMD".to_string(), "true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 30,
+            retries: 3,
+            start_period_secs: 0,
+        };
+        let error = resolve_volume_specs_after_health_gate(
+            &store,
+            &["healthprobe:/data".to_string()],
+            Some(&health),
+        )
+        .expect_err("image HEALTHCHECK must fail on Windows")
+        .to_string();
+        assert!(
+            error.contains("not supported on Windows"),
+            "unexpected error: {error}"
+        );
+        assert!(store.get("healthprobe").unwrap().is_none());
+        assert!(!dir.path().join("volumes").join("healthprobe").exists());
+        assert!(!dir.path().join("volumes.json").exists());
     }
 }

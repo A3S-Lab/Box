@@ -506,7 +506,7 @@ impl VmmProvider for VmController {
             if socket_dir
                 .parent()
                 .and_then(|parent| parent.file_name())
-                .is_some_and(|name| name == "a3s-box-sockets")
+                .is_some_and(crate::host_sockets::is_shared_runtime_socket_root_name)
             {
                 let box_id = socket_dir
                     .file_name()

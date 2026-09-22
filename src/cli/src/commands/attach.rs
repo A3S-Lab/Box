@@ -31,6 +31,14 @@ pub struct AttachArgs {
 }
 
 pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    if args.tty {
+        return Err(crate::platform::unsupported_command(
+            "attach -it",
+            "interactive PTY support",
+        ));
+    }
+
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?.clone();
     let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
@@ -47,19 +55,14 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     }
 
-    // Interactive PTY mode
+    // Interactive PTY mode. Windows rejected `-t` before any state load.
+    #[cfg(not(windows))]
     if args.tty {
-        #[cfg(not(windows))]
         return match route {
             AttachRoute::ManagedPty => execute_managed_pty_attach(&record).await,
             AttachRoute::LegacyPty => execute_pty_attach(&record).await,
             AttachRoute::ManagedLogs | AttachRoute::LegacyLogs => unreachable!(),
         };
-        #[cfg(windows)]
-        return Err(crate::platform::unsupported_command(
-            "attach -it",
-            "interactive PTY support",
-        ));
     }
 
     let managed_target = if route == AttachRoute::ManagedLogs {

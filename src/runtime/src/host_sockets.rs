@@ -12,13 +12,30 @@ use a3s_box_core::error::{BoxError, Result};
 /// Host-global parent of per-box runtime socket directories on Unix.
 #[cfg(all(unix, target_os = "macos"))]
 pub fn shared_runtime_socket_root() -> PathBuf {
-    PathBuf::from("/private/tmp").join("a3s-box-sockets")
+    select_shared_runtime_socket_root(PathBuf::from("/private/tmp"))
+}
+
+/// Whether `name` is the shared runtime socket root or a per-user fallback.
+///
+/// The fallback is `a3s-box-sockets-<uid>` when a root-owned `/tmp/a3s-box-sockets`
+/// is not sticky world-writable and this process cannot repair it.
+pub fn is_shared_runtime_socket_root_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    if name == "a3s-box-sockets" {
+        return true;
+    }
+    let Some(uid) = name.strip_prefix("a3s-box-sockets-") else {
+        return false;
+    };
+    !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Host-global parent of per-box runtime socket directories on Unix.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn shared_runtime_socket_root() -> PathBuf {
-    PathBuf::from("/tmp").join("a3s-box-sockets")
+    select_shared_runtime_socket_root(PathBuf::from("/tmp"))
 }
 
 /// Per-box runtime socket directory.
@@ -75,6 +92,35 @@ pub fn ensure_runtime_socket_dir(home_dir: &Path, box_id: &str) -> Result<PathBu
     }
 
     Ok(socket_dir)
+}
+
+/// Prefer the shared root. If a prior root-lane create left it unusable, use a
+/// directory this uid can create under the same temporary parent.
+#[cfg(unix)]
+fn select_shared_runtime_socket_root(temp_parent: PathBuf) -> PathBuf {
+    let preferred = temp_parent.join("a3s-box-sockets");
+    if shared_root_is_usable(&preferred) {
+        preferred
+    } else {
+        temp_parent.join(format!("a3s-box-sockets-{}", current_unix_uid()))
+    }
+}
+
+#[cfg(unix)]
+fn current_unix_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn shared_root_is_usable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => metadata.permissions().mode() & 0o7777 == 0o1777,
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 /// Ensure the host-global Unix socket root exists as sticky world-writable.
@@ -158,6 +204,23 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("a3s-box-socket-root-{label}-{nanos}"))
+    }
+
+    #[test]
+    fn per_user_socket_root_name_is_recognized_and_ubuntu_is_not() {
+        use std::ffi::OsStr;
+        assert!(is_shared_runtime_socket_root_name(OsStr::new(
+            "a3s-box-sockets"
+        )));
+        assert!(is_shared_runtime_socket_root_name(OsStr::new(
+            "a3s-box-sockets-1000"
+        )));
+        assert!(!is_shared_runtime_socket_root_name(OsStr::new(
+            "a3s-box-sockets-ubuntu"
+        )));
+        assert!(!is_shared_runtime_socket_root_name(OsStr::new(
+            "a3s-box-sockets-"
+        )));
     }
 
     #[cfg(unix)]

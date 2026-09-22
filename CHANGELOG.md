@@ -38,6 +38,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
+  `eb11e6426daec74f6070fb3361d51b153f56db4e`. That tip adopts effective gid 0,
+  clears supplementary groups, and migrates `A3S_BOX_OWNER_CGROUP` after a
+  mode `4755` exec (#628). Box still defers the unprivileged parent's cgroup
+  ancestor denial and requires a tip-built launcher for operator proof. Does
+  **not** close B2 or claim Enterprise GA until a host tip proof passes.
+- Hosted CI Test grants `/dev/kvm` read/write to the job user when the device
+  exists so MicroVM CLI `preflight_isolation` can open it. Production still
+  fails closed on EACCES. Does **not** invent kvm-group membership on operator
+  hosts.
 - `docs/installation.md` documents the mode `4755` operator Sandbox contract:
   `a3s-oci` adopts effective gid 0, clears supplementary groups, and migrates
   into the delegated child after setuid exec; do not install `6755` or a
@@ -60,6 +70,26 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- A root-owned `/tmp/a3s-box-sockets` that is not mode `1777` no longer
+  blocks later unprivileged MicroVM boots. The process uses
+  `/tmp/a3s-box-sockets-<uid>` when it cannot repair the shared root.
+- Image signature push and fetch use the same registry protocol as the image
+  (`--plain-http`, `--tls-verify`, or `A3S_REGISTRY_PROTOCOL`). A plain-HTTP
+  push does not request HTTPS for the `.sig` blob, and verify does not add a
+  second request or an HTTPS-then-HTTP fallback (#634).
+- Windows teardown no longer waits out the stop-forwarding deadline after the
+  guest has already persisted its exit code or the shim has exited. The same
+  short-task rule already applied on Unix. Does **not** close B2.
+- `pool start` validates `--size` / `--max` / `--boot-concurrency` before the
+  Windows unsupported gate, so `--size 0` reports the same arg error on every
+  host. Does **not** invent a Windows warm pool.
+- Windows `run -t` / `exec -t` / `attach -t` now fail before box creation or
+  inventory mutation. MicroVM launch admission (WHPX on Windows, KVM on Linux)
+  and Sandbox driver admission run in CLI `preflight_isolation` and backend
+  `start`, so a missing hypervisor fails before named volumes or boot. Durable
+  create only checks the host isolation class (device present / OS family) so
+  stub CI without kvm-group access can still reserve metadata. Does **not**
+  close B2, B3, or B5, and does **not** remove the libkrun path.
 - Guest-init starts the exec accept loop immediately after the container fork
   returns (and before stdio relay / PTY warm-up) so short workloads can finish
   the host heartbeat while those spin up (#576). Fork stays single-threaded;
@@ -91,26 +121,32 @@ All notable changes to A3S Box will be documented in this file.
   Enterprise GA, and does not replace a Linux directory-rootfs tip proof.
 - `prepare-linux-sandbox-host.sh` reclaim of an existing Sandbox cgroup tree
   walks every leaf `cgroup.procs`, refuses only live PIDs, best-effort migrates
-  zombies, and uses `cgroup.kill` when present (#613 / setuid proof re-runs).
-  Official `proof-linux-sandbox-setuid-launcher.sh` on Ubuntu Orb returned
-  `status=passed` with `b2_process_session_recovery_closed=false`. Does **not**
+  zombies, and uses `cgroup.kill` when present (#613). Does **not** close B2
+  or claim Enterprise GA.
+- Operator Sandbox setuid spawn defers the unprivileged parent's cgroup v2
+  ancestor `EACCES` instead of failing the parent write. CI
+  `setpriv --clear-groups` is a different path and does not satisfy the
+  operator proof (#628).
+- Windows `run` and `create` reject an image `HEALTHCHECK` before named-volume
+  creation. `run -v healthprobe:/data` on an image that defines a health check,
+  without `--no-healthcheck`, no longer leaves that volume behind. Does **not**
   close B2 or claim Enterprise GA.
-- Operator Sandbox setuid spawn no longer requires the unprivileged parent to
-  write the cgroup v2 common ancestor. `pre_exec` defers that EACCES to
-  `a3s-oci`, which adopts effective gid 0, clears supplementary groups, and
-  migrates into the delegated child while the mode 4755 launcher is still
-  effective uid 0. CI setpriv (already egid 0 and `--clear-groups`) is
-  unchanged. Re-verified on Ubuntu Orb (no KVM): non-root
-  `run --rm --isolation sandbox alpine:3.20 -- true|false|sh -c 'exit 3'`
-  with a tip-built mode 4755 launcher returned 0/1/3 without
-  `A3S_BOX_CI_SETPRIV_WRAPPER`. This does **not** close B2, claim Enterprise
-  GA, or replace a KVM tip MicroVM / soak matrix.
-- The Linux setuid-launcher proof records the `a3s-box run` status. A bare
-  `2>&1` on its own line inside the capture was a successful null command, so
-  a failing operator Sandbox run was reported as `rc=0` (#628). This does not
-  make that run start (cgroup migration still happens before the setuid
-  launcher is root, and mode 4755 does not clear the operator egid) and does
-  **not** close B2 or claim Enterprise GA.
+- Operator setuid adoption is a function of the post-exec ids: real uid and gid
+  stay, effective uid stays 0, effective gid becomes 0, and supplementary
+  groups are cleared before `a3s-oci` device-policy bootstrap. A mode `4755`
+  exec no longer reaches that check with the caller's egid and groups. Does
+  **not** close B2 or claim Enterprise GA. On this WSL host the operator proof
+  still exits 2 before a Sandbox run.
+- `proof-linux-sandbox-setuid-launcher.sh` records the real `a3s-box run`
+  status only after the delegated cgroup exists and passwordless sudo can
+  prepare the mode `4755` launcher. On this WSL host the script exited 2
+  before that run (`PROOF_EXIT:2`): uid 1000,
+  `A3S_BOX_SANDBOX_DELEGATED_CGROUP_ROOT` unset,
+  `/sys/fs/cgroup/a3s-box-sandbox/delegated` missing,
+  `/sys/fs/cgroup/cgroup.procs` not writable, and `sudo -n true` reported
+  that a password is required. It printed `non-root Sandbox operator path was
+  not started` and left `A3S_BOX_CI_SETPRIV_WRAPPER` unset. Exit 2 is not
+  `status=passed`. Does **not** close B2 or claim Enterprise GA.
 - Cross-process warm unpause projects `Paused` when attach cannot authenticate
   a SIGSTOP'd shim and the durable state is `Paused` or the `Resuming` claim
   that still owns that shim. `paused_with_memory` still defaults true, so a

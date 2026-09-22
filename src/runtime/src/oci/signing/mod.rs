@@ -303,14 +303,14 @@ async fn verify_cosign_key(
     };
 
     // 2. Fetch the cosign signature artifact
-    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await
-    {
-        Ok(Some(data)) => data,
-        Ok(None) => return VerifyResult::NoSignature,
-        Err(e) => {
-            return VerifyResult::Failed(format!("Failed to fetch signature: {}", e));
-        }
-    };
+    let sig_data =
+        match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await {
+            Ok(Some(data)) => data,
+            Ok(None) => return VerifyResult::NoSignature,
+            Err(e) => {
+                return VerifyResult::Failed(format!("Failed to fetch signature: {}", e));
+            }
+        };
 
     // 3. Parse the signature layer.
     let sig_envelope: CosignSignatureEnvelope = match serde_json::from_slice(&sig_data.layer_data) {
@@ -367,14 +367,14 @@ async fn verify_cosign_keyless(
     protocol: oci_distribution::client::ClientProtocol,
 ) -> VerifyResult {
     // 1. Fetch the cosign signature artifact
-    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await
-    {
-        Ok(Some(data)) => data,
-        Ok(None) => return VerifyResult::NoSignature,
-        Err(e) => {
-            return VerifyResult::Failed(format!("Failed to fetch signature: {}", e));
-        }
-    };
+    let sig_data =
+        match fetch_cosign_signature(registry, repository, manifest_digest, protocol).await {
+            Ok(Some(data)) => data,
+            Ok(None) => return VerifyResult::NoSignature,
+            Err(e) => {
+                return VerifyResult::Failed(format!("Failed to fetch signature: {}", e));
+            }
+        };
 
     // 2. Extract the Fulcio certificate from annotations
     let cert_pem = match sig_data.annotations.get(annotations::CERTIFICATE) {
@@ -629,15 +629,14 @@ mod tests {
         let policy = SignaturePolicy::CosignKey {
             public_key: "/nonexistent/cosign.pub".to_string(),
         };
-        let result =
-            verify_image_signature(
-                &policy,
-                "docker.io",
-                "library/alpine",
-                "sha256:abc",
-                oci_distribution::client::ClientProtocol::Https,
-            )
-            .await;
+        let result = verify_image_signature(
+            &policy,
+            "docker.io",
+            "library/alpine",
+            "sha256:abc",
+            oci_distribution::client::ClientProtocol::Https,
+        )
+        .await;
         match result {
             VerifyResult::Failed(msg) => assert!(msg.contains("Failed to read public key")),
             other => panic!("Expected Failed, got {:?}", other),
@@ -653,15 +652,14 @@ mod tests {
             issuer: "https://accounts.google.com".to_string(),
             identity: "user@example.com".to_string(),
         };
-        let result =
-            verify_image_signature(
-                &policy,
-                "docker.io",
-                "library/alpine",
-                "sha256:abc",
-                oci_distribution::client::ClientProtocol::Https,
-            )
-            .await;
+        let result = verify_image_signature(
+            &policy,
+            "docker.io",
+            "library/alpine",
+            "sha256:abc",
+            oci_distribution::client::ClientProtocol::Https,
+        )
+        .await;
         // Should not be Verified (no real signature exists)
         assert!(!result.is_ok());
     }

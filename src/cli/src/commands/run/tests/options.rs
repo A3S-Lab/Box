@@ -102,6 +102,7 @@ fn test_validate_run_mode_rejects_detached_tty_before_boot() {
     assert!(err.contains("Cannot use -t"));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn test_validate_run_mode_rejects_tty_without_terminal_before_boot() {
     let mut args = default_run_args();
@@ -109,6 +110,25 @@ fn test_validate_run_mode_rejects_tty_without_terminal_before_boot() {
 
     let err = validate_run_mode(&args, false).unwrap_err();
     assert!(err.contains("requires a terminal"));
+}
+
+#[cfg(windows)]
+#[test]
+fn test_validate_run_mode_rejects_windows_tty_before_boot_with_or_without_a_terminal() {
+    let mut args = default_run_args();
+    args.tty = true;
+
+    for stdin_is_terminal in [false, true] {
+        let err = validate_run_mode(&args, stdin_is_terminal).unwrap_err();
+        assert!(
+            err.contains("interactive PTY"),
+            "stdin terminal={stdin_is_terminal}: {err}"
+        );
+        assert!(
+            err.contains("not supported"),
+            "stdin terminal={stdin_is_terminal}: {err}"
+        );
+    }
 }
 
 #[test]
