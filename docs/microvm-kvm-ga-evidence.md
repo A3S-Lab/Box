@@ -17,7 +17,7 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 | `off` / `legacy` | VM-only backend |
 | `sandbox` / `on` | Sandbox → OCI; MicroVM stays Box-libkrun |
 | `microvm` / `all` + `A3S_BOX_OCI_KVM_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host) |
-| `microvm` / `all` without endpoint | Opt-in: packaged `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json` → Box-owned Host ensure (gates 1–2 wiring); tip create/Live prove still open |
+| `microvm` / `all` without endpoint | Opt-in: packaged `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json` → Box-owned Host ensure; tip stamps `oci_sdk` + `dedicated-vm` (gates 1–2 tip-proven). Stop/delete still broken (#644) |
 | WHPX / HVF production composition | **Not claimed** |
 
 Production cutover for this binder means: on Linux (including WSL2 `/dev/kvm`),
@@ -30,7 +30,9 @@ the same fail-closed soft/hard rules Sandbox GA uses.
 | Gate | Evidence |
 | --- | --- |
 | KVM Live tip v5 (observation) | Existing-host WSL2 digest SHA-256 `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5` (Box `68f99abb…`; OCI `f7ab2b7a…` / #347 virtiofs optional fchown). `b2_process_session_recovery_closed=false`. |
-| Vertical-slice KVM OCI qualification | `scripts/linux-kvm-oci-qualification.sh` + examples (qualification endpoint / Box-owned Host). |
+| Packaged opt-in Live tip v5 (Box-owned) | WSL2 digest SHA-256 `9dff1de47585472644e37e2971bf7df487bf353c5b07bc01bbf5b0ed84eb0e5f` (Box `51f0deea…` / #643; OCI `f7ab2b7a…`; tip system image). `kvm_microvm_live_claimed`, `retained_stream_handle_proven`, `retained_filesystem_proven`, `box_owned_ensure_proven`; B2 stays false. |
+| Packaged opt-in create/start/exec | Same tip: endpoint unset + `A3S_BOX_OCI_MIGRATION=microvm` stamps `runtime_route=oci_sdk` / `dedicated-vm` / `libkrun-kvm`; guest printed `hello-packaged`. |
+| Vertical-slice KVM OCI qualification | `scripts/linux-kvm-oci-qualification.sh` + examples (qualification endpoint / Box-owned Host). Stop/delete currently fails on tip — see #644. |
 | Box-owned KVM Host ensure + Live reopen | `oci_kvm_owner` + Live harness `--box-owned`. |
 
 ## Production cutover checklist (open)
@@ -40,11 +42,11 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 1 | Packaged artifact discovery for KVM Host (runtime/shim/system-image) without qualification-only env | **landed in tip** — `oci_kvm_packaged` + unit tests; fail-closed when artifacts absent |
-| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **wiring landed** — endpoint-absent `microvm\|all` builds Box-owned config; host tip-prove (create/Live) still open as gates 3–4 |
-| 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | open |
-| 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | open |
-| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — blocked on 1–4 |
+| 1 | Packaged artifact discovery for KVM Host (runtime/shim/system-image) without qualification-only env | **tip-proven** — #643 (`oci_kvm_packaged`); owner record used discovered paths |
+| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset stamps `oci_sdk` + `dedicated-vm` |
+| 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | **partial** — create/start/exec greened; FS via Live; **stop/delete blocked on #644** |
+| 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | **tip-proven** — Live digest `9dff1de4…` (`box_owned_ensure_proven`) |
+| 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — blocked on gate 3 stop/delete (#644) |
 | 6 | Explicit `off` keeps Box-libkrun | required regression |
 | 7 | No silent Sandbox↔MicroVM fallback | required invariant |
 | 8 | Docs: README “Still open” MicroVM production closed for **Linux/KVM only** | open — with 5 |
