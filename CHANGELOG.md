@@ -6,6 +6,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Linux/KVM packaged Host discovery (`oci_kvm_packaged`): resolve `a3s-oci`,
+  `a3s-oci-krun-shim`, and `system-image.json` from packaged A3S locations
+  (beside `current_exe`, `~/.a3s/bin`, `~/.a3s/share/a3s`) without
+  `A3S_BOX_OCI_KVM_ENDPOINT`. Opt-in `A3S_BOX_OCI_MIGRATION=microvm|all` with
+  the endpoint unset builds a Box-owned ensure config
+  (`service_root/runtime.sock`, `service_root/runtime` handoff). Fail-closed
+  when artifacts are missing. Binder gates 1–2 wiring only — tip create/Live
+  prove and default omit→DedicatedVm (gates 3–5) stay open. Does **not** flip
+  default MicroVM routing or claim Enterprise GA.
 - Sandbox Runtime `NetworkMode::Outbound` maps to host netns
   (`NetworkMode::Host`) with read-only binds of host `/sys/{devices,class,bus,
   block,dev,kernel,module}` plus the usual read-only `/sys/fs/cgroup` cgroup

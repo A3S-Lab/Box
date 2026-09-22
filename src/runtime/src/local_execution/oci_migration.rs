@@ -1157,63 +1157,167 @@ fn parse_linux_kvm_environment(
         }
     }
 
-    let runtime_root = runtime_root
+    let host_root_override = runtime_root
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_service_root(home_dir));
+        .map(PathBuf::from);
     let box_owned = parse_explicit_bool(OCI_KVM_BOX_OWNED_ENV, box_owned)?;
 
     if box_owned {
-        let service_root = service_root
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                ExecutionManagerError::InvalidRequest(format!(
-                    "{OCI_KVM_SERVICE_ROOT_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
-                ))
-            })?;
-        let service_bin = service_bin
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                ExecutionManagerError::InvalidRequest(format!(
-                    "{OCI_KVM_SERVICE_BIN_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
-                ))
-            })?;
-        let service_shim = service_shim
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                ExecutionManagerError::InvalidRequest(format!(
-                    "{OCI_KVM_SERVICE_SHIM_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
-                ))
-            })?;
-        let service_manifest = service_manifest
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                ExecutionManagerError::InvalidRequest(format!(
-                    "{OCI_KVM_SERVICE_MANIFEST_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
-                ))
-            })?;
-        let endpoint = endpoint
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| service_root.join("runtime.sock"));
-        return LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?
-            .with_box_owned_owner(service_root, service_bin, service_shim, service_manifest)
-            .map(Some);
+        return parse_linux_kvm_explicit_box_owned(
+            home_dir,
+            host_root_override,
+            endpoint,
+            service_root,
+            service_bin,
+            service_shim,
+            service_manifest,
+        )
+        .map(Some);
     }
 
-    let endpoint = endpoint
+    if let Some(endpoint) = endpoint.filter(|value| !value.is_empty()) {
+        let runtime_root = host_root_override.unwrap_or_else(|| default_service_root(home_dir));
+        return LinuxKvmOciMigrationConfig::new(runtime_root, PathBuf::from(endpoint)).map(Some);
+    }
+
+    // Gate 1+2: opt-in microvm|all without qualification endpoint → packaged
+    // Box-owned Host. Default omit-isolation stays Box-libkrun until gate 5.
+    #[cfg(target_os = "linux")]
+    {
+        return parse_linux_kvm_packaged_box_owned(
+            home_dir,
+            host_root_override,
+            service_root,
+            service_bin,
+            service_shim,
+            service_manifest,
+        )
+        .map(Some);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (service_root, service_bin, service_shim, service_manifest);
+        Err(ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_KVM_ENDPOINT_ENV} must be set explicitly for the qualification-only KVM service"
+        )))
+    }
+}
+
+fn parse_linux_kvm_explicit_box_owned(
+    _home_dir: &Path,
+    host_root_override: Option<PathBuf>,
+    endpoint: Option<OsString>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_manifest: Option<OsString>,
+) -> ExecutionManagerResult<LinuxKvmOciMigrationConfig> {
+    let service_root = service_root
         .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
         .ok_or_else(|| {
             ExecutionManagerError::InvalidRequest(format!(
-                "{OCI_KVM_ENDPOINT_ENV} must be set explicitly for the qualification-only KVM service"
+                "{OCI_KVM_SERVICE_ROOT_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
             ))
-        })
-        .map(PathBuf::from)?;
-    LinuxKvmOciMigrationConfig::new(runtime_root, endpoint).map(Some)
+        })?;
+    let (service_bin, service_shim, service_manifest) =
+        resolve_linux_kvm_owner_artifacts(service_bin, service_shim, service_manifest)?;
+    let runtime_root = host_root_override.unwrap_or_else(|| service_root.join("runtime"));
+    let endpoint = endpoint
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| service_root.join("runtime.sock"));
+    LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?.with_box_owned_owner(
+        service_root,
+        service_bin,
+        service_shim,
+        service_manifest,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_kvm_packaged_box_owned(
+    home_dir: &Path,
+    host_root_override: Option<PathBuf>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_manifest: Option<OsString>,
+) -> ExecutionManagerResult<LinuxKvmOciMigrationConfig> {
+    let (service_bin, service_shim, service_manifest) =
+        resolve_linux_kvm_owner_artifacts(service_bin, service_shim, service_manifest)?;
+    let service_root = service_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_service_root(home_dir));
+    let runtime_root = host_root_override.unwrap_or_else(|| service_root.join("runtime"));
+    let endpoint = service_root.join("runtime.sock");
+    LinuxKvmOciMigrationConfig::new(runtime_root, endpoint)?.with_box_owned_owner(
+        service_root,
+        service_bin,
+        service_shim,
+        service_manifest,
+    )
+}
+
+fn resolve_linux_kvm_owner_artifacts(
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_manifest: Option<OsString>,
+) -> ExecutionManagerResult<(PathBuf, PathBuf, PathBuf)> {
+    let override_bin = service_bin
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let override_shim = service_shim
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let override_manifest = service_manifest
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    #[cfg(target_os = "linux")]
+    {
+        if override_bin.is_some() && override_shim.is_some() && override_manifest.is_some() {
+            return Ok((
+                override_bin.expect("checked"),
+                override_shim.expect("checked"),
+                override_manifest.expect("checked"),
+            ));
+        }
+        let discovered = super::oci_kvm_packaged::discover_packaged_linux_kvm_artifacts(
+            super::oci_kvm_packaged::PackagedLinuxKvmOverrides {
+                runtime_path: override_bin,
+                shim_path: override_shim,
+                system_image_manifest: override_manifest,
+            },
+        )?;
+        Ok((
+            discovered.runtime_path,
+            discovered.shim_path,
+            discovered.system_image_manifest,
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let service_bin = override_bin.ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "{OCI_KVM_SERVICE_BIN_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+            ))
+        })?;
+        let service_shim = override_shim.ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "{OCI_KVM_SERVICE_SHIM_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+            ))
+        })?;
+        let service_manifest = override_manifest.ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "{OCI_KVM_SERVICE_MANIFEST_ENV} must be set when {OCI_KVM_BOX_OWNED_ENV} is enabled"
+            ))
+        })?;
+        Ok((service_bin, service_shim, service_manifest))
+    }
 }
 
 fn default_service_root(home_dir: &Path) -> PathBuf {
@@ -1414,6 +1518,77 @@ mod tests {
             absolute("a3s-oci-kvm-runtime").as_path()
         );
         assert!(config.box_owned_owner().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_kvm_packaged_opt_in_builds_box_owned_without_endpoint() {
+        let home = absolute("a3s-oci-kvm-packaged-home");
+        let service_root = absolute("a3s-oci-kvm-packaged-service");
+        let runtime = absolute("a3s-oci-packaged-runtime-bin");
+        let shim = absolute("a3s-oci-packaged-shim-bin");
+        let manifest = absolute("a3s-oci-packaged-system-image.json");
+
+        let config = parse_linux_kvm_environment(
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                service_root: Some(service_root.clone().into_os_string()),
+                service_bin: Some(runtime.clone().into_os_string()),
+                service_shim: Some(shim.clone().into_os_string()),
+                service_manifest: Some(manifest.clone().into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(
+                service_root.join("runtime.sock")
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            config.runtime_root(),
+            service_root.join("runtime").as_path()
+        );
+        let owner = config
+            .box_owned_owner()
+            .expect("packaged path is Box-owned");
+        assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(owner.runtime_path(), runtime.as_path());
+        assert_eq!(owner.shim_path(), shim.as_path());
+        assert_eq!(owner.system_image_manifest(), manifest.as_path());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_kvm_packaged_opt_in_all_mode_matches_microvm() {
+        let home = absolute("a3s-oci-kvm-packaged-all-home");
+        let service_root = absolute("a3s-oci-kvm-packaged-all-service");
+        let config = parse_linux_kvm_environment(
+            LinuxKvmEnvironmentInputs {
+                mode: Some(OsString::from("all")),
+                service_root: Some(service_root.clone().into_os_string()),
+                service_bin: Some(absolute("a3s-oci-all").into_os_string()),
+                service_shim: Some(absolute("a3s-oci-krun-shim-all").into_os_string()),
+                service_manifest: Some(absolute("system-image-all.json").into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(config.box_owned_owner().is_some());
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(
+                service_root.join("runtime.sock")
+            )
+            .unwrap()
+        );
     }
 
     #[test]

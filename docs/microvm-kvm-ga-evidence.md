@@ -16,7 +16,8 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 | `A3S_BOX_OCI_MIGRATION` absent | Linux default: `SandboxViaOci` for Sandbox; **omit-isolation MicroVM stays Box-libkrun** |
 | `off` / `legacy` | VM-only backend |
 | `sandbox` / `on` | Sandbox → OCI; MicroVM stays Box-libkrun |
-| `microvm` / `all` + `A3S_BOX_OCI_KVM_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external or Box-owned Host) |
+| `microvm` / `all` + `A3S_BOX_OCI_KVM_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host) |
+| `microvm` / `all` without endpoint | Opt-in: packaged `a3s-oci` + `a3s-oci-krun-shim` + `system-image.json` → Box-owned Host ensure (gates 1–2 wiring); tip create/Live prove still open |
 | WHPX / HVF production composition | **Not claimed** |
 
 Production cutover for this binder means: on Linux (including WSL2 `/dev/kvm`),
@@ -39,8 +40,8 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 1 | Packaged artifact discovery for KVM Host (runtime/shim/system-image) without qualification-only env | open |
-| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | open |
+| 1 | Packaged artifact discovery for KVM Host (runtime/shim/system-image) without qualification-only env | **landed in tip** — `oci_kvm_packaged` + unit tests; fail-closed when artifacts absent |
+| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **wiring landed** — endpoint-absent `microvm\|all` builds Box-owned config; host tip-prove (create/Live) still open as gates 3–4 |
 | 3 | Create/start/exec/FS/stop/delete parity on WSL2 `/dev/kvm` under (2) | open |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | open |
 | 5 | Linux default absent-env: omit-isolation stamps OCI DedicatedVm (Sandbox remains SandboxViaOci) | open — blocked on 1–4 |
