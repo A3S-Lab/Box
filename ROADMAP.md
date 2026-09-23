@@ -857,7 +857,9 @@ Linux and KVM MicroVM Live reattachment on real hosts is observation-greened und
 the process-session recovery parent above
 (existing-host WSL2 digests); the B2 exit gate remains open and harness reports
 still keep
-`b2_process_session_recovery_closed=false`. Box-owned native Host spawn forces
+`b2_process_session_recovery_closed=false`. Multi-driver exit criteria:
+[b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md).
+Box-owned native Host spawn forces
 supervised create for production SandboxViaOci; external Hosts without the env
 remain Host-bound. Fresh construction reaps supervised orphans on dead-Host
 reclaim; Live retained-manager reopen does not. Operator setuid launcher

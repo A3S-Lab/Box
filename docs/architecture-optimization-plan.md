@@ -79,7 +79,7 @@ Feature parity with other microVM projects is **not** an axiom.
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Live tip-proven** (gate 9 digest `e329bb9d…`) but multi-driver B2 exit criteria remain open — do **not** flip B2 from WHPX gate 9 alone |
+| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Live tip-proven** (gate 9 digest `e329bb9d…`) but multi-driver B2 exit criteria remain open — do **not** flip B2 from WHPX gate 9 alone |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + multi-driver B2 exit (WHPX mid-run Live gate 9 is tip-proven; do not delete libkrun on WHPX gate 9 alone) |
@@ -326,7 +326,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
 | P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
-| P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate `b2_process_session_recovery_closed` flip) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion |
+| P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate `b2_process_session_recovery_closed` flip) — binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); gates 1–8 tip-proven / docs closed for Linux/KVM omit→OCI; Enterprise GA + HVF production open | B | Deleting libkrun before §4.5; HVF production |
 | P2 | OCI DedicatedVm production cutover gates for Windows/WHPX — binder: [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md); gates 1–8 + mid-run Live gate 9 tip-proven; OCI pin `b26155b1` | B | Flipping B2 from WHPX alone; Enterprise GA / BX0.3 TEE |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |
