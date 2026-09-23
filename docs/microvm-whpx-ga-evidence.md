@@ -15,12 +15,12 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 
 | Setting | Behavior |
 | --- | --- |
-| `A3S_BOX_OCI_MIGRATION` absent | Windows: omit-isolation stays Box-libkrun/WHPX; no packaged DedicatedVm soft-activate |
+| `A3S_BOX_OCI_MIGRATION` absent | Windows: omit-isolation → packaged Box-owned DedicatedVm when Host artifacts are discoverable (gate 5); missing packages soft-fall to Box-libkrun/WHPX |
 | `off` / `legacy` | VM-only backend |
 | `sandbox` / `on` | Rejected on Windows (Sandbox is Linux-only) |
 | `microvm` / `all` + `A3S_BOX_OCI_WHPX_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host pipe) |
 | `microvm` / `all` + `A3S_BOX_WHPX_OCI_BOX_OWNED=1` + service root/bin/shim/vm-rootfs/**manifest** | Qualification: Box-owned WHPX Host ensure (requires `system-image.json`) |
-| Packaged absent-env production default | **Not claimed** — needs gates below |
+| Packaged absent-env production default | **In progress** — gate 5 soft-activate implemented; tip-prove pending |
 
 Production cutover for this binder means: on Windows x86_64 with WHPX, **absent**
 qualification endpoint env, new omit-isolation records stamp `oci_sdk` +
@@ -48,7 +48,7 @@ unless the row explicitly remains qualification-only.
 | 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset → Box-owned ensure; Windows `pid_start_time` via `GetProcessTimes`; ready schema `a3s.oci.box-whpx-service-ready.v2`; mutable service root materializes `bootstrap-vm-rootfs/` disjoint from immutable `system-image/`; `create` returned MicroVM id on real WHPX |
 | 3 | Create/start/exec/FS/stop/delete parity on real WHPX under (2) | **tip-proven** — durable install must keep Host `bin/` and `system-image/` disjoint (flattening CI `bin/*` beside `system-image/` fails `WindowsSystemImage::load`); with `%USERPROFILE%\\.a3s\\bin` + `share\\a3s\\system-image` (or install-root `bin/` + sibling `system-image/`), empty `bootstrap-vm-rootfs` seed, endpoint unset: `create` → `start` (long-running `/bin/sleep`) → `exec` / FS-via-exec → `stop` → `rm -f` on real WHPX; shares cleaned |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | **tip-proven** — under (2) with endpoint unset: `create` → status `created` / `oci_sdk`; kill Box-owned Host (`service-ready.json` owner pid); Box record stays `created` with no invented `exit_code`/`finished_at`; next `start` re-ensures a new Host (ready schema `a3s.oci.box-whpx-service-ready.v2`, new owner pid) → `running` → `exec`/`stop`/`rm -f`. Matches KVM binder’s `box_owned_ensure_proven` bar. **Non-claim:** mid-run Host death with retained Live stream/FS reattach (`b2_process_session_recovery_closed` stays false) |
-| 5 | Windows default absent-env: omit-isolation stamps OCI DedicatedVm | open — blocked on 1–4 |
+| 5 | Windows default absent-env: omit-isolation stamps OCI DedicatedVm | open — code path mirrors Linux gate 5 soft-activate; tip-prove pending on rebuilt tip Box |
 | 6 | Explicit `off` keeps Box-libkrun/WHPX | required regression |
 | 7 | No silent Sandbox↔MicroVM fallback (Sandbox stays unsupported/fail-closed on Windows) | required invariant |
 | 8 | Docs: README “Still open” closes WHPX production only after 1–7 | open |

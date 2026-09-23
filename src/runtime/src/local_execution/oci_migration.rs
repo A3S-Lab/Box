@@ -628,6 +628,11 @@ impl LocalExecutionManager {
     /// `sandbox` hard-fails when the OCI owner is not launch-ready; the Linux
     /// soft path composes a fail-closed unavailable OCI backend so MicroVM can
     /// continue on Box-libkrun when packaged KVM artifacts are absent.
+    ///
+    /// On Windows x86_64, an absent `A3S_BOX_OCI_MIGRATION` prefers packaged
+    /// WHPX DedicatedVm when Host artifacts are discoverable (gate 5); missing
+    /// packages soft-fall to Box-libkrun/WHPX. Explicit `off`/`legacy` keeps
+    /// the legacy VM backend. Sandbox migration values remain rejected.
     pub async fn with_configured_backend(
         state_path: impl Into<PathBuf>,
         home_dir: impl Into<PathBuf>,
@@ -1025,7 +1030,48 @@ fn parse_windows_environment(
         service_manifest,
     } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
-        return Ok(None);
+        // Gate 5: absent `A3S_BOX_OCI_MIGRATION` selects packaged DedicatedVm
+        // when runtime/shim/vm-rootfs/system-image are discoverable. Missing
+        // packages soft-fall to Box-libkrun/WHPX instead of hard-failing hosts
+        // without the WHPX Host package.
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            let _ = (endpoint, box_owned);
+            let host_root_override = runtime_root
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            return match parse_windows_whpx_packaged_box_owned(
+                home_dir,
+                host_root_override,
+                service_root,
+                service_bin,
+                service_shim,
+                service_vm_rootfs,
+                service_manifest,
+            ) {
+                Ok(config) => Ok(Some(config)),
+                Err(ExecutionManagerError::InvalidRequest(message))
+                    if message.contains("was not found in packaged A3S locations") =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        {
+            let _ = (
+                runtime_root,
+                endpoint,
+                box_owned,
+                service_root,
+                service_bin,
+                service_shim,
+                service_vm_rootfs,
+                service_manifest,
+            );
+            return Ok(None);
+        }
     };
     let mode = mode.to_str().ok_or_else(|| {
         ExecutionManagerError::InvalidRequest(format!(
@@ -1717,6 +1763,100 @@ mod tests {
         assert_eq!(
             owner.vm_rootfs(),
             service_root.join("bootstrap-vm-rootfs").as_path()
+        );
+        let _ = fs::remove_dir_all(&plant);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_whpx_absent_mode_soft_skips_when_packaged_artifacts_missing() {
+        use std::fs;
+
+        let home = absolute("a3s-oci-whpx-gate5-missing-home");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        // Isolate discovery from any tip-prove `A3S_HOME` still exported in the
+        // developer shell (packaged search roots include `dirs_home()`).
+        let previous = std::env::var_os("A3S_HOME");
+        // SAFETY: unit test temporarily redirects packaged discovery roots.
+        unsafe {
+            std::env::set_var("A3S_HOME", &home);
+        }
+        let result = parse_windows_environment(WindowsWhpxEnvironmentInputs::default(), &home);
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("A3S_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("A3S_HOME");
+            },
+        }
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "gate 5 must soft-skip hosts without packaged WHPX artifacts"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_whpx_absent_mode_uses_packaged_box_owned_when_artifacts_present() {
+        use std::fs;
+
+        let home = absolute("a3s-oci-whpx-gate5-default-home");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let plant = std::env::temp_dir().join(format!(
+            "a3s-whpx-migration-gate5-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&plant);
+        fs::create_dir_all(plant.join("bin")).unwrap();
+        fs::create_dir_all(plant.join("system-image")).unwrap();
+        fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
+        let runtime = plant.join("bin").join("a3s-oci.exe");
+        let shim = plant.join("bin").join("a3s-oci-krun-shim.exe");
+        let manifest = plant.join("system-image").join("system-image.json");
+        let seed_bootstrap = plant.join("bootstrap-vm-rootfs");
+        fs::write(&runtime, b"runtime").unwrap();
+        fs::write(&shim, b"shim").unwrap();
+        fs::write(&manifest, b"{}").unwrap();
+
+        let config = parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: None,
+                service_bin: Some(runtime.clone().into_os_string()),
+                service_shim: Some(shim.clone().into_os_string()),
+                service_vm_rootfs: Some(seed_bootstrap.into_os_string()),
+                service_manifest: Some(manifest.clone().into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .expect("gate 5 packaged default");
+
+        let service_root = default_service_root(&home).canonicalize().unwrap();
+        let expected_pipe =
+            super::super::oci_whpx_owner::owned_pipe_name(&service_root).expect("derive pipe");
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::windows_named_pipe(expected_pipe).unwrap()
+        );
+        let owner = config
+            .box_owned_owner()
+            .expect("gate 5 packaged path is Box-owned");
+        assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(
+            owner.runtime_path(),
+            runtime.canonicalize().unwrap().as_path()
+        );
+        assert_eq!(owner.shim_path(), shim.canonicalize().unwrap().as_path());
+        assert_eq!(
+            owner.system_image_manifest(),
+            manifest.canonicalize().unwrap().as_path()
         );
         let _ = fs::remove_dir_all(&plant);
         let _ = fs::remove_dir_all(&home);
