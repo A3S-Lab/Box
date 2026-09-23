@@ -44,8 +44,8 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 1 | Packaged artifact discovery for WHPX Host (runtime/shim/vm-rootfs) without qualification-only env | **blocked** — no durable Windows install layout yet. Qualification downloads CI `windows-whpx-qualification` + guest-agent + rootfs archive each run (`scripts/windows-whpx-oci-qualification.ps1`). Gate 1 needs a shipped layout (e.g. `a3s-oci.exe`, `a3s-oci-krun-shim.exe`, and a durable `vm-rootfs` with `usr\bin\a3s-oci-agent` beside `a3s-box` / under `~/.a3s`) before discovery code is tip-proven. Do not invent soft-default cutover without that package. |
-| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | open / qualification exists with explicit BOX_OWNED + paths |
+| 1 | Packaged artifact discovery for WHPX Host (runtime/shim/vm-rootfs/system-image) without qualification-only env | **implemented** — `oci_whpx_packaged` (layout: OCI `packaging/windows/README.md`). Tip install/package still required before production claim. |
+| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **implemented** — endpoint unset + packaged artifacts → Box-owned; missing packages fail-closed. Tip prove on real WHPX remaining. |
 | 3 | Create/start/exec/FS/stop/delete parity on real WHPX under (2) | open |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | open |
 | 5 | Windows default absent-env: omit-isolation stamps OCI DedicatedVm | open — blocked on 1–4 |

@@ -1114,20 +1114,84 @@ fn parse_windows_environment(
             .map(Some);
     }
 
-    let endpoint = endpoint
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ExecutionManagerError::InvalidRequest(format!(
-            "{OCI_WHPX_ENDPOINT_ENV} must be set explicitly for the qualification-only WHPX service"
-        ))
-        })?
-        .into_string()
-        .map_err(|_| {
+    let endpoint = endpoint.filter(|value| !value.is_empty());
+    if let Some(endpoint) = endpoint {
+        let endpoint = endpoint.into_string().map_err(|_| {
             ExecutionManagerError::InvalidRequest(format!(
                 "{OCI_WHPX_ENDPOINT_ENV} must contain UTF-8 text"
             ))
         })?;
-    WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
+        return WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some);
+    }
+
+    // Opt-in microvm|all without qualification endpoint → packaged Box-owned Host.
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return parse_windows_whpx_packaged_box_owned(
+            home_dir,
+            Some(runtime_root),
+            service_root,
+            service_bin,
+            service_shim,
+            service_vm_rootfs,
+            service_manifest,
+        )
+        .map(Some);
+    }
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+    {
+        let _ = (
+            service_root,
+            service_bin,
+            service_shim,
+            service_vm_rootfs,
+            service_manifest,
+        );
+        Err(ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_WHPX_ENDPOINT_ENV} must be set explicitly for the qualification-only WHPX service"
+        )))
+    }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn parse_windows_whpx_packaged_box_owned(
+    home_dir: &Path,
+    host_root_override: Option<PathBuf>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_vm_rootfs: Option<OsString>,
+    service_manifest: Option<OsString>,
+) -> ExecutionManagerResult<WindowsWhpxOciMigrationConfig> {
+    let discovered = super::oci_whpx_packaged::discover_packaged_windows_whpx_artifacts(
+        super::oci_whpx_packaged::PackagedWindowsWhpxOverrides {
+            runtime_path: service_bin
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            shim_path: service_shim
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            vm_rootfs: service_vm_rootfs
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            system_image_manifest: service_manifest
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        },
+    )?;
+    let service_root = service_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or(host_root_override)
+        .unwrap_or_else(|| default_service_root(home_dir));
+    let endpoint = super::oci_whpx_owner::owned_pipe_name(&service_root)?;
+    WindowsWhpxOciMigrationConfig::new(service_root.clone(), endpoint)?.with_box_owned_owner(
+        service_root,
+        discovered.runtime_path,
+        discovered.shim_path,
+        discovered.vm_rootfs,
+        discovered.system_image_manifest,
+    )
 }
 
 #[derive(Default)]

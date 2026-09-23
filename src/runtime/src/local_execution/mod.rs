@@ -37,6 +37,8 @@ mod oci_kvm_owner {
 }
 #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
 mod oci_whpx_owner;
+#[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+mod oci_whpx_packaged;
 #[cfg(all(
     feature = "vm",
     not(all(target_os = "windows", target_arch = "x86_64"))
