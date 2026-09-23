@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pin `a3s-oci-sdk`/`a3s-oci-core` and CI/release `A3S_OCI_RUNTIME_REV` to
+  crates.io-publishable `0.3.2` (`d5c3292f`) so `a3s-box-runtime@3.3.0` /
+  `a3s-box-sdk@3.3.0` can finish crates.io publication. crates.io `0.3.1`
+  lacked Network/Storage attachment APIs present on the prior git pin. Does
+  **not** claim Enterprise GA.
+
 ## [3.3.0] — 2026-09-23
 
 Release line `3.3.0`: workspace, installers, and SDK packages align on

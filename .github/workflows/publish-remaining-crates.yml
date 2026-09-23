@@ -1,0 +1,148 @@
+name: Publish remaining Box crates
+
+# Idempotent crates.io publisher for unfinished release-line crates
+# (e.g. a3s-box-runtime/sdk after a blocked v* release publish job).
+# Does not create GitHub Release assets; use release.yml for that.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Box workspace version without a v prefix (e.g. 3.3.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-remaining-crates-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  A3S_DEPS_STUB: "1"
+
+jobs:
+  publish-crates:
+    name: Publish remaining crates.io packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Create stub libkrun for linking
+        run: |
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: src
+          key: remaining-crates-${{ inputs.version }}
+      - name: Verify workspace version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          actual="$(python3 - <<'PY'
+          import tomllib
+          with open("src/Cargo.toml", "rb") as manifest:
+              print(tomllib.load(manifest)["workspace"]["package"]["version"])
+          PY
+          )"
+          if [[ "$actual" != "$RELEASE_VERSION" ]]; then
+            echo "::error::Workspace version $actual does not match requested $RELEASE_VERSION"
+            exit 1
+          fi
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd src
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not configured"
+            exit 1
+          fi
+          echo "Publishing version $VERSION (in dependency order)"
+          CRATES_IO_USER_AGENT="A3S-Lab-Box-remaining-publisher/$VERSION (https://github.com/A3S-Lab/Box)"
+
+          crate_status() {
+            local crate="$1"
+            curl --retry 5 --retry-all-errors --silent --show-error \
+              --location --user-agent "$CRATES_IO_USER_AGENT" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$crate/$VERSION"
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local attempt status
+            for attempt in $(seq 1 18); do
+              status="$(crate_status "$crate")"
+              if [ "$status" = "200" ]; then
+                if cargo info "$crate@$VERSION" \
+                     --registry crates-io >/dev/null 2>&1; then
+                  echo "Verified $crate@$VERSION in the crates.io index"
+                  return 0
+                fi
+                echo "$crate@$VERSION is visible through the API; waiting for the index"
+              fi
+              if [ "$status" != "200" ] && [ "$status" != "404" ]; then
+                echo "::error::crates.io returned HTTP $status while verifying $crate@$VERSION"
+                return 1
+              fi
+              if [ "$attempt" -lt 18 ]; then
+                sleep 10
+              fi
+            done
+            echo "::error::$crate@$VERSION did not become visible on crates.io"
+            return 1
+          }
+
+          libkrun_code="$(crate_status a3s-libkrun-sys)"
+          case "$libkrun_code" in
+            200) ;;
+            404)
+              echo "::error title=missing a3s-libkrun-sys release::Publish and verify a3s-libkrun-sys@$VERSION with publish-libkrun-sys.yml before running this workflow."
+              exit 1
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $libkrun_code while checking a3s-libkrun-sys@$VERSION"
+              exit 1
+              ;;
+          esac
+
+          for crate in a3s-box-mkext4 a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
+            code="$(crate_status "$crate")"
+            case "$code" in
+              200)
+                echo "$crate@$VERSION already exists; skipping upload"
+                ;;
+              404)
+                echo "Publishing $crate@$VERSION..."
+                if ! cargo publish --locked -p "$crate" --allow-dirty; then
+                  code="$(crate_status "$crate")"
+                  if [ "$code" != "200" ]; then
+                    echo "::error::$crate@$VERSION publication failed"
+                    exit 1
+                  fi
+                  echo "$crate@$VERSION became visible after a concurrent publication"
+                fi
+                ;;
+              *)
+                echo "::error::crates.io returned HTTP $code while checking $crate@$VERSION"
+                exit 1
+                ;;
+            esac
+            wait_for_crate "$crate"
+          done
