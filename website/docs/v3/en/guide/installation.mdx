@@ -64,7 +64,7 @@ a3s-box info
 
 | Behavior                       | Linux/macOS                   | Windows                         |
 | ------------------------------ | ----------------------------- | ------------------------------- |
-| Pin a release                  | `--version v3.2.7`            | `-Version v3.2.7`               |
+| Pin a release                  | `--version v3.3.0`            | `-Version v3.3.0`               |
 | Choose destination             | `--install-dir PATH`          | `-InstallDir PATH`              |
 | Do not change `PATH`           | `--no-modify-path`            | `-NoModifyPath`                 |
 | Replace an unmanaged directory | `--force`                     | `-Force`                        |
@@ -75,14 +75,14 @@ Pass Unix options after `sh -s --`:
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
-  sh -s -- --version v3.2.7 --no-modify-path
+  sh -s -- --version v3.3.0 --no-modify-path
 ```
 
 Invoke downloaded PowerShell text as a script block when options are needed:
 
 ```powershell
 $installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
-& ([scriptblock]::Create($installer)) -Version v3.2.7 -NoModifyPath
+& ([scriptblock]::Create($installer)) -Version v3.3.0 -NoModifyPath
 ```
 
 The corresponding environment variables are `A3S_BOX_VERSION`,
@@ -108,10 +108,10 @@ remove that installation directory from the per-user `PATH`.
 Uninstalling binaries intentionally does not delete runtime state stored
 elsewhere.
 
-## Linux Sandbox host preparation (3.2.7 GA)
+## Linux Sandbox host preparation (3.3.0 GA)
 
 The installer does not enable Sandbox host capabilities. After installing
-`v3.2.7` or newer on a certified Linux host, prepare the delegated cgroup and
+`v3.3.0` or newer on a certified Linux host, prepare the delegated cgroup and
 setuid launcher, then run without setting `A3S_BOX_OCI_MIGRATION`:
 
 ```bash
