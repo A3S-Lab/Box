@@ -1,10 +1,10 @@
 # A3S Box Architecture Optimization Plan
 
 Status: **active planning baseline** (2026-09-23)  
-Evidence tip: `main` @ gate-9 tip-prove (WHPX Live digest `e329bb9d…`;
-Linux/KVM and Windows/WHPX omit→DedicatedVm cutover tip-proven; WHPX mid-run
-Live gate 9 tip-proven; `b2_process_session_recovery_closed` stays false;
-Enterprise GA open)  
+Evidence tip: `main` @ pin-honest WHPX Live re-tip (digest `f366c8d4…` on
+OCI pin `b26155b1`; Linux/KVM and Windows/WHPX omit→DedicatedVm cutover
+tip-proven; WHPX mid-run Live gate 9 tip-proven;
+`b2_process_session_recovery_closed` stays false; Enterprise GA open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),

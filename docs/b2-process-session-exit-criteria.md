@@ -27,8 +27,8 @@ Related:
 | --- | --- | --- |
 | 1 | Native Linux Sandbox Live: retained stream + keyed mutating FS across Host owner death; no invented exit; schema at or above `a3s.box.linux-native-live-session.v7` | **observation-greened** (CI / WSL digests in Sandbox binder). Still reports `b2_process_session_recovery_closed=false`. |
 | 2 | Linux/KVM DedicatedVm Live: retained stream + FS + `kvm_microvm_live_claimed` under Box-owned ensure; tip schema `a3s.box.linux-kvm-live-session` (v5+) | **observation-greened** (WSL digests in KVM binder). B2 flag stays false. |
-| 3 | Windows/WHPX DedicatedVm Live: mid-run Host death with retained stream + FS under packaged Box-owned Host; schema `a3s.box.windows-whpx-live-session.v1` | **tip-proven** — digest `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e` (WHPX binder gate 9). B2 flag stays false. |
-| 4 | Pin honesty: Native + KVM + WHPX tip digests recorded against the same Box `main` tip and CI `A3S_OCI_RUNTIME_REV` (or a documented re-tip after pin bump) | **partial** — WHPX tip used OCI `7a18464`; Box CI pin is now `b26155b1` (includes that tip). Re-tip WHPX (and refresh Native/KVM digests) on the pinned Host before flip. |
+| 3 | Windows/WHPX DedicatedVm Live: mid-run Host death with retained stream + FS under packaged Box-owned Host; schema `a3s.box.windows-whpx-live-session.v1` | **tip-proven** — pin-honest digest `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box `79414cc3` / OCI `b26155b1`). B2 flag stays false. |
+| 4 | Pin honesty: Native + KVM + WHPX tip digests recorded against the same Box `main` tip and CI `A3S_OCI_RUNTIME_REV` (or a documented re-tip after pin bump) | **partial** — WHPX pin-honest re-tip digest `f366c8d4…` on Box `79414cc3` + OCI pin `b26155b1` (Host binaries `#357` tip). Native/KVM digests still on older pins; refresh those before flip. |
 | 5 | Deliberate close: ROADMAP B2 exit checkbox + harness schemas allow `b2_process_session_recovery_closed=true` only when gates 1–4 pass; CHANGELOG states non-claims (no Enterprise GA / HVF / B5) | **open** — do not flip from this document alone. |
 
 ## Flip checklist (when gates 1–4 are green)

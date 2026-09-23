@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Pin-honest WHPX Live re-tip on OCI pin `b26155b1`: digest
+  `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box
+  `79414cc3`; `live_path_unavailable=false`). Does **not** flip B2 or claim
+  Enterprise GA.
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `b26155b1` (merge of `#353`–`#357`: WHPX durable session-owner, host-control
   Live reattach, Guest Host-EOF reconnect). Aligns packaged Host with the gate 9
