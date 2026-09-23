@@ -165,7 +165,9 @@ artifacts are published from the same versioned release tag. See the
 > (qualification-only remains), Linux/KVM binder gate residual docs sync on
 > release line, and broader Cloud `BX0.3` hardware-TEE claims. Linux/KVM
 > omit-isolation → OCI DedicatedVm production cutover is tip-proven
-> (gates 1–7 in [microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md));
+> (gates 1–8 in [microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md));
+> Windows/WHPX production remains open
+> ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md) / #650).
 > Enterprise GA is not claimed. Box-owned native Host spawn now forces
 > supervised create (`A3S_OCI_NATIVE_SESSION_SUPERVISOR=1`) for production
 > `SandboxViaOci`; external Hosts that omit the env remain Host-bound.
