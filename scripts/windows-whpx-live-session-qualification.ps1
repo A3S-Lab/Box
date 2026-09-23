@@ -88,8 +88,12 @@ Build with:
 Copy-Item -LiteralPath (Resolve-RegularFile $exampleSrc) `
     -Destination (Join-Path $boxBin $exampleName)
 
-foreach ($name in @('a3s-oci.exe', 'a3s-oci-krun-shim.exe')) {
-    Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $ociWindowsArtifacts $name)) `
+foreach ($name in @('a3s-oci.exe', 'a3s-oci-krun-shim.exe', 'krun.dll', 'libkrunfw.dll')) {
+    $candidate = Join-Path $ociWindowsArtifacts $name
+    if (-not (Test-Path -LiteralPath $candidate)) {
+        $candidate = Join-Path $ociWindowsArtifacts (Join-Path 'bin' $name)
+    }
+    Copy-Item -LiteralPath (Resolve-RegularFile $candidate) `
         -Destination (Join-Path $ociBin $name)
 }
 
