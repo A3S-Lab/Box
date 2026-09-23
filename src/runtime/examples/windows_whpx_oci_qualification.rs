@@ -52,6 +52,7 @@ mod qualification {
     const SERVICE_BIN_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_BIN";
     const SERVICE_SHIM_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_SHIM";
     const SERVICE_VM_ROOTFS_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS";
+    const SERVICE_MANIFEST_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_MANIFEST";
     const SCHEMA_VERSION: &str = "a3s.box.windows-whpx-oci-qualification.v1";
     const STDOUT_MARKER: &str = "a3s-box-whpx-oci-stdout";
     const STDERR_MARKER: &str = "a3s-box-whpx-oci-stderr";
@@ -71,6 +72,7 @@ mod qualification {
         service_bin: Option<PathBuf>,
         service_shim: Option<PathBuf>,
         service_vm_rootfs: Option<PathBuf>,
+        service_manifest: Option<PathBuf>,
     }
 
     #[derive(Debug, Serialize)]
@@ -222,16 +224,18 @@ mod qualification {
             std::env::var(BOX_OWNED_ENV).ok().as_deref().map(str::trim),
             Some("1" | "true" | "on" | "yes" | "box-owned")
         );
-        let (service_root, service_bin, service_shim, service_vm_rootfs) = if box_owned {
-            (
-                Some(absolute_environment_path(SERVICE_ROOT_ENV)?),
-                Some(absolute_environment_path(SERVICE_BIN_ENV)?),
-                Some(absolute_environment_path(SERVICE_SHIM_ENV)?),
-                Some(absolute_environment_path(SERVICE_VM_ROOTFS_ENV)?),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (service_root, service_bin, service_shim, service_vm_rootfs, service_manifest) =
+            if box_owned {
+                (
+                    Some(absolute_environment_path(SERVICE_ROOT_ENV)?),
+                    Some(absolute_environment_path(SERVICE_BIN_ENV)?),
+                    Some(absolute_environment_path(SERVICE_SHIM_ENV)?),
+                    Some(absolute_environment_path(SERVICE_VM_ROOTFS_ENV)?),
+                    Some(absolute_environment_path(SERVICE_MANIFEST_ENV)?),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
 
         report.home_dir = Some(home_dir.clone());
         report.state_path = Some(state_path.clone());
@@ -250,6 +254,7 @@ mod qualification {
             service_bin,
             service_shim,
             service_vm_rootfs,
+            service_manifest,
         })
     }
 
@@ -476,6 +481,10 @@ mod qualification {
                     .service_vm_rootfs
                     .clone()
                     .ok_or_else(|| failure("box-owned connect requires vm-rootfs"))?,
+                inputs
+                    .service_manifest
+                    .clone()
+                    .ok_or_else(|| failure("box-owned connect requires system-image manifest"))?,
             )?;
         }
         Ok(LocalExecutionManager::with_windows_whpx_oci_qualification(

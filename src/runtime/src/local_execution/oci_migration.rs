@@ -43,6 +43,7 @@ pub const OCI_WHPX_SERVICE_ROOT_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_ROOT";
 pub const OCI_WHPX_SERVICE_BIN_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_BIN";
 pub const OCI_WHPX_SERVICE_SHIM_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_SHIM";
 pub const OCI_WHPX_SERVICE_VM_ROOTFS_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS";
+pub const OCI_WHPX_SERVICE_MANIFEST_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_MANIFEST";
 #[cfg(test)]
 const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
 
@@ -74,6 +75,7 @@ pub struct WindowsWhpxBoxOwnedOwner {
     runtime_path: PathBuf,
     shim_path: PathBuf,
     vm_rootfs: PathBuf,
+    system_image_manifest: PathBuf,
 }
 
 impl WindowsWhpxBoxOwnedOwner {
@@ -91,6 +93,10 @@ impl WindowsWhpxBoxOwnedOwner {
 
     pub fn vm_rootfs(&self) -> &Path {
         &self.vm_rootfs
+    }
+
+    pub fn system_image_manifest(&self) -> &Path {
+        &self.system_image_manifest
     }
 }
 
@@ -253,12 +259,14 @@ impl WindowsWhpxOciMigrationConfig {
         runtime_path: impl Into<PathBuf>,
         shim_path: impl Into<PathBuf>,
         vm_rootfs: impl Into<PathBuf>,
+        system_image_manifest: impl Into<PathBuf>,
     ) -> ExecutionManagerResult<Self> {
         self.box_owned_owner = Some(WindowsWhpxBoxOwnedOwner {
             service_root: service_root.into(),
             runtime_path: runtime_path.into(),
             shim_path: shim_path.into(),
             vm_rootfs: vm_rootfs.into(),
+            system_image_manifest: system_image_manifest.into(),
         });
         self.validate()?;
         Ok(self)
@@ -287,6 +295,7 @@ impl WindowsWhpxOciMigrationConfig {
                 service_bin: std::env::var_os(OCI_WHPX_SERVICE_BIN_ENV),
                 service_shim: std::env::var_os(OCI_WHPX_SERVICE_SHIM_ENV),
                 service_vm_rootfs: std::env::var_os(OCI_WHPX_SERVICE_VM_ROOTFS_ENV),
+                service_manifest: std::env::var_os(OCI_WHPX_SERVICE_MANIFEST_ENV),
             },
             home_dir,
         )
@@ -301,6 +310,10 @@ impl WindowsWhpxOciMigrationConfig {
                     validate_absolute_normalized(&owner.runtime_path, "WHPX OCI runtime binary")?;
                     validate_absolute_normalized(&owner.shim_path, "WHPX OCI shim")?;
                     validate_absolute_normalized(&owner.vm_rootfs, "WHPX OCI vm-rootfs")?;
+                    validate_absolute_normalized(
+                        &owner.system_image_manifest,
+                        "WHPX OCI system-image manifest",
+                    )?;
                     let expected = super::oci_whpx_owner::owned_pipe_name(&owner.service_root)?;
                     if name != &expected {
                         return Err(ExecutionManagerError::InvalidRequest(format!(
@@ -472,6 +485,7 @@ impl LocalExecutionManager {
                     owner.runtime_path.clone(),
                     owner.shim_path.clone(),
                     owner.vm_rootfs.clone(),
+                    owner.system_image_manifest.clone(),
                 )?;
                 let endpoint = super::oci_whpx_owner::ensure_windows_whpx_oci_owner(
                     &owner.service_root,
@@ -1008,6 +1022,7 @@ fn parse_windows_environment(
         service_bin,
         service_shim,
         service_vm_rootfs,
+        service_manifest,
     } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -1072,6 +1087,14 @@ fn parse_windows_environment(
                     "{OCI_WHPX_SERVICE_VM_ROOTFS_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
                 ))
             })?;
+        let service_manifest = service_manifest
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_MANIFEST_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
         let endpoint = match endpoint.filter(|value| !value.is_empty()) {
             Some(value) => value.into_string().map_err(|_| {
                 ExecutionManagerError::InvalidRequest(format!(
@@ -1081,7 +1104,13 @@ fn parse_windows_environment(
             None => super::oci_whpx_owner::owned_pipe_name(&service_root)?,
         };
         return WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint)?
-            .with_box_owned_owner(service_root, service_bin, service_shim, service_vm_rootfs)
+            .with_box_owned_owner(
+                service_root,
+                service_bin,
+                service_shim,
+                service_vm_rootfs,
+                service_manifest,
+            )
             .map(Some);
     }
 
@@ -1111,6 +1140,7 @@ struct WindowsWhpxEnvironmentInputs {
     service_bin: Option<OsString>,
     service_shim: Option<OsString>,
     service_vm_rootfs: Option<OsString>,
+    service_manifest: Option<OsString>,
 }
 
 #[derive(Default)]
@@ -1497,6 +1527,7 @@ mod tests {
                 service_bin: Some(absolute("a3s-oci.exe").into_os_string()),
                 service_shim: Some(absolute("a3s-oci-krun-shim.exe").into_os_string()),
                 service_vm_rootfs: Some(absolute("system").into_os_string()),
+                service_manifest: Some(absolute("system-image.json").into_os_string()),
                 ..Default::default()
             },
             &home,
@@ -1509,6 +1540,10 @@ mod tests {
         );
         let owner = config.box_owned_owner().expect("box-owned owner");
         assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(
+            owner.system_image_manifest(),
+            absolute("system-image.json").as_path()
+        );
     }
 
     #[test]

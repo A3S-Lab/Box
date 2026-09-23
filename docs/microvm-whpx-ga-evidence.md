@@ -19,13 +19,14 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 | `off` / `legacy` | VM-only backend |
 | `sandbox` / `on` | Rejected on Windows (Sandbox is Linux-only) |
 | `microvm` / `all` + `A3S_BOX_OCI_WHPX_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host pipe) |
-| `microvm` / `all` + `A3S_BOX_WHPX_OCI_BOX_OWNED=1` + service root/bin/shim/vm-rootfs | Qualification: Box-owned WHPX Host ensure |
+| `microvm` / `all` + `A3S_BOX_WHPX_OCI_BOX_OWNED=1` + service root/bin/shim/vm-rootfs/**manifest** | Qualification: Box-owned WHPX Host ensure (requires `system-image.json`) |
 | Packaged absent-env production default | **Not claimed** — needs gates below |
 
 Production cutover for this binder means: on Windows x86_64 with WHPX, **absent**
 qualification endpoint env, new omit-isolation records stamp `oci_sdk` +
-`DedicatedVm` using packaged Box-owned Host artifacts, with fail-closed
-soft/hard rules that never silently reinterpret Sandbox (Sandbox remains
+`DedicatedVm` using packaged Box-owned Host artifacts (`a3s-oci.exe`,
+`a3s-oci-krun-shim.exe`, bootstrap `vm-rootfs`, and `system-image/system-image.json`),
+with fail-closed soft/hard rules that never silently reinterpret Sandbox (Sandbox remains
 unsupported on Windows).
 
 ## What is already greened (do not invent more)

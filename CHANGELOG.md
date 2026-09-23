@@ -113,6 +113,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Windows Box-owned WHPX Host spawn passes `--system-image-manifest` required
+  by OCI `box-whpx-qualification-service` (pin `f08555c9…`). Box-owned env now
+  requires `A3S_BOX_WHPX_OCI_SERVICE_MANIFEST`; owner record schema is
+  `a3s.box.windows-whpx-oci-owner.v2`. Qualification script stages the OCI
+  artifact `system-image\system-image.json`. Does **not** flip WHPX production
+  cutover or claim Enterprise GA (#650).
 - Linux/KVM DedicatedVm OCI qualification accepts `config.persistent` so
   Docker-like `create` / non-`--rm` `run` (which set persistent to retain the
   writable layer until remove) are not rejected as unqualified. Tip-proven on

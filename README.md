@@ -506,8 +506,9 @@ a3s-box run --rm --cpus 1 --memory 512m --network none alpine:3.20 -- /bin/true
 ```
 
 Alternatively, set `A3S_BOX_WHPX_OCI_BOX_OWNED=1` with absolute
-`A3S_BOX_WHPX_OCI_SERVICE_ROOT` / `_BIN` / `_SHIM` / `_VM_ROOTFS` so Box
-identity-fences and (re)spawns that Host under a deterministic named pipe
+`A3S_BOX_WHPX_OCI_SERVICE_ROOT` / `_BIN` / `_SHIM` / `_VM_ROOTFS` /
+`_MANIFEST` (system-image.json) so Box identity-fences and (re)spawns that
+Host under a deterministic named pipe
 derived from the service root. Script `-BoxOwned` uses this path, including
 Host `taskkill` → ensure reconnect. This remains qualification-only and does
 not promote WHPX MicroVM to production.
