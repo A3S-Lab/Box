@@ -43,6 +43,7 @@ pub const OCI_WHPX_SERVICE_ROOT_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_ROOT";
 pub const OCI_WHPX_SERVICE_BIN_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_BIN";
 pub const OCI_WHPX_SERVICE_SHIM_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_SHIM";
 pub const OCI_WHPX_SERVICE_VM_ROOTFS_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS";
+pub const OCI_WHPX_SERVICE_MANIFEST_ENV: &str = "A3S_BOX_WHPX_OCI_SERVICE_MANIFEST";
 #[cfg(test)]
 const DEFAULT_OCI_WHPX_ENDPOINT: &str = r"\\.\pipe\a3s-oci-box-qualification";
 
@@ -74,6 +75,7 @@ pub struct WindowsWhpxBoxOwnedOwner {
     runtime_path: PathBuf,
     shim_path: PathBuf,
     vm_rootfs: PathBuf,
+    system_image_manifest: PathBuf,
 }
 
 impl WindowsWhpxBoxOwnedOwner {
@@ -91,6 +93,10 @@ impl WindowsWhpxBoxOwnedOwner {
 
     pub fn vm_rootfs(&self) -> &Path {
         &self.vm_rootfs
+    }
+
+    pub fn system_image_manifest(&self) -> &Path {
+        &self.system_image_manifest
     }
 }
 
@@ -253,12 +259,14 @@ impl WindowsWhpxOciMigrationConfig {
         runtime_path: impl Into<PathBuf>,
         shim_path: impl Into<PathBuf>,
         vm_rootfs: impl Into<PathBuf>,
+        system_image_manifest: impl Into<PathBuf>,
     ) -> ExecutionManagerResult<Self> {
         self.box_owned_owner = Some(WindowsWhpxBoxOwnedOwner {
             service_root: service_root.into(),
             runtime_path: runtime_path.into(),
             shim_path: shim_path.into(),
             vm_rootfs: vm_rootfs.into(),
+            system_image_manifest: system_image_manifest.into(),
         });
         self.validate()?;
         Ok(self)
@@ -287,6 +295,7 @@ impl WindowsWhpxOciMigrationConfig {
                 service_bin: std::env::var_os(OCI_WHPX_SERVICE_BIN_ENV),
                 service_shim: std::env::var_os(OCI_WHPX_SERVICE_SHIM_ENV),
                 service_vm_rootfs: std::env::var_os(OCI_WHPX_SERVICE_VM_ROOTFS_ENV),
+                service_manifest: std::env::var_os(OCI_WHPX_SERVICE_MANIFEST_ENV),
             },
             home_dir,
         )
@@ -301,6 +310,10 @@ impl WindowsWhpxOciMigrationConfig {
                     validate_absolute_normalized(&owner.runtime_path, "WHPX OCI runtime binary")?;
                     validate_absolute_normalized(&owner.shim_path, "WHPX OCI shim")?;
                     validate_absolute_normalized(&owner.vm_rootfs, "WHPX OCI vm-rootfs")?;
+                    validate_absolute_normalized(
+                        &owner.system_image_manifest,
+                        "WHPX OCI system-image manifest",
+                    )?;
                     let expected = super::oci_whpx_owner::owned_pipe_name(&owner.service_root)?;
                     if name != &expected {
                         return Err(ExecutionManagerError::InvalidRequest(format!(
@@ -472,6 +485,7 @@ impl LocalExecutionManager {
                     owner.runtime_path.clone(),
                     owner.shim_path.clone(),
                     owner.vm_rootfs.clone(),
+                    owner.system_image_manifest.clone(),
                 )?;
                 let endpoint = super::oci_whpx_owner::ensure_windows_whpx_oci_owner(
                     &owner.service_root,
@@ -1008,6 +1022,7 @@ fn parse_windows_environment(
         service_bin,
         service_shim,
         service_vm_rootfs,
+        service_manifest,
     } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -1033,9 +1048,11 @@ fn parse_windows_environment(
         }
     }
 
-    let runtime_root = runtime_root
+    let explicit_host_root = runtime_root
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(PathBuf::from);
+    let runtime_root = explicit_host_root
+        .clone()
         .unwrap_or_else(|| default_service_root(home_dir));
     let box_owned = parse_explicit_bool(OCI_WHPX_BOX_OWNED_ENV, box_owned)?;
 
@@ -1072,6 +1089,14 @@ fn parse_windows_environment(
                     "{OCI_WHPX_SERVICE_VM_ROOTFS_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
                 ))
             })?;
+        let service_manifest = service_manifest
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "{OCI_WHPX_SERVICE_MANIFEST_ENV} must be set when {OCI_WHPX_BOX_OWNED_ENV} is enabled"
+                ))
+            })?;
         let endpoint = match endpoint.filter(|value| !value.is_empty()) {
             Some(value) => value.into_string().map_err(|_| {
                 ExecutionManagerError::InvalidRequest(format!(
@@ -1081,24 +1106,171 @@ fn parse_windows_environment(
             None => super::oci_whpx_owner::owned_pipe_name(&service_root)?,
         };
         return WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint)?
-            .with_box_owned_owner(service_root, service_bin, service_shim, service_vm_rootfs)
+            .with_box_owned_owner(
+                service_root,
+                service_bin,
+                service_shim,
+                service_vm_rootfs,
+                service_manifest,
+            )
             .map(Some);
     }
 
-    let endpoint = endpoint
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ExecutionManagerError::InvalidRequest(format!(
-            "{OCI_WHPX_ENDPOINT_ENV} must be set explicitly for the qualification-only WHPX service"
-        ))
-        })?
-        .into_string()
-        .map_err(|_| {
+    let endpoint = endpoint.filter(|value| !value.is_empty());
+    if let Some(endpoint) = endpoint {
+        let endpoint = endpoint.into_string().map_err(|_| {
             ExecutionManagerError::InvalidRequest(format!(
                 "{OCI_WHPX_ENDPOINT_ENV} must contain UTF-8 text"
             ))
         })?;
-    WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some)
+        return WindowsWhpxOciMigrationConfig::new(runtime_root, endpoint).map(Some);
+    }
+
+    // Opt-in microvm|all without qualification endpoint → packaged Box-owned Host.
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return parse_windows_whpx_packaged_box_owned(
+            home_dir,
+            explicit_host_root,
+            service_root,
+            service_bin,
+            service_shim,
+            service_vm_rootfs,
+            service_manifest,
+        )
+        .map(Some);
+    }
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+    {
+        let _ = (
+            service_root,
+            service_bin,
+            service_shim,
+            service_vm_rootfs,
+            service_manifest,
+        );
+        Err(ExecutionManagerError::InvalidRequest(format!(
+            "{OCI_WHPX_ENDPOINT_ENV} must be set explicitly for the qualification-only WHPX service"
+        )))
+    }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn parse_windows_whpx_packaged_box_owned(
+    home_dir: &Path,
+    host_root_override: Option<PathBuf>,
+    service_root: Option<OsString>,
+    service_bin: Option<OsString>,
+    service_shim: Option<OsString>,
+    service_vm_rootfs: Option<OsString>,
+    service_manifest: Option<OsString>,
+) -> ExecutionManagerResult<WindowsWhpxOciMigrationConfig> {
+    let discovered = super::oci_whpx_packaged::discover_packaged_windows_whpx_artifacts(
+        super::oci_whpx_packaged::PackagedWindowsWhpxOverrides {
+            runtime_path: service_bin
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            shim_path: service_shim
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            vm_rootfs: service_vm_rootfs
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            system_image_manifest: service_manifest
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        },
+    )?;
+    // Mutable service/runtime root must stay disjoint from immutable
+    // system-image. Packaged `bootstrap-vm-rootfs/` beside Host binaries is a
+    // seed; ensure materializes the live bootstrap under the service root.
+    let service_root = service_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or(host_root_override)
+        .unwrap_or_else(|| default_service_root(home_dir));
+    std::fs::create_dir_all(&service_root).map_err(|error| {
+        ExecutionManagerError::InvalidRequest(format!(
+            "failed to create Windows WHPX OCI service root {}: {error}",
+            service_root.display()
+        ))
+    })?;
+    let service_root = service_root.canonicalize().map_err(|error| {
+        ExecutionManagerError::InvalidRequest(format!(
+            "Windows WHPX OCI service root must resolve to an existing directory {}: {error}",
+            service_root.display()
+        ))
+    })?;
+    let system_image_directory = discovered.system_image_manifest.parent().ok_or_else(|| {
+        ExecutionManagerError::InvalidRequest(format!(
+            "packaged WHPX system-image manifest has no parent directory: {}",
+            discovered.system_image_manifest.display()
+        ))
+    })?;
+    if discovered.system_image_manifest.starts_with(&service_root)
+        || service_root.starts_with(system_image_directory)
+    {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "packaged WHPX system-image {} and mutable service root {} must be disjoint (do not set {OCI_WHPX_SERVICE_ROOT_ENV} / {OCI_HOST_ROOT_ENV} to the Host package install root that contains system-image/)",
+            system_image_directory.display(),
+            service_root.display()
+        )));
+    }
+    let vm_rootfs =
+        materialize_windows_whpx_service_bootstrap(&service_root, &discovered.vm_rootfs)?;
+    let endpoint = super::oci_whpx_owner::owned_pipe_name(&service_root)?;
+    WindowsWhpxOciMigrationConfig::new(service_root.clone(), endpoint)?.with_box_owned_owner(
+        service_root,
+        discovered.runtime_path,
+        discovered.shim_path,
+        vm_rootfs,
+        discovered.system_image_manifest,
+    )
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn materialize_windows_whpx_service_bootstrap(
+    service_root: &Path,
+    packaged_seed: &Path,
+) -> ExecutionManagerResult<PathBuf> {
+    let bootstrap = service_root.join("bootstrap-vm-rootfs");
+    if !bootstrap.exists() {
+        std::fs::create_dir_all(&bootstrap).map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "failed to create Windows WHPX service bootstrap {}: {error}",
+                bootstrap.display()
+            ))
+        })?;
+        if packaged_seed.is_dir() {
+            let seed = packaged_seed.canonicalize().ok();
+            if seed.as_ref() != Some(&bootstrap) {
+                if let Ok(entries) = std::fs::read_dir(packaged_seed) {
+                    for entry in entries.flatten() {
+                        let source = entry.path();
+                        if source.is_dir() {
+                            continue;
+                        }
+                        let destination = bootstrap.join(entry.file_name());
+                        let _ = std::fs::copy(&source, &destination);
+                    }
+                }
+            }
+        }
+    }
+    let canonical = bootstrap.canonicalize().map_err(|error| {
+        ExecutionManagerError::Unavailable(format!(
+            "failed to resolve Windows WHPX service bootstrap {}: {error}",
+            bootstrap.display()
+        ))
+    })?;
+    if canonical == service_root || !canonical.starts_with(service_root) {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "Windows WHPX service bootstrap {} must be a strict descendant of service root {}",
+            canonical.display(),
+            service_root.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 #[derive(Default)]
@@ -1111,6 +1283,7 @@ struct WindowsWhpxEnvironmentInputs {
     service_bin: Option<OsString>,
     service_shim: Option<OsString>,
     service_vm_rootfs: Option<OsString>,
+    service_manifest: Option<OsString>,
 }
 
 #[derive(Default)]
@@ -1450,8 +1623,9 @@ mod tests {
     }
 
     #[test]
-    fn windows_environment_requires_explicit_pipe_and_accepts_microvm() {
+    fn windows_environment_without_endpoint_fail_closed_or_accepts_qualification_pipe() {
         let home = absolute("a3s-oci-config-home");
+        // Opt-in without endpoint uses packaged discovery; empty install fail-closes.
         assert!(parse_windows_environment(
             WindowsWhpxEnvironmentInputs {
                 mode: Some(OsString::from("all")),
@@ -1482,6 +1656,114 @@ mod tests {
         assert!(config.box_owned_owner().is_none());
     }
 
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_packaged_opt_in_builds_box_owned_without_endpoint() {
+        use std::fs;
+
+        let home = absolute("a3s-oci-whpx-packaged-home");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let plant = std::env::temp_dir().join(format!(
+            "a3s-whpx-migration-packaged-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&plant);
+        fs::create_dir_all(plant.join("system-image")).unwrap();
+        fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
+        let runtime = plant.join("a3s-oci.exe");
+        let shim = plant.join("a3s-oci-krun-shim.exe");
+        let manifest = plant.join("system-image").join("system-image.json");
+        let seed_bootstrap = plant.join("bootstrap-vm-rootfs");
+        fs::write(&runtime, b"runtime").unwrap();
+        fs::write(&shim, b"shim").unwrap();
+        fs::write(&manifest, b"{}").unwrap();
+
+        let config = parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                service_bin: Some(runtime.clone().into_os_string()),
+                service_shim: Some(shim.clone().into_os_string()),
+                service_vm_rootfs: Some(seed_bootstrap.into_os_string()),
+                service_manifest: Some(manifest.clone().into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .unwrap();
+
+        let service_root = default_service_root(&home).canonicalize().unwrap();
+        let expected_pipe =
+            super::super::oci_whpx_owner::owned_pipe_name(&service_root).expect("derive pipe");
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::windows_named_pipe(expected_pipe).unwrap()
+        );
+        let owner = config
+            .box_owned_owner()
+            .expect("packaged opt-in is Box-owned");
+        assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(
+            owner.runtime_path(),
+            runtime.canonicalize().unwrap().as_path()
+        );
+        assert_eq!(owner.shim_path(), shim.canonicalize().unwrap().as_path());
+        assert_eq!(
+            owner.system_image_manifest(),
+            manifest.canonicalize().unwrap().as_path()
+        );
+        assert_eq!(
+            owner.vm_rootfs(),
+            service_root.join("bootstrap-vm-rootfs").as_path()
+        );
+        let _ = fs::remove_dir_all(&plant);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_packaged_opt_in_rejects_service_root_overlapping_system_image() {
+        use std::fs;
+
+        let home = absolute("a3s-oci-whpx-packaged-overlap-home");
+        let plant = std::env::temp_dir().join(format!(
+            "a3s-whpx-migration-packaged-overlap-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&plant);
+        fs::create_dir_all(plant.join("system-image")).unwrap();
+        fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
+        let runtime = plant.join("a3s-oci.exe");
+        let shim = plant.join("a3s-oci-krun-shim.exe");
+        let manifest = plant.join("system-image").join("system-image.json");
+        let bootstrap = plant.join("bootstrap-vm-rootfs");
+        fs::write(&runtime, b"runtime").unwrap();
+        fs::write(&shim, b"shim").unwrap();
+        fs::write(&manifest, b"{}").unwrap();
+
+        let error = parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                // Package install root overlaps immutable system-image/.
+                service_root: Some(plant.clone().into_os_string()),
+                service_bin: Some(runtime.into_os_string()),
+                service_shim: Some(shim.into_os_string()),
+                service_vm_rootfs: Some(bootstrap.into_os_string()),
+                service_manifest: Some(manifest.into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .expect_err("service root overlapping system-image must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("must be disjoint"),
+            "unexpected error: {message}"
+        );
+        let _ = fs::remove_dir_all(&plant);
+    }
+
     #[test]
     fn windows_box_owned_environment_derives_pipe_from_service_root() {
         let home = absolute("a3s-oci-config-home");
@@ -1497,6 +1779,7 @@ mod tests {
                 service_bin: Some(absolute("a3s-oci.exe").into_os_string()),
                 service_shim: Some(absolute("a3s-oci-krun-shim.exe").into_os_string()),
                 service_vm_rootfs: Some(absolute("system").into_os_string()),
+                service_manifest: Some(absolute("system-image.json").into_os_string()),
                 ..Default::default()
             },
             &home,
@@ -1509,6 +1792,10 @@ mod tests {
         );
         let owner = config.box_owned_owner().expect("box-owned owner");
         assert_eq!(owner.service_root(), service_root.as_path());
+        assert_eq!(
+            owner.system_image_manifest(),
+            absolute("system-image.json").as_path()
+        );
     }
 
     #[test]

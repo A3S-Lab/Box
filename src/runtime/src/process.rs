@@ -75,8 +75,10 @@ pub fn remove_legacy_microvm_cgroup(box_id: &str) -> a3s_box_core::error::Result
 /// Read a process start time as a stable PID identity token.
 ///
 /// Linux returns field 22 of `/proc/<pid>/stat`, measured in clock ticks since
-/// boot. macOS returns the `proc_bsdinfo` start timestamp in microseconds. Both
-/// distinguish a recorded process from a later process that reused the same PID.
+/// boot. macOS returns the `proc_bsdinfo` start timestamp in microseconds.
+/// Windows returns `GetProcessTimes` creation `FILETIME` as a 64-bit 100-ns
+/// tick count since 1601-01-01 UTC. All three distinguish a recorded process
+/// from a later process that reused the same PID.
 #[cfg(target_os = "linux")]
 pub fn pid_start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -88,7 +90,48 @@ pub fn pid_start_time(pid: u32) -> Option<u64> {
     macos_process_identity(pid).map(|identity| identity.start_time)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let mut handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+        }
+        if handle == 0 {
+            return None;
+        }
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
+        (ticks > 0).then_some(ticks)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn pid_start_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -314,6 +357,36 @@ mod tests {
         assert!(is_process_alive_with_identity(pid, start_time));
         assert!(!is_process_alive_with_identity(pid, Some(u64::MAX)));
         assert!(is_process_running_with_identity(pid, start_time));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_distinguishes_a_reused_pid() {
+        let pid = std::process::id();
+        let start_time = pid_start_time(pid);
+        assert!(
+            start_time.is_some(),
+            "live Windows process must have a GetProcessTimes creation token"
+        );
+        assert!(is_process_alive_with_identity(pid, start_time));
+        assert!(!is_process_alive_with_identity(pid, Some(u64::MAX)));
+        assert!(is_process_running_with_identity(pid, start_time));
+        assert!(!is_process_alive_with_identity(0x7fff_fffe, start_time));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_survives_spawned_child() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "ping -n 5 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id();
+        let start_time = pid_start_time(pid).expect("capture child identity");
+        assert!(is_process_alive_with_identity(pid, Some(start_time)));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!is_process_alive_with_identity(pid, Some(start_time)));
     }
 
     #[cfg(target_os = "macos")]

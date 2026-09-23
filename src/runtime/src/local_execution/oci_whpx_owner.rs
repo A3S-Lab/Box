@@ -15,16 +15,18 @@ use sha2::{Digest, Sha256};
 use super::{OciLifecycleAdapter, OciRuntimeEndpoint};
 use crate::file_lock::FileLock;
 
-const OWNER_RECORD_SCHEMA: &str = "a3s.box.windows-whpx-oci-owner.v1";
+const OWNER_RECORD_SCHEMA: &str = "a3s.box.windows-whpx-oci-owner.v2";
 const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-whpx-owner";
 const READY_FILE_NAME: &str = "service-ready.json";
-const READY_SCHEMA: &str = "a3s.oci.box-whpx-service-ready.v1";
-const AGENT_RELATIVE: &str = r"usr\bin\a3s-oci-agent";
+const READY_SCHEMA: &str = "a3s.oci.box-whpx-service-ready.v2";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Certified artifacts required to spawn or reuse a Box-owned WHPX qualification Host.
+/// Certified artifacts required to spawn or reuse a Box-owned WHPX Host.
+///
+/// Matches OCI `box-whpx-qualification-service`: isolated shim, bootstrap
+/// `vm-rootfs`, and the pinned `system-image.json` (agent lives in the image).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WindowsWhpxOwnerArtifacts {
     pub runtime_path: PathBuf,
@@ -32,7 +34,8 @@ pub(crate) struct WindowsWhpxOwnerArtifacts {
     pub shim_path: PathBuf,
     pub shim_sha256: String,
     pub vm_rootfs: PathBuf,
-    pub agent_sha256: String,
+    pub system_image_manifest: PathBuf,
+    pub system_image_manifest_sha256: String,
 }
 
 impl WindowsWhpxOwnerArtifacts {
@@ -40,14 +43,17 @@ impl WindowsWhpxOwnerArtifacts {
         runtime_path: impl Into<PathBuf>,
         shim_path: impl Into<PathBuf>,
         vm_rootfs: impl Into<PathBuf>,
+        system_image_manifest: impl Into<PathBuf>,
     ) -> ExecutionManagerResult<Self> {
         let runtime_path = runtime_path.into();
         let shim_path = shim_path.into();
         let vm_rootfs = vm_rootfs.into();
+        let system_image_manifest = system_image_manifest.into();
         for (label, path) in [
             ("runtime", runtime_path.as_path()),
             ("shim", shim_path.as_path()),
             ("vm-rootfs", vm_rootfs.as_path()),
+            ("system-image manifest", system_image_manifest.as_path()),
         ] {
             if !path.is_absolute() {
                 return Err(ExecutionManagerError::InvalidRequest(format!(
@@ -56,21 +62,26 @@ impl WindowsWhpxOwnerArtifacts {
                 )));
             }
         }
-        let agent_path = vm_rootfs.join(AGENT_RELATIVE);
-        if !agent_path.is_file() {
+        if !vm_rootfs.is_dir() {
             return Err(ExecutionManagerError::InvalidRequest(format!(
-                "Windows WHPX OCI owner vm-rootfs must contain {}: {}",
-                AGENT_RELATIVE,
-                agent_path.display()
+                "Windows WHPX OCI owner vm-rootfs must be a directory: {}",
+                vm_rootfs.display()
+            )));
+        }
+        if !system_image_manifest.is_file() {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "Windows WHPX OCI owner system-image manifest must be a file: {}",
+                system_image_manifest.display()
             )));
         }
         Ok(Self {
             runtime_sha256: sha256_file(&runtime_path)?,
             shim_sha256: sha256_file(&shim_path)?,
-            agent_sha256: sha256_file(&agent_path)?,
+            system_image_manifest_sha256: sha256_file(&system_image_manifest)?,
             runtime_path,
             shim_path,
             vm_rootfs,
+            system_image_manifest,
         })
     }
 }
@@ -95,7 +106,8 @@ struct WindowsWhpxOwnerRecord {
     shim_path: PathBuf,
     shim_sha256: String,
     vm_rootfs: PathBuf,
-    agent_sha256: String,
+    system_image_manifest: PathBuf,
+    system_image_manifest_sha256: String,
     pipe_name: String,
 }
 
@@ -115,7 +127,8 @@ impl WindowsWhpxOwnerRecord {
             shim_path: artifacts.shim_path.clone(),
             shim_sha256: artifacts.shim_sha256.clone(),
             vm_rootfs: artifacts.vm_rootfs.clone(),
-            agent_sha256: artifacts.agent_sha256.clone(),
+            system_image_manifest: artifacts.system_image_manifest.clone(),
+            system_image_manifest_sha256: artifacts.system_image_manifest_sha256.clone(),
             pipe_name,
         }
     }
@@ -128,9 +141,10 @@ impl WindowsWhpxOwnerRecord {
             || !self.runtime_path.is_absolute()
             || !self.shim_path.is_absolute()
             || !self.vm_rootfs.is_absolute()
+            || !self.system_image_manifest.is_absolute()
             || !is_sha256_hex(&self.runtime_sha256)
             || !is_sha256_hex(&self.shim_sha256)
-            || !is_sha256_hex(&self.agent_sha256)
+            || !is_sha256_hex(&self.system_image_manifest_sha256)
         {
             return Err(ExecutionManagerError::Internal(
                 "Windows WHPX OCI owner record is malformed or belongs to another endpoint"
@@ -146,7 +160,8 @@ impl WindowsWhpxOwnerRecord {
             && self.shim_path == expected.shim_path
             && self.shim_sha256 == expected.shim_sha256
             && self.vm_rootfs == expected.vm_rootfs
-            && self.agent_sha256 == expected.agent_sha256
+            && self.system_image_manifest == expected.system_image_manifest
+            && self.system_image_manifest_sha256 == expected.system_image_manifest_sha256
     }
 
     fn is_alive(&self) -> bool {
@@ -161,6 +176,8 @@ struct ServiceReadyEvidence {
     endpoint: String,
     runtime_root: PathBuf,
     state_root: PathBuf,
+    #[serde(default)]
+    system_image_manifest: Option<PathBuf>,
 }
 
 /// Ensure a Box-owned Windows WHPX qualification Host is identity-fenced and ready.
@@ -352,6 +369,10 @@ async fn wait_until_ready(
                     && paths_equal(&ready.runtime_root, service_root)
                     && paths_equal(&ready.state_root, state_root)
                     && ready.owner_pid != 0
+                    && ready
+                        .system_image_manifest
+                        .as_ref()
+                        .is_none_or(|path| path.is_absolute())
             }
             Ok(None) => false,
             Err(_) => false,
@@ -444,6 +465,8 @@ fn spawn_owner(
         .arg(service_root)
         .arg("--vm-rootfs")
         .arg(&artifacts.vm_rootfs)
+        .arg("--system-image-manifest")
+        .arg(&artifacts.system_image_manifest)
         .arg("--state-root")
         .arg(state_root)
         .arg("--pipe")
@@ -712,7 +735,8 @@ mod tests {
             shim_path: PathBuf::from(r"C:\opt\a3s\a3s-oci-krun-shim.exe"),
             shim_sha256: "b".repeat(64),
             vm_rootfs: PathBuf::from(r"C:\opt\a3s\system"),
-            agent_sha256: "c".repeat(64),
+            system_image_manifest: PathBuf::from(r"C:\opt\a3s\system-image.json"),
+            system_image_manifest_sha256: "c".repeat(64),
         }
     }
 

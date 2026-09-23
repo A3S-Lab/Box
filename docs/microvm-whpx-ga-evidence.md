@@ -19,13 +19,14 @@ Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 | `off` / `legacy` | VM-only backend |
 | `sandbox` / `on` | Rejected on Windows (Sandbox is Linux-only) |
 | `microvm` / `all` + `A3S_BOX_OCI_WHPX_ENDPOINT` | Qualification: MicroVM → OCI DedicatedVm (external Host pipe) |
-| `microvm` / `all` + `A3S_BOX_WHPX_OCI_BOX_OWNED=1` + service root/bin/shim/vm-rootfs | Qualification: Box-owned WHPX Host ensure |
+| `microvm` / `all` + `A3S_BOX_WHPX_OCI_BOX_OWNED=1` + service root/bin/shim/vm-rootfs/**manifest** | Qualification: Box-owned WHPX Host ensure (requires `system-image.json`) |
 | Packaged absent-env production default | **Not claimed** — needs gates below |
 
 Production cutover for this binder means: on Windows x86_64 with WHPX, **absent**
 qualification endpoint env, new omit-isolation records stamp `oci_sdk` +
-`DedicatedVm` using packaged Box-owned Host artifacts, with fail-closed
-soft/hard rules that never silently reinterpret Sandbox (Sandbox remains
+`DedicatedVm` using packaged Box-owned Host artifacts (`a3s-oci.exe`,
+`a3s-oci-krun-shim.exe`, bootstrap `vm-rootfs`, and `system-image/system-image.json`),
+with fail-closed soft/hard rules that never silently reinterpret Sandbox (Sandbox remains
 unsupported on Windows).
 
 ## What is already greened (do not invent more)
@@ -43,8 +44,8 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 1 | Packaged artifact discovery for WHPX Host (runtime/shim/vm-rootfs) without qualification-only env | **blocked** — no durable Windows install layout yet. Qualification downloads CI `windows-whpx-qualification` + guest-agent + rootfs archive each run (`scripts/windows-whpx-oci-qualification.ps1`). Gate 1 needs a shipped layout (e.g. `a3s-oci.exe`, `a3s-oci-krun-shim.exe`, and a durable `vm-rootfs` with `usr\bin\a3s-oci-agent` beside `a3s-box` / under `~/.a3s`) before discovery code is tip-proven. Do not invent soft-default cutover without that package. |
-| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | open / qualification exists with explicit BOX_OWNED + paths |
+| 1 | Packaged artifact discovery for WHPX Host (runtime/shim/vm-rootfs/system-image) without qualification-only env | **tip-proven** — `oci_whpx_packaged` + install layout (OCI `packaging/windows/README.md`); local WHPX Host package beside `a3s-box.exe` discovered with endpoint unset |
+| 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset → Box-owned ensure; Windows `pid_start_time` via `GetProcessTimes`; ready schema `a3s.oci.box-whpx-service-ready.v2`; mutable service root materializes `bootstrap-vm-rootfs/` disjoint from immutable `system-image/`; `create` returned MicroVM id on real WHPX |
 | 3 | Create/start/exec/FS/stop/delete parity on real WHPX under (2) | open |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | open |
 | 5 | Windows default absent-env: omit-isolation stamps OCI DedicatedVm | open — blocked on 1–4 |

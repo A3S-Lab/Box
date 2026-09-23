@@ -321,11 +321,16 @@ $boxCli = Join-Path $boxBin 'a3s-box.exe'
 $qualification = Join-Path $boxBin 'windows-whpx-oci-qualification.exe'
 $ociCli = Join-Path $ociBin 'a3s-oci.exe'
 $ociShim = Join-Path $ociBin 'a3s-oci-krun-shim.exe'
+$systemImageManifest = Join-Path $ociWindowsArtifacts 'system-image\system-image.json'
+if (-not (Test-Path -LiteralPath $systemImageManifest -PathType Leaf)) {
+    throw "OCI Windows artifact is missing system-image\system-image.json (required by box-whpx-qualification-service)."
+}
 $serviceArguments = @(
     'box-whpx-qualification-service',
     '--shim', $ociShim,
     '--runtime-root', $runtimeRoot,
     '--vm-rootfs', $systemRoot,
+    '--system-image-manifest', $systemImageManifest,
     '--state-root', $stateRoot,
     '--pipe', $pipeName,
     '--ready-file', $readyPath
@@ -350,7 +355,8 @@ foreach ($name in @(
     'A3S_BOX_WHPX_OCI_SERVICE_ROOT',
     'A3S_BOX_WHPX_OCI_SERVICE_BIN',
     'A3S_BOX_WHPX_OCI_SERVICE_SHIM',
-    'A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS'
+    'A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS',
+    'A3S_BOX_WHPX_OCI_SERVICE_MANIFEST'
 )) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable(
         $name,
@@ -409,7 +415,8 @@ try {
             }
             if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
                 $candidate = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
-                if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
+                if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v2' -or
+                    $candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
                     $ready = $candidate
                     break
                 }
@@ -449,6 +456,7 @@ try {
         $env:A3S_BOX_WHPX_OCI_SERVICE_BIN = $ociCli
         $env:A3S_BOX_WHPX_OCI_SERVICE_SHIM = $ociShim
         $env:A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS = $systemRoot
+        $env:A3S_BOX_WHPX_OCI_SERVICE_MANIFEST = $systemImageManifest
         # Derive the same pipe Box will use so the report endpoint matches.
         $hasher = [System.Security.Cryptography.SHA256]::Create()
         $bytes = [Text.Encoding]::UTF8.GetBytes($runtimeRoot)

@@ -37,6 +37,8 @@ mod oci_kvm_owner {
 }
 #[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
 mod oci_whpx_owner;
+#[cfg(all(feature = "vm", target_os = "windows", target_arch = "x86_64"))]
+mod oci_whpx_packaged;
 #[cfg(all(
     feature = "vm",
     not(all(target_os = "windows", target_arch = "x86_64"))
@@ -55,7 +57,8 @@ mod oci_whpx_owner {
         pub shim_path: PathBuf,
         pub shim_sha256: String,
         pub vm_rootfs: PathBuf,
-        pub agent_sha256: String,
+        pub system_image_manifest: PathBuf,
+        pub system_image_manifest_sha256: String,
     }
 
     pub(crate) fn owned_pipe_name(service_root: &Path) -> ExecutionManagerResult<String> {
