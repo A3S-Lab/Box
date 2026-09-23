@@ -1,10 +1,11 @@
 # A3S Box Architecture Optimization Plan
 
 Status: **active planning baseline** (2026-09-23)  
-Evidence tip: `main` @ pin-honest WHPX Live re-tip (digest `f366c8d4…` on
-OCI pin `b26155b1`; Linux/KVM and Windows/WHPX omit→DedicatedVm cutover
-tip-proven; WHPX mid-run Live gate 9 tip-proven;
-`b2_process_session_recovery_closed` stays false; Enterprise GA open)  
+Evidence tip: `main` @ pin-honest Native+KVM+WHPX Live on OCI pin `b26155b1`
+(Native `bac4f83d…` / KVM `5bdc5588…` / WHPX `f366c8d4…`; Linux/KVM and
+Windows/WHPX omit→DedicatedVm cutover tip-proven; WHPX mid-run Live gate 9
+tip-proven; `b2_process_session_recovery_closed` stays false; Enterprise GA
+open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
@@ -79,7 +80,7 @@ Feature parity with other microVM projects is **not** an axiom.
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Live tip-proven** (gate 9 digest `e329bb9d…`) but multi-driver B2 exit criteria remain open — do **not** flip B2 from WHPX gate 9 alone |
+| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Gates 1–4 tip/pin-honest on OCI `b26155b1` (Native `bac4f83d…`, KVM `5bdc5588…`, WHPX `f366c8d4…`); gate 5 deliberate flip still open — do **not** flip B2 from Live digests alone |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + multi-driver B2 exit (WHPX mid-run Live gate 9 is tip-proven; do not delete libkrun on WHPX gate 9 alone) |

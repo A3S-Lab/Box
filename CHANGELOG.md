@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Pin-honest Native Live re-tip on OCI pin `b26155b1`: digest
+  `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d` (Box
+  `e5203dbe`; schema `a3s.box.linux-native-live-session.v7`; WSL2 Sandbox CI
+  host). Closes B2 exit binder gate 4 pin honesty on this OCI pin (Native +
+  KVM + WHPX). Does **not** flip `b2_process_session_recovery_closed` or claim
+  Enterprise GA.
 - Pin-honest WHPX Live re-tip on OCI pin `b26155b1`: digest
   `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box
   `79414cc3`; `live_path_unavailable=false`). Does **not** flip B2 or claim

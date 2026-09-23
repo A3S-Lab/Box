@@ -39,8 +39,12 @@ Authoritative hosted gate. Steps that matter for GA:
    `71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd`
    (linux-x86_64) /
    `43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21`
-   (linux-arm64). Does **not** flip B2. KVM tip v5 existing-host greened
-   digest SHA-256
+   (linux-arm64). **Pin-honest WSL2 tip** on OCI pin `b26155b1`: SHA-256
+   `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d`
+   (Box `e5203dbe…`; schema `a3s.box.linux-native-live-session.v7`;
+   `retained_stream_handle_proven` + `retained_filesystem_proven`;
+   `b2_process_session_recovery_closed=false`). Does **not** flip B2. KVM tip
+   v5 existing-host greened digest SHA-256
    `81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5`
    (WSL2 `/dev/kvm`; Box `68f99abb…`; OCI `f7ab2b7a…` / #347 virtiofs
    optional fchown after create; tip-rebuilt system image); prior digest
@@ -91,7 +95,7 @@ replace the CI binder above or close Enterprise MicroVM GA.
 | Named volumes, bind/tmpfs (R17 mounts) | R17 profile gate |
 | Network: private netns, loopback-only; R17 Service host-loopback relays | R17 networking profile + design |
 | Pause/resume, filesystem snapshots | SDK Local Sandbox |
-| Native Live v7 retained stream + keyed mutating FS across owner SIGKILL | Live-session gate + verifier (CI-greened digests above) |
+| Native Live v7 retained stream + keyed mutating FS across owner SIGKILL | Live-session gate + verifier (CI-greened + pin-honest `bac4f83d…` above) |
 | Stopped-only owner crash recovery | no-KVM recovery report |
 | Fresh ensure reaps supervised orphans after Host SIGKILL | SDK sandbox smoke + #339 |
 | Operator setuid launcher (self-hosted suid FS) | proof script + honesty verifier |
