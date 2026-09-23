@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Windows WHPX CI artifact includes
+  `windows-whpx-live-session-qualification.exe` so gate 9 tip-prove can run from
+  the published `windows-whpx` bundle without a local example rebuild. Does
+  **not** tip-prove gate 9 or claim Enterprise GA.
+
 ### Fixed
 
 - Pin `a3s-oci-sdk`/`a3s-oci-core` and CI/release `A3S_OCI_RUNTIME_REV` to
