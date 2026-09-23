@@ -26,11 +26,11 @@ All notable changes to A3S Box will be documented in this file.
   because the retained stream surfaces `Unavailable` on Host death (expected);
   the flag is cleared on Live Ready reopen and set only when reconcile fails
   closed.
-- Pin `a3s-oci-sdk`/`a3s-oci-core` and CI/release `A3S_OCI_RUNTIME_REV` to
-  crates.io-publishable `0.3.2` (`d5c3292f`) so `a3s-box-runtime@3.3.0` /
-  `a3s-box-sdk@3.3.0` can finish crates.io publication. crates.io `0.3.1`
-  lacked Network/Storage attachment APIs present on the prior git pin. Does
-  **not** claim Enterprise GA.
+- Intermediate crates.io publish pin to `a3s-oci-sdk`/`a3s-oci-core` `0.3.2`
+  (`d5c3292f`) so `a3s-box-runtime@3.3.0` / `a3s-box-sdk@3.3.0` could finish
+  crates.io publication (crates.io `0.3.1` lacked Network/Storage attachment
+  APIs). Superseded by the `b26155b1` WHPX Live substrate pin above; SDK crate
+  version remains `0.3.2`. Does **not** claim Enterprise GA.
 
 ### Added
 
