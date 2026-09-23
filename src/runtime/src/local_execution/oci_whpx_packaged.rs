@@ -109,7 +109,11 @@ fn resolve_manifest(
     search_roots: &[PathBuf],
 ) -> ExecutionManagerResult<PathBuf> {
     if let Some(path) = explicit {
-        return finalize_file(path, OCI_WHPX_SERVICE_MANIFEST_ENV, "WHPX system-image manifest");
+        return finalize_file(
+            path,
+            OCI_WHPX_SERVICE_MANIFEST_ENV,
+            "WHPX system-image manifest",
+        );
     }
     for root in search_roots {
         for candidate in [
@@ -137,7 +141,11 @@ fn resolve_bootstrap_dir(
     search_roots: &[PathBuf],
 ) -> ExecutionManagerResult<PathBuf> {
     if let Some(path) = explicit {
-        return finalize_dir(path, OCI_WHPX_SERVICE_VM_ROOTFS_ENV, "WHPX bootstrap vm-rootfs");
+        return finalize_dir(
+            path,
+            OCI_WHPX_SERVICE_VM_ROOTFS_ENV,
+            "WHPX bootstrap vm-rootfs",
+        );
     }
     for root in search_roots {
         let candidate = root.join(BOOTSTRAP_DIRNAME);
@@ -247,8 +255,7 @@ mod tests {
 
     #[test]
     fn discovers_runtime_shim_manifest_and_bootstrap_from_search_root() {
-        let root =
-            std::env::temp_dir().join(format!("a3s-whpx-packaged-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("a3s-whpx-packaged-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         plant_file(&root.join(RUNTIME_FILENAME));
@@ -285,10 +292,8 @@ mod tests {
 
     #[test]
     fn discovers_manifest_under_system_image_subdirectory() {
-        let root = std::env::temp_dir().join(format!(
-            "a3s-whpx-packaged-subdir-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("a3s-whpx-packaged-subdir-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("system-image")).unwrap();
         plant_file(&root.join(RUNTIME_FILENAME));

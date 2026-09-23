@@ -510,8 +510,13 @@ Alternatively, set `A3S_BOX_WHPX_OCI_BOX_OWNED=1` with absolute
 `_MANIFEST` (system-image.json) so Box identity-fences and (re)spawns that
 Host under a deterministic named pipe
 derived from the service root. Script `-BoxOwned` uses this path, including
-Host `taskkill` → ensure reconnect. This remains qualification-only and does
-not promote WHPX MicroVM to production.
+Host `taskkill` → ensure reconnect. For **opt-in packaged** Box-owned Host
+ensure, omit `A3S_BOX_OCI_WHPX_ENDPOINT` and install `a3s-oci.exe`,
+`a3s-oci-krun-shim.exe`, `bootstrap-vm-rootfs/`, and `system-image/system-image.json`
+on the packaged discovery path (see OCI `packaging/windows/README.md`). Absent-env
+default omit-isolation remains Box-libkrun/WHPX until binder gate 5. This remains
+qualification-only for production claims and does not promote WHPX MicroVM to
+production.
 
 For the exact product gate, download the Box `windows-whpx` artifact and the
 pinned OCI Runtime `windows-whpx-qualification` and `guest-agents-musl`
