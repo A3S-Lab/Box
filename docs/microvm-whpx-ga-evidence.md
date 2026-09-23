@@ -60,7 +60,7 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **tip-proven** — schema `a3s.box.windows-whpx-live-session.v1`. Pin-honest re-tip digest sha256 `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box `79414cc3` / OCI pin `b26155b1`; Host binaries from `#357` tip `7a18464`). Prior tip digest `e329bb9d…` on Box `166cab1b` / Host tip `7a18464` while CI still pinned `d5c3292f`. Report: `retained_stream_handle_proven` + `retained_filesystem_proven` + `whpx_microvm_live_claimed` + `box_owned_ensure_proven`; `live_path_unavailable=false`; `b2_process_session_recovery_closed=false`; `fixture_stream_continuity_claimed=false` |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **same-tip pin-honest** — schema `a3s.box.windows-whpx-live-session.v1`. Digest sha256 `0696d7e15d4596c026b9bf11a898f0c81f8755d234b1c9b59fe7a180ea1daeaf` (Box `1356d4bb` / OCI pin `b26155b1`). Prior pin-honest `f366c8d4…` (Box `79414cc3`) and tip `e329bb9d…` remain historical. Report: `retained_stream_handle_proven` + `retained_filesystem_proven` + `whpx_microvm_live_claimed` + `box_owned_ensure_proven`; `live_path_unavailable=false`; `b2_process_session_recovery_closed=false`; `fixture_stream_continuity_claimed=false` |
 
 Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
 explicit mid-run Live non-claim under Windows/WHPX.
