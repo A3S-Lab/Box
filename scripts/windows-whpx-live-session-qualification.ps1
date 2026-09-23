@@ -169,7 +169,12 @@ Write-Host "  image=$Image"
 Write-Host "  box-sha=$boxSha"
 Write-Host "  oci-sha=$ociSha"
 Write-Host "  report=$reportPath"
+Write-Host '  session-owner=A3S_OCI_WHPX_SESSION_OWNER=1 (Box-owned Host spawn)'
 Write-Host '  note=gate 9 remains open until retained Live verifies'
+
+# Box-owned Host path sets this in oci_whpx_owner; export for any direct OCI
+# create the example may issue outside that fence.
+$env:A3S_OCI_WHPX_SESSION_OWNER = '1'
 
 $qualification = Join-Path $boxBin $exampleName
 $qualificationProcess = Start-Process -FilePath $qualification `

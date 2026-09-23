@@ -22,6 +22,12 @@ const READY_FILE_NAME: &str = "service-ready.json";
 const READY_SCHEMA: &str = "a3s.oci.box-whpx-service-ready.v2";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Opt-in OCI durable WHPX session-owner (Live Host reopen substrate).
+///
+/// Box-owned Hosts always set this so create goes Host → session-owner → shim.
+/// External operator-launched Hosts that omit the env remain Host-bound
+/// (stopped-only). Does not claim gate 9 tip-prove or B2 close.
+const WHPX_SESSION_OWNER_ENV: &str = "A3S_OCI_WHPX_SESSION_OWNER";
 
 /// Certified artifacts required to spawn or reuse a Box-owned WHPX Host.
 ///
@@ -477,6 +483,12 @@ fn spawn_owner(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .creation_flags(CREATION_FLAGS);
+    // Box-owned Hosts always use session-owner create so Live reopen and
+    // stopped-only fresh construction share Host → session-owner → shim.
+    // External operator-launched Hosts that omit the env remain Host-bound.
+    // Requires OCI-Runtime WHPX session-owner spawn (#353/#354); host-control
+    // named-pipe Live reattach remains a follow-up before gate 9 tip-prove.
+    command.env(WHPX_SESSION_OWNER_ENV, "1");
     command.spawn().map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to spawn Windows WHPX OCI owner {}: {error}",
@@ -769,5 +781,10 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with(r"\\.\pipe\a3s-box-whpx-owner-"));
         assert_eq!(first.len(), r"\\.\pipe\a3s-box-whpx-owner-".len() + 32);
+    }
+
+    #[test]
+    fn box_owned_spawn_forces_session_owner_env() {
+        assert_eq!(WHPX_SESSION_OWNER_ENV, "A3S_OCI_WHPX_SESSION_OWNER");
     }
 }
