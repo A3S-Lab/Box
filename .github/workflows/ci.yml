@@ -1037,10 +1037,15 @@ jobs:
           cd src
           cargo build --locked --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
           cargo build --locked --release -p a3s-box-runtime --no-default-features --features vm `
-            --example windows-whpx-oci-qualification --target x86_64-pc-windows-msvc
+            --example windows-whpx-oci-qualification `
+            --example windows-whpx-live-session-qualification `
+            --target x86_64-pc-windows-msvc
           Copy-Item `
             target/x86_64-pc-windows-msvc/release/examples/windows-whpx-oci-qualification.exe `
             target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe
+          Copy-Item `
+            target/x86_64-pc-windows-msvc/release/examples/windows-whpx-live-session-qualification.exe `
+            target/x86_64-pc-windows-msvc/release/windows-whpx-live-session-qualification.exe
       - name: Test Windows symlink diagnostics
         run: |
           cd src
@@ -1063,6 +1068,7 @@ jobs:
             'src/target/x86_64-pc-windows-msvc/release/a3s-box.exe',
             'src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe',
             'src/target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe',
+            'src/target/x86_64-pc-windows-msvc/release/windows-whpx-live-session-qualification.exe',
             'src/target/x86_64-pc-windows-msvc/release/krun.dll',
             'src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll'
           )
@@ -1110,6 +1116,7 @@ jobs:
             src/target/x86_64-pc-windows-msvc/release/a3s-box.exe
             src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe
             src/target/x86_64-pc-windows-msvc/release/windows-whpx-oci-qualification.exe
+            src/target/x86_64-pc-windows-msvc/release/windows-whpx-live-session-qualification.exe
             src/target/x86_64-pc-windows-msvc/release/krun.dll
             src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
             src/target/x86_64-pc-windows-msvc/release/artifact-manifest.json
