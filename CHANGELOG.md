@@ -23,6 +23,10 @@ All notable changes to A3S Box will be documented in this file.
   packaged Box-owned DedicatedVm when Host artifacts are discoverable (mirrors
   Linux/KVM gate 5); missing packages soft-fall to Box-libkrun/WHPX instead of
   hard-failing. Explicit `off`/`legacy` still keeps the legacy VM backend.
+  Tip-proven gates 5–7 on real WHPX (absent → `oci_sdk`; `off` → `box_vm`;
+  `--isolation sandbox` fail-closed). Binder gates 1–8 closed for Windows/WHPX
+  omit→DedicatedVm production cutover; Enterprise GA still not claimed
+  ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
 
 ### Added
 
