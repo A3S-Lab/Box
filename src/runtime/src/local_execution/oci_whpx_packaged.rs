@@ -141,10 +141,7 @@ fn assert_runtime_disjoint_from_system_image(
             artifacts.system_image_manifest.display()
         )));
     };
-    for (label, directory) in [
-        ("runtime", runtime_directory),
-        ("shim", shim_directory),
-    ] {
+    for (label, directory) in [("runtime", runtime_directory), ("shim", shim_directory)] {
         if directory == system_image_directory
             || directory.starts_with(system_image_directory)
             || system_image_directory.starts_with(directory)
@@ -361,10 +358,7 @@ mod tests {
         )
         .expect_err("flat layout must fail closed");
         let message = error.to_string();
-        assert!(
-            message.contains("must be disjoint"),
-            "{message}"
-        );
+        assert!(message.contains("must be disjoint"), "{message}");
         let _ = fs::remove_dir_all(&root);
     }
 
