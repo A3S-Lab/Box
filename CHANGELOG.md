@@ -4,6 +4,30 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows/WHPX packaged Host discovery rejects flat installs that nest
+  `system-image/` under the same directory as `a3s-oci.exe` /
+  `a3s-oci-krun-shim.exe` (WHPX `WindowsSystemImage::load` requires those
+  directories to be disjoint). Discovery now prefers the durable sibling layout
+  (`bin/` + `system-image/`, or `%USERPROFILE%\\.a3s\\bin` +
+  `share\\a3s\\system-image`) and searches the install root when the current
+  executable lives under `bin/`. Tip-proven gate 3 create/start/exec/FS/stop/rm
+  and gate 4 Created-state owner-death / Host re-ensure (no invented exit; B2
+  stays false) on real WHPX under `A3S_BOX_OCI_MIGRATION=microvm` with endpoint
+  unset ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
+
+### Changed
+
+- Windows/WHPX gate 5 soft-activate: absent `A3S_BOX_OCI_MIGRATION` now selects
+  packaged Box-owned DedicatedVm when Host artifacts are discoverable (mirrors
+  Linux/KVM gate 5); missing packages soft-fall to Box-libkrun/WHPX instead of
+  hard-failing. Explicit `off`/`legacy` still keeps the legacy VM backend.
+  Tip-proven gates 5–7 on real WHPX (absent → `oci_sdk`; `off` → `box_vm`;
+  `--isolation sandbox` fail-closed). Binder gates 1–8 closed for Windows/WHPX
+  omit→DedicatedVm production cutover; Enterprise GA still not claimed
+  ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
+
 ### Added
 
 - Linux/KVM packaged Host discovery (`oci_kvm_packaged`): resolve `a3s-oci`,
