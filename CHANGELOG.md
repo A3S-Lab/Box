@@ -14,6 +14,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- Box-owned WHPX Host spawn sets `A3S_OCI_WHPX_SESSION_OWNER=1` (KVM analogue)
+  so create uses Host → session-owner → shim. Requires OCI-Runtime WHPX
+  session-owner spawn wiring; host-control named-pipe Live reattach and gate 9
+  tip-prove remain open. Does **not** flip B2 or claim Enterprise GA.
+
 - Windows/WHPX mid-run Live observation harness
   (`windows-whpx-live-session-qualification` example, PS1 runner, Python
   verifier). Schema `a3s.box.windows-whpx-live-session.v1`. Mirrors the Linux
