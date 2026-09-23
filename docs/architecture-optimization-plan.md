@@ -1,8 +1,9 @@
 # A3S Box Architecture Optimization Plan
 
 Status: **active planning baseline** (2026-09-23)  
-Evidence tip: `main` @ `2919debb` (a3s-box `3.3.0` + `a3s-oci-sdk` `0.3.2` pin; Linux/KVM and
-Windows/WHPX omit→DedicatedVm cutover tip-proven)  
+Evidence tip: `main` @ `d9e3e5fe` (a3s-box `3.3.0` + `a3s-oci-sdk` `0.3.2` pin;
+Linux/KVM and Windows/WHPX omit→DedicatedVm cutover tip-proven; WHPX mid-run Live
+observation harness landed in `#657`, gate 9 still open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
@@ -77,7 +78,7 @@ Feature parity with other microVM projects is **not** an axiom.
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Host death with retained Live stream/FS reattach is unproven** (WHPX gate 4 non-claim) |
+| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Host death with retained Live stream/FS reattach is unproven** (WHPX gate 4 non-claim; Box harness `#657` present; OCI durable session-owner spawn still required before tip-prove) |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + B2 mid-run Live bar on WHPX match the honesty already tip-proven for KVM/Sandbox observation |
@@ -114,7 +115,9 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 - Short-lived workloads that exit before exec-ready still persist authenticated terminal state (already partially landed; keep regression-locked). Guest-init starts the exec accept loop immediately after the container fork returns (before stdio relay / PTY warm-up) so heartbeat can win that race without violating fork-safety; Linux directory-rootfs tip proof for `#576` cleared on WSL (2026-09-22: `run --rm alpine:3.20 -- /bin/true` 5/5 rc 0 with `LD_LIBRARY_PATH=/usr/local/lib/a3s-box`; tracker `#631` closed).
 
 **Evidence required:** Native Live + KVM Live matrices on WSL; Windows/WHPX
-mid-run Live observation harness (not yet tip-proven); still no self-certifying
+mid-run Live observation harness landed (`a3s.box.windows-whpx-live-session.v1`,
+`#657`) but **not tip-proven** until OCI WHPX durable session-owner (Job Object /
+intermediate owner + Host reattach) lands; still no self-certifying
 `b2_process_session_recovery_closed=true` from a single report.
 
 **Refuse:** Weakening live-session tests; fixture `process_restart` as driver Live evidence; treating WHPX Created-state Host re-ensure (cutover gate 4) as mid-run Live.
