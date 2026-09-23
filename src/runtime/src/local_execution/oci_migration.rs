@@ -1808,10 +1808,8 @@ mod tests {
         let home = absolute("a3s-oci-whpx-gate5-default-home");
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
-        let plant = std::env::temp_dir().join(format!(
-            "a3s-whpx-migration-gate5-{}",
-            std::process::id()
-        ));
+        let plant =
+            std::env::temp_dir().join(format!("a3s-whpx-migration-gate5-{}", std::process::id()));
         let _ = fs::remove_dir_all(&plant);
         fs::create_dir_all(plant.join("bin")).unwrap();
         fs::create_dir_all(plant.join("system-image")).unwrap();
