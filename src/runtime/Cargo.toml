@@ -22,6 +22,11 @@ path = "examples/windows_whpx_oci_qualification.rs"
 required-features = ["vm"]
 
 [[example]]
+name = "windows-whpx-live-session-qualification"
+path = "examples/windows_whpx_live_session_qualification.rs"
+required-features = ["vm"]
+
+[[example]]
 name = "linux-kvm-oci-qualification"
 path = "examples/linux_kvm_oci_qualification.rs"
 required-features = ["vm"]

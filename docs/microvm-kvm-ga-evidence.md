@@ -1,11 +1,14 @@
 # Linux/KVM MicroVM OCI cutover evidence binder
 
 Status: **Linux/KVM omit-isolation production cutover tip-proven** (gates 1–8);
-Enterprise GA, HVF/WHPX production cutover remain open.
+Enterprise GA and HVF production cutover remain open. Windows/WHPX omit→DedicatedVm
+lifecycle cutover is tip-proven separately
+([microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md)); WHPX mid-run Live
+(binder gate 9) remains open.
 
-Scope: Linux/KVM `DedicatedVm` via A3S OCI Runtime. HVF and WHPX production
-cutover are out of this binder. Sandbox shared-kernel GA is
-[sandbox-ga-evidence.md](sandbox-ga-evidence.md).
+Scope: Linux/KVM `DedicatedVm` via A3S OCI Runtime. HVF production cutover and
+WHPX mid-run Live (binder gate 9) are out of this binder. Sandbox shared-kernel
+GA is [sandbox-ga-evidence.md](sandbox-ga-evidence.md).
 
 Pinned OCI Runtime revision is the workflow `A3S_OCI_RUNTIME_REV` value in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).

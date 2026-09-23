@@ -12,6 +12,25 @@ All notable changes to A3S Box will be documented in this file.
   lacked Network/Storage attachment APIs present on the prior git pin. Does
   **not** claim Enterprise GA.
 
+### Added
+
+- Windows/WHPX mid-run Live observation harness
+  (`windows-whpx-live-session-qualification` example, PS1 runner, Python
+  verifier). Schema `a3s.box.windows-whpx-live-session.v1`. Mirrors the Linux
+  KVM Live v5 pattern (keyed exec/FS before owner kill, retained-stream
+  + filesystem proofs after reattach). Reports keep
+  `b2_process_session_recovery_closed=false` and
+  `fixture_stream_continuity_claimed=false`. Gate 9 stays **open** until
+  tip-proven on real WHPX (also needs OCI WHPX durable session-owner Live).
+  Does **not** flip B2 or claim Enterprise GA.
+
+### Changed
+
+- Architecture optimization plan and WHPX binder: record Linux/KVM and
+  Windows/WHPX omit→DedicatedVm cutover as tip-proven; open WHPX mid-run Live
+  (binder gate 9 / ROADMAP B2) as the next Axis A Windows honesty gate. Does
+  **not** flip `b2_process_session_recovery_closed` or claim Enterprise GA.
+
 ## [3.3.0] — 2026-09-23
 
 Release line `3.3.0`: workspace, installers, and SDK packages align on
