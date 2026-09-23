@@ -1,6 +1,8 @@
 # Windows/WHPX MicroVM OCI cutover evidence binder
 
-Status: **Windows/WHPX omit-isolation production cutover tip-proven** (gates 1–8)
+Status: **Windows/WHPX omit-isolation production cutover tip-proven** (gates 1–8);
+**mid-run Live (gate 9) tip-proven** with retained stream/FS after Host taskkill.
+`b2_process_session_recovery_closed` stays false; Enterprise GA remains open.
 
 Scope: Windows x86_64 `DedicatedVm` via A3S OCI Runtime WHPX Host. Linux/KVM
 production cutover is tracked in
@@ -54,11 +56,11 @@ unless the row explicitly remains qualification-only.
 | 7 | No silent Sandbox↔MicroVM fallback (Sandbox stays unsupported/fail-closed on Windows) | **tip-proven** — `--isolation sandbox` hard-fails (`Sandbox isolation is supported only on Linux`); no box record stamped |
 | 8 | Docs: README “Still open” closes WHPX production only after 1–7 | **done in this cutover** — README Still-open no longer lists Windows/WHPX omit→OCI as open; HVF + Enterprise GA remain open |
 
-## Next binder work (not tip-proven)
+## Mid-run Live (binder gate 9) — tip-proven
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — observation harness landed (`windows-whpx-live-session-qualification`, schema `a3s.box.windows-whpx-live-session.v1`): keyed exec/FS before taskkill, retained-stream + filesystem proofs after reattach, honest `b2=false` / `fixture_stream_continuity_claimed=false`. Box-owned Host spawn forces `A3S_OCI_WHPX_SESSION_OWNER=1` (`#661`). OCI durable session-owner Job Object spawn merged (`OCI-Runtime#354`); host-control named-pipe bridge + `WhpxRuntimeDriver::recover` Live reattach land in `OCI-Runtime#356`. Gate stays **open** until a tip-proven digest is published on real WHPX |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **tip-proven** — schema `a3s.box.windows-whpx-live-session.v1` report sha256 `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e` on real WHPX. Box tip `166cab1b` (`#661`/`#665` harness); OCI Host tip `7a18464` (`OCI-Runtime#354`/`#356`/`#357`: durable session-owner, host-control reattach, `A3S_OCI_GUEST_HOST_RECONNECT=1`). Report: `retained_stream_handle_proven` + `retained_filesystem_proven` + `whpx_microvm_live_claimed` + `box_owned_ensure_proven`; `b2_process_session_recovery_closed=false`; `fixture_stream_continuity_claimed=false` |
 
 Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
 explicit mid-run Live non-claim under Windows/WHPX.
@@ -70,5 +72,4 @@ explicit mid-run Live non-claim under Windows/WHPX.
 - HVF DedicatedVm **production** cutover.
 - B5 deletion of Box-libkrun / guest-init.
 - Treating CI “Build Windows WHPX” alone as production cutover.
-- Mid-run Host death Live stream/FS reattach (B2).
 - CNI / Axis C–E surfaces in the same cutover PR.
