@@ -155,14 +155,13 @@ $env:A3S_BOX_WHPX_LIVE_SESSION_IMAGE = $Image
 $env:A3S_BOX_WHPX_LIVE_SESSION_REPORT = $reportPath
 $env:A3S_BOX_WHPX_LIVE_SESSION_BOX_SHA = $boxSha
 $env:A3S_BOX_WHPX_LIVE_SESSION_OCI_SHA = $ociSha
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_BIN = (Join-Path $ociBin 'a3s-oci.exe')
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_ROOT = $runtimeRoot
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_SHIM = (
-    Join-Path $ociBin 'a3s-oci-krun-shim.exe'
-)
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_VM_ROOTFS = $systemRoot
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_MANIFEST = $systemImageManifest
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_LOG = (
+# Service paths reuse the WHPX OCI qualification env names (see example).
+$env:A3S_BOX_WHPX_OCI_SERVICE_BIN = (Join-Path $ociBin 'a3s-oci.exe')
+$env:A3S_BOX_WHPX_OCI_SERVICE_ROOT = $runtimeRoot
+$env:A3S_BOX_WHPX_OCI_SERVICE_SHIM = (Join-Path $ociBin 'a3s-oci-krun-shim.exe')
+$env:A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS = $systemRoot
+$env:A3S_BOX_WHPX_OCI_SERVICE_MANIFEST = $systemImageManifest
+$env:A3S_BOX_WHPX_OCI_SERVICE_LOG = (
     Join-Path $outputRoot 'qualification-service.log'
 )
 
