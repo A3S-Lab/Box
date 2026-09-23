@@ -46,7 +46,7 @@ unless the row explicitly remains qualification-only.
 | --- | --- | --- |
 | 1 | Packaged artifact discovery for WHPX Host (runtime/shim/vm-rootfs/system-image) without qualification-only env | **tip-proven** — `oci_whpx_packaged` + install layout (OCI `packaging/windows/README.md`); local WHPX Host package beside `a3s-box.exe` discovered with endpoint unset |
 | 2 | Opt-in `A3S_BOX_OCI_MIGRATION=microvm\|all` uses that packaged Host (Box-owned ensure) | **tip-proven** — endpoint unset → Box-owned ensure; Windows `pid_start_time` via `GetProcessTimes`; ready schema `a3s.oci.box-whpx-service-ready.v2`; mutable service root materializes `bootstrap-vm-rootfs/` disjoint from immutable `system-image/`; `create` returned MicroVM id on real WHPX |
-| 3 | Create/start/exec/FS/stop/delete parity on real WHPX under (2) | open |
+| 3 | Create/start/exec/FS/stop/delete parity on real WHPX under (2) | **tip-proven** — durable install must keep Host `bin/` and `system-image/` disjoint (flattening CI `bin/*` beside `system-image/` fails `WindowsSystemImage::load`); with `%USERPROFILE%\\.a3s\\bin` + `share\\a3s\\system-image` (or install-root `bin/` + sibling `system-image/`), empty `bootstrap-vm-rootfs` seed, endpoint unset: `create` → `start` (long-running `/bin/sleep`) → `exec` / FS-via-exec → `stop` → `rm -f` on real WHPX; shares cleaned |
 | 4 | Owner-death / Live reopen under (2) without inventing exit; keep B2 flag false | open |
 | 5 | Windows default absent-env: omit-isolation stamps OCI DedicatedVm | open — blocked on 1–4 |
 | 6 | Explicit `off` keeps Box-libkrun/WHPX | required regression |

@@ -1669,10 +1669,11 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&plant);
+        fs::create_dir_all(plant.join("bin")).unwrap();
         fs::create_dir_all(plant.join("system-image")).unwrap();
         fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
-        let runtime = plant.join("a3s-oci.exe");
-        let shim = plant.join("a3s-oci-krun-shim.exe");
+        let runtime = plant.join("bin").join("a3s-oci.exe");
+        let shim = plant.join("bin").join("a3s-oci-krun-shim.exe");
         let manifest = plant.join("system-image").join("system-image.json");
         let seed_bootstrap = plant.join("bootstrap-vm-rootfs");
         fs::write(&runtime, b"runtime").unwrap();
@@ -1732,10 +1733,11 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&plant);
+        fs::create_dir_all(plant.join("bin")).unwrap();
         fs::create_dir_all(plant.join("system-image")).unwrap();
         fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
-        let runtime = plant.join("a3s-oci.exe");
-        let shim = plant.join("a3s-oci-krun-shim.exe");
+        let runtime = plant.join("bin").join("a3s-oci.exe");
+        let shim = plant.join("bin").join("a3s-oci-krun-shim.exe");
         let manifest = plant.join("system-image").join("system-image.json");
         let bootstrap = plant.join("bootstrap-vm-rootfs");
         fs::write(&runtime, b"runtime").unwrap();

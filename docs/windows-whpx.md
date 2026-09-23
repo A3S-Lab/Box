@@ -246,6 +246,30 @@ The virtio-fs case intentionally scans 2,048 files five times with cache mode
 that test has an independent 900-second default budget. `-SkipVirtiofsStress`
 is suitable for a short functional rehearsal, not for release soak evidence.
 
+## Packaged WHPX Host install layout (production cutover)
+
+Durably install the OCI `windows-whpx-qualification` artifact **without
+flattening** `bin/` into the same directory as `system-image/`:
+
+```text
+install-root/
+  bin/
+    a3s-box.exe                 # tip Box CLI (optional beside Host)
+    a3s-oci.exe
+    a3s-oci-krun-shim.exe
+    krun.dll
+    libkrunfw.dll
+  system-image/
+    system-image.json
+    a3s-oci-system.ext4…
+  bootstrap-vm-rootfs/          # empty seed; Box materializes under A3S home
+```
+
+Equivalent A3S-home layout: `%USERPROFILE%\.a3s\bin\` for Host binaries and
+`%USERPROFILE%\.a3s\share\a3s\system-image\` for the immutable image. Nesting
+`system-image/` under the shim directory fails closed at discovery (and would
+fail later inside `WindowsSystemImage::load`).
+
 ## Box-to-OCI Runtime product qualification
 
 The unified-runtime vertical slice has a separate, build-free hardware gate.

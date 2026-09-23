@@ -7,6 +7,10 @@
 //! win. `PATH` is ignored (same policy as Sandbox / KVM packaged discovery).
 //!
 //! Layout contract: OCI `packaging/windows/README.md` / Box #650.
+//! Durable install keeps Host binaries under `bin/` (or `%USERPROFILE%\\.a3s\\bin`)
+//! and immutable `system-image/` as a sibling directory — never nested under the
+//! shim/runtime directory (WHPX `WindowsSystemImage::load` requires that
+//! disjointness).
 
 use std::path::{Path, PathBuf};
 
@@ -79,12 +83,14 @@ pub(crate) fn discover_packaged_windows_whpx_artifacts_in(
     let system_image_manifest =
         resolve_manifest(overrides.system_image_manifest.as_deref(), search_roots)?;
     let vm_rootfs = resolve_bootstrap_dir(overrides.vm_rootfs.as_deref(), search_roots)?;
-    Ok(PackagedWindowsWhpxArtifacts {
+    let artifacts = PackagedWindowsWhpxArtifacts {
         runtime_path,
         shim_path,
         vm_rootfs,
         system_image_manifest,
-    })
+    };
+    assert_runtime_disjoint_from_system_image(&artifacts)?;
+    Ok(artifacts)
 }
 
 fn default_search_roots() -> Vec<PathBuf> {
@@ -92,9 +98,15 @@ fn default_search_roots() -> Vec<PathBuf> {
     if let Ok(executable) = std::env::current_exe() {
         if let Some(directory) = executable.parent() {
             roots.push(directory.to_path_buf());
-            if directory.file_name().is_some_and(|name| name == "deps") {
-                if let Some(target_directory) = directory.parent() {
-                    roots.push(target_directory.to_path_buf());
+            // CI / durable install layout keeps Host binaries under `bin/` and
+            // immutable `system-image/` as a sibling of that directory. Search
+            // the install root so discovery matches OCI packaging/windows.
+            if directory
+                .file_name()
+                .is_some_and(|name| name == "bin" || name == "deps")
+            {
+                if let Some(install_root) = directory.parent() {
+                    roots.push(install_root.to_path_buf());
                 }
             }
         }
@@ -102,6 +114,49 @@ fn default_search_roots() -> Vec<PathBuf> {
     roots.push(a3s_box_core::dirs_home().join("bin"));
     roots.push(a3s_box_core::dirs_home().join("share").join("a3s"));
     roots
+}
+
+/// WHPX Host requires the shim/runtime directory and the system-image directory
+/// to be disjoint (`WindowsSystemImage::load`). Flat installs that place
+/// `system-image/` under the same directory as `a3s-oci-krun-shim.exe` fail at
+/// VM entry with a masked agent-bridge error; reject them at discovery.
+fn assert_runtime_disjoint_from_system_image(
+    artifacts: &PackagedWindowsWhpxArtifacts,
+) -> ExecutionManagerResult<()> {
+    let Some(runtime_directory) = artifacts.runtime_path.parent() else {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "packaged WHPX runtime has no parent directory: {}",
+            artifacts.runtime_path.display()
+        )));
+    };
+    let Some(shim_directory) = artifacts.shim_path.parent() else {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "packaged WHPX shim has no parent directory: {}",
+            artifacts.shim_path.display()
+        )));
+    };
+    let Some(system_image_directory) = artifacts.system_image_manifest.parent() else {
+        return Err(ExecutionManagerError::InvalidRequest(format!(
+            "packaged WHPX system-image manifest has no parent directory: {}",
+            artifacts.system_image_manifest.display()
+        )));
+    };
+    for (label, directory) in [
+        ("runtime", runtime_directory),
+        ("shim", shim_directory),
+    ] {
+        if directory == system_image_directory
+            || directory.starts_with(system_image_directory)
+            || system_image_directory.starts_with(directory)
+        {
+            return Err(ExecutionManagerError::InvalidRequest(format!(
+                "packaged WHPX {label} directory {} and system-image directory {} must be disjoint; keep Host binaries under `bin/` (or `%USERPROFILE%\\.a3s\\bin`) and `system-image/` as a sibling (see OCI packaging/windows/README.md)",
+                directory.display(),
+                system_image_directory.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_manifest(
@@ -175,9 +230,10 @@ fn resolve_file(
         return finalize_file(path, environment, label);
     }
     for root in search_roots {
-        let candidate = root.join(filename);
-        if candidate.is_file() {
-            return finalize_file(&candidate, environment, label);
+        for candidate in [root.join(filename), root.join("bin").join(filename)] {
+            if candidate.is_file() {
+                return finalize_file(&candidate, environment, label);
+            }
         }
     }
     Err(missing_packaged(label, filename, environment))
@@ -254,13 +310,14 @@ mod tests {
     }
 
     #[test]
-    fn discovers_runtime_shim_manifest_and_bootstrap_from_search_root() {
+    fn discovers_sibling_bin_and_system_image_layout() {
         let root = std::env::temp_dir().join(format!("a3s-whpx-packaged-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        plant_file(&root.join(RUNTIME_FILENAME));
-        plant_file(&root.join(SHIM_FILENAME));
-        plant_file(&root.join(MANIFEST_FILENAME));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("system-image")).unwrap();
+        plant_file(&root.join("bin").join(RUNTIME_FILENAME));
+        plant_file(&root.join("bin").join(SHIM_FILENAME));
+        plant_file(&root.join("system-image").join(MANIFEST_FILENAME));
         fs::create_dir_all(root.join(BOOTSTRAP_DIRNAME)).unwrap();
 
         let found = discover_packaged_windows_whpx_artifacts_in(
@@ -276,13 +333,10 @@ mod tests {
             found.shim_path.file_name().and_then(|n| n.to_str()),
             Some(SHIM_FILENAME)
         );
-        assert_eq!(
-            found
-                .system_image_manifest
-                .file_name()
-                .and_then(|n| n.to_str()),
-            Some(MANIFEST_FILENAME)
-        );
+        assert!(found
+            .system_image_manifest
+            .to_string_lossy()
+            .contains("system-image"));
         assert_eq!(
             found.vm_rootfs.file_name().and_then(|n| n.to_str()),
             Some(BOOTSTRAP_DIRNAME)
@@ -291,9 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn discovers_manifest_under_system_image_subdirectory() {
+    fn rejects_flat_layout_nesting_system_image_under_runtime_directory() {
         let root =
-            std::env::temp_dir().join(format!("a3s-whpx-packaged-subdir-{}", std::process::id()));
+            std::env::temp_dir().join(format!("a3s-whpx-packaged-flat-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("system-image")).unwrap();
         plant_file(&root.join(RUNTIME_FILENAME));
@@ -301,15 +355,16 @@ mod tests {
         plant_file(&root.join("system-image").join(MANIFEST_FILENAME));
         fs::create_dir_all(root.join(BOOTSTRAP_DIRNAME)).unwrap();
 
-        let found = discover_packaged_windows_whpx_artifacts_in(
+        let error = discover_packaged_windows_whpx_artifacts_in(
             std::slice::from_ref(&root),
             PackagedWindowsWhpxOverrides::default(),
         )
-        .unwrap();
-        assert!(found
-            .system_image_manifest
-            .to_string_lossy()
-            .contains("system-image"));
+        .expect_err("flat layout must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("must be disjoint"),
+            "{message}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

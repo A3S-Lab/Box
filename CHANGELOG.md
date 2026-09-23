@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows/WHPX packaged Host discovery rejects flat installs that nest
+  `system-image/` under the same directory as `a3s-oci.exe` /
+  `a3s-oci-krun-shim.exe` (WHPX `WindowsSystemImage::load` requires those
+  directories to be disjoint). Discovery now prefers the durable sibling layout
+  (`bin/` + `system-image/`, or `%USERPROFILE%\\.a3s\\bin` +
+  `share\\a3s\\system-image`) and searches the install root when the current
+  executable lives under `bin/`. Tip-proven gate 3 create/start/exec/FS/stop/rm
+  on real WHPX under `A3S_BOX_OCI_MIGRATION=microvm` with endpoint unset
+  ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
+
 ### Added
 
 - Linux/KVM packaged Host discovery (`oci_kvm_packaged`): resolve `a3s-oci`,
