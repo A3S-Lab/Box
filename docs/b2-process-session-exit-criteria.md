@@ -26,9 +26,9 @@ Related:
 | # | Gate | Honest state |
 | --- | --- | --- |
 | 1 | Native Linux Sandbox Live: retained stream + keyed mutating FS across Host owner death; no invented exit; schema at or above `a3s.box.linux-native-live-session.v7` | **observation-greened** (CI / WSL digests in Sandbox binder). Still reports `b2_process_session_recovery_closed=false`. |
-| 2 | Linux/KVM DedicatedVm Live: retained stream + FS + `kvm_microvm_live_claimed` under Box-owned ensure; tip schema `a3s.box.linux-kvm-live-session` (v5+) | **observation-greened** (WSL digests in KVM binder). B2 flag stays false. |
+| 2 | Linux/KVM DedicatedVm Live: retained stream + FS + `kvm_microvm_live_claimed` under Box-owned ensure; tip schema `a3s.box.linux-kvm-live-session` (v5+) | **pin-honest tip** — digest `5bdc558847a0b4643e67648accefce4a4658d6e6ee3cd6a4a6941bb8063f6cad` (Box `357fc359` / OCI pin `b26155b1`; tip system-image asset). B2 flag stays false. Prior WSL observation digests remain historical. |
 | 3 | Windows/WHPX DedicatedVm Live: mid-run Host death with retained stream + FS under packaged Box-owned Host; schema `a3s.box.windows-whpx-live-session.v1` | **tip-proven** — pin-honest digest `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box `79414cc3` / OCI `b26155b1`). B2 flag stays false. |
-| 4 | Pin honesty: Native + KVM + WHPX tip digests recorded against the same Box `main` tip and CI `A3S_OCI_RUNTIME_REV` (or a documented re-tip after pin bump) | **partial** — WHPX pin-honest re-tip digest `f366c8d4…` on Box `79414cc3` + OCI pin `b26155b1` (Host binaries `#357` tip). Native/KVM digests still on older pins; refresh those before flip. |
+| 4 | Pin honesty: Native + KVM + WHPX tip digests recorded against the same Box `main` tip and CI `A3S_OCI_RUNTIME_REV` (or a documented re-tip after pin bump) | **partial** — WHPX digest `f366c8d4…` (Box `79414cc3`) + KVM digest `5bdc5588…` (Box `357fc359`) on OCI pin `b26155b1`. Native Live re-tip still needs Sandbox CI host prep (root/cgroup) on this machine. |
 | 5 | Deliberate close: ROADMAP B2 exit checkbox + harness schemas allow `b2_process_session_recovery_closed=true` only when gates 1–4 pass; CHANGELOG states non-claims (no Enterprise GA / HVF / B5) | **open** — do not flip from this document alone. |
 
 ## Flip checklist (when gates 1–4 are green)

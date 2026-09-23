@@ -10,6 +10,10 @@ All notable changes to A3S Box will be documented in this file.
   `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box
   `79414cc3`; `live_path_unavailable=false`). Does **not** flip B2 or claim
   Enterprise GA.
+- Pin-honest KVM Live re-tip on OCI pin `b26155b1`: digest
+  `5bdc558847a0b4643e67648accefce4a4658d6e6ee3cd6a4a6941bb8063f6cad` (Box
+  `357fc359`; WSL2 `/dev/kvm`, Box-owned). Does **not** flip B2 or claim
+  Enterprise GA.
 - Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
   `b26155b1` (merge of `#353`–`#357`: WHPX durable session-owner, host-control
   Live reattach, Guest Host-EOF reconnect). Aligns packaged Host with the gate 9
