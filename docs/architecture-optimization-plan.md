@@ -1,8 +1,12 @@
 # A3S Box Architecture Optimization Plan
 
-Status: **active planning baseline** (2026-09-18)  
-Evidence tip: `main` @ `83b1d008` (includes #578 ephemeral exit-0 retention + #577 macOS TCP/53)  
-Companion docs: [ROADMAP.md](../ROADMAP.md), [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md), [productization-plan.md](productization-plan.md), [soak-test-plan.md](soak-test-plan.md)
+Status: **active planning baseline** (2026-09-23)  
+Evidence tip: `main` @ `2919debb` (a3s-box `3.3.0` + `a3s-oci-sdk` `0.3.2` pin; Linux/KVM and
+Windows/WHPX omit→DedicatedVm cutover tip-proven)  
+Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
+[microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
+[cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
+[productization-plan.md](productization-plan.md), [soak-test-plan.md](soak-test-plan.md)
 
 This plan answers one question: **what architectural work makes Box more true to its isolation and ownership axioms, without overfitting to demos, competitor feature lists, or unproven gates.**
 
@@ -60,23 +64,25 @@ Feature parity with other microVM projects is **not** an axiom.
 ### 2.1 What is production today
 
 - **Linux Sandbox GA** via `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent: lifecycle, exec, filesystem, pause/resume, snapshot, restart, cleanup, Native Live observation (tip harness v7). See [sandbox-ga-evidence.md](sandbox-ga-evidence.md).
-- Default omit-isolation on Linux/KVM with packaged OCI artifacts is OCI
-  DedicatedVm (binder gates 1–8 tip-proven); HVF/WHPX production cutover and
-  Enterprise GA remain open. Explicit `A3S_BOX_OCI_MIGRATION=off` keeps
-  Box-libkrun.
-- HVF / WHPX MicroVM → OCI compositions remain **qualification-only**, not
-  production claims.
+- **Linux/KVM omit-isolation → OCI DedicatedVm** production cutover tip-proven
+  (binder gates 1–8). See [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md).
+- **Windows/WHPX omit-isolation → OCI DedicatedVm** production cutover tip-proven
+  (binder gates 1–8; Created-state owner-death / Host re-ensure only). See
+  [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md).
+- Explicit `A3S_BOX_OCI_MIGRATION=off` keeps Box-libkrun on both hosts.
+- HVF DedicatedVm **production** cutover remains open (qualification compositions
+  exist; no production binder).
 
 ### 2.2 What is partial / open (do not optimize as if closed)
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false` |
+| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Host death with retained Live stream/FS reattach is unproven** (WHPX gate 4 non-claim) |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
-| B5 legacy VMM removal | Blocked on MicroVM parity through OCI |
+| B5 legacy VMM removal | Blocked until HVF production cutover + B2 mid-run Live bar on WHPX match the honesty already tip-proven for KVM/Sandbox observation |
 | B6 cross-platform artifact matrix | Open |
-| Enterprise GA / BX0.3 TEE | Unproven |
+| Enterprise GA / BX0.3 TEE | Unproven — cutover binders alone do not constitute Enterprise GA |
 
 ### 2.3 Structural tension to resolve (not paper over)
 
@@ -107,9 +113,11 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 - Keyed replay for mutating FS and exec under lost responses.
 - Short-lived workloads that exit before exec-ready still persist authenticated terminal state (already partially landed; keep regression-locked). Guest-init starts the exec accept loop immediately after the container fork returns (before stdio relay / PTY warm-up) so heartbeat can win that race without violating fork-safety; Linux directory-rootfs tip proof for `#576` cleared on WSL (2026-09-22: `run --rm alpine:3.20 -- /bin/true` 5/5 rc 0 with `LD_LIBRARY_PATH=/usr/local/lib/a3s-box`; tracker `#631` closed).
 
-**Evidence required:** Native Live + KVM Live matrices; still no self-certifying `b2_process_session_recovery_closed=true` from a single report.
+**Evidence required:** Native Live + KVM Live matrices on WSL; Windows/WHPX
+mid-run Live observation harness (not yet tip-proven); still no self-certifying
+`b2_process_session_recovery_closed=true` from a single report.
 
-**Refuse:** Weakening live-session tests; fixture `process_restart` as driver Live evidence.
+**Refuse:** Weakening live-session tests; fixture `process_restart` as driver Live evidence; treating WHPX Created-state Host re-ensure (cutover gate 4) as mid-run Live.
 
 ### Axis B — Finish the execution cutover (remove the false dual core)
 
@@ -117,12 +125,17 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 
 **Optimize toward:**
 
-1. Production MicroVM via OCI DedicatedVm on Linux/KVM (then HVF, then WHPX), with the same reservation/route stamp rules as Sandbox.
-2. Only then delete Box-direct libkrun lifecycle (B5).
+1. ~~Production MicroVM via OCI DedicatedVm on Linux/KVM~~ **tip-proven**
+   ([microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md)).
+2. ~~Production MicroVM via OCI DedicatedVm on Windows/WHPX~~ **tip-proven**
+   for omit→DedicatedVm lifecycle ([microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md));
+   **next:** mid-run Host death Live stream/FS reattach (Axis A / B2 Windows).
+3. Production MicroVM via OCI DedicatedVm on Apple Silicon/HVF (same stamp rules).
+4. Only then delete Box-direct libkrun lifecycle (B5).
 
-**Evidence required:** Real-host parity for create/start/exec/FS/stop/delete/recovery on each driver; no silent Sandbox↔MicroVM fallback.
+**Evidence required:** Real-host parity for create/start/exec/FS/stop/delete/recovery on each driver; no silent Sandbox↔MicroVM fallback. WHPX mid-run Live must not invent exit and must keep `b2_process_session_recovery_closed=false` until the multi-driver B2 exit criteria land.
 
-**Refuse:** Declaring cutover from qualification-only endpoints; “OCI-shaped” wrappers that still own VMM state inside Box.
+**Refuse:** Declaring cutover from qualification-only endpoints; “OCI-shaped” wrappers that still own VMM state inside Box; claiming Enterprise GA from KVM/WHPX cutover binders alone.
 
 ### Axis C — Network threat posture on the MicroVM data plane
 

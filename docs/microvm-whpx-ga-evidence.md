@@ -54,6 +54,15 @@ unless the row explicitly remains qualification-only.
 | 7 | No silent Sandbox↔MicroVM fallback (Sandbox stays unsupported/fail-closed on Windows) | **tip-proven** — `--isolation sandbox` hard-fails (`Sandbox isolation is supported only on Linux`); no box record stamped |
 | 8 | Docs: README “Still open” closes WHPX production only after 1–7 | **done in this cutover** — README Still-open no longer lists Windows/WHPX omit→OCI as open; HVF + Enterprise GA remain open |
 
+## Next binder work (not tip-proven)
+
+| # | Gate | Status |
+| --- | --- | --- |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — cutover gate 4 only proved Created-state Host kill + re-ensure before `start`. Axis A / B2 Windows path. Acceptance bar mirrors KVM Live observation (`retained_stream_handle_proven`, `retained_filesystem_proven`, keyed exec/FS before kill and after reattach) on real WHPX with endpoint unset |
+
+Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
+explicit mid-run Live non-claim under Windows/WHPX.
+
 ## Explicit non-claims
 
 - Enterprise GA / BX0.3 TEE.

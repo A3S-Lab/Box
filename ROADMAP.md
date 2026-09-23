@@ -665,6 +665,13 @@ retain process or filesystem sessions after its owner dies.
     `cb8e6c287c669086249e0f6fd38f447deb2d0466ea1803aa2e7c2b5d66579373` (Box
     `d8854a4c…` / OCI `fb390b69…`) remains historical. Prior published digests
     above remain v2-scoped historical evidence.
+  - [ ] Windows/WHPX mid-run Live observation harness (packaged Box-owned Host;
+    endpoint unset): create → start long-running DedicatedVm → keyed exec / FS
+    → Host SIGKILL/taskkill while Running → retained-manager reattach with no
+    invented exit → keyed exec / FS / stream continuity. Report schema must keep
+    `b2_process_session_recovery_closed=false`. Does **not** alone close B2 or
+    claim Enterprise GA. Binder: WHPX evidence gate 9
+    ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish

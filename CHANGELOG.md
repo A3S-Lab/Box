@@ -12,6 +12,13 @@ All notable changes to A3S Box will be documented in this file.
   lacked Network/Storage attachment APIs present on the prior git pin. Does
   **not** claim Enterprise GA.
 
+### Changed
+
+- Architecture optimization plan and WHPX binder: record Linux/KVM and
+  Windows/WHPX omit→DedicatedVm cutover as tip-proven; open WHPX mid-run Live
+  (binder gate 9 / ROADMAP B2) as the next Axis A Windows honesty gate. Does
+  **not** flip `b2_process_session_recovery_closed` or claim Enterprise GA.
+
 ## [3.3.0] — 2026-09-23
 
 Release line `3.3.0`: workspace, installers, and SDK packages align on
