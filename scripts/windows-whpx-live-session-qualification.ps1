@@ -77,6 +77,15 @@ function Resolve-RegularFile {
 
 Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $boxArtifacts 'a3s-box.exe')) `
     -Destination (Join-Path $boxBin 'a3s-box.exe')
+Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $boxArtifacts 'a3s-box-shim.exe')) `
+    -Destination (Join-Path $boxBin 'a3s-box-shim.exe')
+foreach ($name in @('krun.dll', 'libkrunfw.dll')) {
+    $dll = Join-Path $boxArtifacts $name
+    if (Test-Path -LiteralPath $dll) {
+        Copy-Item -LiteralPath (Resolve-RegularFile $dll) `
+            -Destination (Join-Path $boxBin $name)
+    }
+}
 $exampleSrc = Join-Path $boxArtifacts $exampleName
 if (-not (Test-Path -LiteralPath $exampleSrc)) {
     throw @"
