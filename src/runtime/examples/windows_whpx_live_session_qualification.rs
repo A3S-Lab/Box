@@ -630,14 +630,8 @@ mod qualification {
         report.owner_gone = true;
 
         let disconnect = process.next_event().await;
-        let live_available = !matches!(disconnect, Err(ExecutionManagerError::Unavailable(_)));
-
-        if !live_available && matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))) {
-            // WHPX Live reattach is not yet wired at the OCI layer — fail
-            // closed honestly instead of inventing success.
-            report.live_path_unavailable = true;
-        }
-
+        // Retained stream must surface Unavailable on Host death; that alone
+        // does not mean the Live reattach path is missing (reconcile proves it).
         require(
             matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))),
             format!("retained stream must surface Unavailable on Host death, got {disconnect:?}"),
@@ -672,6 +666,7 @@ mod qualification {
                     "Host reopen recovered a different Ready Box generation",
                 )?;
                 report.reconciled_ready_after_reopen = true;
+                report.live_path_unavailable = false;
             }
             ReconcileOutcome::Failed => {
                 report.live_path_unavailable = true;

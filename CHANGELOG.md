@@ -6,13 +6,22 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- WHPX binder gate 9 tip-proven on real WHPX: mid-run Host taskkill with
+  retained Live stream + filesystem reattach
+  (`a3s.box.windows-whpx-live-session.v1` digest
+  `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e`).
+  `b2_process_session_recovery_closed` stays false; does **not** claim
+  Enterprise GA.
 - Windows WHPX CI artifact includes
   `windows-whpx-live-session-qualification.exe` so gate 9 tip-prove can run from
-  the published `windows-whpx` bundle without a local example rebuild. Does
-  **not** tip-prove gate 9 or claim Enterprise GA.
+  the published `windows-whpx` bundle without a local example rebuild.
 
 ### Fixed
 
+- Live-session harness no longer stamps `live_path_unavailable=true` merely
+  because the retained stream surfaces `Unavailable` on Host death (expected);
+  the flag is cleared on Live Ready reopen and set only when reconcile fails
+  closed.
 - Pin `a3s-oci-sdk`/`a3s-oci-core` and CI/release `A3S_OCI_RUNTIME_REV` to
   crates.io-publishable `0.3.2` (`d5c3292f`) so `a3s-box-runtime@3.3.0` /
   `a3s-box-sdk@3.3.0` can finish crates.io publication. crates.io `0.3.1`
@@ -23,9 +32,9 @@ All notable changes to A3S Box will be documented in this file.
 
 - Box-owned WHPX Host spawn sets `A3S_OCI_WHPX_SESSION_OWNER=1` (KVM analogue)
   so create uses Host → session-owner → shim (`#661`). OCI durable session-owner
-  spawn is merged (`OCI-Runtime#354`); host-control named-pipe Live reattach
-  lands in `OCI-Runtime#356`. Gate 9 tip-prove on real WHPX remains open. Does
-  **not** flip B2 or claim Enterprise GA.
+  spawn (`OCI-Runtime#354`), host-control Live reattach (`#356`), and Guest
+  Host-EOF reconnect (`#357`) tip-prove WHPX binder gate 9 (digest above).
+  Does **not** flip B2 or claim Enterprise GA.
 
 - Windows/WHPX mid-run Live observation harness
   (`windows-whpx-live-session-qualification` example, PS1 runner, Python
@@ -33,9 +42,7 @@ All notable changes to A3S Box will be documented in this file.
   KVM Live v5 pattern (keyed exec/FS before owner kill, retained-stream
   + filesystem proofs after reattach). Reports keep
   `b2_process_session_recovery_closed=false` and
-  `fixture_stream_continuity_claimed=false`. Gate 9 stays **open** until
-  tip-proven on real WHPX (OCI durable session-owner spawn `#354` + host-control
-  reattach `#356` are the substrate; tip digest still required).
+  `fixture_stream_continuity_claimed=false`.
   Does **not** flip B2 or claim Enterprise GA.
 
 ### Changed
