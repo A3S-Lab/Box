@@ -6,12 +6,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Same-tip Native+KVM+WHPX Live triad on Box `1356d4bb` / OCI pin `b26155b1`:
+  Native `aa30adca0518aff54029582cc081a8e5530623c7094bda308a3f10113d8fa482`,
+  KVM `9a0b744f8e829e172480f13d28ba6e66ea8f51c0253daf6bbb0392f16815dd11`,
+  WHPX `0696d7e15d4596c026b9bf11a898f0c81f8755d234b1c9b59fe7a180ea1daeaf`.
+  Closes B2 exit binder gates 1–4 on this tip. Does **not** flip
+  `b2_process_session_recovery_closed` (gate 5 deliberate) or claim Enterprise
+  GA.
 - Pin-honest Native Live re-tip on OCI pin `b26155b1`: digest
   `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d` (Box
   `e5203dbe`; schema `a3s.box.linux-native-live-session.v7`; WSL2 Sandbox CI
-  host). Closes B2 exit binder gate 4 pin honesty on this OCI pin (Native +
-  KVM + WHPX). Does **not** flip `b2_process_session_recovery_closed` or claim
-  Enterprise GA.
+  host). Superseded for gate 4 by the same-tip triad above. Does **not** flip
+  `b2_process_session_recovery_closed` or claim Enterprise GA.
 - Pin-honest WHPX Live re-tip on OCI pin `b26155b1`: digest
   `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc` (Box
   `79414cc3`; `live_path_unavailable=false`). Does **not** flip B2 or claim

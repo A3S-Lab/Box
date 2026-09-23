@@ -582,8 +582,10 @@ retain process or filesystem sessions after its owner dies.
     KVM / utility-VM claims stay false). **Pin-honest WSL2 tip** on OCI pin
     `b26155b1`: SHA-256
     `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d`
-    (Box `e5203dbe…`; same v7 bar; B2 stays false). Prior published digests
-    above remain v4-scoped historical evidence.
+    (Box `e5203dbe…`; same v7 bar; B2 stays false). **Same-tip triad** on Box
+    `1356d4bb` / OCI `b26155b1`: SHA-256
+    `aa30adca0518aff54029582cc081a8e5530623c7094bda308a3f10113d8fa482`.
+    Prior published digests above remain v4-scoped historical evidence.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -675,8 +677,11 @@ retain process or filesystem sessions after its owner dies.
     digest
     `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc`
     (`a3s.box.windows-whpx-live-session.v1`; Box `79414cc3…` / OCI pin
-    `b26155b1…`). Prior tip `e329bb9d…` (Box `166cab1b…` / Host `7a18464…`)
-    remains historical. Report keeps `b2_process_session_recovery_closed=false`.
+    `b26155b1…`). **Same-tip triad** digest
+    `0696d7e15d4596c026b9bf11a898f0c81f8755d234b1c9b59fe7a180ea1daeaf`
+    (Box `1356d4bb…` / OCI pin `b26155b1…`). Prior tip `e329bb9d…` (Box
+    `166cab1b…` / Host `7a18464…`) remains historical. Report keeps
+    `b2_process_session_recovery_closed=false`.
     Does **not** alone close B2 or claim Enterprise GA. Binder: WHPX evidence
     gate 9 ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
@@ -858,10 +863,11 @@ exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
 one exec dispatch. The same fixture owner also recovers keyed file upload and
 mutating filesystem state across owner replacement without flipping B2. Native
-Linux, KVM MicroVM, and WHPX DedicatedVm Live reattachment are tip/pin-honest
-on OCI pin `b26155b1` under the process-session recovery parent above
-(Native `bac4f83d…` / KVM `5bdc5588…` / WHPX `f366c8d4…`); the B2 exit gate
-remains open (deliberate flip only) and harness reports still keep
+Linux, KVM MicroVM, and WHPX DedicatedVm Live reattachment are same-tip
+pin-honest on Box `1356d4bb` / OCI pin `b26155b1` under the process-session
+recovery parent above (Native `aa30adca…` / KVM `9a0b744f…` / WHPX
+`0696d7e1…`); B2 exit gates 1–4 are closed on tip; gate 5 (deliberate flip)
+remains open and harness reports still keep
 `b2_process_session_recovery_closed=false`. Multi-driver exit criteria:
 [b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md).
 Box-owned native Host spawn forces
