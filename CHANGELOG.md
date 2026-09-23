@@ -12,8 +12,9 @@ All notable changes to A3S Box will be documented in this file.
   directories to be disjoint). Discovery now prefers the durable sibling layout
   (`bin/` + `system-image/`, or `%USERPROFILE%\\.a3s\\bin` +
   `share\\a3s\\system-image`) and searches the install root when the current
-  executable lives under `bin/`. Tip-proven gate 3 create/start/exec/FS/stop/rm
-  on real WHPX under `A3S_BOX_OCI_MIGRATION=microvm` with endpoint unset
+  executable lives under `bin/`.   Tip-proven gate 3 create/start/exec/FS/stop/rm and gate 4 Created-state
+  owner-death / Host re-ensure (no invented exit; B2 stays false) on real
+  WHPX under `A3S_BOX_OCI_MIGRATION=microvm` with endpoint unset
   ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
 
 ### Added
