@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-09-23
+
+Release line `3.3.0`: workspace, installers, and SDK packages align on
+`v3.3.0`. Ships Linux/KVM and Windows/WHPX omit-isolation → OCI DedicatedVm
+production cutover (packaged Host discovery, gate 5 absent-env default),
+Sandbox Outbound host-netns, and post-`3.2.7` honesty/reliability fixes.
+Does **not** close B2 Live mid-run stream reattach, HVF production cutover,
+or claim Enterprise GA / `BX0.3`.
+
 ### Fixed
 
 - Windows/WHPX packaged Host discovery rejects flat installs that nest

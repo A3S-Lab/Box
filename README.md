@@ -76,19 +76,22 @@ is not yet a production claim.
 
 ## Current release line
 
-The `3.2.7` release line (published as
-[v3.2.7](https://github.com/A3S-Lab/Box/releases/tag/v3.2.7)) keeps the public
-SDK contract stable while packaging Linux Sandbox GA activation and the latest
-runtime fixes from `main`:
+The `3.3.0` release line (published as
+[v3.3.0](https://github.com/A3S-Lab/Box/releases/tag/v3.3.0)) keeps the public
+SDK contract stable while packaging Linux Sandbox GA, Linux/KVM and
+Windows/WHPX omit→OCI DedicatedVm production cutover, and the latest runtime
+fixes from `main`:
 
 | Area | Latest behavior |
 | --- | --- |
 | Linux Sandbox GA | Absent `A3S_BOX_OCI_MIGRATION` defaults new Sandbox records to `SandboxViaOci`; hosted x86_64/aarch64 CI proves the route with the env unset (lifecycle + Native Live observation gate; tip harness v7, CI-greened digests v7-scoped). Operator host prep: `scripts/prepare-linux-sandbox-host.sh`. Evidence: [sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md). Not a MicroVM/`BX0.3` claim. |
+| Linux/KVM MicroVM cutover | Absent `A3S_BOX_OCI_MIGRATION` stamps omit-isolation → packaged Box-owned OCI `DedicatedVm` when Host artifacts are discoverable (gates 1–8 tip-proven). Evidence: [microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md). |
+| Windows/WHPX MicroVM cutover | Same absent-env packaged DedicatedVm default on Windows x86_64 with sibling `bin/` + `system-image/` Host layout (gates 1–8 tip-proven; B2 mid-run Live reattach unclaimed). Evidence: [microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md). |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` drain idle VMs and leases with bounded concurrency; destroy failures best-effort reap orphans (idle, lease release/expiry, oneshot `pool run`, mid-replenish, and template teardown); snapshot template dirs (`~/.a3s/pool/tpl-*`) are removed even after a Failing/Unavailable build. |
 | MicroVM lifecycle | Guest stop is skipped when the workload already exited; Unix cold boot fail-closes without an exec heartbeat; crash-detection grace is 80ms. Transport retries cover ambiguous ACK/stream loss on keyed exec, read-only filesystem ops, keyed mutating filesystem ops (`MakeDir`/`Move`/`Remove` with `request_id`), keyed file uploads, and file downloads. SDK/bridge `Unavailable` for keyed upload and mutate preserves `request_id` for caller retry (parity with keyed exec). |
 | CRI | PodSandbox creation defers the agent workload until `StartContainer`; cancel and destroy paths best-effort reap orphans when VM teardown fails. |
 | Runtime builds | OCI-only builds retain durable cleanup and socket handling without hypervisor dependencies. |
-| Evidence | Soak runs record per-capability results and versioned host-resource samples; Sandbox GA binder freezes networking non-claims (bridge/publish rejected). |
+| Evidence | Soak runs record per-capability results and versioned host-resource samples; Sandbox GA binder freezes networking non-claims (bridge/publish rejected). Enterprise GA / HVF production / B2 remain unclaimed. |
 
 Installers, native binaries, and the Rust, Python, TypeScript, and Go SDK
 artifacts are published from the same versioned release tag. See the

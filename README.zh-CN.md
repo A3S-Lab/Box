@@ -51,18 +51,21 @@ runtime crate 现在还暴露显式的 `OciMigrationPolicy` 与 `LocalExecutionB
 
 ## 当前发布线
 
-`3.2.7` 发布线（已发布为
-[v3.2.7](https://github.com/A3S-Lab/Box/releases/tag/v3.2.7)）在保持公共 SDK
-契约稳定的同时，打包 Linux Sandbox GA 默认激活与来自 `main` 的最新运行时修复：
+`3.3.0` 发布线（已发布为
+[v3.3.0](https://github.com/A3S-Lab/Box/releases/tag/v3.3.0)）在保持公共 SDK
+契约稳定的同时，打包 Linux Sandbox GA、Linux/KVM 与 Windows/WHPX omit→OCI
+DedicatedVm 生产切换，以及来自 `main` 的最新运行时修复：
 
 | 领域 | 最新行为 |
 | --- | --- |
 | Linux Sandbox GA | 未设置 `A3S_BOX_OCI_MIGRATION` 时，新的 Sandbox 记录默认走 `SandboxViaOci`；托管 x86_64/aarch64 CI 在未设置该变量时证明该路由（生命周期 + Native Live 观察门；tip harness 为 v7，CI-greened digests v7-scoped）。主机准备：`scripts/prepare-linux-sandbox-host.sh`。证据：[sandbox-ga-evidence.md](docs/sandbox-ga-evidence.md)。不是 MicroVM/`BX0.3` 宣称。 |
+| Linux/KVM MicroVM 切换 | 未设置 `A3S_BOX_OCI_MIGRATION` 且可发现 Host 产物时，omit-isolation 盖章为 Box 托管 OCI `DedicatedVm`（gates 1–8 tip-proven）。证据：[microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md)。 |
+| Windows/WHPX MicroVM 切换 | Windows x86_64 上同样的 absent-env 打包 DedicatedVm 默认（sibling `bin/` + `system-image/` Host 布局；gates 1–8 tip-proven；B2 mid-run Live reattach 未宣称）。证据：[microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)。 |
 | Warm pools | SIGTERM/`SIGINT`/`pool stop` 以有界并发排空空闲 VM 与租约；销毁失败尽力回收孤儿（空闲、租约释放/过期、一次性 `pool run`、补充中途与模板拆除）；即使构建为 Failing/Unavailable，也会移除快照模板目录（`~/.a3s/pool/tpl-*`）。 |
 | MicroVM lifecycle | 工作负载已退出时跳过 guest stop；Unix 冷启动在无 exec 心跳时失败即关闭；崩溃检测宽限为 80ms。传输层对带 key 的 exec 与只读文件系统操作覆盖歧义 ACK/流丢失重试。 |
 | CRI | PodSandbox 创建将 agent 工作负载推迟到 `StartContainer`；取消与销毁路径在 VM 拆除失败时尽力回收孤儿。 |
 | Runtime builds | 仅 OCI 的构建在无 hypervisor 依赖的情况下保留持久清理与 socket 处理。 |
-| Evidence | Soak 运行记录每能力结果与版本化主机资源采样；Sandbox GA binder 冻结网络非宣称（bridge/publish 拒绝）。 |
+| Evidence | Soak 运行记录每能力结果与版本化主机资源采样；Sandbox GA binder 冻结网络非宣称（bridge/publish 拒绝）。Enterprise GA / HVF 生产 / B2 仍未宣称。 |
 
 安装程序、原生二进制以及 Rust、Python、TypeScript 与 Go SDK 产物从同一版本化发布标签发布。完整补丁历史见
 [Changelog](CHANGELOG.md)。
