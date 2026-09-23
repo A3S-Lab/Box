@@ -10,6 +10,10 @@ All notable changes to A3S Box will be documented in this file.
   `b26155b1` (merge of `#353`–`#357`: WHPX durable session-owner, host-control
   Live reattach, Guest Host-EOF reconnect). Aligns packaged Host with the gate 9
   tip-prove Host tip. Does **not** flip B2 or claim Enterprise GA.
+- Add multi-driver B2 exit criteria binder
+  ([docs/b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md)):
+  Native + KVM + WHPX Live tip gates, pin honesty, and deliberate flip checklist.
+  Does **not** flip `b2_process_session_recovery_closed`.
 - WHPX binder gate 9 tip-proven on real WHPX: mid-run Host taskkill with
   retained Live stream + filesystem reattach
   (`a3s.box.windows-whpx-live-session.v1` digest
