@@ -668,9 +668,14 @@ retain process or filesystem sessions after its owner dies.
   - [ ] Windows/WHPX mid-run Live observation harness (packaged Box-owned Host;
     endpoint unset): create → start long-running DedicatedVm → keyed exec / FS
     → Host SIGKILL/taskkill while Running → retained-manager reattach with no
-    invented exit → keyed exec / FS / stream continuity. Report schema must keep
-    `b2_process_session_recovery_closed=false`. Does **not** alone close B2 or
-    claim Enterprise GA. Binder: WHPX evidence gate 9
+    invented exit → keyed exec / FS / stream continuity. Report schema
+    `a3s.box.windows-whpx-live-session.v1` (example +
+    `verify-windows-whpx-live-session-report.py` +
+    `windows-whpx-live-session-qualification.ps1`) is present; greening of a
+    tip digest remains pending (also blocked on OCI WHPX durable session-owner
+    Live reattach, KVM analogue `A3S_OCI_KVM_SESSION_OWNER`). Report schema
+    must keep `b2_process_session_recovery_closed=false`. Does **not** alone
+    close B2 or claim Enterprise GA. Binder: WHPX evidence gate 9
     ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing

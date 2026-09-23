@@ -20,8 +20,10 @@ NATIVE_EXAMPLE = (
     "src/runtime/examples/linux_native_live_session_qualification.rs"
 )
 KVM_EXAMPLE = "src/runtime/examples/linux_kvm_live_session_qualification.rs"
+WHPX_EXAMPLE = "src/runtime/examples/windows_whpx_live_session_qualification.rs"
 NATIVE_VERIFIER = "scripts/verify-linux-native-live-session-report.py"
 KVM_VERIFIER = "scripts/verify-linux-kvm-live-session-report.py"
+WHPX_VERIFIER = "scripts/verify-windows-whpx-live-session-report.py"
 
 CONST_RE = re.compile(
     r'const\s+(SCHEMA_VERSION|KEYED_FILE_UPLOAD_BEFORE|KEYED_MKDIR_BEFORE|'
@@ -56,6 +58,7 @@ def evaluate_tree(root: Path) -> list[str]:
     pairs = (
         ("native", NATIVE_EXAMPLE, NATIVE_VERIFIER, "v7"),
         ("kvm", KVM_EXAMPLE, KVM_VERIFIER, "v5"),
+        ("whpx", WHPX_EXAMPLE, WHPX_VERIFIER, "v1"),
     )
     for label, example_rel, verifier_rel, tip_tag in pairs:
         example = root / example_rel
@@ -126,7 +129,7 @@ def evaluate_tree(root: Path) -> list[str]:
                         "ROADMAP.md still claims Native Live v7 greening pending "
                         "after CI digests were published"
                     )
-            else:
+            elif label == "kvm":
                 digest = (
                     "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5"
                 )
@@ -140,6 +143,8 @@ def evaluate_tree(root: Path) -> list[str]:
                         "ROADMAP.md still claims KVM Live v5 greening pending "
                         "after the existing-host digest was published"
                     )
+            # whpx: schema presence in ROADMAP is checked above; no
+            # tip-proven digest to verify yet (gate 9 still open).
 
     readme = root / "README.md"
     if not readme.is_file():
@@ -245,12 +250,29 @@ def self_test() -> int:
             'KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"\n',
             encoding="utf-8",
         )
+        (root / WHPX_EXAMPLE).write_text(
+            'const SCHEMA_VERSION: &str = "a3s.box.windows-whpx-live-session.v1";\n'
+            'const KEYED_FILE_UPLOAD_BEFORE: &str = "a3s.box.live-session.keyed-file.before-owner-kill";\n'
+            'const KEYED_MKDIR_BEFORE: &str = "a3s.box.live-session.keyed-mkdir.before-owner-kill";\n'
+            'const KEYED_MOVE_BEFORE: &str = "a3s.box.live-session.keyed-move.before-owner-kill";\n'
+            'const KEYED_REMOVE_BEFORE: &str = "a3s.box.live-session.keyed-remove.before-owner-kill";\n',
+            encoding="utf-8",
+        )
+        (root / WHPX_VERIFIER).write_text(
+            'SCHEMA = "a3s.box.windows-whpx-live-session.v1"\n'
+            'KEYED_FILE_UPLOAD_BEFORE = "a3s.box.live-session.keyed-file.before-owner-kill"\n'
+            'KEYED_MKDIR_BEFORE = "a3s.box.live-session.keyed-mkdir.before-owner-kill"\n'
+            'KEYED_MOVE_BEFORE = "a3s.box.live-session.keyed-move.before-owner-kill"\n'
+            'KEYED_REMOVE_BEFORE = "a3s.box.live-session.keyed-remove.before-owner-kill"\n',
+            encoding="utf-8",
+        )
         (root / "ROADMAP.md").write_text(
             "a3s.box.linux-native-live-session.v7\n"
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n"
+            "a3s.box.windows-whpx-live-session.v1\n",
             encoding="utf-8",
         )
         (root / "README.md").write_text(
@@ -332,7 +354,8 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n"
+            "a3s.box.windows-whpx-live-session.v1\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -347,7 +370,8 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "greening of a v5 digest remains pending\n",
+            "greening of a v5 digest remains pending\n"
+            "a3s.box.windows-whpx-live-session.v1\n",
             encoding="utf-8",
         )
         failures = evaluate_tree(root)
@@ -362,7 +386,8 @@ def self_test() -> int:
             "71b106e90635780f904679c21f03459c748070aadfd0dbf99a0ea0888107b2fd\n"
             "43044eed12fb53b4452d5dab948b3ec5528e1236d56ce35a435335e422a3cb21\n"
             "a3s.box.linux-kvm-live-session.v5\n"
-            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n",
+            "81ecd79ee341ea1705ffd0f16cfb0d0aca76998d8cfd36dca9a04fa982bd7cd5\n"
+            "a3s.box.windows-whpx-live-session.v1\n",
             encoding="utf-8",
         )
 

@@ -58,7 +58,7 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — cutover gate 4 only proved Created-state Host kill + re-ensure before `start`. Axis A / B2 Windows path. Acceptance bar mirrors KVM Live observation (`retained_stream_handle_proven`, `retained_filesystem_proven`, keyed exec/FS before kill and after reattach) on real WHPX with endpoint unset |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — observation harness landed (`windows-whpx-live-session-qualification`, schema `a3s.box.windows-whpx-live-session.v1`): keyed exec/FS before taskkill, retained-stream + filesystem proofs after reattach, honest `b2=false` / `fixture_stream_continuity_claimed=false`. Not tip-proven on real WHPX; mid-run Live also needs OCI WHPX durable session-owner (KVM analogue). Gate stays open until a tip-proven digest is published |
 
 Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
 explicit mid-run Live non-claim under Windows/WHPX.
