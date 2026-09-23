@@ -415,7 +415,8 @@ try {
             }
             if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
                 $candidate = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
-                if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
+                if ($candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v2' -or
+                    $candidate.schema_version -eq 'a3s.oci.box-whpx-service-ready.v1') {
                     $ready = $candidate
                     break
                 }

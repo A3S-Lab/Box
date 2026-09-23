@@ -19,7 +19,7 @@ const OWNER_RECORD_SCHEMA: &str = "a3s.box.windows-whpx-oci-owner.v2";
 const OWNER_RECORD_NAME: &str = "box-owner.json";
 const OWNER_LOCK_TARGET: &str = "box-whpx-owner";
 const READY_FILE_NAME: &str = "service-ready.json";
-const READY_SCHEMA: &str = "a3s.oci.box-whpx-service-ready.v1";
+const READY_SCHEMA: &str = "a3s.oci.box-whpx-service-ready.v2";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -176,6 +176,8 @@ struct ServiceReadyEvidence {
     endpoint: String,
     runtime_root: PathBuf,
     state_root: PathBuf,
+    #[serde(default)]
+    system_image_manifest: Option<PathBuf>,
 }
 
 /// Ensure a Box-owned Windows WHPX qualification Host is identity-fenced and ready.
@@ -367,6 +369,10 @@ async fn wait_until_ready(
                     && paths_equal(&ready.runtime_root, service_root)
                     && paths_equal(&ready.state_root, state_root)
                     && ready.owner_pid != 0
+                    && ready
+                        .system_image_manifest
+                        .as_ref()
+                        .is_none_or(|path| path.is_absolute())
             }
             Ok(None) => false,
             Err(_) => false,

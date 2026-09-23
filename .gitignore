@@ -83,6 +83,9 @@ cobertura.xml
 logs/
 *.log
 
+# Local WHPX packaged tip-prove staging (binaries + system-image)
+.whpx-tip-prove/
+
 # Git Worktrees
 .worktrees/
 sdk/*/target/

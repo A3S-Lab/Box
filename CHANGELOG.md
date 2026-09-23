@@ -113,6 +113,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Windows `pid_start_time` uses `GetProcessTimes` creation `FILETIME` so
+  Box-owned WHPX Host ensure can identity-fence spawned PIDs (previously the
+  Windows stub always returned `None` and ensure failed closed). Ready
+  evidence accepts OCI `a3s.oci.box-whpx-service-ready.v2`. Packaged WHPX
+  opt-in materializes live `bootstrap-vm-rootfs/` under the mutable service
+  root and refuse service roots that overlap immutable `system-image/`
+  (OCI disjoint layout). Tip-proven gates 1–2 on real WHPX: endpoint unset +
+  packaged Host → `create` MicroVM. Does **not** flip gate 5 or claim
+  Enterprise GA (#650).
 - Windows Box-owned WHPX Host spawn passes `--system-image-manifest` required
   by OCI `box-whpx-qualification-service` (pin `f08555c9…`). Box-owned env now
   requires `A3S_BOX_WHPX_OCI_SERVICE_MANIFEST`; owner record schema is
