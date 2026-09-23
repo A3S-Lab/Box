@@ -668,12 +668,14 @@ retain process or filesystem sessions after its owner dies.
   - [x] Windows/WHPX mid-run Live observation harness (packaged Box-owned Host;
     endpoint unset): create → start long-running DedicatedVm → keyed exec / FS
     → Host taskkill while Running → retained-manager reattach with no invented
-    exit → keyed exec / FS / stream continuity. Tip-proven digest
-    `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e`
-    (`a3s.box.windows-whpx-live-session.v1`; Box `166cab1b…` / OCI `7a18464…`).
-    Report keeps `b2_process_session_recovery_closed=false`. Does **not** alone
-    close B2 or claim Enterprise GA. Binder: WHPX evidence gate 9
-    ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
+    exit → keyed exec / FS / stream continuity. Tip-proven; pin-honest re-tip
+    digest
+    `f366c8d45e95c7992c9e96395db03d8307bba300be5c90e4d3b9cfbc876fe9fc`
+    (`a3s.box.windows-whpx-live-session.v1`; Box `79414cc3…` / OCI pin
+    `b26155b1…`). Prior tip `e329bb9d…` (Box `166cab1b…` / Host `7a18464…`)
+    remains historical. Report keeps `b2_process_session_recovery_closed=false`.
+    Does **not** alone close B2 or claim Enterprise GA. Binder: WHPX evidence
+    gate 9 ([microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)).
   - [x] Lifecycle evidence honesty (anti-overfit; does **not** close B2): refuse
   inventing kill exit / `stopped_by_user` on `AlreadyStopped`; refuse inventing
   `Paused` over terminal cold pause/resume evidence; warm pause/resume publish
