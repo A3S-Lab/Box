@@ -46,6 +46,11 @@ All notable changes to A3S Box will be documented in this file.
   records qualification Live tip digest `81ecd79e…` vs open production gates
   (packaged Host discovery, opt-in then default omit-isolation to DedicatedVm).
   Does **not** flip MicroVM production cutover, B5, or Enterprise GA.
+- Windows/WHPX MicroVM OCI cutover evidence binder
+  ([docs/microvm-whpx-ga-evidence.md](docs/microvm-whpx-ga-evidence.md)):
+  qualification-only checklist for packaged Host discovery and absent-env
+  DedicatedVm default (#650). Does **not** flip WHPX production or claim
+  Enterprise GA.
 - Host-held secret substitution spike
   ([docs/host-held-secrets-spike.md](docs/host-held-secrets-spike.md)):
   records why netproxy TLS rewrite is not implemented and why Compose

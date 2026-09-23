@@ -217,19 +217,22 @@ artifact drift, and reuses only a launch-ready SDK endpoint. The CLI, machine
 bridge and async Rust SDK constructor default Linux Sandbox records to
 `SandboxViaOci` when `A3S_BOX_OCI_MIGRATION` is absent (explicit `off` keeps the
 legacy route; explicit `sandbox` hard-fails if the owner is not launch-ready).
-The qualification-only `A3S_BOX_OCI_MIGRATION=microvm|all` MicroVM path still
+The packaged Linux/KVM path now soft-activates DedicatedVm when
+`A3S_BOX_OCI_MIGRATION` is absent and `a3s-oci` + `a3s-oci-krun-shim` +
+`system-image.json` are discoverable (binder gates 1–8 tip-proven; see
+[microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md)). Explicit
+`off` keeps Box-libkrun. The qualification-only external Host path still
 requires an explicit `A3S_BOX_OCI_KVM_ENDPOINT` for an externally launched
 `box-kvm-qualification-service`, or `A3S_BOX_KVM_OCI_BOX_OWNED=1` plus service
 root/bin/shim/manifest so Box identity-fences and (re)spawns that Host under
 `{service_root}/runtime.sock`. That composition keeps production Sandbox on
 `SandboxViaOci` when the Native Linux owner is launch-ready, and sends only
-new MicroVM records to the qualification DedicatedVm provider. `microvm`/`kvm`
+new MicroVM records to the DedicatedVm provider. `microvm`/`kvm`
 leave Sandbox fail-closed if that owner is not ready; `all` refuses to start
-without it. This does not claim MicroVM production cutover. Box-owned KVM Host spawn forces
+without it. Box-owned KVM Host spawn forces
 `A3S_OCI_KVM_SESSION_OWNER=1`; fresh qualification construction reaps
 session-owner/shim orphans on dead-Host reclaim, while retained-manager Live
-reopen does not. Box-owned KVM ensure does not claim production
-MicroVM cutover. Windows WHPX qualification likewise accepts an externally
+reopen does not. Windows WHPX qualification likewise accepts an externally
 launched `box-whpx-qualification-service` pipe, or
 `A3S_BOX_WHPX_OCI_BOX_OWNED=1` plus service root/bin/shim/vm-rootfs so Box
 identity-fences and (re)spawns that Host under a deterministic named pipe.
@@ -243,7 +246,7 @@ Non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER` fail-closes unless the
 Sandbox OCI launcher is root-owned mode `4755`; hosted CI setpriv on nosuid
 runners remains lab-only (self-hosted
 `scripts/proof-linux-sandbox-setuid-launcher.sh`). This does not flip B2
-harness close or MicroVM cutover.
+harness close or WHPX/HVF MicroVM production cutover.
 Core lifecycle, run/exec/PTY, wait,
 pause/resume and cleanup commands now detect the persisted OCI route instead
 of requiring Box guest sockets. The blocking native-Linux x86_64 and aarch64 CI
@@ -339,10 +342,12 @@ env unset. Explicit `off` preserves the VM-only backend; explicit `sandbox`
 hard-fails when the owner is not launch-ready. Public docs must not call this
 path a “preview” while CI proves it. Operator host prep is documented in
 [Installation](docs/installation.md#linux-sandbox-host-preparation). Sandbox GA
-does **not** require MicroVM cutover, WHPX/KVM MicroVM production composition,
+does **not** require WHPX/HVF MicroVM production composition,
 flipping `b2_process_session_recovery_closed`, fixture-as-driver Live, or Cloud
-`BX0.3` hardware-TEE exit. Default omit-isolation → MicroVM remains until a
-separate MicroVM cutover. Full B3/B4 exit gates remain open; Sandbox
+`BX0.3` hardware-TEE exit. Linux/KVM omit-isolation → OCI DedicatedVm
+production cutover is tip-proven
+([microvm-kvm-ga-evidence.md](docs/microvm-kvm-ga-evidence.md)); Enterprise GA
+is not claimed. Full B3/B4 exit gates remain open; Sandbox
 GA must advertise only the surfaces already proven (not Compose/CRI/bridge as
 closed).
 
