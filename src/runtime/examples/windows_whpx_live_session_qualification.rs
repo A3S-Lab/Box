@@ -256,9 +256,7 @@ mod qualification {
         let report_path = match absolute_environment_path(REPORT_ENV) {
             Ok(path) => path,
             Err(error) => {
-                eprintln!(
-                    "WHPX live-session qualification cannot select its report: {error}"
-                );
+                eprintln!("WHPX live-session qualification cannot select its report: {error}");
                 std::process::exit(2);
             }
         };
@@ -433,8 +431,7 @@ mod qualification {
                 failure(format!("failed to launch taskkill for pid {pid}: {error}"))
             })?;
         if !status.success() {
-            let still_running =
-                a3s_box_runtime::is_process_running_with_identity(pid, None);
+            let still_running = a3s_box_runtime::is_process_running_with_identity(pid, None);
             require(
                 !still_running,
                 format!("taskkill failed and Host pid {pid} is still running"),
@@ -624,12 +621,7 @@ mod qualification {
                     "streaming stdin write before Host taskkill failed: {error}"
                 ))
             })?;
-        expect_stream_echo(
-            process.as_mut(),
-            STREAM_ECHO_BEFORE,
-            "before Host taskkill",
-        )
-        .await?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_BEFORE, "before Host taskkill").await?;
 
         // Keep the Box manager: retained-handle continuity is the v1 gate.
         taskkill_host_service(host_pid)?;
@@ -640,9 +632,7 @@ mod qualification {
         let disconnect = process.next_event().await;
         let live_available = !matches!(disconnect, Err(ExecutionManagerError::Unavailable(_)));
 
-        if !live_available
-            && matches!(disconnect, Err(ExecutionManagerError::Unavailable(_)))
-        {
+        if !live_available && matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))) {
             // WHPX Live reattach is not yet wired at the OCI layer — fail
             // closed honestly instead of inventing success.
             report.live_path_unavailable = true;
@@ -650,9 +640,7 @@ mod qualification {
 
         require(
             matches!(disconnect, Err(ExecutionManagerError::Unavailable(_))),
-            format!(
-                "retained stream must surface Unavailable on Host death, got {disconnect:?}"
-            ),
+            format!("retained stream must surface Unavailable on Host death, got {disconnect:?}"),
         )?;
 
         // Retained-manager reconcile/inspect must respawn via ensure.
@@ -728,12 +716,7 @@ mod qualification {
                     "retained streaming stdin after Host reopen failed: {error}"
                 ))
             })?;
-        expect_stream_echo(
-            process.as_mut(),
-            STREAM_ECHO_AFTER,
-            "after Host reopen",
-        )
-        .await?;
+        expect_stream_echo(process.as_mut(), STREAM_ECHO_AFTER, "after Host reopen").await?;
         input.close_stdin().await.map_err(|error| {
             failure(format!(
                 "retained streaming close_stdin after Host reopen failed: {error}"
@@ -789,12 +772,8 @@ mod qualification {
         )?;
         report.exit_code_absent_after_reopen = true;
 
-        prove_list_dir_after_reattach(
-            &manager,
-            &reservation.execution_id,
-            reservation.generation,
-        )
-        .await?;
+        prove_list_dir_after_reattach(&manager, &reservation.execution_id, reservation.generation)
+            .await?;
         report.list_dir_after_reattach = true;
 
         prove_file_download_after_reattach(
@@ -1393,8 +1372,7 @@ mod qualification {
                 cmd: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
-                    "printf 'a3s-box-whpx-live-session\\n'; while :; do sleep 60; done"
-                        .to_string(),
+                    "printf 'a3s-box-whpx-live-session\\n'; while :; do sleep 60; done".to_string(),
                 ],
                 network: NetworkMode::None,
                 persistent: false,
