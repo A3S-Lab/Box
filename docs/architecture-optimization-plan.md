@@ -78,7 +78,7 @@ Feature parity with other microVM projects is **not** an axiom.
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Host death with retained Live stream/FS reattach is unproven** (WHPX gate 4 non-claim; Box harness `#657` present; OCI durable session-owner spawn still required before tip-prove) |
+| B2 process-session recovery exit | Open; reports keep `b2_process_session_recovery_closed=false`. Native + KVM Live observation-greened on WSL; **Windows/WHPX mid-run Host death with retained Live stream/FS reattach is unproven** (WHPX gate 4 non-claim; Box harness `#657` + session-owner env `#661` present; OCI `#354` durable spawn merged; host-control + recover reattach in OCI `#356` — tip-prove on real WHPX still required before any B2 flip) |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + B2 mid-run Live bar on WHPX match the honesty already tip-proven for KVM/Sandbox observation |
@@ -116,8 +116,9 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 
 **Evidence required:** Native Live + KVM Live matrices on WSL; Windows/WHPX
 mid-run Live observation harness landed (`a3s.box.windows-whpx-live-session.v1`,
-`#657`) but **not tip-proven** until OCI WHPX durable session-owner (Job Object /
-intermediate owner + Host reattach) lands; still no self-certifying
+`#657`) with Box session-owner env (`#661`) and OCI durable spawn (`OCI-Runtime#354`);
+host-control + recover reattach land in `OCI-Runtime#356`. **Not tip-proven** on
+real WHPX until a gate 9 digest is published; still no self-certifying
 `b2_process_session_recovery_closed=true` from a single report.
 
 **Refuse:** Weakening live-session tests; fixture `process_restart` as driver Live evidence; treating WHPX Created-state Host re-ensure (cutover gate 4) as mid-run Live.

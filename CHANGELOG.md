@@ -15,9 +15,10 @@ All notable changes to A3S Box will be documented in this file.
 ### Added
 
 - Box-owned WHPX Host spawn sets `A3S_OCI_WHPX_SESSION_OWNER=1` (KVM analogue)
-  so create uses Host → session-owner → shim. Requires OCI-Runtime WHPX
-  session-owner spawn wiring; host-control named-pipe Live reattach and gate 9
-  tip-prove remain open. Does **not** flip B2 or claim Enterprise GA.
+  so create uses Host → session-owner → shim (`#661`). OCI durable session-owner
+  spawn is merged (`OCI-Runtime#354`); host-control named-pipe Live reattach
+  lands in `OCI-Runtime#356`. Gate 9 tip-prove on real WHPX remains open. Does
+  **not** flip B2 or claim Enterprise GA.
 
 - Windows/WHPX mid-run Live observation harness
   (`windows-whpx-live-session-qualification` example, PS1 runner, Python
@@ -26,10 +27,17 @@ All notable changes to A3S Box will be documented in this file.
   + filesystem proofs after reattach). Reports keep
   `b2_process_session_recovery_closed=false` and
   `fixture_stream_continuity_claimed=false`. Gate 9 stays **open** until
-  tip-proven on real WHPX (also needs OCI WHPX durable session-owner Live).
+  tip-proven on real WHPX (OCI durable session-owner spawn `#354` + host-control
+  reattach `#356` are the substrate; tip digest still required).
   Does **not** flip B2 or claim Enterprise GA.
 
 ### Changed
+
+- WHPX binder gate 9 / architecture plan B2: record OCI durable session-owner
+  spawn (`OCI-Runtime#354`) and Box session-owner env (`#661`) as landed
+  substrate; host-control + recover reattach tracked in `OCI-Runtime#356`. Gate 9
+  and B2 stay **open** until tip-proven on real WHPX. Does **not** claim
+  Enterprise GA.
 
 - Architecture optimization plan and WHPX binder: record Linux/KVM and
   Windows/WHPX omit→DedicatedVm cutover as tip-proven; open WHPX mid-run Live
