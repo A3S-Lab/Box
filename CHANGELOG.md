@@ -6,13 +6,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Deliberate B2 product process-session recovery exit on Box tip `1356d4bb` /
+  OCI pin `b26155b1` (binder gates 1–5 closed; same-tip digests Native
+  `aa30adca…` / KVM `9a0b744f…` / WHPX `0696d7e1…`). Individual Live observation
+  reports keep `b2_process_session_recovery_closed=false` (never self-certify).
+  Does **not** claim Enterprise GA, HVF production cutover, B5 libkrun
+  deletion, or BX0.3 TEE.
 - Same-tip Native+KVM+WHPX Live triad on Box `1356d4bb` / OCI pin `b26155b1`:
   Native `aa30adca0518aff54029582cc081a8e5530623c7094bda308a3f10113d8fa482`,
   KVM `9a0b744f8e829e172480f13d28ba6e66ea8f51c0253daf6bbb0392f16815dd11`,
   WHPX `0696d7e15d4596c026b9bf11a898f0c81f8755d234b1c9b59fe7a180ea1daeaf`.
-  Closes B2 exit binder gates 1–4 on this tip. Does **not** flip
-  `b2_process_session_recovery_closed` (gate 5 deliberate) or claim Enterprise
-  GA.
+  Evidence for B2 exit binder gates 1–4; product exit lands with the deliberate
+  close entry above. Live reports keep `b2_process_session_recovery_closed=false`.
 - Pin-honest Native Live re-tip on OCI pin `b26155b1`: digest
   `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d` (Box
   `e5203dbe`; schema `a3s.box.linux-native-live-session.v7`; WSL2 Sandbox CI
