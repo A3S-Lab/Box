@@ -608,11 +608,12 @@ impl LocalExecutionManager {
 
     /// Select the production Sandbox migration composition.
     ///
-    /// On Linux, an absent `A3S_BOX_OCI_MIGRATION` defaults to `SandboxViaOci`.
-    /// Explicit `off` keeps the legacy VM backend. Explicit `sandbox` hard-fails
-    /// when the OCI owner is not launch-ready; the Linux default soft-composes a
-    /// fail-closed unavailable OCI backend so MicroVM continue to work without
-    /// OCI host prep.
+    /// On Linux, an absent `A3S_BOX_OCI_MIGRATION` prefers packaged KVM
+    /// DedicatedVm when artifacts are discoverable (gate 5), otherwise defaults
+    /// to `SandboxViaOci`. Explicit `off` keeps the legacy VM backend. Explicit
+    /// `sandbox` hard-fails when the OCI owner is not launch-ready; the Linux
+    /// soft path composes a fail-closed unavailable OCI backend so MicroVM can
+    /// continue on Box-libkrun when packaged KVM artifacts are absent.
     pub async fn with_configured_backend(
         state_path: impl Into<PathBuf>,
         home_dir: impl Into<PathBuf>,
@@ -1139,7 +1140,46 @@ fn parse_linux_kvm_environment(
         service_manifest,
     } = inputs;
     let Some(mode) = mode.filter(|value| !value.is_empty()) else {
-        return Ok(None);
+        // Gate 5: absent `A3S_BOX_OCI_MIGRATION` selects packaged DedicatedVm
+        // when runtime/shim/system-image are discoverable. Missing packages
+        // soft-fall through to SandboxViaOci / legacy (MicroVM stays
+        // Box-libkrun) instead of hard-failing hosts without the KVM package.
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (endpoint, box_owned);
+            let host_root_override = runtime_root
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            return match parse_linux_kvm_packaged_box_owned(
+                home_dir,
+                host_root_override,
+                service_root,
+                service_bin,
+                service_shim,
+                service_manifest,
+            ) {
+                Ok(config) => Ok(Some(config)),
+                Err(ExecutionManagerError::InvalidRequest(message))
+                    if message.contains("was not found in packaged A3S locations") =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (
+                runtime_root,
+                endpoint,
+                box_owned,
+                service_root,
+                service_bin,
+                service_shim,
+                service_manifest,
+            );
+            return Ok(None);
+        }
     };
     let mode = mode.to_str().ok_or_else(|| {
         ExecutionManagerError::InvalidRequest(format!(
@@ -1180,8 +1220,7 @@ fn parse_linux_kvm_environment(
         return LinuxKvmOciMigrationConfig::new(runtime_root, PathBuf::from(endpoint)).map(Some);
     }
 
-    // Gate 1+2: opt-in microvm|all without qualification endpoint → packaged
-    // Box-owned Host. Default omit-isolation stays Box-libkrun until gate 5.
+    // Opt-in microvm|all without qualification endpoint → packaged Box-owned Host.
     #[cfg(target_os = "linux")]
     {
         parse_linux_kvm_packaged_box_owned(
@@ -1516,6 +1555,55 @@ mod tests {
             absolute("a3s-oci-kvm-runtime").as_path()
         );
         assert!(config.box_owned_owner().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_kvm_absent_mode_soft_skips_when_packaged_artifacts_missing() {
+        let home = absolute("a3s-oci-kvm-gate5-missing-home");
+        assert_eq!(
+            parse_linux_kvm_environment(LinuxKvmEnvironmentInputs::default(), &home).unwrap(),
+            None,
+            "gate 5 must soft-skip hosts without packaged KVM artifacts"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_kvm_absent_mode_uses_packaged_box_owned_when_artifacts_present() {
+        let home = absolute("a3s-oci-kvm-gate5-default-home");
+        let service_root = absolute("a3s-oci-kvm-gate5-default-service");
+        let runtime = absolute("a3s-oci-gate5-runtime-bin");
+        let shim = absolute("a3s-oci-gate5-shim-bin");
+        let manifest = absolute("a3s-oci-gate5-system-image.json");
+
+        let config = parse_linux_kvm_environment(
+            LinuxKvmEnvironmentInputs {
+                mode: None,
+                service_root: Some(service_root.clone().into_os_string()),
+                service_bin: Some(runtime.clone().into_os_string()),
+                service_shim: Some(shim.clone().into_os_string()),
+                service_manifest: Some(manifest.clone().into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        )
+        .unwrap()
+        .expect("gate 5 packaged default");
+
+        assert_eq!(
+            config.endpoint(),
+            &crate::local_execution::OciRuntimeEndpoint::unix_socket(
+                service_root.join("runtime.sock")
+            )
+            .unwrap()
+        );
+        let owner = config
+            .box_owned_owner()
+            .expect("gate 5 packaged path is Box-owned");
+        assert_eq!(owner.runtime_path(), runtime.as_path());
+        assert_eq!(owner.shim_path(), shim.as_path());
+        assert_eq!(owner.system_image_manifest(), manifest.as_path());
     }
 
     #[cfg(target_os = "linux")]

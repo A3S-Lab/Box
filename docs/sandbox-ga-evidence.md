@@ -101,8 +101,10 @@ replace the CI binder above or close Enterprise MicroVM GA.
 - Named **bridge** networks, peer discovery, and static published ports as
   Sandbox GA product surfaces (rejected for Sandbox; MicroVM/TSI differ).
 - Compose / CRI / containerd as Sandbox GA-closed.
-- Default omit-isolation → MicroVM cutover to OCI.
-- WHPX/KVM MicroVM **production** OCI composition (qualification-only remains).
+- Default omit-isolation → MicroVM cutover to OCI on **HVF/WHPX** (Linux/KVM
+  omit→DedicatedVm is tip-proven in [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md);
+  not a Sandbox GA claim).
+- WHPX/HVF MicroVM **production** OCI composition (qualification-only remains).
 - Flipping `b2_process_session_recovery_closed`.
 - Fixture `process_restart` as driver Live evidence.
 - Inventing KVM Live digests or flipping `b2_process_session_recovery_closed`
