@@ -495,12 +495,16 @@ retain process or filesystem sessions after its owner dies.
   (`retained_stream_handle_proven=true`, `retained_filesystem_proven=true`,
   `kvm_microvm_live_claimed=true`). That satisfies W2's Native + one
   utility-VM driver matrix for live process, I/O, and filesystem reattach.
-  The B2 **exit gate remains open**: harness report schemas keep
-  `b2_process_session_recovery_closed=false` by design (individual reports
-  never self-certify B2 close). Does **not** flip
-  default create Host-bound policy, cutover, HostRuntimeService registration,
-  fixture `process_restart` continuity, fresh-host promotion, or broader
-  Utility-VM product claims beyond the observation-scoped KVM MicroVM gate.
+  The B2 **product exit is closed** on Box tip `1356d4bb` / OCI pin
+  `b26155b1` via the multi-driver binder
+  ([b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md))
+  with same-tip digests Native `aa30adca…` / KVM `9a0b744f…` / WHPX
+  `0696d7e1…`. Individual Live observation reports keep
+  `b2_process_session_recovery_closed=false` by design (never self-certify).
+  Does **not** claim Enterprise GA, HVF production cutover, B5 libkrun
+  deletion, BX0.3 TEE, default create Host-bound policy changes, fixture
+  `process_restart` continuity, fresh-host promotion, or broader Utility-VM
+  product claims beyond the observation-scoped gates.
   - [x] Observation harness `a3s.box.linux-native-live-session.v2`
     (`linux-native-live-session-qualification` drop-manager path): supervised
     create + Host owner SIGKILL + Live rebind with keyed captured exec
@@ -866,8 +870,9 @@ mutating filesystem state across owner replacement without flipping B2. Native
 Linux, KVM MicroVM, and WHPX DedicatedVm Live reattachment are same-tip
 pin-honest on Box `1356d4bb` / OCI pin `b26155b1` under the process-session
 recovery parent above (Native `aa30adca…` / KVM `9a0b744f…` / WHPX
-`0696d7e1…`); B2 exit gates 1–4 are closed on tip; gate 5 (deliberate flip)
-remains open and harness reports still keep
+`0696d7e1…`); B2 product exit closed on tip via
+[b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md);
+individual Live reports still keep
 `b2_process_session_recovery_closed=false`. Multi-driver exit criteria:
 [b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md).
 Box-owned native Host spawn forces
@@ -890,8 +895,8 @@ their bridge-network endpoints, and removes leaked CRI rootfs trees with
 fail-closed wipe (no invent-clean remove while a bind or undeletable tree
 remains). This is resource-safe restart reconciliation, not process-session
 reattachment (that
-Live observation matrix is tip/pin-honest above; the B2 exit gate remains
-open and harness reports still keep
+Live observation matrix is tip/pin-honest above; product B2 exit is closed on
+tip while harness reports still keep
 `b2_process_session_recovery_closed=false`).
 
 ### B3 - Storage And Networking Attachments

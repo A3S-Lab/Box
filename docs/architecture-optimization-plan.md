@@ -1,11 +1,12 @@
 # A3S Box Architecture Optimization Plan
 
 Status: **active planning baseline** (2026-09-23)  
-Evidence tip: `main` @ same-tip Native+KVM+WHPX Live on Box `1356d4bb` /
-OCI pin `b26155b1` (Native `aa30adca…` / KVM `9a0b744f…` / WHPX `0696d7e1…`;
+Evidence tip: `main` @ B2 product exit closed on Box `1356d4bb` / OCI pin
+`b26155b1` (same-tip Native `aa30adca…` / KVM `9a0b744f…` / WHPX `0696d7e1…`;
 Linux/KVM and Windows/WHPX omit→DedicatedVm cutover tip-proven; WHPX mid-run
-Live gate 9 tip-proven; B2 exit gates 1–4 closed on tip; gate 5 deliberate flip
-open; `b2_process_session_recovery_closed` stays false; Enterprise GA open)  
+Live gate 9 tip-proven; Live reports keep
+`b2_process_session_recovery_closed=false`; Enterprise GA / HVF / B5 / BX0.3
+open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
@@ -13,7 +14,10 @@ Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microv
 
 This plan answers one question: **what architectural work makes Box more true to its isolation and ownership axioms, without overfitting to demos, competitor feature lists, or unproven gates.**
 
-It does **not** claim Enterprise GA, close B2/B3/B4, or flip `b2_process_session_recovery_closed`.
+It does **not** claim Enterprise GA, close B3/B4, flip Live-report
+`b2_process_session_recovery_closed=true`, or delete Box-libkrun (B5).
+B2 product process-session recovery exit is closed on tip — see
+[b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md).
 
 ---
 
@@ -80,7 +84,7 @@ Feature parity with other microVM projects is **not** an axiom.
 
 | Gate | Honest state |
 | --- | --- |
-| B2 process-session recovery exit | Open at gate 5 only; reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Gates 1–4 same-tip closed on Box `1356d4bb` / OCI `b26155b1` (Native `aa30adca…`, KVM `9a0b744f…`, WHPX `0696d7e1…`); deliberate schema/ROADMAP flip still required — do **not** flip B2 from digests alone |
+| B2 process-session recovery exit | **Product exit closed** on Box `1356d4bb` / OCI `b26155b1` (binder gates 1–5). Live observation reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Does **not** claim Enterprise GA / HVF / B5 / BX0.3 |
 | B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + multi-driver B2 exit (WHPX mid-run Live gate 9 is tip-proven; do not delete libkrun on WHPX gate 9 alone) |
@@ -327,7 +331,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
 | P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
-| P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate `b2_process_session_recovery_closed` flip) — binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion |
+| P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate product exit) — **closed on tip** `1356d4bb` / `b26155b1`; binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion; Live reports emitting `b2_process_session_recovery_closed=true` |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); gates 1–8 tip-proven / docs closed for Linux/KVM omit→OCI; Enterprise GA + HVF production open | B | Deleting libkrun before §4.5; HVF production |
 | P2 | OCI DedicatedVm production cutover gates for Windows/WHPX — binder: [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md); gates 1–8 + mid-run Live gate 9 tip-proven; OCI pin `b26155b1` | B | Flipping B2 from WHPX alone; Enterprise GA / BX0.3 TEE |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |
