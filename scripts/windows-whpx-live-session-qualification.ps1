@@ -77,6 +77,15 @@ function Resolve-RegularFile {
 
 Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $boxArtifacts 'a3s-box.exe')) `
     -Destination (Join-Path $boxBin 'a3s-box.exe')
+Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $boxArtifacts 'a3s-box-shim.exe')) `
+    -Destination (Join-Path $boxBin 'a3s-box-shim.exe')
+foreach ($name in @('krun.dll', 'libkrunfw.dll')) {
+    $dll = Join-Path $boxArtifacts $name
+    if (Test-Path -LiteralPath $dll) {
+        Copy-Item -LiteralPath (Resolve-RegularFile $dll) `
+            -Destination (Join-Path $boxBin $name)
+    }
+}
 $exampleSrc = Join-Path $boxArtifacts $exampleName
 if (-not (Test-Path -LiteralPath $exampleSrc)) {
     throw @"
@@ -88,19 +97,25 @@ Build with:
 Copy-Item -LiteralPath (Resolve-RegularFile $exampleSrc) `
     -Destination (Join-Path $boxBin $exampleName)
 
-foreach ($name in @('a3s-oci.exe', 'a3s-oci-krun-shim.exe')) {
-    Copy-Item -LiteralPath (Resolve-RegularFile (Join-Path $ociWindowsArtifacts $name)) `
+foreach ($name in @('a3s-oci.exe', 'a3s-oci-krun-shim.exe', 'krun.dll', 'libkrunfw.dll')) {
+    $candidate = Join-Path $ociWindowsArtifacts $name
+    if (-not (Test-Path -LiteralPath $candidate)) {
+        $candidate = Join-Path $ociWindowsArtifacts (Join-Path 'bin' $name)
+    }
+    Copy-Item -LiteralPath (Resolve-RegularFile $candidate) `
         -Destination (Join-Path $ociBin $name)
 }
 
+# Immutable system-image must stay disjoint from the mutable Host runtime root.
 $systemImageSrc = Join-Path $ociWindowsArtifacts 'system-image'
 if (-not (Test-Path -LiteralPath $systemImageSrc -PathType Container)) {
     throw "Missing system-image directory under $OciWindowsArtifactDirectory"
 }
+$systemImageRoot = Join-Path $outputRoot 'system-image'
 Copy-Item -LiteralPath $systemImageSrc `
-    -Destination (Join-Path $runtimeRoot 'system-image') -Recurse
+    -Destination $systemImageRoot -Recurse
 $systemImageManifest = Resolve-RegularFile (
-    Join-Path $runtimeRoot 'system-image\system-image.json'
+    Join-Path $systemImageRoot 'system-image.json'
 )
 
 # Guest agent bits may live beside the Windows Host package; keep path for operators.
@@ -151,14 +166,13 @@ $env:A3S_BOX_WHPX_LIVE_SESSION_IMAGE = $Image
 $env:A3S_BOX_WHPX_LIVE_SESSION_REPORT = $reportPath
 $env:A3S_BOX_WHPX_LIVE_SESSION_BOX_SHA = $boxSha
 $env:A3S_BOX_WHPX_LIVE_SESSION_OCI_SHA = $ociSha
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_BIN = (Join-Path $ociBin 'a3s-oci.exe')
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_ROOT = $runtimeRoot
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_SHIM = (
-    Join-Path $ociBin 'a3s-oci-krun-shim.exe'
-)
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_VM_ROOTFS = $systemRoot
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_MANIFEST = $systemImageManifest
-$env:A3S_BOX_WHPX_LIVE_SESSION_SERVICE_LOG = (
+# Service paths reuse the WHPX OCI qualification env names (see example).
+$env:A3S_BOX_WHPX_OCI_SERVICE_BIN = (Join-Path $ociBin 'a3s-oci.exe')
+$env:A3S_BOX_WHPX_OCI_SERVICE_ROOT = $runtimeRoot
+$env:A3S_BOX_WHPX_OCI_SERVICE_SHIM = (Join-Path $ociBin 'a3s-oci-krun-shim.exe')
+$env:A3S_BOX_WHPX_OCI_SERVICE_VM_ROOTFS = $systemRoot
+$env:A3S_BOX_WHPX_OCI_SERVICE_MANIFEST = $systemImageManifest
+$env:A3S_BOX_WHPX_OCI_SERVICE_LOG = (
     Join-Path $outputRoot 'qualification-service.log'
 )
 
