@@ -579,8 +579,11 @@ retain process or filesystem sessions after its owner dies.
     (linux-arm64) (`status=passed`, `retained_filesystem_proven=true`,
     `retained_stream_handle_proven=true`, `move_before_kill=true`,
     `remove_before_kill=true`, keyed Move/Remove ids present; B2 / fixture /
-    KVM / utility-VM claims stay false). Prior published digests above remain
-    v4-scoped historical evidence.
+    KVM / utility-VM claims stay false). **Pin-honest WSL2 tip** on OCI pin
+    `b26155b1`: SHA-256
+    `bac4f83d85533f1824766c542177bd0119423c50466c3786c74f44adf73e1f6d`
+    (Box `e5203dbe…`; same v7 bar; B2 stays false). Prior published digests
+    above remain v4-scoped historical evidence.
   - [x] Retained streaming process-handle continuity on a real Native Linux
     owner restart (v3/v4 harness path above; fixture `process_restart` remains
     non-driver evidence). Does **not** alone close the parent (needs KVM
@@ -855,10 +858,10 @@ exposes the first broken request, reconnects to a replacement process, and
 continues inventory, stdin, output, close, signal, exact wait, and cleanup with
 one exec dispatch. The same fixture owner also recovers keyed file upload and
 mutating filesystem state across owner replacement without flipping B2. Native
-Linux and KVM MicroVM Live reattachment on real hosts is observation-greened under
-the process-session recovery parent above
-(existing-host WSL2 digests); the B2 exit gate remains open and harness reports
-still keep
+Linux, KVM MicroVM, and WHPX DedicatedVm Live reattachment are tip/pin-honest
+on OCI pin `b26155b1` under the process-session recovery parent above
+(Native `bac4f83d…` / KVM `5bdc5588…` / WHPX `f366c8d4…`); the B2 exit gate
+remains open (deliberate flip only) and harness reports still keep
 `b2_process_session_recovery_closed=false`. Multi-driver exit criteria:
 [b2-process-session-exit-criteria.md](docs/b2-process-session-exit-criteria.md).
 Box-owned native Host spawn forces
@@ -881,7 +884,7 @@ their bridge-network endpoints, and removes leaked CRI rootfs trees with
 fail-closed wipe (no invent-clean remove while a bind or undeletable tree
 remains). This is resource-safe restart reconciliation, not process-session
 reattachment (that
-Live observation matrix is observation-greened above; the B2 exit gate remains
+Live observation matrix is tip/pin-honest above; the B2 exit gate remains
 open and harness reports still keep
 `b2_process_session_recovery_closed=false`).
 
