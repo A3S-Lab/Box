@@ -97,14 +97,16 @@ foreach ($name in @('a3s-oci.exe', 'a3s-oci-krun-shim.exe', 'krun.dll', 'libkrun
         -Destination (Join-Path $ociBin $name)
 }
 
+# Immutable system-image must stay disjoint from the mutable Host runtime root.
 $systemImageSrc = Join-Path $ociWindowsArtifacts 'system-image'
 if (-not (Test-Path -LiteralPath $systemImageSrc -PathType Container)) {
     throw "Missing system-image directory under $OciWindowsArtifactDirectory"
 }
+$systemImageRoot = Join-Path $outputRoot 'system-image'
 Copy-Item -LiteralPath $systemImageSrc `
-    -Destination (Join-Path $runtimeRoot 'system-image') -Recurse
+    -Destination $systemImageRoot -Recurse
 $systemImageManifest = Resolve-RegularFile (
-    Join-Path $runtimeRoot 'system-image\system-image.json'
+    Join-Path $systemImageRoot 'system-image.json'
 )
 
 # Guest agent bits may live beside the Windows Host package; keep path for operators.
