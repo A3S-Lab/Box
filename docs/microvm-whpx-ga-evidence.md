@@ -58,7 +58,7 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — observation harness landed (`windows-whpx-live-session-qualification`, schema `a3s.box.windows-whpx-live-session.v1`): keyed exec/FS before taskkill, retained-stream + filesystem proofs after reattach, honest `b2=false` / `fixture_stream_continuity_claimed=false`. Not tip-proven on real WHPX; mid-run Live also needs OCI WHPX durable session-owner (KVM analogue). Gate stays open until a tip-proven digest is published |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **open** — observation harness landed (`windows-whpx-live-session-qualification`, schema `a3s.box.windows-whpx-live-session.v1`): keyed exec/FS before taskkill, retained-stream + filesystem proofs after reattach, honest `b2=false` / `fixture_stream_continuity_claimed=false`. Box-owned Host spawn forces `A3S_OCI_WHPX_SESSION_OWNER=1` (`#661`). OCI durable session-owner Job Object spawn merged (`OCI-Runtime#354`); host-control named-pipe bridge + `WhpxRuntimeDriver::recover` Live reattach land in `OCI-Runtime#356`. Gate stays **open** until a tip-proven digest is published on real WHPX |
 
 Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
 explicit mid-run Live non-claim under Windows/WHPX.
