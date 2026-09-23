@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Pin `a3s-oci-sdk` / CI/release `A3S_OCI_RUNTIME_REV` to OCI Runtime
+  `b26155b1` (merge of `#353`–`#357`: WHPX durable session-owner, host-control
+  Live reattach, Guest Host-EOF reconnect). Aligns packaged Host with the gate 9
+  tip-prove Host tip. Does **not** flip B2 or claim Enterprise GA.
 - WHPX binder gate 9 tip-proven on real WHPX: mid-run Host taskkill with
   retained Live stream + filesystem reattach
   (`a3s.box.windows-whpx-live-session.v1` digest

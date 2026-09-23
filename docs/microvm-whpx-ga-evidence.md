@@ -60,7 +60,7 @@ unless the row explicitly remains qualification-only.
 
 | # | Gate | Status |
 | --- | --- | --- |
-| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **tip-proven** — schema `a3s.box.windows-whpx-live-session.v1` report sha256 `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e` on real WHPX. Box tip `166cab1b` (`#661`/`#665` harness); OCI Host tip `7a18464` (`OCI-Runtime#354`/`#356`/`#357`: durable session-owner, host-control reattach, `A3S_OCI_GUEST_HOST_RECONNECT=1`). Report: `retained_stream_handle_proven` + `retained_filesystem_proven` + `whpx_microvm_live_claimed` + `box_owned_ensure_proven`; `b2_process_session_recovery_closed=false`; `fixture_stream_continuity_claimed=false` |
+| 9 | Mid-run Host death with retained Live stream + filesystem reattach under packaged Box-owned WHPX (running DedicatedVm; no invented exit; `b2_process_session_recovery_closed` stays false) | **tip-proven** — schema `a3s.box.windows-whpx-live-session.v1` report sha256 `e329bb9dddedee36abc44bf4a2732bd48148e3d35f27842348d3da74dca56b5e` on real WHPX. Box tip `166cab1b` (`#661`/`#665` harness); OCI Host tip `7a18464` / pin `b26155b1` (`OCI-Runtime#354`/`#356`/`#357`: durable session-owner, host-control reattach, `A3S_OCI_GUEST_HOST_RECONNECT=1`). Report: `retained_stream_handle_proven` + `retained_filesystem_proven` + `whpx_microvm_live_claimed` + `box_owned_ensure_proven`; `b2_process_session_recovery_closed=false`; `fixture_stream_continuity_claimed=false` |
 
 Do **not** treat gate 9 as Enterprise GA or as flipping B2. It only closes the
 explicit mid-run Live non-claim under Windows/WHPX.
