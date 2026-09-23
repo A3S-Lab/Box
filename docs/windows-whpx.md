@@ -204,18 +204,26 @@ Additional fail-closed negatives covered after #259–#263:
 ## WHPX soak validation
 
 Run the Windows-specific soak harness from the Box repository root on an
-otherwise idle WHPX host. It builds the current guest-init and Windows binaries,
-then precompiles the real smoke executable and repeatedly exercises the
-supported lifecycle, logs, exit-code, long-argv, post-boot exec, bidirectional
-single-file copy, `top`, guest PID-aware stats, published-port, bind-mount,
-named-volume, commit, snapshot, and virtio-fs paths. The initialization profile
-additionally combines a read-only script mount with a named state volume and
-requires both a successful run and an exact nonzero failure.
+otherwise idle WHPX host. It builds the current guest-init and Windows binaries
+(unless `-SkipBuild`), then precompiles the real smoke executable and repeatedly
+exercises the supported lifecycle, logs, exit-code, long-argv, post-boot exec,
+bidirectional single-file copy, `top`, guest PID-aware stats, published-port,
+named-volume, commit, and filesystem snapshot paths.
+
+Bind-mount, volume-backed init, and virtiofs tar stress remain Linux-only in
+`core_smoke` (`#[cfg(target_os = "linux")]`) and are **not** part of this
+matrix — listing them produced false `0 tests` passes that the evidence
+verifier correctly fail-closes.
 
 This runner supplies the `WIN-01` lane in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only
 the documented Windows subset; unsupported Windows features require fail-closed
 functional tests rather than being inferred from another host.
+
+Tip (Box `c8c2c1dc…`): one-iteration soak summary SHA-256
+`93c085108896c24620c506ead1f517a28a5b1114c2d31aeecc02353f4cc51f35`
+(`result=pass`, `verification=pass`, nine tests). Does **not** claim
+Enterprise GA or close longitudinal multi-iteration `WIN-01` trend verification.
 
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `
@@ -237,9 +245,9 @@ and cleanup. The runner requires no active A3S Box or A3S OCI Runtime process
 at startup, verifies the same invariant after every test, and fails when
 requested/completed counts or resource guardrails drift.
 
-The twelve-test default matrix includes a 4,096-byte workload argument,
-volume-backed init success/failure, and POSIX ownership and mode replay through
-restart and commit. Use `-ListTests` to inspect the exact selection.
+The nine-test default matrix includes a 4,096-byte workload argument and POSIX
+ownership/mode replay through restart and commit. Use `-ListTests` to inspect
+the exact selection.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
 `none`. Real WHPX validation took 373 seconds on the host described above, so
