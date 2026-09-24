@@ -1003,11 +1003,14 @@ tip while harness reports still keep
   Linux MicroVM `:ro` volumes host-enforce write denial via private RO bind
   aliases before virtio-fs; Windows MicroVM `:ro` volumes host-enforce write
   denial via BindFlt read-only mappings (same live-view / source-stays-writable
-  contract); other hosts refuse `:ro` until native host denial exists (no
-  guest-honor-only attach); destroy/boot-failure, orphan reap, and legacy wipe
-  paths detach those aliases fail-closed before deleting `boxes/{id}`. macOS
-  host `:ro` denial and full Linux UID/GID storage on Windows binds remain
-  open. Does **not** flip `b2_process_session_recovery_closed`.
+  contract), including absent-detach honesty for BindFlt
+  `HRESULT 0x80070057` (`INVALID_PARAMETER`) tip-proven on Box `07514c79` /
+  WIN-01 soak digest `a90e7715…` (bind-mount restored to matrix); other hosts
+  refuse `:ro` until native host denial exists (no guest-honor-only attach);
+  destroy/boot-failure, orphan reap, and legacy wipe paths detach those
+  aliases fail-closed before deleting `boxes/{id}`. macOS host `:ro` denial
+  and full Linux UID/GID storage on Windows binds remain open. Does **not**
+  flip `b2_process_session_recovery_closed` or claim Enterprise GA.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the

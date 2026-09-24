@@ -12,12 +12,19 @@ All notable changes to A3S Box will be documented in this file.
   single-file binds on WHPX. Tip-proven with `a3s-box run --rm -v …:ro` and
   one-iteration WIN-01 soak summary SHA-256
   `a90e771533e4d17064481889811f22a2e01c499872078e651fd6b2955afce00f`
-  (`result=pass`, `verification=pass`, 10 tests including bind-mount). Enable
+  (`result=pass`, `verification=pass`, 10 tests including bind-mount) on Box
+  `07514c79`. Enable
   `real_core_bind_mounts_preserve_host_paths_and_read_only_mode` on Windows and
   restore it to the WIN-01 soak matrix. Does **not** claim Enterprise GA.
 
 ### Changed
 
+- Enable `real_core_volume_backed_init_script_success_and_failure` on Windows
+  (named volume + `:ro` init bind) and add it to the WIN-01 soak matrix.
+  Tip one-iteration soak summary SHA-256
+  `6aea2e8553693a1a3790b83f41bc9ca617a57a0675695fc33be6a7548e5840d6`
+  (`result=pass`, `verification=pass`, 11 tests, ~6 min). Virtiofs tar stress
+  remains Linux-only. Does **not** claim Enterprise GA or close B3/R24.
 - WIN-01 three-iteration longitudinal WHPX soak tip-proven on Box `1c741962`:
   summary SHA-256
   `0ff23f04a470e6de12f616b3a9d29ea4aa5be10d7a90fa4b152351e313bae52e`
