@@ -1727,7 +1727,6 @@ fn real_core_named_volume_persists_across_stop_restart() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_volume_backed_init_script_success_and_failure() {
