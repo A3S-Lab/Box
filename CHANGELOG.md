@@ -19,6 +19,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- WIN-01 G2 (7200s) WHPX soak tip-proven: summary SHA-256
+  `49e0c3820401e89a522bcb4034b591e9644c2efd4a5bc2721d9169e8e9da5a96`
+  (`result=pass`, `verification=pass`, 22 iterations × 11 tests = 242,
+  ~123 min wall). Does **not** claim Enterprise GA or close `R24` (24h).
 - Enable `real_core_volume_backed_init_script_success_and_failure` on Windows
   (named volume + `:ro` init bind) and add it to the WIN-01 soak matrix.
   Tip one-iteration soak summary SHA-256

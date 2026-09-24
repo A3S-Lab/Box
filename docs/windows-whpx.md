@@ -232,7 +232,10 @@ one-iteration soak summary SHA-256
 (`result=pass`, `verification=pass`, ten tests, ~5.5 min). Tip (volume-backed
 init on Windows): one-iteration soak summary SHA-256
 `6aea2e8553693a1a3790b83f41bc9ca617a57a0675695fc33be6a7548e5840d6`
-(`result=pass`, `verification=pass`, eleven tests, ~6 min). Does **not**
+(`result=pass`, `verification=pass`, eleven tests, ~6 min). Tip (G2 7200s):
+summary SHA-256
+`49e0c3820401e89a522bcb4034b591e9644c2efd4a5bc2721d9169e8e9da5a96`
+(`result=pass`, `verification=pass`, 22×11=242 tests, ~123 min). Does **not**
 claim Enterprise GA or close longer duration/`R24` trend verification.
 
 ```powershell
