@@ -112,7 +112,10 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 
 ### Axis A — Recovery and lifecycle honesty (highest leverage)
 
-**Problem.** Process I/O, owner death, and short-task exit retention must be exact; B2 exit gate remains open by design until harness + real-driver evidence close it.
+**Problem.** Process I/O, owner death, and short-task exit retention must be exact.
+B2 product process-session recovery exit is closed on tip
+([b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md));
+individual Live reports keep `b2_process_session_recovery_closed=false`.
 
 **Optimize toward:**
 
@@ -121,10 +124,10 @@ Work proceeds in this order. Later axes do not steal capacity from earlier ones 
 - Short-lived workloads that exit before exec-ready still persist authenticated terminal state (already partially landed; keep regression-locked). Guest-init starts the exec accept loop immediately after the container fork returns (before stdio relay / PTY warm-up) so heartbeat can win that race without violating fork-safety; Linux directory-rootfs tip proof for `#576` cleared on WSL (2026-09-22: `run --rm alpine:3.20 -- /bin/true` 5/5 rc 0 with `LD_LIBRARY_PATH=/usr/local/lib/a3s-box`; tracker `#631` closed).
 
 **Evidence required:** Native Live + KVM Live matrices on WSL; Windows/WHPX
-mid-run Live tip-proven on real WHPX (`a3s.box.windows-whpx-live-session.v1`
-digest `e329bb9d…`, gate 9 in [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md)).
-Still no self-certifying `b2_process_session_recovery_closed=true` from a single
-report (multi-driver B2 exit criteria remain open).
+mid-run Live tip-proven on real WHPX (same-tip digest `0696d7e1…` on Box
+`1356d4bb` / OCI `b26155b1`, gate 9 in
+[microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md)). Individual Live
+reports never self-certify `b2_process_session_recovery_closed=true`.
 
 **Refuse:** Weakening live-session tests; fixture `process_restart` as driver Live evidence; treating WHPX Created-state Host re-ensure (cutover gate 4) as mid-run Live.
 
@@ -139,12 +142,13 @@ report (multi-driver B2 exit criteria remain open).
 2. ~~Production MicroVM via OCI DedicatedVm on Windows/WHPX~~ **tip-proven**
    for omit→DedicatedVm lifecycle **and** mid-run Live (gate 9) in
    [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md);
-   **next:** multi-driver B2 exit criteria (do not flip B2 from WHPX alone);
-   HVF production cutover.
+   ~~multi-driver B2 product exit~~ **closed on tip**
+   ([b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md));
+   **next:** HVF production cutover; Enterprise GA / BX0.3 remain open.
 3. Production MicroVM via OCI DedicatedVm on Apple Silicon/HVF (same stamp rules).
 4. Only then delete Box-direct libkrun lifecycle (B5).
 
-**Evidence required:** Real-host parity for create/start/exec/FS/stop/delete/recovery on each driver; no silent Sandbox↔MicroVM fallback. WHPX mid-run Live must not invent exit and must keep `b2_process_session_recovery_closed=false` until the multi-driver B2 exit criteria land.
+**Evidence required:** Real-host parity for create/start/exec/FS/stop/delete/recovery on each driver; no silent Sandbox↔MicroVM fallback. WHPX mid-run Live must not invent exit; Live reports keep `b2_process_session_recovery_closed=false`.
 
 **Refuse:** Declaring cutover from qualification-only endpoints; “OCI-shaped” wrappers that still own VMM state inside Box; claiming Enterprise GA from KVM/WHPX cutover binders alone.
 

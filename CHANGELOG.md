@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- WIN-01 three-iteration longitudinal WHPX soak tip-proven on Box `1c741962`:
+  summary SHA-256
+  `0ff23f04a470e6de12f616b3a9d29ea4aa5be10d7a90fa4b152351e313bae52e`
+  (`result=pass`, `verification=pass`, 3×9 tests). Refresh architecture Axis
+  A/B prose now that B2 product exit is closed. Does **not** claim Enterprise
+  GA or close duration/`R24` trend gates.
 - Fix Windows WHPX soak (`WIN-01`) matrix: drop Linux-only `core_smoke` names
   (bind mounts, volume-backed init, virtiofs tar) that produced false `0 tests`
   passes. Tip one-iteration soak on Box `c8c2c1dc` summary SHA-256

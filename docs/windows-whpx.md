@@ -222,8 +222,11 @@ functional tests rather than being inferred from another host.
 
 Tip (Box `c8c2c1dc…`): one-iteration soak summary SHA-256
 `93c085108896c24620c506ead1f517a28a5b1114c2d31aeecc02353f4cc51f35`
-(`result=pass`, `verification=pass`, nine tests). Does **not** claim
-Enterprise GA or close longitudinal multi-iteration `WIN-01` trend verification.
+(`result=pass`, `verification=pass`, nine tests). Tip (Box `1c741962…`):
+three-iteration longitudinal summary SHA-256
+`0ff23f04a470e6de12f616b3a9d29ea4aa5be10d7a90fa4b152351e313bae52e`
+(27 tests, ~16 min). Does **not** claim Enterprise GA or close longer
+duration/`R24` trend verification.
 
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `
