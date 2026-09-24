@@ -140,6 +140,21 @@ operator path with `scripts/proof-linux-sandbox-setuid-launcher.sh` (non-root
 run, setpriv unset). Non-root Host spawn without `A3S_BOX_CI_SETPRIV_WRAPPER`
 now fail-closes unless the resolved launcher is root-owned mode `4755`.
 
+## Linux / WSL MicroVM `:ro` volumes
+
+MicroVM `-v host:guest:ro` on Linux and WSL host-enforces write denial via a
+private `MS_RDONLY` bind alias before virtio-fs attach. That path needs host
+`CAP_SYS_ADMIN` (typically root). Without it, Box fails closed before durable
+boot with a `CAP_SYS_ADMIN` hint — it does **not** fall back to guest-honor-only
+`:ro`.
+
+The Sandbox setuid launcher above elevates SandboxViaOci only; it does **not**
+cover MicroVM RO staging. On WSL, run MicroVM `:ro` workloads as root (or an
+equivalent capability-bearing identity), or omit `:ro` and use a writable bind.
+
+Windows/WHPX MicroVM `:ro` uses BindFlt instead and does not need Linux
+`CAP_SYS_ADMIN`. See [Windows WHPX](windows-whpx.md).
+
 ## Offline installation
 
 An offline install must supply the release tag and a trusted SHA-256 value. The

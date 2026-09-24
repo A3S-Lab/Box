@@ -108,7 +108,10 @@ pub(super) fn stage_virtiofs_ro_share(
                 "Failed to remount MicroVM :ro volume alias {} read-only: {error}",
                 target.display()
             ),
-            hint: None,
+            hint: Some(
+                "Host CAP_SYS_ADMIN (or equivalent) is required for :ro virtio-fs write denial"
+                    .into(),
+            ),
         });
     }
 
@@ -524,6 +527,41 @@ mod tests {
         let rw_mount =
             format!("123 45 0:67 / {target} rw,relatime - ext4 /dev/sda1 rw,errors=continue\n");
         assert!(!mount_is_read_only(&rw_mount, Path::new(target)));
+    }
+
+    #[test]
+    fn refuses_ro_staging_without_cap_sys_admin() {
+        if can_mount() {
+            // Privileged runners cover the happy path below; this case locks the
+            // unprivileged WSL/Linux MicroVM refuse contract.
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let box_dir = fixture.path();
+        let source = box_dir.join("vol");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("x"), b"data").unwrap();
+        let filemounts = box_dir.join(".filemounts");
+        std::fs::create_dir_all(&filemounts).unwrap();
+
+        let error = stage_virtiofs_ro_share(&source, &filemounts, 0).unwrap_err();
+        match error {
+            BoxError::BoxBootError { hint: Some(hint), .. } => {
+                assert!(
+                    hint.contains("CAP_SYS_ADMIN"),
+                    "unprivileged :ro staging must hint CAP_SYS_ADMIN, got: {hint}"
+                );
+            }
+            other => panic!("expected BoxBootError with CAP_SYS_ADMIN hint, got: {other}"),
+        }
+        assert!(
+            !ro_alias_root(&filemounts).exists()
+                || std::fs::read_dir(ro_alias_root(&filemounts))
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true),
+            "failed :ro staging must not leave a live alias under .filemounts/ro-aliases"
+        );
+        assert_eq!(std::fs::read(source.join("x")).unwrap(), b"data");
     }
 
     #[test]
