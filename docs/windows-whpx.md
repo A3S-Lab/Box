@@ -201,6 +201,10 @@ Additional fail-closed negatives covered after #259–#263:
 | `WIN-NEG-POOL-01` | `pool start` exits non-zero immediately |
 | `WIN-NEG-CUPD-01` | `container-update --cpus 2` rejects and does not persist |
 
+Tip: `cargo test -p a3s-box-cli --test command_coverage test_windows_` on Box
+`79b25590…` worktree → 4/4 pass (sandbox/TEE/bridge/PTY/pool/health/Compose/
+live `container-update`). Does **not** claim Enterprise GA.
+
 ## WHPX soak validation
 
 Run the Windows-specific soak harness from the Box repository root on an

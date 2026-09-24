@@ -24,6 +24,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Windows WIN-NEG fail-closed tip-proven on tip (`command_coverage`
+  `test_windows_*`, 4/4): sandbox/TEE/bridge/network create/PTY/`shell`
+  attach/pause/unpause/pool start reject before durable mutation; health
+  reject before run/create/start; Compose up fails closed; live
+  `container-update` tier-2 rejects without persist. Does **not** claim
+  Enterprise GA or close B3/B4.
 - Enable `real_core_virtiofs_tar_closes_every_source_file_cleanly` on Windows
   and add it to the default WIN-01 soak matrix (`-SkipVirtiofsStress` omits it).
   Tip one-iteration soak summary SHA-256
