@@ -208,13 +208,11 @@ otherwise idle WHPX host. It builds the current guest-init and Windows binaries
 (unless `-SkipBuild`), then precompiles the real smoke executable and repeatedly
 exercises the supported lifecycle, logs, exit-code, long-argv, post-boot exec,
 bidirectional single-file copy, `top`, guest PID-aware stats, published-port,
-bind-mount (`:ro` via BindFlt), volume-backed init script, named-volume, commit,
-and filesystem snapshot paths.
+bind-mount (`:ro` via BindFlt), virtiofs tar stress (`--virtiofs-cache=none`),
+volume-backed init script, named-volume, commit, and filesystem snapshot paths.
 
-Virtiofs tar stress remains Linux-only in `core_smoke`
-(`#[cfg(target_os = "linux")]`) and is **not** part of this matrix — listing
-it produced false `0 tests` passes that the evidence verifier correctly
-fail-closes.
+Pass `-SkipVirtiofsStress` to omit the ~100s virtiofs tar case from short
+rehearsals. The default matrix includes it after Windows tip-prove.
 
 This runner supplies the `WIN-01` lane in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only
@@ -235,7 +233,10 @@ init on Windows): one-iteration soak summary SHA-256
 (`result=pass`, `verification=pass`, eleven tests, ~6 min). Tip (G2 7200s):
 summary SHA-256
 `49e0c3820401e89a522bcb4034b591e9644c2efd4a5bc2721d9169e8e9da5a96`
-(`result=pass`, `verification=pass`, 22×11=242 tests, ~123 min). Does **not**
+(`result=pass`, `verification=pass`, 22×11=242 tests, ~123 min). Tip
+(virtiofs tar on Windows): one-iteration soak summary SHA-256
+`0452f1370ecdaf3cd4b4e2b72d3d032241ed173e36f6c83300a1329954e6ba95`
+(`result=pass`, `verification=pass`, twelve tests, ~7 min). Does **not**
 claim Enterprise GA or close longer duration/`R24` trend verification.
 
 ```powershell
@@ -260,7 +261,8 @@ requested/completed counts or resource guardrails drift.
 
 The default matrix includes a 4,096-byte workload argument, POSIX
 ownership/mode replay through restart and commit, BindFlt `:ro` bind-mounts,
-and volume-backed init. Use `-ListTests` to inspect
+virtiofs tar stress, and volume-backed init (twelve tests). Use `-ListTests`
+to inspect
 the exact selection.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode

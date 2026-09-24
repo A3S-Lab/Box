@@ -1519,7 +1519,6 @@ fn real_core_postgres_scram_survives_sequential_published_connections() {
     smoke.ok(&["rm", "-f", &smoke.name]);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
