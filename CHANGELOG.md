@@ -19,6 +19,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Enable `real_core_virtiofs_tar_closes_every_source_file_cleanly` on Windows
+  and add it to the default WIN-01 soak matrix (`-SkipVirtiofsStress` omits it).
+  Tip one-iteration soak summary SHA-256
+  `0452f1370ecdaf3cd4b4e2b72d3d032241ed173e36f6c83300a1329954e6ba95`
+  (`result=pass`, `verification=pass`, 12 tests, ~7 min). Does **not** claim
+  Enterprise GA or close `R24`.
 - WIN-01 G2 (7200s) WHPX soak tip-proven: summary SHA-256
   `49e0c3820401e89a522bcb4034b591e9644c2efd4a5bc2721d9169e8e9da5a96`
   (`result=pass`, `verification=pass`, 22 iterations × 11 tests = 242,
@@ -27,8 +33,8 @@ All notable changes to A3S Box will be documented in this file.
   (named volume + `:ro` init bind) and add it to the WIN-01 soak matrix.
   Tip one-iteration soak summary SHA-256
   `6aea2e8553693a1a3790b83f41bc9ca617a57a0675695fc33be6a7548e5840d6`
-  (`result=pass`, `verification=pass`, 11 tests, ~6 min). Virtiofs tar stress
-  remains Linux-only. Does **not** claim Enterprise GA or close B3/R24.
+  (`result=pass`, `verification=pass`, 11 tests, ~6 min). Does **not** claim
+  Enterprise GA or close B3/R24.
 - WIN-01 three-iteration longitudinal WHPX soak tip-proven on Box `1c741962`:
   summary SHA-256
   `0ff23f04a470e6de12f616b3a9d29ea4aa5be10d7a90fa4b152351e313bae52e`

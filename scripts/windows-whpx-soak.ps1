@@ -17,8 +17,7 @@ param(
     [int]$MaxRuntimeHandles = 8192,
     [string]$OutputDirectory = '',
     [switch]$SkipBuild,
-    # Retained for operator scripts; virtiofs tar stress is Linux-only and is
-    # no longer part of the Windows WHPX soak matrix.
+    # Omit the ~100s virtiofs tar stress case from the WIN-01 matrix.
     [switch]$SkipVirtiofsStress,
     [switch]$ListTests
 )
@@ -36,15 +35,20 @@ $tests = @(
     'real_core_utility_commands_cp_top_stats',
     'real_core_published_port_http_smoke',
     'real_core_bind_mounts_preserve_host_paths_and_read_only_mode',
+    'real_core_virtiofs_tar_closes_every_source_file_cleanly',
     'real_core_volume_backed_init_script_success_and_failure',
     'real_core_named_volume_persists_across_stop_restart',
     'real_core_commit_preserves_guest_ownership_and_modes_after_stop',
     'real_core_filesystem_image_snapshot_commands'
 )
 
-# Virtiofs tar stress remains Linux-only in core_smoke
-# (`#[cfg(target_os = "linux")]`). Do not list it here: cargo --exact exits 0
-# with "0 tests" and the soak evidence verifier fail-closes.
+if ($SkipVirtiofsStress) {
+    $tests = @(
+        $tests | Where-Object {
+            $_ -ne 'real_core_virtiofs_tar_closes_every_source_file_cleanly'
+        }
+    )
+}
 
 if ($ListTests) {
     $tests
