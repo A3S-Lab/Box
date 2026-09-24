@@ -1005,12 +1005,13 @@ tip while harness reports still keep
   denial via BindFlt read-only mappings (same live-view / source-stays-writable
   contract), including absent-detach honesty for BindFlt
   `HRESULT 0x80070057` (`INVALID_PARAMETER`) tip-proven on Box `07514c79` /
-  WIN-01 soak digest `a90e7715…` (bind-mount restored to matrix); other hosts
-  refuse `:ro` until native host denial exists (no guest-honor-only attach);
-  destroy/boot-failure, orphan reap, and legacy wipe paths detach those
-  aliases fail-closed before deleting `boxes/{id}`. macOS host `:ro` denial
-  and full Linux UID/GID storage on Windows binds remain open. Does **not**
-  flip `b2_process_session_recovery_closed` or claim Enterprise GA.
+  WIN-01 soak digests `a90e7715…` (bind-mount), `6aea2e85…` (volume-backed
+  init), `0452f137…` (virtiofs tar; 12-test matrix), and G2 `49e0c382…`; other
+  hosts refuse `:ro` until native host denial exists (no guest-honor-only
+  attach); destroy/boot-failure, orphan reap, and legacy wipe paths detach
+  those aliases fail-closed before deleting `boxes/{id}`. macOS host `:ro`
+  denial and full Linux UID/GID storage on Windows binds remain open. Does
+  **not** flip `b2_process_session_recovery_closed` or claim Enterprise GA.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
   snapshots. **Partial:** managed Linux Sandbox live/paused/stopped snapshots,
   host-rootfs commit/export/diff, and paused `cp`/filesystem now share the
