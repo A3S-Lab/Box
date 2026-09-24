@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Linux MicroVM `:ro` remount failure now carries the same `CAP_SYS_ADMIN` hint
+  as bind failure (WSL/unprivileged honesty). Unit test
+  `refuses_ro_staging_without_cap_sys_admin` locks the fail-closed refuse
+  contract when caps are absent. Docs: Installation § Linux / WSL MicroVM
+  `:ro`. Does **not** claim Enterprise GA.
 - Windows MicroVM `:ro` bind detach: treat BindFlt `HRESULT 0x80070057`
   (`ERROR_INVALID_PARAMETER`) as an absent mapping (same honesty as Linux
   `umount` `EINVAL`). Unblocks host-enforced `:ro` virtio-fs directory and
