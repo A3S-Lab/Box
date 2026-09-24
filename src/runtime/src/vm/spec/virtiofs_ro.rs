@@ -349,11 +349,20 @@ const BINDFLT_FLAG_READ_ONLY_MAPPING: u32 = 0x1;
 #[cfg(target_os = "windows")]
 const HRESULT_FROM_WIN32_FILE_NOT_FOUND: i32 = 0x8007_0002u32 as i32;
 #[cfg(target_os = "windows")]
+const HRESULT_FROM_WIN32_PATH_NOT_FOUND: i32 = 0x8007_0003u32 as i32;
+#[cfg(target_os = "windows")]
+const HRESULT_FROM_WIN32_INVALID_PARAMETER: i32 = 0x8007_0057u32 as i32;
+#[cfg(target_os = "windows")]
 const HRESULT_FROM_WIN32_NOT_FOUND: i32 = 0x8007_0490u32 as i32;
 
 #[cfg(target_os = "windows")]
 fn bindflt_absent(hr: i32) -> bool {
-    hr == HRESULT_FROM_WIN32_FILE_NOT_FOUND || hr == HRESULT_FROM_WIN32_NOT_FOUND
+    // Mirror Linux umount EINVAL: BindFlt returns INVALID_PARAMETER when no
+    // mapping exists for the virtual path (fresh alias dir / already detached).
+    hr == HRESULT_FROM_WIN32_FILE_NOT_FOUND
+        || hr == HRESULT_FROM_WIN32_PATH_NOT_FOUND
+        || hr == HRESULT_FROM_WIN32_INVALID_PARAMETER
+        || hr == HRESULT_FROM_WIN32_NOT_FOUND
 }
 
 #[cfg(target_os = "windows")]
@@ -545,6 +554,16 @@ mod tests {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bindflt_absent_treats_invalid_parameter_like_linux_einval() {
+        assert!(bindflt_absent(HRESULT_FROM_WIN32_INVALID_PARAMETER));
+        assert!(bindflt_absent(HRESULT_FROM_WIN32_PATH_NOT_FOUND));
+        assert!(bindflt_absent(HRESULT_FROM_WIN32_FILE_NOT_FOUND));
+        assert!(bindflt_absent(HRESULT_FROM_WIN32_NOT_FOUND));
+        // Access denied must stay fail-closed (not an absent mapping).
+        assert!(!bindflt_absent(0x8007_0005u32 as i32));
+    }
 
     #[test]
     fn stages_read_only_virtiofs_alias_with_bindflt() {

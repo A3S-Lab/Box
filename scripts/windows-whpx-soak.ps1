@@ -35,14 +35,15 @@ $tests = @(
     'real_core_long_argument_avoids_kernel_cmdline_overflow',
     'real_core_utility_commands_cp_top_stats',
     'real_core_published_port_http_smoke',
+    'real_core_bind_mounts_preserve_host_paths_and_read_only_mode',
     'real_core_named_volume_persists_across_stop_restart',
     'real_core_commit_preserves_guest_ownership_and_modes_after_stop',
     'real_core_filesystem_image_snapshot_commands'
 )
 
-# Bind mounts, volume-backed init, and virtiofs tar stress remain Linux-only in
-# core_smoke (`#[cfg(target_os = "linux")]`). Do not list them here: cargo
-# --exact exits 0 with "0 tests" and the soak evidence verifier fail-closes.
+# Volume-backed init and virtiofs tar stress remain Linux-only in core_smoke
+# (`#[cfg(target_os = "linux")]`). Do not list them here: cargo --exact exits 0
+# with "0 tests" and the soak evidence verifier fail-closes.
 
 if ($ListTests) {
     $tests

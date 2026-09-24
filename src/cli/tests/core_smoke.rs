@@ -1570,7 +1570,6 @@ fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
     assert_contains(&output, "virtiofs-tar-pass-5", "virtiofs tar output");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
