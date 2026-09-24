@@ -208,12 +208,13 @@ otherwise idle WHPX host. It builds the current guest-init and Windows binaries
 (unless `-SkipBuild`), then precompiles the real smoke executable and repeatedly
 exercises the supported lifecycle, logs, exit-code, long-argv, post-boot exec,
 bidirectional single-file copy, `top`, guest PID-aware stats, published-port,
-named-volume, commit, and filesystem snapshot paths.
+bind-mount (`:ro` via BindFlt), named-volume, commit, and filesystem snapshot
+paths.
 
-Bind-mount, volume-backed init, and virtiofs tar stress remain Linux-only in
-`core_smoke` (`#[cfg(target_os = "linux")]`) and are **not** part of this
-matrix — listing them produced false `0 tests` passes that the evidence
-verifier correctly fail-closes.
+Volume-backed init and virtiofs tar stress remain Linux-only in `core_smoke`
+(`#[cfg(target_os = "linux")]`) and are **not** part of this matrix — listing
+them produced false `0 tests` passes that the evidence verifier correctly
+fail-closes.
 
 This runner supplies the `WIN-01` lane in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only
@@ -225,8 +226,11 @@ Tip (Box `c8c2c1dc…`): one-iteration soak summary SHA-256
 (`result=pass`, `verification=pass`, nine tests). Tip (Box `1c741962…`):
 three-iteration longitudinal summary SHA-256
 `0ff23f04a470e6de12f616b3a9d29ea4aa5be10d7a90fa4b152351e313bae52e`
-(27 tests, ~16 min). Does **not** claim Enterprise GA or close longer
-duration/`R24` trend verification.
+(27 tests, ~16 min). Tip (BindFlt `:ro` detach fix + bind-mount matrix):
+one-iteration soak summary SHA-256
+`a90e771533e4d17064481889811f22a2e01c499872078e651fd6b2955afce00f`
+(`result=pass`, `verification=pass`, ten tests, ~5.5 min). Does **not**
+claim Enterprise GA or close longer duration/`R24` trend verification.
 
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `

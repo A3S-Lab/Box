@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows MicroVM `:ro` bind detach: treat BindFlt `HRESULT 0x80070057`
+  (`ERROR_INVALID_PARAMETER`) as an absent mapping (same honesty as Linux
+  `umount` `EINVAL`). Unblocks host-enforced `:ro` virtio-fs directory and
+  single-file binds on WHPX. Tip-proven with `a3s-box run --rm -v …:ro` and
+  one-iteration WIN-01 soak summary SHA-256
+  `a90e771533e4d17064481889811f22a2e01c499872078e651fd6b2955afce00f`
+  (`result=pass`, `verification=pass`, 10 tests including bind-mount). Enable
+  `real_core_bind_mounts_preserve_host_paths_and_read_only_mode` on Windows and
+  restore it to the WIN-01 soak matrix. Does **not** claim Enterprise GA.
+
 ### Changed
 
 - WIN-01 three-iteration longitudinal WHPX soak tip-proven on Box `1c741962`:
