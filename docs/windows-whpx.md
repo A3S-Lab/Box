@@ -255,8 +255,9 @@ and cleanup. The runner requires no active A3S Box or A3S OCI Runtime process
 at startup, verifies the same invariant after every test, and fails when
 requested/completed counts or resource guardrails drift.
 
-The nine-test default matrix includes a 4,096-byte workload argument and POSIX
-ownership/mode replay through restart and commit. Use `-ListTests` to inspect
+The default matrix includes a 4,096-byte workload argument, POSIX
+ownership/mode replay through restart and commit, BindFlt `:ro` bind-mounts,
+and volume-backed init. Use `-ListTests` to inspect
 the exact selection.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
