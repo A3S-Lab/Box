@@ -7,34 +7,33 @@ are lowercase SHA-256 unless noted otherwise.
 ## Packaged Windows runtime
 
 The deterministic `vendor/krun-windows-x64.tar.xz` archive has SHA-256
-`ce178184bc9e309c9f8fef181312cd6c398fc825807124e31afab949b790627e`
+`dfc1d7fe2fefccde7197125edceaf6917c653a4b06399c38fb27dcc74059071e`
 and contains exactly:
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `krun.dll` | 7,428,608 | `f21293b65ee16058c9014b543c708d84c50dc28d7775dbd77bac32faabafa59e` |
+| `krun.dll` | 8,497,664 | `feff4d37b1aeb6e54fa72c44f93500ddaa389284f0af5684016dc58b2549c202` |
 | `krun.lib` | 11,870 | `3ac760758158bd4d2d6570db58037d47cd370a8e6ea04ccf54a8b24fd1fdec3d` |
 | `libkrunfw.dll` | 21,473,280 | `44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077` |
 
 `krun.dll` and its import library correspond to A3S-Lab/libkrun commit
-`dc5519faeabd8bf38d984ed29c44e6da977f0b5c`. That revision retains segmented
-Windows host-to-guest stream reads and reopens writable virtio-fs files with
-write access before `fsync`, so authenticated guest recovery reports can be
-flushed without a false `EIO`. The packaged
-`libkrunfw.dll` wrapper remains from commit
+`53020419b64d0fbeaea1eeb1fe48683d7efa0c73` (merged on `main` as `6fdc25f`;
+Windows virtio-fs `ATOMIC_O_TRUNC` / `O_TRUNC` on open so guest shell redirects
+truncate host bind files). That revision also retains segmented Windows
+host-to-guest stream reads and reopens writable virtio-fs files with write
+access before `fsync`. The packaged `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`b92b7d00e0b60ca729e0b1e98feff6471d3c7f62de29c8b706309ae3c0528b3b`).
+`b0becb861090567b572d61c072c4ef528b1f244a34379a314d14a99aea6581e1`).
 The deterministic archive was generated from local tooling commit
-`f7c69184ad3cf3436343836176859cd2fc9c732e`; that revision keeps guest→host
+`6fdc25f`; that revision keeps guest→host
 TSI reverse-proxy streams open until FIN/reaper (A3S-Lab/libkrun#13) and
 hairpins guest connects that target host-forwarded ports back into the guest
 (A3S-Lab/libkrun#14), on top of `-EPERM` for unpublished TSI listen
 (A3S-Lab/libkrun#12, Box#370), allowlist-only host binds, macOS VirtioFS
 directory-entry snapshotting, mutation-stable synthetic FUSE resume cookies,
 directory-stream ownership independent from the retained file handle, and
-retryable Unix-datagram TX backpressure handling. It does not change the
-packaged Windows runtime. Its `corresponding-source/2692169` directory
+retryable Unix-datagram TX backpressure handling. Its `corresponding-source/2692169` directory
 preserves the exact wrapper source for the packaged firmware DLL. The archive
 also contains the Apache-2.0 license and the EDK2 source notices.
 

@@ -159,6 +159,10 @@ Tip (writable bind + named volume on WSL, no `:ro`): host marker write-through
 and volume persist across two `run --rm` passed on tip (`wsl_rw_tip=pass`).
 Does **not** claim Enterprise GA.
 
+Tip (Windows WHPX writable bind truncate): after libkrun `5302041`, guest
+`printf short > host-file` truncates correctly (`win_otrunc_bind_tip=pass`).
+Does **not** claim Enterprise GA or Linux UID/GID storage on Windows binds.
+
 Tip (MicroVM egress on WSL Bridge / passt_bridge): default profile denies
 link-local metadata; first-match `--egress deny:1.1.1.1/32` denies that IP while
 a control run without deny fetches public HTTP (`wsl_microvm_egress_tip=pass`).
