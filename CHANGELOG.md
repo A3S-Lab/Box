@@ -39,6 +39,11 @@ All notable changes to A3S Box will be documented in this file.
   `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
   (`result=pass`, `verification=pass`, 188 iterations × 12 tests = 2256,
   ~24.0 h wall, 0 fails). Does **not** claim Enterprise GA or close B3/B4/B5/B6.
+- WIN-01 one-iteration soak on tip `c689f5dd` after writable-bind `O_TRUNC`
+  matrix expansion (13 tests): summary SHA-256
+  `e88f1ca3df0b63213a0933079273955aae294fa26e954112f318bcfe2ef6f955`
+  (`result=pass`, `verification=pass`, 1×13). Does **not** replace R24 or claim
+  Enterprise GA.
 - WSL MicroVM tip-proven writable bind (`-v host:guest` without `:ro`) and
   named-volume persist across two `run --rm` on Box pin tip `a3s-box 3.3.0`
   / OCI `b26155b1` host path (`wsl_rw_tip=pass`). `:ro` still requires
