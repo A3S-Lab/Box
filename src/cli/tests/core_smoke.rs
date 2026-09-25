@@ -1625,6 +1625,46 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
 
 #[test]
 #[ignore]
+fn real_core_writable_bind_mount_truncates_on_overwrite() {
+    // Windows virtio-fs advertises ATOMIC_O_TRUNC; open must shrink the host
+    // file or shell redirects leave long-file remnants (host-bind-ok →
+    // changednd-ok). Linux/macOS open already honors O_TRUNC.
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    let host_dir = tempfile::tempdir().expect("temporary writable bind source");
+    let marker = host_dir.path().join("marker.txt");
+    std::fs::write(&marker, "host-bind-ok").expect("write long host fixture");
+
+    seed_smoke_image(&smoke, &image);
+
+    let mount = format!("{}:/mnt/a3s-bind", host_dir.path().display());
+    let result = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-rw", smoke.name),
+        "-v",
+        &mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /mnt/a3s-bind/marker.txt)\" = host-bind-ok || exit 51; printf changed >/mnt/a3s-bind/marker.txt; test \"$(cat /mnt/a3s-bind/marker.txt)\" = changed || exit 52; printf writable-bind-trunc-ok",
+    ]);
+    assert_contains(
+        &result,
+        "writable-bind-trunc-ok",
+        "writable bind trunc output",
+    );
+    let host_after = std::fs::read_to_string(&marker).expect("read host marker after guest overwrite");
+    assert_eq!(
+        host_after, "changed",
+        "host bind must truncate on guest overwrite (ATOMIC_O_TRUNC); got {host_after:?}"
+    );
+}
+
+#[test]
+#[ignore]
 fn real_core_named_volume_persists_across_stop_restart() {
     let smoke = CoreSmoke::new();
     let image = smoke_image();
