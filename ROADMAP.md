@@ -991,8 +991,11 @@ tip while harness reports still keep
   Domain match, full
   AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
-  open. Explicit `--dns` must be an IP address; Bridge requires IPv4 (TSI
-  keeps IPv6). Does **not** flip `b2_process_session_recovery_closed`.
+  open. WSL tip (Box `a3s-box 3.3.0`): default metadata deny + first-match
+  `--egress` deny with public allow control (`wsl_microvm_egress_tip=pass`).
+  Explicit `--dns` must be an IP address; Bridge requires IPv4 (TSI
+  keeps IPv6). Does **not** flip `b2_process_session_recovery_closed` or claim
+  Enterprise GA.
 - [ ] Support Windows bind mounts and named volumes without weakening Linux
   ownership, mode, symlink, or read-only semantics.
   **Partial:** Windows stopped `snapshot create` requires guest rootfs metadata

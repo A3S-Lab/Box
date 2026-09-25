@@ -32,6 +32,14 @@ All notable changes to A3S Box will be documented in this file.
   named-volume persist across two `run --rm` on Box pin tip `a3s-box 3.3.0`
   / OCI `b26155b1` host path (`wsl_rw_tip=pass`). `:ro` still requires
   `CAP_SYS_ADMIN` (documented). Does **not** claim Enterprise GA.
+- WSL MicroVM tip-proven Axis C egress on tip `a3s-box 3.3.0` / passt_bridge:
+  default profile denies link-local metadata (`169.254.169.254` wget timeout);
+  first-match `--egress deny:1.1.1.1/32` + `allow:0.0.0.0/0` denies that IP;
+  control run without deny fetches `http://1.1.1.1/` (`wget_rc=0`) so deny is
+  not a total blackhole (`wsl_microvm_egress_tip=pass`). Does **not** close
+  Sandbox egress enforcement, CNI, domain match, or Enterprise GA. Sandbox
+  keep-authority refuse-`--egress` CLI tip on this WSL still blocked without
+  interactive `sudo` host prep (no passwordless sudo).
 - Windows WIN-HOST installer tip-proven: `scripts/test-install.ps1` →
   `install.ps1 tests passed for windows-x86_64` (SHA-256 verify, happy-path
   install, unmanaged refuse, pipeline layout). Does **not** claim Enterprise
