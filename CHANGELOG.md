@@ -12,8 +12,11 @@ All notable changes to A3S Box will be documented in this file.
   (tip: `host-bind-ok` → `changed`, `win_otrunc_bind_tip=pass`). Vendored
   libkrun `5302041` / `main` `6fdc25f`; refreshed
   `vendor/krun-windows-x64.tar.xz` (`dfc1d7fe…`). Unit test
-  `test_virtiofs_windows_open_o_trunc_shrinks_existing_file`. Does **not**
-  claim Enterprise GA or close full Linux UID/GID storage on Windows binds.
+  `test_virtiofs_windows_open_o_trunc_shrinks_existing_file`. Locked into
+  ignored `core_smoke`
+  `real_core_writable_bind_mount_truncates_on_overwrite` and the WIN-01 soak
+  matrix (13 tests with virtiofs tar). Does **not** claim Enterprise GA or
+  close full Linux UID/GID storage on Windows binds.
 - Linux MicroVM `:ro` remount failure now carries the same `CAP_SYS_ADMIN` hint
   as bind failure (WSL/unprivileged honesty). Unit test
   `refuses_ro_staging_without_cap_sys_admin` locks the fail-closed refuse

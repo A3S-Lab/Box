@@ -35,6 +35,7 @@ $tests = @(
     'real_core_utility_commands_cp_top_stats',
     'real_core_published_port_http_smoke',
     'real_core_bind_mounts_preserve_host_paths_and_read_only_mode',
+    'real_core_writable_bind_mount_truncates_on_overwrite',
     'real_core_virtiofs_tar_closes_every_source_file_cleanly',
     'real_core_volume_backed_init_script_success_and_failure',
     'real_core_named_volume_persists_across_stop_restart',
