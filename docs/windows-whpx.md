@@ -203,7 +203,9 @@ Additional fail-closed negatives covered after #259–#263:
 
 Tip: `cargo test -p a3s-box-cli --test command_coverage test_windows_` on Box
 `79b25590…` worktree → 4/4 pass (sandbox/TEE/bridge/PTY/pool/health/Compose/
-live `container-update`). Does **not** claim Enterprise GA.
+live `container-update`). Tip: `scripts/test-install.ps1` on tip → pass
+(`install.ps1 tests passed for windows-x86_64`; digest/SHA verify + managed
+install layout). Does **not** claim Enterprise GA.
 
 ## WHPX soak validation
 

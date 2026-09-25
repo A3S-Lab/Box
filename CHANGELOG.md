@@ -24,6 +24,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Windows WIN-HOST installer tip-proven: `scripts/test-install.ps1` →
+  `install.ps1 tests passed for windows-x86_64` (SHA-256 verify, happy-path
+  install, unmanaged refuse, pipeline layout). Does **not** claim Enterprise
+  GA or close B6 release packaging.
 - Windows WIN-NEG fail-closed tip-proven on tip (`command_coverage`
   `test_windows_*`, 4/4): sandbox/TEE/bridge/network create/PTY/`shell`
   attach/pause/unpause/pool start reject before durable mutation; health
