@@ -1012,7 +1012,9 @@ tip while harness reports still keep
   init), `0452f137…` (virtiofs tar; 12-test matrix), and G2 `49e0c382…`; other
   hosts refuse `:ro` until native host denial exists (no guest-honor-only
   attach); destroy/boot-failure, orphan reap, and legacy wipe paths detach
-  those aliases fail-closed before deleting `boxes/{id}`. macOS host `:ro`
+  those aliases fail-closed before deleting `boxes/{id}`. Writable Windows
+  virtio-fs binds tip-proven to honor `O_TRUNC` on open (libkrun `5302041` /
+  `win_otrunc_bind_tip=pass`). macOS host `:ro`
   denial and full Linux UID/GID storage on Windows binds remain open. Does
   **not** flip `b2_process_session_recovery_closed` or claim Enterprise GA.
 - [ ] Add quiesce/resume integration for consistent stopped and online product
