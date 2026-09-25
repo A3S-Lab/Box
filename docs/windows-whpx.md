@@ -245,7 +245,11 @@ summary SHA-256
 (`result=pass`, `verification=pass`, twelve tests, ~7 min). Tip (R24 86400s):
 summary SHA-256
 `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
-(`result=pass`, `verification=pass`, 188×12=2256 tests, ~24.0 h). Does **not**
+(`result=pass`, `verification=pass`, 188×12=2256 tests, ~24.0 h). Tip (Box
+`c689f5dd…`, writable-bind `O_TRUNC` in matrix): one-iteration soak summary
+SHA-256
+`e88f1ca3df0b63213a0933079273955aae294fa26e954112f318bcfe2ef6f955`
+(`result=pass`, `verification=pass`, thirteen tests, ~7.7 min). Does **not**
 claim Enterprise GA or close B3/B4/B5/B6.
 
 ```powershell
