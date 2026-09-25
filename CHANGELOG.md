@@ -28,6 +28,10 @@ All notable changes to A3S Box will be documented in this file.
   `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
   (`result=pass`, `verification=pass`, 188 iterations × 12 tests = 2256,
   ~24.0 h wall, 0 fails). Does **not** claim Enterprise GA or close B3/B4/B5/B6.
+- WSL MicroVM tip-proven writable bind (`-v host:guest` without `:ro`) and
+  named-volume persist across two `run --rm` on Box pin tip `a3s-box 3.3.0`
+  / OCI `b26155b1` host path (`wsl_rw_tip=pass`). `:ro` still requires
+  `CAP_SYS_ADMIN` (documented). Does **not** claim Enterprise GA.
 - Windows WIN-HOST installer tip-proven: `scripts/test-install.ps1` →
   `install.ps1 tests passed for windows-x86_64` (SHA-256 verify, happy-path
   install, unmanaged refuse, pipeline layout). Does **not** claim Enterprise
