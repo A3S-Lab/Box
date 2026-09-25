@@ -333,10 +333,10 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | Priority | Slice | Axis | Out of scope in the same PR |
 | --- | --- | --- | --- |
 | P0 | Keep B2 evidence honest; fix real Live/recovery failures only | A | Flipping `b2_process_session_recovery_closed` |
-| P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580` | C | CNI; Sandbox bridge GA |
-| P0 | Operator Sandbox setuid cgroup + egid adopt (`#628`) — tip-proven on Ubuntu Orb + closed on `main` via `#636` / Orb proof note; KVM Live / soak still open | A | Claiming GA from Sandbox-only short-rm |
+| P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580`; WSL tip `wsl_microvm_egress_tip=pass` (metadata deny + public allow control) | C | CNI; Sandbox bridge GA |
+| P0 | Operator Sandbox setuid cgroup + egid adopt (`#628`) — tip-proven on Ubuntu Orb + closed on `main` via `#636` / Orb proof note; KVM Live / soak still open; this WSL needs interactive sudo to refresh launcher/cgroup | A | Claiming GA from Sandbox-only short-rm |
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
-| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`. Sandbox keep-authority refuses networks that store those rules | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
+| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`; WSL tip first-match deny `1.1.1.1/32` with public allow control. Sandbox keep-authority refuses networks that store those rules (unit + Orb; WSL CLI tip needs sudo host prep) | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
 | P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate product exit) — **closed on tip** `1356d4bb` / `b26155b1`; binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion; Live reports emitting `b2_process_session_recovery_closed=true` |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); gates 1–8 tip-proven / docs closed for Linux/KVM omit→OCI; Enterprise GA + HVF production open | B | Deleting libkrun before §4.5; HVF production |
