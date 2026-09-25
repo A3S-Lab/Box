@@ -155,6 +155,10 @@ equivalent capability-bearing identity), or omit `:ro` and use a writable bind.
 Windows/WHPX MicroVM `:ro` uses BindFlt instead and does not need Linux
 `CAP_SYS_ADMIN`. See [Windows WHPX](windows-whpx.md).
 
+Tip (writable bind + named volume on WSL, no `:ro`): host marker write-through
+and volume persist across two `run --rm` passed on tip (`wsl_rw_tip=pass`).
+Does **not** claim Enterprise GA.
+
 ## Offline installation
 
 An offline install must supply the release tag and a trusted SHA-256 value. The
