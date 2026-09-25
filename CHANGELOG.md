@@ -24,6 +24,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- WIN-01 R24 (86400s) WHPX soak tip-proven: summary SHA-256
+  `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
+  (`result=pass`, `verification=pass`, 188 iterations × 12 tests = 2256,
+  ~24.0 h wall, 0 fails). Does **not** claim Enterprise GA or close B3/B4/B5/B6.
 - Windows WIN-HOST installer tip-proven: `scripts/test-install.ps1` →
   `install.ps1 tests passed for windows-x86_64` (SHA-256 verify, happy-path
   install, unmanaged refuse, pipeline layout). Does **not** claim Enterprise

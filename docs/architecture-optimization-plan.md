@@ -8,8 +8,8 @@ Live gate 9 tip-proven; Live reports keep
 `b2_process_session_recovery_closed=false`; WIN-01 soak expanded on Box
 `17bbf5c0` / `ce6817b5` — BindFlt `:ro` absent-detach + bind-mount +
 volume-backed init tip digests `a90e7715…` / `6aea2e85…` (11 tests); G2
-7200s digest `49e0c382…` (22×11=242); Enterprise GA / HVF / B5 / BX0.3 /
-`R24` remain open)  
+7200s digest `49e0c382…` (22×11=242); R24 86400s digest `9b5e1f3c…`
+(188×12=2256); Enterprise GA / HVF / B5 / BX0.3 remain open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
@@ -341,7 +341,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate product exit) — **closed on tip** `1356d4bb` / `b26155b1`; binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion; Live reports emitting `b2_process_session_recovery_closed=true` |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); gates 1–8 tip-proven / docs closed for Linux/KVM omit→OCI; Enterprise GA + HVF production open | B | Deleting libkrun before §4.5; HVF production |
 | P2 | OCI DedicatedVm production cutover gates for Windows/WHPX — binder: [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md); gates 1–8 + mid-run Live gate 9 tip-proven; OCI pin `b26155b1` | B | Flipping B2 from WHPX alone; Enterprise GA / BX0.3 TEE |
-| P2 | WIN-01 WHPX soak honesty — BindFlt `:ro` absent-detach (`07514c79`), bind-mount + volume-backed init + virtiofs tar matrix (12 tests; digests `a90e7715…` / `6aea2e85…` / `0452f137…`); G2 7200s tip digest `49e0c382…` (22×11=242 on pre-virtiofs matrix); `R24` still open | A | Claiming Enterprise GA from G2 alone |
+| P2 | WIN-01 WHPX soak honesty — BindFlt `:ro` absent-detach (`07514c79`), bind-mount + volume-backed init + virtiofs tar matrix (12 tests; digests `a90e7715…` / `6aea2e85…` / `0452f137…`); G2 `49e0c382…` (22×11=242); R24 `9b5e1f3c…` (188×12=2256) tip-proven | A | Claiming Enterprise GA from soak alone; closing B3/B4/B5/B6 |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |
 | P3 | Compose MicroVM on unified manager; CRI shim ownership | E | Conformance badges |
 
