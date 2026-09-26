@@ -9,7 +9,12 @@ Live gate 9 tip-proven; Live reports keep
 `17bbf5c0` / `ce6817b5` — BindFlt `:ro` absent-detach + bind-mount +
 volume-backed init tip digests `a90e7715…` / `6aea2e85…` (11 tests); G2
 7200s digest `49e0c382…` (22×11=242); R24 86400s digest `9b5e1f3c…`
-(188×12=2256); Enterprise GA / HVF / B5 / BX0.3 remain open)  
+(188×12=2256); writable-bind `O_TRUNC` + 13-test matrix on `c689f5dd` /
+`e88f1ca3…`; Live re-tip report `4a3024d7…` on `cfae3a02` + `O_TRUNC` krun;
+G2 13-test solo digest `6222d0b0…` (16×13=208); R24 13-test O_TRUNC attempt
+failed mid-iter-18 after 17 green iters on harness `Process.Start` sharing
+violation (not guest assert); Start-retry hardened; R24 restart running;
+Enterprise GA / HVF / B5 / BX0.3 remain open)  
 Companion docs: [ROADMAP.md](../ROADMAP.md), [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md),
 [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md),
 [cross-platform-oci-runtime-development-plan.md](cross-platform-oci-runtime-development-plan.md),
@@ -88,7 +93,7 @@ Feature parity with other microVM projects is **not** an axiom.
 | Gate | Honest state |
 | --- | --- |
 | B2 process-session recovery exit | **Product exit closed** on Box `1356d4bb` / OCI `b26155b1` (binder gates 1–5). Live observation reports keep `b2_process_session_recovery_closed=false`. Binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md). Does **not** claim Enterprise GA / HVF / B5 / BX0.3 |
-| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; Sandbox keep-authority refuses Bridge networks that store `--egress` rather than ignoring them; domain match, full AAAA, CNI, Sandbox egress enforcement, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
+| B3 storage/network qualification | Open; NetworkStore DNS A + AAAA NODATA (UDP); macOS and Linux TCP/53 terminate known names; first-match IPv4 egress (CIDR/protocol/port) is enforced on netproxy and passt_bridge; **Linux keep-authority Sandbox Bridge installs the same packet-field FORWARD filter** (unit-proven; WSL tip pending sudo / 9p I/O); staging rolls back DNAT+veth when filter/DNAT/persist fails before a lease file; passt is started with `--no-map-gw` so the gateway is not rewritten to host loopback; the shim refuses a path-only virtio-net attach that would skip that proxy; IPv6 Ethernet is dropped until an IPv6 policy exists, including one 802.1Q or 802.1ad tag; domain match, full AAAA, CNI, macOS host `:ro`, and MicroVM live host-path snapshots remain open |
 | B4 Compose/CRI/warm-pool unified adapter | Open; Sandbox Compose path partial; MicroVM Compose cutover and warm-pool unification remain |
 | B5 legacy VMM removal | Blocked until HVF production cutover + multi-driver B2 exit (WHPX mid-run Live gate 9 is tip-proven; do not delete libkrun on WHPX gate 9 alone) |
 | B6 cross-platform artifact matrix | Open |
@@ -336,12 +341,12 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | P0 | MicroVM default egress deny for private/metadata/host (netproxy + tests) — landed `#580`; WSL tip `wsl_microvm_egress_tip=pass` (metadata deny + public allow control) | C | CNI; Sandbox bridge GA |
 | P0 | Operator Sandbox setuid cgroup + egid adopt (`#628`) — tip-proven on Ubuntu Orb + closed on `main` via `#636` / Orb proof note; KVM Live / soak still open; this WSL needs interactive sudo to refresh launcher/cgroup | A | Claiming GA from Sandbox-only short-rm |
 | P1 | Linux passt_bridge TCP/53 NetworkStore answers with real TCP termination — landed this branch | C | Full AAAA RRs |
-| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`; WSL tip first-match deny `1.1.1.1/32` with public allow control. Sandbox keep-authority refuses networks that store those rules (unit + Orb; WSL CLI tip needs sudo host prep) | C | Domain match; IPv6 policy DSL; CNI; Sandbox egress enforcement |
+| P1 | First-match MicroVM egress (CIDR/protocol/port) on netproxy + passt_bridge — landed `#586`; WSL tip first-match deny `1.1.1.1/32` with public allow control. Keep-authority Sandbox Bridge FORWARD filter landed (same packet-field contract; unit-proven; WSL tip needs interactive sudo) | C | Domain match; IPv6 policy DSL; CNI; claiming Sandbox≈MicroVM |
 | P1 | Design-only host-held secret substitution on netproxy TLS — spike in `docs/host-held-secrets-spike.md` (no code; tmpfs secrets stay) | C | Replacing Compose tmpfs secrets |
 | P1 | Multi-driver B2 exit criteria (Native + KVM + WHPX Live matrices → deliberate product exit) — **closed on tip** `1356d4bb` / `b26155b1`; binder: [b2-process-session-exit-criteria.md](b2-process-session-exit-criteria.md) | A | Claiming Enterprise GA; HVF production; B5 libkrun deletion; Live reports emitting `b2_process_session_recovery_closed=true` |
 | P2 | OCI DedicatedVm production cutover gates for Linux/KVM — binder: [microvm-kvm-ga-evidence.md](microvm-kvm-ga-evidence.md); gates 1–8 tip-proven / docs closed for Linux/KVM omit→OCI; Enterprise GA + HVF production open | B | Deleting libkrun before §4.5; HVF production |
 | P2 | OCI DedicatedVm production cutover gates for Windows/WHPX — binder: [microvm-whpx-ga-evidence.md](microvm-whpx-ga-evidence.md); gates 1–8 + mid-run Live gate 9 tip-proven; OCI pin `b26155b1` | B | Flipping B2 from WHPX alone; Enterprise GA / BX0.3 TEE |
-| P2 | WIN-01 WHPX soak honesty — BindFlt `:ro` absent-detach (`07514c79`), bind-mount + volume-backed init + virtiofs tar matrix; G2 `49e0c382…` (22×11=242); R24 `9b5e1f3c…` (188×12=2256); writable bind `O_TRUNC` locked (`5302041` / Box `c689f5dd`); one-iter 13-test digest `e88f1ca3…` tip-proven | A | Claiming Enterprise GA from soak alone; closing B3/B4/B5/B6 |
+| P2 | WIN-01 WHPX soak honesty — R24 `…tcpdiag…` running (~3h+/24+ iters past prior Start/boot/TCP flake windows); inter-test delay 3s; publish smoke hardens `0.0.0.0` ephemeral probe + early host-listen occupancy check (rebuild deferred while soak holds core_smoke.exe) | A | Claiming Enterprise GA from soak alone; closing B3/B4/B5/B6 |
 | P2 | Warm-pool / snapshot-fork soak toward `POL-01` close on KVM only | D | Cross-hypervisor fork claims |
 | P3 | Compose MicroVM on unified manager; CRI shim ownership | E | Conformance badges |
 

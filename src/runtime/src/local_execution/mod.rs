@@ -90,6 +90,8 @@ pub(crate) mod oci_portable_rootfs;
 #[cfg(feature = "vm")]
 mod oci_production;
 #[cfg(feature = "vm")]
+mod oci_sandbox_bridge_egress;
+#[cfg(feature = "vm")]
 mod oci_secret_attachments;
 mod oci_session;
 mod oci_storage_attachments;

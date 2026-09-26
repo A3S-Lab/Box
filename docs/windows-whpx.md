@@ -249,8 +249,15 @@ summary SHA-256
 `c689f5dd…`, writable-bind `O_TRUNC` in matrix): one-iteration soak summary
 SHA-256
 `e88f1ca3df0b63213a0933079273955aae294fa26e954112f318bcfe2ef6f955`
-(`result=pass`, `verification=pass`, thirteen tests, ~7.7 min). Does **not**
-claim Enterprise GA or close B3/B4/B5/B6.
+(`result=pass`, `verification=pass`, thirteen tests, ~7.7 min). Tip (G2 7200s
+on 13-test `O_TRUNC` matrix, Box `cfae3a02…`, solo idle WHPX): summary SHA-256
+`6222d0b003126bce412f476318200a32cdd0baae0fb6c547fd566bbce0c962d8`
+(`result=pass`, `verification=pass`, 16×13=208 tests, ~126.8 min). R24 13-test
+`O_TRUNC` tip digest is **not** yet claimed: prior attempt
+`win01-r24-13test-otrunc-retry-20260926T012300` failed mid-iter-18 after 17
+clean iterations when `Process.Start` hit a core_smoke image sharing
+violation; the harness now retries that Start path. Does **not** claim
+Enterprise GA or close B3/B4/B5/B6.
 
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `
@@ -274,9 +281,16 @@ requested/completed counts or resource guardrails drift.
 
 The default matrix includes a 4,096-byte workload argument, POSIX
 ownership/mode replay through restart and commit, BindFlt `:ro` bind-mounts,
-virtiofs tar stress, and volume-backed init (twelve tests). Use `-ListTests`
-to inspect
-the exact selection.
+writable-bind `O_TRUNC` overwrite, virtiofs tar stress, and volume-backed init
+(thirteen tests). Use `-ListTests` to inspect the exact selection.
+
+Long-running gates need extra WHPX settle margin. The harness waits 8 seconds
+between tests (`-InterTestDelayMilliseconds`), and it sets
+`A3S_EXEC_READY_TIMEOUT_MS=60000` for smoke children unless the caller already
+set it. With 3–5 seconds of delay and the 15-second product default for exec
+readiness, R24 runs failed after 1.5–2 hours: single-file `:ro` failed with
+exit code 101, and volume-backed init was force-killed before its exec server
+came up. The 15-second product default is unchanged.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
 `none`. Real WHPX validation took 373 seconds on the host described above, so

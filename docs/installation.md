@@ -166,7 +166,9 @@ Does **not** claim Enterprise GA or Linux UID/GID storage on Windows binds.
 Tip (MicroVM egress on WSL Bridge / passt_bridge): default profile denies
 link-local metadata; first-match `--egress deny:1.1.1.1/32` denies that IP while
 a control run without deny fetches public HTTP (`wsl_microvm_egress_tip=pass`).
-Does **not** close Sandbox egress enforcement or Enterprise GA.
+Keep-authority Sandbox Bridge now installs the same packet-field FORWARD filter
+on Linux (unit-proven); WSL tip-prove still needs interactive sudo on this host.
+Does **not** claim Sandbox≈MicroVM or Enterprise GA.
 
 ## Offline installation
 

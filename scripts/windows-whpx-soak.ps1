@@ -10,7 +10,10 @@ param(
     [ValidateRange(1, 86400)]
     [int]$VirtiofsTimeoutSeconds = 900,
     [ValidateRange(0, 60000)]
-    [int]$InterTestDelayMilliseconds = 1000,
+    # WHPX can still hold a partition / BindFlt mapping after the shim exits.
+    # 1s was too short (Exit 1, started_at=null); 3–5s still left R24 flakes on
+    # `:ro` / volume-backed init under full-matrix pressure (~1.5–2 h in).
+    [int]$InterTestDelayMilliseconds = 8000,
     [ValidateRange(1, 16384)]
     [int]$MaxRuntimeWorkingSetMiB = 2048,
     [ValidateRange(1, 65536)]
@@ -101,6 +104,10 @@ function Write-Utf8Text {
         [string]$Text
     )
 
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
     [IO.File]::WriteAllText($Path, $Text, $script:utf8NoBom)
 }
 
@@ -312,13 +319,40 @@ function Invoke-SoakTest {
     $startInfo.RedirectStandardError = $true
     $startInfo.CreateNoWindow = $true
 
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) {
-        throw "Failed to start core smoke test for $Test"
+    # Windows can briefly lock the freshly-exited core_smoke image (AV scan /
+    # lingering image mapping). Retry Start on sharing violations instead of
+    # failing a multi-hour soak on a harness flake.
+    $process = $null
+    $stdoutTask = $null
+    $stderrTask = $null
+    $startAttempts = 8
+    for ($attempt = 1; $attempt -le $startAttempts; $attempt++) {
+        $candidate = New-Object System.Diagnostics.Process
+        $candidate.StartInfo = $startInfo
+        try {
+            if (-not $candidate.Start()) {
+                throw "Failed to start core smoke test for $Test"
+            }
+            $process = $candidate
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            break
+        }
+        catch {
+            try { $candidate.Dispose() } catch { }
+            $message = [string]$_.Exception.Message
+            $sharing = $message -match (
+                'being used by another process|sharing violation|cannot access the file'
+            )
+            if (-not $sharing -or $attempt -eq $startAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds (150 * $attempt * $attempt)
+        }
     }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if ($null -eq $process) {
+        throw "Failed to start core smoke test for $Test after $startAttempts attempts"
+    }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     [int64]$peakRunnerWorkingSet = 0
     [int64]$peakRuntimeWorkingSet = 0
@@ -701,6 +735,12 @@ try {
     $env:A3S_BOX_SMOKE_IMAGE_TAR = $resolvedImageTar
     $env:A3S_BOX_SMOKE_TIMEOUT_SECS = $CommandTimeoutSeconds.ToString()
     $env:A3S_BOX_VIRTIOFS_TAR_TIMEOUT_SECS = $VirtiofsTimeoutSeconds.ToString()
+    # Product default exec-ready wait is 15s. Under multi-hour WHPX soak with
+    # BindFlt `:ro` + named volumes, cold boots can exceed that before the guest
+    # exec accept loop is up (R24 volume-backed init exit 1 / force-kill).
+    if (-not $env:A3S_EXEC_READY_TIMEOUT_MS) {
+        $env:A3S_EXEC_READY_TIMEOUT_MS = '60000'
+    }
     $soakStartedAt = [DateTime]::UtcNow
 
     while ($true) {

@@ -6,6 +6,49 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Windows WHPX soak settle margin: the default inter-test delay goes from
+  3000 ms to 8000 ms, and the harness sets `A3S_EXEC_READY_TIMEOUT_MS=60000`
+  for smoke children unless the caller already set it. The product default
+  stays at 15 s. Two R24 runs on the C: `O_TRUNC` pin failed after 1.5–2 h.
+  In `…otrunc-20260926T204429`, single-file `:ro` failed with exit code 101 at
+  iteration 15; a 30× solo stress of the same test passed every time. In
+  `…otrunc-settle-20260926T225353`, volume-backed init hit the 15 s
+  exec-ready timeout and was force-killed at iteration 13. core_smoke now
+  prints `--rm` retained-log tails and exit codes on `ok()` failures, and
+  waits 2 s between the directory and single-file `:ro` binds on Windows.
+  Does **not** claim R24 tip-proven or Enterprise GA.
+- Windows WHPX soak harness: retry `Process.Start` on core_smoke image sharing
+  violations (AV / lingering image map) with short backoff instead of failing a
+  multi-hour soak. Prior R24 13-test attempt
+  `win01-r24-13test-otrunc-retry-20260926T012300` reached 17 clean iterations
+  (224 tests) then died mid-iter-18 on
+  `being used by another process` at Start — not a guest/test assertion failure.
+  Does **not** claim R24 tip-proven or Enterprise GA.
+- Windows WHPX soak evidence writer recreates a missing parent directory before
+  `WriteAllText` (D: tip-prove tree vanished mid-`…tcpdiag…` after ~25 green
+  iters / ~3.2 h while writing `inventory-final.json`). Prefer a stable local
+  volume for `-OutputDirectory` when the repo disk drops directories under
+  multi-hour WHPX pressure. Does **not** claim storage root cause fixed or
+  Enterprise GA.
+- Windows WHPX soak `published_port`: probe ephemeral ports on `0.0.0.0` (same
+  bind family as the Windows port-forward worker) and fail closed early when
+  the host publish listener never occupies the mapped port after the guest
+  listen marker — separates “worker never bound” from TCP 10060 blackholes.
+  Does **not** claim TSI/pipe-bridge root cause fixed or Enterprise GA.
+- Windows WHPX soak / core_smoke: `wait_for_running` fail-closes immediately when
+  `ps` shows a terminal guest (`stopped` / `exited` / `dead`) instead of only
+  matching Linux `dead` and burning the full smoke timeout. Surfaces
+  `inspect` + product logs + `console.log` / `console.err.log` /
+  `shim.stderr.log` tails (pre-Ready WHPX failures land in shim stderr, not
+  guest console). Default soak inter-test partition-release delay raised
+  1000→3000 ms after repeated R24 Exit 1 flakes with `started_at=null`
+  (startretry iter 80 `published_port` ~9.9 h; inspect iter 16 `utility`
+  ~1.9 h; solo re-runs pass). `wait_for_tcp_text` timeout now also probes
+  whether `127.0.0.1:port` is still free vs occupied and dumps inspect/logs/
+  shim tails — `…part3s-20260926T160303` died iter 10 on published-port TCP
+  10060 after guest listen marker + `port` mapping succeeded (solo re-run
+  pass). Does **not** claim WHPX TSI publish or partition root causes are
+  fixed or close Enterprise GA.
 - Windows MicroVM virtio-fs writable binds: honor FUSE `ATOMIC_O_TRUNC` on
   `open` (`set_len(0)` when Linux `O_TRUNC` is set). Guest shell redirects such
   as `printf short > file` no longer leave long-file remnants on the host
@@ -35,6 +78,35 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Keep-authority Sandbox Bridge FORWARD egress: install a per-bridge iptables
+  filter chain that mirrors MicroVM `untrusted_egress_denied` (first-match
+  `--egress` CIDR/protocol/port, then default untrusted profile). Module
+  `oci_sandbox_bridge_egress` (unit-proven compile order + netproxy verdict
+  alignment). Linux no longer refuses networks that store `--egress` on this
+  path. Staging rolls back DNAT + the veth pair (and idle bridge filter/NAT)
+  if filter/DNAT/persist fails before a lease is published — including the
+  case where DNAT succeeded and persist failed (no lease file yet). WSL
+  tip-prove still needs interactive sudo (`sudo -n`
+  unavailable on this host). Does **not** claim Sandbox≈MicroVM, CNI, domain
+  match, or Enterprise GA.
+- WHPX mid-run Live (gate 9) re-tipped on Box `cfae3a02` / OCI `b26155b1` with
+  Alpine minirootfs + writable-bind `O_TRUNC` krun tip
+  (`box-windows-otrunc-fix`): report SHA-256
+  `4a3024d7dc66ced13ca53032fe718ead7876d6cbf554f4a61f9184355ee8db6c`
+  (`status=passed`, retained stream+FS, `b2_process_session_recovery_closed=false`).
+  Honesty verifier rules matched (PowerShell mirror when host Python is broken).
+  Does **not** claim Enterprise GA.
+- `windows-whpx-live-session-qualification.ps1`: skip the WindowsApps Store
+  `python.exe` stub (it hangs awaiting install), prefer `py -3`, and fall back
+  to a PowerShell honesty mirror of
+  `verify-windows-whpx-live-session-report.py` when Python is missing or
+  broken so Live tip-prove cannot wedge after a passed qualification report.
+- WIN-01 G2 (7200s) on 13-test `O_TRUNC` matrix tip-proven (solo, idle WHPX):
+  summary SHA-256
+  `6222d0b003126bce412f476318200a32cdd0baae0fb6c547fd566bbce0c962d8`
+  (`result=pass`, `verification=pass`, 16 iterations × 13 tests = 208,
+  ~126.8 min wall, Box `cfae3a02`, final inventory 0). Does **not** claim
+  Enterprise GA or close B3/B4/B5/B6 / R24-with-13.
 - WIN-01 R24 (86400s) WHPX soak tip-proven: summary SHA-256
   `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
   (`result=pass`, `verification=pass`, 188 iterations × 12 tests = 2256,

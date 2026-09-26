@@ -546,7 +546,9 @@ mod tests {
 
         let error = stage_virtiofs_ro_share(&source, &filemounts, 0).unwrap_err();
         match error {
-            BoxError::BoxBootError { hint: Some(hint), .. } => {
+            BoxError::BoxBootError {
+                hint: Some(hint), ..
+            } => {
                 assert!(
                     hint.contains("CAP_SYS_ADMIN"),
                     "unprivileged :ro staging must hint CAP_SYS_ADMIN, got: {hint}"

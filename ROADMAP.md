@@ -963,8 +963,10 @@ tip while harness reports still keep
   directory wipe fails (no success claim). Orphan crash-recovery reap, VM destroy,
   SDK/CLI/Compose path cleanup, and foreground `--rm` use the same
   lease-before-wipe contract; veth
-  delete contract as DNAT/MASQUERADE; staging rollback surfaces combined
-  present-link / idle-bridge delete failures; idle-bridge MASQUERADE removal
+  delete contract as DNAT/MASQUERADE; staging rollback removes DNAT before the
+  veth pair when filter/DNAT/persist fails before a lease file exists, and
+  surfaces combined present-link / idle-bridge delete failures; idle-bridge
+  MASQUERADE removal
   uses the same present-rule delete contract; CLI removal cleanup fails closed
   when NetworkStore cannot be opened for disconnect (no invent-clean detach).
   GA default remains delegated rootless/
@@ -986,9 +988,10 @@ tip while harness reports still keep
   that same IPv4 path before the default profile, and both are applied before
   passt_bridge diverts TCP/53 or answers NetworkStore names. IPv6 Ethernet is
   dropped there until an IPv6 policy exists, including behind one 802.1Q or
-  802.1ad tag. Sandbox keep-authority refuses Bridge
-  attach when the network stores `--egress` rules, instead of ignoring them.
-  Domain match, full
+  802.1ad tag. Linux keep-authority Sandbox Bridge installs a FORWARD filter
+  chain that mirrors that same first-match + default untrusted profile
+  (`oci_sandbox_bridge_egress`; unit-proven; WSL tip still needs interactive
+  sudo). Domain match, full
   AAAA records, CNI, multi-device, rootless/MicroVM/Windows
   parity, and the B3 exit gate remain
   open. WSL tip (Box `a3s-box 3.3.0`): default metadata deny + first-match
