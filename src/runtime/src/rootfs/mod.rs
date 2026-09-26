@@ -155,6 +155,7 @@ fn read_guest_terminal_status(box_dir: &Path) -> TerminalStatusRead {
 
 /// Return whether the current guest generation completed a clean block-root
 /// handoff after publishing its terminal workload status.
+#[cfg(any(unix, test))]
 pub(crate) fn guest_rootfs_handoff_complete(box_dir: &Path) -> bool {
     matches!(
         read_guest_terminal_status(box_dir),

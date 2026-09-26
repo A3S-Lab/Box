@@ -86,6 +86,8 @@ pub enum BoxState {
 enum VmBootMode {
     #[default]
     Workload,
+    // Constructed only by macOS stopped-rootfs maintenance boot.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     RootfsMaintenance,
 }
 
@@ -341,6 +343,7 @@ pub struct VmManager {
     pub(crate) box_id: String,
 
     /// Internal boot contract. Maintenance never becomes persisted box state.
+    #[cfg_attr(not(unix), allow(dead_code))]
     boot_mode: VmBootMode,
 
     /// Current state
