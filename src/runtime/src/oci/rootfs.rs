@@ -222,6 +222,14 @@ impl OciRootfsBuilder {
             }
         };
 
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in install_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&install_dir).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create guest init install directory {}: {}",
@@ -891,6 +899,42 @@ mod tests {
         assert!(
             replaced.is_err(),
             "guest file replacement followed an ancestor junction"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_guest_init_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let guest_init = temp_dir.path().join("guest-init");
+        fs::write(&guest_init, b"guest init").unwrap();
+
+        let installed = OciRootfsBuilder::new(link.join("rootfs"))
+            .with_guest_init(&guest_init)
+            .install_guest_init_only();
+        assert!(
+            !outside.join("rootfs").exists(),
+            "guest init directory was created through the junction"
+        );
+        assert!(
+            installed.is_err(),
+            "guest init followed an ancestor junction"
         );
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }

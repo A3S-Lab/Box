@@ -557,6 +557,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is an ancestor of the rootfs.
   Replacing a guest file does not create its parent directory through a
   Windows junction that is an ancestor of the rootfs.
+  Installing guest init does not create its directory through a Windows
+  junction that is an ancestor of the rootfs.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
