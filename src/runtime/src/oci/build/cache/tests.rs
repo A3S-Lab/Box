@@ -69,6 +69,48 @@ fn test_store_then_lookup_round_trips() {
     assert_eq!(fs::read(&hit.blob_path).unwrap(), b"fake layer contents");
 }
 
+#[cfg(windows)]
+#[test]
+fn store_does_not_read_a_layer_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let cache_dir = tmp.path().join("buildcache");
+    let cache = open_at(&cache_dir);
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let contents = b"secret-layer";
+    fs::write(outside.join("layer.tar.gz"), contents).unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let layer = LayerInfo {
+        path: link.join("layer.tar.gz"),
+        digest: sha256_bytes(contents),
+        size: contents.len() as u64,
+    };
+    let key = BuildCache::chain("", "RUN secret", None);
+    cache.store(&key, &layer, "diff");
+
+    let blob = cache_dir.join("blobs").join(&layer.digest);
+    if blob.is_file() {
+        panic!(
+            "build cache stored a layer through an ancestor junction: {}",
+            String::from_utf8_lossy(&fs::read(&blob).unwrap())
+        );
+    }
+    assert!(cache.lookup(&key).is_none());
+    assert_eq!(fs::read(outside.join("layer.tar.gz")).unwrap(), contents);
+}
+
 #[test]
 fn prune_evicts_orphan_key_records() {
     let tmp = TempDir::new().unwrap();

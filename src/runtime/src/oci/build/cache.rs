@@ -177,6 +177,16 @@ impl BuildCache {
     /// Publish one entry through the native cache's sole blob/key write
     /// boundary. The caller must hold the cache lock.
     fn publish_entry_unlocked(&self, key: &str, layer: &LayerInfo, diff_id: &str) -> bool {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in layer.path.components() {
+                prefix.push(component);
+                if crate::vm::refuse_directory_reparse(&prefix).is_err() {
+                    return false;
+                }
+            }
+        }
         if !cached_blob_is_valid(&layer.path, &layer.digest, layer.size) {
             return false;
         }
