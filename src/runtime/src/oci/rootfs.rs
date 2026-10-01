@@ -112,6 +112,14 @@ impl OciRootfsBuilder {
 
     /// Create the base directory structure.
     fn create_base_structure(&self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in self.rootfs_path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         let dirs = [
             "dev",
             "proc",
@@ -736,6 +744,39 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn build_does_not_create_the_rootfs_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let image = temp_dir.path().join("image");
+        fs::create_dir_all(&image).unwrap();
+        let built = OciRootfsBuilder::new(link.join("rootfs"))
+            .with_image(&image)
+            .build();
+        assert!(
+            !outside.join("rootfs").exists(),
+            "rootfs was created through the junction"
+        );
+        assert!(built.is_err(), "rootfs build followed an ancestor junction");
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
 
     #[test]
     fn test_oci_rootfs_builder_creates_base_structure() {
