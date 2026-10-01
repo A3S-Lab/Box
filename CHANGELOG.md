@@ -561,6 +561,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of the rootfs.
   Building an image does not create its workspace through a Windows junction
   that is an ancestor of that workspace.
+  Removing a box does not delete its directory through a Windows junction
+  that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

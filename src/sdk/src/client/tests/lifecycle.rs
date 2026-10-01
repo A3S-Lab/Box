@@ -699,6 +699,71 @@ fn cleanup_removed_box_does_not_delete_through_a_directory_junction() {
 
 #[cfg(windows)]
 #[test]
+fn cleanup_removed_box_does_not_delete_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    let box_target = outside.join("box");
+    std::fs::create_dir_all(&box_target).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    std::fs::write(box_target.join("data.txt"), b"data").unwrap();
+    let parent = home.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let box_dir = link.join("box");
+
+    let id = "22222222-2222-4222-8222-222222222222";
+    let mut record = box_record(id, "ancestor", "stopped");
+    record.box_dir = box_dir;
+    record.exec_socket_path = link.join("box").join("exec.sock");
+    record.volume_names.clear();
+    record.anonymous_volumes.clear();
+    record.network_name = None;
+
+    let removed = cleanup_removed_box(&A3sBoxPaths::from_home(home.path()), &record);
+    assert!(
+        box_target.join("data.txt").is_file(),
+        "sdk removal deleted the box through an ancestor junction"
+    );
+    assert!(removed.is_err(), "sdk removal followed an ancestor junction");
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_removed_box_deletes_a_real_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "33333333-3333-4333-8333-333333333333";
+    let box_dir = home.path().join("boxes").join(id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::write(box_dir.join("data.txt"), b"data").unwrap();
+
+    let mut record = box_record(id, "real", "stopped");
+    record.box_dir = box_dir.clone();
+    record.exec_socket_path = box_dir.join("exec.sock");
+    record.volume_names.clear();
+    record.anonymous_volumes.clear();
+    record.network_name = None;
+
+    cleanup_removed_box(&A3sBoxPaths::from_home(home.path()), &record)
+        .expect("real box directory removal");
+    assert!(!box_dir.exists());
+}
+
+#[cfg(windows)]
+#[test]
 fn cleanup_external_socket_dir_does_not_delete_through_a_directory_junction() {
     use std::os::windows::fs::MetadataExt;
     use std::os::windows::process::CommandExt;

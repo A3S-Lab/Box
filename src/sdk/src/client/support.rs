@@ -657,7 +657,13 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
         a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))
             .map_err(ClientError::Runtime)?;
         #[cfg(windows)]
-        a3s_box_runtime::vm::refuse_directory_reparse(&record.box_dir)?;
+        {
+            let mut prefix = PathBuf::new();
+            for component in record.box_dir.components() {
+                prefix.push(component);
+                a3s_box_runtime::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
