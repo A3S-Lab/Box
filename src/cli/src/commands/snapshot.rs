@@ -620,7 +620,18 @@ fn boxes_referencing_snapshot(
 /// Unreadable markers (other than missing) are treated as in-use so
 /// `snapshot rm` cannot soft-skip a live CoW user under inventory I/O failure.
 fn box_references_lower(box_dir: &std::path::Path, snap_rootfs: &std::path::Path) -> bool {
-    match std::fs::read_to_string(box_dir.join(".snapshot-lower")) {
+    let marker = box_dir.join(".snapshot-lower");
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in marker.components() {
+            prefix.push(component);
+            if super::commit::refuse_directory_reparse(&prefix).is_err() {
+                return true;
+            }
+        }
+    }
+    match std::fs::read_to_string(&marker) {
         Ok(s) => {
             let referenced = std::path::PathBuf::from(s.trim());
             let referenced = referenced.canonicalize().unwrap_or(referenced);
@@ -761,6 +772,39 @@ mod tests {
         assert!(!outside.join("sockets").exists());
         assert!(!outside.join("logs").exists());
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_lower_reference_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_dir = outside.join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(box_dir.join(".snapshot-lower"), b"C:\\not-the-snapshot\n").unwrap();
+        let snap = tmp.path().join("snap");
+        std::fs::create_dir_all(&snap).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        assert!(
+            box_references_lower(&link.join("box"), &snap),
+            "snapshot lower marker was trusted through a junction"
+        );
+        assert_eq!(
+            std::fs::read(box_dir.join(".snapshot-lower")).unwrap(),
+            b"C:\\not-the-snapshot\n"
+        );
     }
 
     #[cfg(windows)]
