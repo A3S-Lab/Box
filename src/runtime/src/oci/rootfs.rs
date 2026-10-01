@@ -191,6 +191,15 @@ impl OciRootfsBuilder {
             .as_ref()
             .ok_or_else(|| BoxError::BuildError("Guest init path not set".to_string()))?;
 
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in src.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
+
         if !src.exists() {
             return Err(BoxError::BuildError(format!(
                 "Guest init binary not found: {}",
@@ -994,6 +1003,51 @@ mod tests {
             "guest init followed an ancestor junction"
         );
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_guest_init_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("guest-init"), b"secret-init").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let rootfs = temp_dir.path().join("rootfs");
+        fs::create_dir_all(rootfs.join("sbin")).unwrap();
+
+        let installed = OciRootfsBuilder::new(&rootfs)
+            .with_guest_init(link.join("guest-init"))
+            .install_guest_init_only();
+        let adopted = rootfs.join("sbin").join("init");
+        if adopted.is_file() {
+            panic!(
+                "guest init read through an ancestor junction: {}",
+                String::from_utf8_lossy(&fs::read(&adopted).unwrap())
+            );
+        }
+        match installed {
+            Ok(()) => panic!("guest init install succeeded through an ancestor junction"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            fs::read(outside.join("guest-init")).unwrap(),
+            b"secret-init"
+        );
     }
 
     #[test]

@@ -1726,6 +1726,8 @@ tip while harness reports still keep
   that is an ancestor of the layer file.
   Assembling an image does not read a layer blob through a Windows
   junction that is an ancestor of the layer file.
+  Installing guest init does not read the binary through a Windows
+  junction that is an ancestor of the binary.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
