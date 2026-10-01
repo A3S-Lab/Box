@@ -1235,6 +1235,19 @@ fn parse_windows_whpx_packaged_box_owned(
         .map(PathBuf::from)
         .or(host_root_override)
         .unwrap_or_else(|| default_service_root(home_dir));
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in service_root.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "failed to create Windows WHPX OCI service root {}: {error}",
+                    service_root.display()
+                ))
+            })?;
+        }
+    }
     std::fs::create_dir_all(&service_root).map_err(|error| {
         ExecutionManagerError::InvalidRequest(format!(
             "failed to create Windows WHPX OCI service root {}: {error}",
@@ -1766,6 +1779,63 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&plant);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_packaged_service_root_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let plant = temporary.path().join("plant");
+        std::fs::create_dir_all(plant.join("bin")).unwrap();
+        std::fs::create_dir_all(plant.join("system-image")).unwrap();
+        std::fs::create_dir_all(plant.join("bootstrap-vm-rootfs")).unwrap();
+        let runtime = plant.join("bin").join("a3s-oci.exe");
+        let shim = plant.join("bin").join("a3s-oci-krun-shim.exe");
+        let manifest = plant.join("system-image").join("system-image.json");
+        let bootstrap = plant.join("bootstrap-vm-rootfs");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        std::fs::write(&shim, b"shim").unwrap();
+        std::fs::write(&manifest, b"{}").unwrap();
+        let home = temporary.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let parsed = parse_windows_environment(
+            WindowsWhpxEnvironmentInputs {
+                mode: Some(OsString::from("microvm")),
+                service_root: Some(link.join("service").into_os_string()),
+                service_bin: Some(runtime.into_os_string()),
+                service_shim: Some(shim.into_os_string()),
+                service_vm_rootfs: Some(bootstrap.into_os_string()),
+                service_manifest: Some(manifest.into_os_string()),
+                ..Default::default()
+            },
+            &home,
+        );
+        assert!(
+            !outside.join("service").exists(),
+            "WHPX service root was created through the junction"
+        );
+        assert!(
+            parsed.is_err(),
+            "WHPX service root followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]

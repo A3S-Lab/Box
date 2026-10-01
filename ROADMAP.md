@@ -1620,6 +1620,8 @@ tip while harness reports still keep
   junction that is an ancestor of the box directory.
   Building a guest rootfs does not create a nested directory through a Windows
   junction inside that rootfs.
+  Preparing a Windows WHPX OCI service root does not create it through a
+  Windows junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
