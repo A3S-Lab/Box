@@ -282,6 +282,14 @@ pub struct AttachedRootfs {
 /// malformed generations instead of falling back to a host directory.
 pub fn guest_native_ext4_generation_exists(box_dir: &Path) -> Result<bool> {
     let path = box_dir.join("rootfs-ext4-v1");
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     match std::fs::symlink_metadata(&path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -915,6 +923,42 @@ mod tests {
         assert_eq!(
             std::fs::read(rootfs.join(".a3s_exit_code")).unwrap(),
             b"41\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guest_native_generation_does_not_detect_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let artifact = outside.join("box").join("rootfs-ext4-v1");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join("secret.txt"), b"secret-generation").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let detected = guest_native_ext4_generation_exists(&link.join("box"));
+        match detected {
+            Ok(true) => panic!("guest-native generation was detected through a junction"),
+            Ok(false) => panic!("guest-native generation through a junction was treated as absent"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(artifact.join("secret.txt")).unwrap(),
+            b"secret-generation"
         );
     }
 }
