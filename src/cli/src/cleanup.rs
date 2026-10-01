@@ -323,8 +323,14 @@ impl Drop for BoxDirGuard {
             return;
         }
         #[cfg(windows)]
-        if crate::commands::commit::refuse_directory_reparse(&self.path).is_err() {
-            return;
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in self.path.components() {
+                prefix.push(component);
+                if crate::commands::commit::refuse_directory_reparse(&prefix).is_err() {
+                    return;
+                }
+            }
         }
         let _ = std::fs::remove_dir_all(&self.path);
     }
@@ -394,6 +400,42 @@ mod tests {
         assert!(
             crate::commands::commit::metadata_is_reparse_point(&metadata),
             "box dir guard removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn box_dir_guard_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("failed-box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        {
+            let _guard = BoxDirGuard::new(link.join("failed-box"));
+        }
+
+        assert_eq!(
+            std::fs::read(box_target.join("secret.txt")).unwrap(),
+            b"keep",
+            "box dir guard deleted a directory through an ancestor junction"
+        );
+        assert!(
+            box_target.exists(),
+            "box dir guard removed the target directory through an ancestor junction"
         );
     }
 
