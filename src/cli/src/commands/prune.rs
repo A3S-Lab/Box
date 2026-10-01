@@ -4,6 +4,7 @@
 //! networks): removes every created/stopped/dead box in one call, mirroring
 //! `docker container prune`. Running boxes are never touched.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[derive(Args)]
@@ -13,7 +14,7 @@ pub struct PruneArgs {
     pub force: bool,
 }
 
-pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: PruneArgs) -> Result<(), BoxError> {
     if !args.force {
         println!("WARNING: This will remove all created, stopped, and dead boxes.");
         println!("Running and paused boxes are kept.");
@@ -40,10 +41,10 @@ pub async fn execute(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> 
         crate::cleanup::cleanup_removed_box(record)
             .map_err(|error| prune_cleanup_error(&record.id, error))?;
         state.remove(&record.id).map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "Failed to remove pruned Box {} from state after host cleanup: {error}",
                 record.id
-            )
+            ))
         })?;
         removed += 1;
         println!("Removed box: {}", record.name);
@@ -59,11 +60,12 @@ fn is_prunable_box(record: &crate::state::BoxRecord) -> bool {
     matches!(record.status.as_str(), "stopped" | "dead" | "created")
 }
 
-fn prune_cleanup_error(box_id: &str, error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
-    format!(
-        "Failed to clean pruned Box {box_id}: {error}; preserving its state (refusing prune success)"
+fn prune_cleanup_error(box_id: &str, error: BoxError) -> BoxError {
+    super::annotate_box_error(
+        error,
+        &format!("Failed to clean pruned Box {box_id}: "),
+        "; preserving its state (refusing prune success)",
     )
-    .into()
 }
 
 #[cfg(test)]
@@ -96,10 +98,33 @@ mod tests {
 
     #[test]
     fn prune_cleanup_error_refuses_invented_success() {
-        let err = prune_cleanup_error("box-1", "lease teardown refused");
-        let message = err.to_string();
-        assert!(message.contains("box-1"));
-        assert!(message.contains("lease teardown refused"));
-        assert!(message.contains("refusing prune success"));
+        let err = prune_cleanup_error(
+            "box-1",
+            BoxError::Other("lease teardown refused".to_string()),
+        );
+        match err {
+            BoxError::Other(message) => {
+                assert!(message.contains("box-1"), "{message}");
+                assert!(message.contains("lease teardown refused"), "{message}");
+                assert!(message.contains("refusing prune success"), "{message}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prune_cleanup_io_error_stays_an_io_error() {
+        let err = prune_cleanup_error(
+            "box-1",
+            BoxError::IoError(std::io::Error::other("lease teardown refused")),
+        );
+        match err {
+            BoxError::IoError(error) => {
+                let message = error.to_string();
+                assert!(message.contains("box-1"), "{message}");
+                assert!(message.contains("refusing prune success"), "{message}");
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
     }
 }

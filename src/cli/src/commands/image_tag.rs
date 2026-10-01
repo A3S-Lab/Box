@@ -1,5 +1,6 @@
 //! `a3s-box tag` command — create a tag that refers to an existing image.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage;
@@ -15,7 +16,7 @@ pub struct ImageTagArgs {
 
 /// Validate a tag target's reference grammar. Docker requires the repository
 /// name (everything before the `:tag`/`@digest`) to be lowercase.
-fn validate_tag_target(target: &str) -> Result<(), String> {
+fn validate_tag_target(target: &str) -> Result<(), BoxError> {
     let without_digest = target.split('@').next().unwrap_or(target);
     let last_slash = without_digest.rfind('/');
     // Strip a trailing `:tag` only when the colon is part of the tag, not a
@@ -25,21 +26,22 @@ fn validate_tag_target(target: &str) -> Result<(), String> {
         _ => without_digest,
     };
     if repo.bytes().any(|b| b.is_ascii_uppercase()) {
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "invalid reference format: repository name must be lowercase: '{target}'"
-        ));
+        )));
     }
     Ok(())
 }
 
-pub async fn execute(args: ImageTagArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ImageTagArgs) -> Result<(), BoxError> {
     validate_tag_target(&args.target)?;
 
     let store = super::open_image_store()?;
     let images = store.list().await;
 
-    let source = image_usage::resolve_stored_image(&images, &args.source)?
-        .ok_or_else(|| format!("Image not found: {}", args.source))?;
+    let source = image_usage::resolve_stored_image(&images, &args.source)
+        .map_err(BoxError::OciImageError)?
+        .ok_or_else(|| BoxError::OciImageError(format!("Image not found: {}", args.source)))?;
 
     // Store with new reference pointing to the same digest directory (no disk copy)
     store
@@ -70,11 +72,18 @@ mod tests {
 
     #[test]
     fn test_validate_tag_target_rejects_uppercase_repo() {
-        assert!(validate_tag_target("BadRepo:Tag").is_err());
+        let err = validate_tag_target("BadRepo:Tag").unwrap_err();
+        assert!(
+            matches!(err, BoxError::ConfigError(ref message) if message.contains("must be lowercase")),
+            "{err}"
+        );
         assert!(validate_tag_target("myrepo:V1").is_ok()); // uppercase tag is fine
         assert!(validate_tag_target("localhost:5000/myrepo:tag").is_ok());
         assert!(validate_tag_target("alpine:latest").is_ok());
-        assert!(validate_tag_target("ns/Sub:tag").is_err());
+        assert!(matches!(
+            validate_tag_target("ns/Sub:tag").unwrap_err(),
+            BoxError::ConfigError(_)
+        ));
     }
 
     #[test]

@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,6 +36,7 @@ const FRAME_OPEN: u8 = 1;
 const FRAME_OPEN_ACK: u8 = 2;
 const FRAME_DATA: u8 = 3;
 const FRAME_CLOSE: u8 = 4;
+const FRAME_OPEN_UDP: u8 = 7;
 const OPEN_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(60);
 const OPEN_RETRY_BACKOFF: Duration = Duration::from_millis(250);
@@ -48,10 +49,17 @@ const MAX_STOP_REQUEST_BYTES: u64 = 16;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublishedProtocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PortMapping {
     host_port: u16,
     guest_port: u16,
+    protocol: PublishedProtocol,
 }
 
 struct SharedControlState {
@@ -245,30 +253,50 @@ pub fn run_port_forward_worker(
     tracing::info!(pipe = %exec_pipe_path, "Windows host exec pipe ready");
 
     for mapping in mappings {
-        let listener = match bind_published_port(mapping, PORT_REBIND_TIMEOUT) {
-            Ok(listener) => listener,
-            Err(err) => {
-                write_ready_file(
-                    ready_file,
-                    &format!(
-                        "failed to bind Windows published port 0.0.0.0:{} -> {}: {}",
-                        mapping.host_port, mapping.guest_port, err
-                    ),
-                );
-                return Err(BoxError::NetworkError(format!(
-                    "failed to bind Windows published port 0.0.0.0:{} -> {}: {}",
-                    mapping.host_port, mapping.guest_port, err
-                )));
-            }
-        };
-        tracing::info!(
-            host_port = mapping.host_port,
-            guest_port = mapping.guest_port,
-            "Windows published port listener ready"
-        );
-
         let shared_control = shared_control.clone();
-        thread::spawn(move || listen_host_port_loop(listener, mapping, shared_control));
+        let bind_error = match mapping.protocol {
+            PublishedProtocol::Tcp => match bind_published_port(mapping, PORT_REBIND_TIMEOUT) {
+                Ok(listener) => {
+                    tracing::info!(
+                        host_port = mapping.host_port,
+                        guest_port = mapping.guest_port,
+                        "Windows published TCP port listener ready"
+                    );
+                    thread::spawn(move || listen_host_port_loop(listener, mapping, shared_control));
+                    None
+                }
+                Err(err) => Some(err),
+            },
+            PublishedProtocol::Udp => match bind_published_udp(mapping, PORT_REBIND_TIMEOUT) {
+                Ok(socket) => {
+                    tracing::info!(
+                        host_port = mapping.host_port,
+                        guest_port = mapping.guest_port,
+                        "Windows published UDP port listener ready"
+                    );
+                    thread::spawn(move || listen_udp_port_loop(socket, mapping, shared_control));
+                    None
+                }
+                Err(err) => Some(err),
+            },
+        };
+        if let Some(err) = bind_error {
+            let protocol = match mapping.protocol {
+                PublishedProtocol::Tcp => "tcp",
+                PublishedProtocol::Udp => "udp",
+            };
+            write_ready_file(
+                ready_file,
+                &format!(
+                    "failed to bind Windows published {protocol} port 0.0.0.0:{} -> {}: {}",
+                    mapping.host_port, mapping.guest_port, err
+                ),
+            );
+            return Err(BoxError::NetworkError(format!(
+                "failed to bind Windows published {protocol} port 0.0.0.0:{} -> {}: {}",
+                mapping.host_port, mapping.guest_port, err
+            )));
+        }
     }
 
     let exec_control = shared_control.clone();
@@ -282,6 +310,21 @@ pub fn run_port_forward_worker(
         shared_control,
     );
     Ok(())
+}
+
+fn bind_published_udp(mapping: PortMapping, timeout: Duration) -> io::Result<UdpSocket> {
+    let started = Instant::now();
+    loop {
+        match UdpSocket::bind(("0.0.0.0", mapping.host_port)) {
+            Ok(socket) => return Ok(socket),
+            Err(error)
+                if error.kind() == io::ErrorKind::AddrInUse && started.elapsed() < timeout =>
+            {
+                thread::sleep(PORT_REBIND_BACKOFF.min(timeout.saturating_sub(started.elapsed())));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn bind_published_port(mapping: PortMapping, timeout: Duration) -> io::Result<TcpListener> {
@@ -432,23 +475,21 @@ fn parse_port_map(port_map: &[String]) -> Result<Vec<PortMapping>> {
     port_map
         .iter()
         .map(|mapping| {
-            let (host, guest) = mapping.split_once(':').ok_or_else(|| {
-                BoxError::NetworkError(format!(
-                    "invalid port mapping '{}' (expected host:guest)",
-                    mapping
-                ))
-            })?;
-
-            let host_port = host.parse::<u16>().map_err(|_| {
-                BoxError::NetworkError(format!("invalid host port in mapping '{}'", mapping))
-            })?;
-            let guest_port = guest.parse::<u16>().map_err(|_| {
-                BoxError::NetworkError(format!("invalid guest port in mapping '{}'", mapping))
-            })?;
-
+            let parsed = a3s_box_core::parse_port_mapping(mapping)
+                .map_err(|error| BoxError::NetworkError(error))?;
+            if parsed.host_port == 0 {
+                return Err(BoxError::NetworkError(format!(
+                    "Windows published ports reject host_port=0 auto-assign in '{mapping}'"
+                )));
+            }
+            let protocol = match parsed.protocol {
+                a3s_box_core::PortProtocol::Tcp => PublishedProtocol::Tcp,
+                a3s_box_core::PortProtocol::Udp => PublishedProtocol::Udp,
+            };
             Ok(PortMapping {
-                host_port,
-                guest_port,
+                host_port: parsed.host_port,
+                guest_port: parsed.guest_port,
+                protocol,
             })
         })
         .collect()
@@ -487,9 +528,161 @@ fn listen_host_port_loop(
     }
 }
 
+struct UdpPeerSlot {
+    sender: mpsc::SyncSender<Vec<u8>>,
+    alive: Arc<AtomicBool>,
+}
+
+enum UdpEnqueue {
+    Queued,
+    Dropped,
+    Closed(Vec<u8>),
+}
+
+fn enqueue_published_udp(sender: &mpsc::SyncSender<Vec<u8>>, payload: Vec<u8>) -> UdpEnqueue {
+    match sender.try_send(payload) {
+        Ok(()) => UdpEnqueue::Queued,
+        Err(mpsc::TrySendError::Full(_)) => UdpEnqueue::Dropped,
+        Err(mpsc::TrySendError::Disconnected(payload)) => UdpEnqueue::Closed(payload),
+    }
+}
+
+struct UdpSessionAlive(Arc<AtomicBool>);
+
+impl Drop for UdpSessionAlive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn reclaim_closed_udp_peers(peers: &mut HashMap<SocketAddr, UdpPeerSlot>) {
+    peers.retain(|_, slot| slot.alive.load(Ordering::Acquire));
+}
+
+fn listen_udp_port_loop(socket: UdpSocket, mapping: PortMapping, shared_control: SharedControl) {
+    let socket = Arc::new(socket);
+    let mut peers: HashMap<SocketAddr, UdpPeerSlot> = HashMap::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let (size, peer) = match socket.recv_from(&mut buf) {
+            Ok(packet) => packet,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    host_port = mapping.host_port,
+                    "Failed to receive published UDP datagram"
+                );
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        reclaim_closed_udp_peers(&mut peers);
+        let mut payload = buf[..size].to_vec();
+        if let Some(slot) = peers.get(&peer) {
+            match enqueue_published_udp(&slot.sender, payload) {
+                UdpEnqueue::Queued => continue,
+                UdpEnqueue::Dropped => {
+                    tracing::warn!(
+                        host_port = mapping.host_port,
+                        peer = %peer,
+                        queue = a3s_box_core::port::PUBLISHED_UDP_ASSOCIATION_QUEUE,
+                        "Published UDP association queue is full; dropping datagram"
+                    );
+                    continue;
+                }
+                UdpEnqueue::Closed(returned) => {
+                    peers.remove(&peer);
+                    payload = returned;
+                }
+            }
+        }
+
+        if !published_udp_association_allowed(peers.len(), false) {
+            tracing::warn!(
+                host_port = mapping.host_port,
+                peer = %peer,
+                limit = a3s_box_core::port::PUBLISHED_UDP_MAX_ASSOCIATIONS,
+                "Published UDP association limit reached; dropping datagram"
+            );
+            continue;
+        }
+
+        let (sender, receiver) =
+            mpsc::sync_channel(a3s_box_core::port::PUBLISHED_UDP_ASSOCIATION_QUEUE);
+        if sender.try_send(payload).is_err() {
+            continue;
+        }
+        let alive = Arc::new(AtomicBool::new(true));
+        peers.insert(
+            peer,
+            UdpPeerSlot {
+                sender,
+                alive: Arc::clone(&alive),
+            },
+        );
+        let shared_control = shared_control.clone();
+        let socket = Arc::clone(&socket);
+        let guest_port = mapping.guest_port;
+        let activity = Arc::new(Mutex::new(Instant::now()));
+        thread::spawn(move || {
+            let _session = UdpSessionAlive(alive);
+            let client = HostClient::Udp(UdpHostRead {
+                receiver,
+                pending: Vec::new(),
+                socket: Arc::clone(&socket),
+                peer,
+                activity,
+                idle_timeout: a3s_box_core::port::PUBLISHED_UDP_IDLE_TIMEOUT,
+            });
+            if let Err(err) = handle_host_stream(
+                client,
+                FRAME_OPEN_UDP,
+                guest_port.to_be_bytes().to_vec(),
+                format!("guest UDP port {guest_port}"),
+                shared_control,
+            ) {
+                tracing::debug!(
+                    error = %err,
+                    host_port = mapping.host_port,
+                    guest_port,
+                    peer = %peer,
+                    "Published UDP session ended"
+                );
+            }
+        });
+    }
+}
+
+struct UdpHostRead {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    pending: Vec<u8>,
+    socket: Arc<UdpSocket>,
+    peer: SocketAddr,
+    activity: Arc<Mutex<Instant>>,
+    idle_timeout: Duration,
+}
+
+fn published_udp_association_allowed(open: usize, known_peer: bool) -> bool {
+    known_peer || open < a3s_box_core::port::PUBLISHED_UDP_MAX_ASSOCIATIONS
+}
+
+fn touch_udp_activity(activity: &Mutex<Instant>) {
+    *activity.lock().unwrap_or_else(|error| error.into_inner()) = Instant::now();
+}
+
+fn udp_activity_expired(activity: &Mutex<Instant>, idle_timeout: Duration) -> bool {
+    activity
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .elapsed()
+        > idle_timeout
+}
+
 enum HostClient {
     Tcp(TcpStream),
     Pipe(Arc<NamedPipeServer>),
+    Udp(UdpHostRead),
 }
 
 impl HostClient {
@@ -497,6 +690,11 @@ impl HostClient {
         match self {
             Self::Tcp(stream) => stream.try_clone().map(HostWriter::Tcp),
             Self::Pipe(stream) => Ok(HostWriter::Pipe(stream.clone())),
+            Self::Udp(stream) => Ok(HostWriter::Udp {
+                socket: Arc::clone(&stream.socket),
+                peer: stream.peer,
+                activity: Arc::clone(&stream.activity),
+            }),
         }
     }
 
@@ -504,13 +702,46 @@ impl HostClient {
         match self {
             Self::Tcp(stream) => stream.read(buf),
             Self::Pipe(stream) => stream.read(buf),
+            Self::Udp(stream) => stream.read(buf),
         }
+    }
+}
+
+impl UdpHostRead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.pending.is_empty() {
+            match self.receiver.recv_timeout(self.idle_timeout) {
+                Ok(payload) => {
+                    touch_udp_activity(&self.activity);
+                    self.pending = payload;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if udp_activity_expired(&self.activity, self.idle_timeout) =>
+                {
+                    return Ok(0);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let size = buf.len().min(self.pending.len());
+        buf[..size].copy_from_slice(&self.pending[..size]);
+        self.pending.drain(..size);
+        Ok(size)
     }
 }
 
 enum HostWriter {
     Tcp(TcpStream),
     Pipe(Arc<NamedPipeServer>),
+    Udp {
+        socket: Arc<UdpSocket>,
+        peer: SocketAddr,
+        activity: Arc<Mutex<Instant>>,
+    },
 }
 
 impl HostWriter {
@@ -518,6 +749,21 @@ impl HostWriter {
         match self {
             Self::Tcp(stream) => stream.write_all(payload),
             Self::Pipe(stream) => stream.write_all(payload),
+            Self::Udp {
+                socket,
+                peer,
+                activity,
+            } => {
+                let sent = socket.send_to(payload, *peer)?;
+                if sent != payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "published UDP datagram was truncated",
+                    ));
+                }
+                touch_udp_activity(activity);
+                Ok(())
+            }
         }
     }
 
@@ -527,6 +773,7 @@ impl HostWriter {
                 let _ = stream.shutdown(Shutdown::Both);
             }
             Self::Pipe(stream) => stream.disconnect(),
+            Self::Udp { .. } => {}
         }
     }
 }
@@ -638,7 +885,7 @@ fn handle_host_stream(
         thread::sleep(OPEN_RETRY_BACKOFF);
     }
 
-    let mut buf = [0u8; 16 * 1024];
+    let mut buf = [0u8; 64 * 1024];
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
@@ -1195,6 +1442,215 @@ mod tests {
     }
 
     #[test]
+    fn published_port_map_keeps_tcp_and_udp() {
+        let mappings = parse_port_map(&[
+            "8080:80".to_string(),
+            "8081:53/udp".to_string(),
+            "8082:80/tcp".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            mappings,
+            vec![
+                PortMapping {
+                    host_port: 8080,
+                    guest_port: 80,
+                    protocol: PublishedProtocol::Tcp,
+                },
+                PortMapping {
+                    host_port: 8081,
+                    guest_port: 53,
+                    protocol: PublishedProtocol::Udp,
+                },
+                PortMapping {
+                    host_port: 8082,
+                    guest_port: 80,
+                    protocol: PublishedProtocol::Tcp,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn published_port_map_rejects_unknown_protocol() {
+        let error = parse_port_map(&["8080:80/sctp".to_string()]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("sctp"), "{message}");
+    }
+
+    #[test]
+    fn published_port_map_rejects_unresolved_auto_assign() {
+        let error = parse_port_map(&["0:80/udp".to_string()]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("host_port=0"), "{message}");
+        assert!(message.contains("0:80/udp"), "{message}");
+    }
+
+    #[test]
+    fn published_udp_reader_keeps_datagram_boundaries() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(b"one".to_vec()).unwrap();
+        sender.send(b"two-bytes".to_vec()).unwrap();
+        drop(sender);
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let mut reader = UdpHostRead {
+            receiver,
+            pending: Vec::new(),
+            socket,
+            peer: "127.0.0.1:9".parse().unwrap(),
+            activity: Arc::new(Mutex::new(Instant::now())),
+            idle_timeout: Duration::from_secs(60),
+        };
+        let mut buf = [0u8; 64];
+        let first = reader.read(&mut buf).unwrap();
+        assert_eq!(&buf[..first], b"one");
+        let second = reader.read(&mut buf).unwrap();
+        assert_eq!(&buf[..second], b"two-bytes");
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn published_udp_writer_returns_one_datagram_to_the_peer() {
+        let server = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let activity = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(30)));
+        let mut writer = HostWriter::Udp {
+            socket: Arc::clone(&server),
+            peer: peer_addr,
+            activity: Arc::clone(&activity),
+        };
+        writer.write_all(b"reply").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut buf = [0u8; 16];
+        let (size, from) = peer.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..size], b"reply");
+        assert_eq!(from, server.local_addr().unwrap());
+        assert!(activity.lock().unwrap().elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn published_udp_reader_closes_when_neither_side_sends() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut reader = UdpHostRead {
+            receiver,
+            pending: Vec::new(),
+            socket: Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap()),
+            peer: "127.0.0.1:9".parse().unwrap(),
+            activity: Arc::new(Mutex::new(Instant::now())),
+            idle_timeout: Duration::from_millis(40),
+        };
+        let started = Instant::now();
+        let mut buf = [0u8; 8];
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn published_udp_reply_refreshes_the_idle_window() {
+        let (_sender, receiver) = mpsc::channel();
+        let activity = Arc::new(Mutex::new(Instant::now()));
+        let refresher = Arc::clone(&activity);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            touch_udp_activity(&refresher);
+        });
+        let mut reader = UdpHostRead {
+            receiver,
+            pending: Vec::new(),
+            socket: Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap()),
+            peer: "127.0.0.1:9".parse().unwrap(),
+            activity,
+            idle_timeout: Duration::from_millis(200),
+        };
+        let started = Instant::now();
+        let mut buf = [0u8; 8];
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn published_udp_closed_sessions_release_association_slots() {
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut peers = HashMap::new();
+        let alive = Arc::new(AtomicBool::new(true));
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        peers.insert(
+            peer,
+            UdpPeerSlot {
+                sender,
+                alive: Arc::clone(&alive),
+            },
+        );
+        reclaim_closed_udp_peers(&mut peers);
+        assert_eq!(peers.len(), 1);
+        assert!(!published_udp_association_allowed(
+            a3s_box_core::port::PUBLISHED_UDP_MAX_ASSOCIATIONS,
+            false
+        ));
+
+        drop(UdpSessionAlive(alive));
+        reclaim_closed_udp_peers(&mut peers);
+        assert!(peers.is_empty());
+        assert!(published_udp_association_allowed(peers.len(), false));
+    }
+
+    #[test]
+    fn published_udp_full_queue_drops_the_new_datagram() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        assert!(matches!(
+            enqueue_published_udp(&sender, b"first".to_vec()),
+            UdpEnqueue::Queued
+        ));
+        assert!(matches!(
+            enqueue_published_udp(&sender, b"second".to_vec()),
+            UdpEnqueue::Dropped
+        ));
+        assert_eq!(receiver.recv().unwrap(), b"first");
+        drop(receiver);
+        assert!(matches!(
+            enqueue_published_udp(&sender, b"third".to_vec()),
+            UdpEnqueue::Closed(payload) if payload == b"third"
+        ));
+    }
+
+    #[test]
+    fn published_udp_association_cap_keeps_known_peers() {
+        let cap = a3s_box_core::port::PUBLISHED_UDP_MAX_ASSOCIATIONS;
+        assert!(published_udp_association_allowed(cap - 1, false));
+        assert!(!published_udp_association_allowed(cap, false));
+        assert!(published_udp_association_allowed(cap, true));
+    }
+
+    #[test]
+    fn published_udp_bind_receives_one_datagram() {
+        let socket = bind_published_udp(
+            PortMapping {
+                host_port: 0,
+                guest_port: 53,
+                protocol: PublishedProtocol::Udp,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        assert_ne!(port, 0);
+
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .send_to(b"dns", SocketAddr::from(([127, 0, 0, 1], port)))
+            .unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        let (size, _) = socket.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..size], b"dns");
+    }
+
+    #[test]
     fn stop_signal_decoder_accepts_the_linux_signal_range() {
         assert_eq!(decode_stop_signal(b"15").unwrap(), 15);
         assert_eq!(decode_stop_signal(b"64\n").unwrap(), 64);
@@ -1245,6 +1701,7 @@ mod tests {
             PortMapping {
                 host_port,
                 guest_port: 8080,
+                protocol: PublishedProtocol::Tcp,
             },
             Duration::from_secs(1),
         )
@@ -1263,6 +1720,7 @@ mod tests {
             PortMapping {
                 host_port,
                 guest_port: 8080,
+                protocol: PublishedProtocol::Tcp,
             },
             Duration::from_millis(75),
         )

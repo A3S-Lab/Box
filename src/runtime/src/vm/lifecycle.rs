@@ -403,21 +403,35 @@ impl VmManager {
             }
 
             #[cfg(windows)]
-            if _handler_stopped && self.config.persistent {
+            if _handler_stopped {
                 // Match terminal-metadata staging: guest virtiofs may land the
                 // `.tmp` publish under rootfs, upper, or merged depending on the
                 // active provider (copy vs overlay). Finalize every present root
                 // so stopped export/diff/commit see the same generation.
                 let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-                if windows_stop::finalize_box_terminal_rootfs_metadata(&box_dir) {
-                    tracing::info!(
+                if self.config.persistent {
+                    if windows_stop::finalize_box_terminal_rootfs_metadata(&box_dir) {
+                        tracing::info!(
+                            box_id = %self.box_id,
+                            "Published terminal rootfs metadata after Windows guest exit"
+                        );
+                    } else {
+                        tracing::debug!(
+                            box_id = %self.box_id,
+                            "No Windows terminal rootfs metadata tmp was present after guest exit"
+                        );
+                    }
+                }
+                // Copy managed-volume POSIX metadata out of the box rootfs before
+                // provider cleanup and box deletion remove it.
+                if let Err(error) = volume_posix::harvest_volume_posix_sidecars(
+                    &box_dir,
+                    &self.home_dir.join("volumes"),
+                ) {
+                    tracing::warn!(
                         box_id = %self.box_id,
-                        "Published terminal rootfs metadata after Windows guest exit"
-                    );
-                } else {
-                    tracing::debug!(
-                        box_id = %self.box_id,
-                        "No Windows terminal rootfs metadata tmp was present after guest exit"
+                        error = %error,
+                        "Failed to harvest Windows volume posix metadata"
                     );
                 }
             }
@@ -475,23 +489,46 @@ impl VmManager {
             }
         }
 
-        match std::fs::remove_dir_all(&socket_dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
+        let socket_directory: Result<()> = {
+            #[cfg(windows)]
+            {
+                super::sandbox::refuse_directory_reparse(&socket_dir)
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(())
+            }
+        };
+        match socket_directory {
+            Err(error) => {
                 tracing::error!(
                     box_id = %self.box_id,
                     path = %socket_dir.display(),
-                    error = %e,
-                    "Refusing invent-clean destroy while VM socket directory remains"
+                    %error,
+                    "Refusing invent-clean destroy while VM socket directory is a junction"
                 );
                 if stop_error.is_none() {
-                    stop_error = Some(BoxError::Other(format!(
-                        "Failed to remove VM socket directory {}: {e}; refusing invent-clean destroy",
-                        socket_dir.display()
-                    )));
+                    stop_error = Some(error);
                 }
             }
+            Ok(()) => match std::fs::remove_dir_all(&socket_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::error!(
+                        box_id = %self.box_id,
+                        path = %socket_dir.display(),
+                        error = %e,
+                        "Refusing invent-clean destroy while VM socket directory remains"
+                    );
+                    if stop_error.is_none() {
+                        stop_error = Some(BoxError::Other(format!(
+                            "Failed to remove VM socket directory {}: {e}; refusing invent-clean destroy",
+                            socket_dir.display()
+                        )));
+                    }
+                }
+            },
         }
 
         // Remove the box working directory itself (overlay upper/work, logs,
@@ -553,23 +590,46 @@ impl VmManager {
         };
 
         if !preserve_rootfs && mount_aliases_clean && host_net_clean && virtiofs_ro_clean {
-            match std::fs::remove_dir_all(&box_dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
+            let box_directory: Result<()> = {
+                #[cfg(windows)]
+                {
+                    super::sandbox::refuse_directory_reparse(&box_dir)
+                }
+                #[cfg(not(windows))]
+                {
+                    Ok(())
+                }
+            };
+            match box_directory {
+                Err(error) => {
                     tracing::error!(
                         box_id = %self.box_id,
                         path = %box_dir.display(),
-                        error = %e,
-                        "Refusing invent-clean destroy while box directory remains"
+                        %error,
+                        "Refusing invent-clean destroy while box directory is a junction"
                     );
                     if stop_error.is_none() {
-                        stop_error = Some(BoxError::Other(format!(
-                            "Failed to remove box directory {}: {e}; refusing invent-clean destroy",
-                            box_dir.display()
-                        )));
+                        stop_error = Some(error);
                     }
                 }
+                Ok(()) => match std::fs::remove_dir_all(&box_dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::error!(
+                            box_id = %self.box_id,
+                            path = %box_dir.display(),
+                            error = %e,
+                            "Refusing invent-clean destroy while box directory remains"
+                        );
+                        if stop_error.is_none() {
+                            stop_error = Some(BoxError::Other(format!(
+                                "Failed to remove box directory {}: {e}; refusing invent-clean destroy",
+                                box_dir.display()
+                            )));
+                        }
+                    }
+                },
             }
         }
 

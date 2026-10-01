@@ -872,3 +872,125 @@ async fn test_try_wait_exit_reads_windows_rootfs_exit_code() {
         assert!(!json.contains("init.krun"));
     }
 }
+
+#[cfg(windows)]
+fn link_directory_junction(link: &std::path::Path, target: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        target.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+}
+
+#[cfg(windows)]
+fn assert_directory_junction(path: &std::path::Path) {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).expect("directory junction must remain");
+    assert!(
+        metadata.file_attributes() & 0x400 != 0,
+        "directory junction was replaced: {}",
+        path.display()
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn destroy_does_not_delete_through_a_socket_directory_junction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_id = "junction-destroy-socket".to_string();
+    let mut config = BoxConfig::default();
+    config.persistent = true;
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id);
+    vm.home_dir = tmp.path().to_path_buf();
+    let socket_dir = vm.socket_dir();
+    link_directory_junction(&socket_dir, &outside);
+
+    let result = vm.destroy_with_options(default_stop_signal(), 100).await;
+    assert!(
+        result.is_err(),
+        "destroy deleted through a socket directory junction: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert_directory_junction(&socket_dir);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn destroy_does_not_delete_through_a_box_directory_junction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_id = "junction-destroy-box".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    link_directory_junction(&box_dir, &outside);
+
+    let result = vm.destroy_with_options(default_stop_signal(), 100).await;
+    assert!(
+        result.is_err(),
+        "destroy deleted through a box directory junction: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert_directory_junction(&box_dir);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn boot_failure_cleanup_does_not_delete_through_a_socket_directory_junction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_id = "junction-boot-socket".to_string();
+    let mut config = BoxConfig::default();
+    config.persistent = true;
+    let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id);
+    vm.home_dir = tmp.path().to_path_buf();
+    let socket_dir = vm.socket_dir();
+    link_directory_junction(&socket_dir, &outside);
+
+    vm.cleanup_boot_failure().await;
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert_directory_junction(&socket_dir);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn boot_failure_cleanup_does_not_delete_through_a_box_directory_junction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_id = "junction-boot-box".to_string();
+    let mut vm =
+        VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+    vm.home_dir = tmp.path().to_path_buf();
+    let box_dir = tmp.path().join("boxes").join(&box_id);
+    link_directory_junction(&box_dir, &outside);
+
+    vm.cleanup_boot_failure().await;
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert_directory_junction(&box_dir);
+}

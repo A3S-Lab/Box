@@ -452,6 +452,16 @@ fn spawn_owner(
 ) -> ExecutionManagerResult<Child> {
     use std::os::windows::process::CommandExt;
 
+    let mut state_prefix = PathBuf::new();
+    for component in state_root.components() {
+        state_prefix.push(component);
+        crate::vm::refuse_directory_reparse(&state_prefix).map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "refusing Windows WHPX OCI state root {}: {error}",
+                state_root.display()
+            ))
+        })?;
+    }
     std::fs::create_dir_all(state_root).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to create Windows WHPX OCI state root {}: {error}",
@@ -498,6 +508,14 @@ fn spawn_owner(
 }
 
 fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        crate::vm::refuse_directory_reparse(parent).map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "refusing Windows WHPX OCI owner log directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -552,6 +570,16 @@ fn validate_service_root(path: &Path) -> ExecutionManagerResult<()> {
 }
 
 fn prepare_service_root(path: &Path) -> ExecutionManagerResult<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "refusing Windows WHPX OCI service root {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
     std::fs::create_dir_all(path).map_err(|error| {
         ExecutionManagerError::Unavailable(format!(
             "failed to create Windows WHPX OCI service root {}: {error}",
@@ -786,5 +814,176 @@ mod tests {
     #[test]
     fn box_owned_spawn_forces_session_owner_env() {
         assert_eq!(WHPX_SESSION_OWNER_ENV, "A3S_OCI_WHPX_SESSION_OWNER");
+    }
+
+    #[test]
+    fn open_owner_log_does_not_write_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let service = parent.join("service");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            service.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let opened = open_owner_log(&service.join("owner.stdout.log"));
+        let opened_debug = match &opened {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("owner.stdout.log").exists(),
+            "owner log was created through the service directory junction: {opened_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&service)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn prepare_service_root_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let service = link.join("service");
+        let prepared = prepare_service_root(&service);
+        let prepared_debug = match &prepared {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("service").exists(),
+            "service root was created through the ancestor junction: {prepared_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn prepare_service_root_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = tmp.path().join("service");
+        prepare_service_root(&service).unwrap();
+        let metadata = std::fs::symlink_metadata(&service).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    fn spawn_owner_does_not_create_state_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let service = tmp.path().join("service");
+        std::fs::create_dir_all(&service).unwrap();
+        let state = link.join("state");
+        let artifacts = WindowsWhpxOwnerArtifacts {
+            runtime_path: tmp.path().join("missing-runtime.exe"),
+            runtime_sha256: "a".repeat(64),
+            shim_path: tmp.path().join("missing-shim.exe"),
+            shim_sha256: "b".repeat(64),
+            vm_rootfs: tmp.path().join("rootfs"),
+            system_image_manifest: tmp.path().join("manifest.json"),
+            system_image_manifest_sha256: "c".repeat(64),
+        };
+        let spawned = spawn_owner(
+            &service,
+            &artifacts,
+            r"\\.\pipe\a3s-box-whpx-owner-test",
+            &state,
+            &tmp.path().join("ready"),
+        );
+        let spawned_debug = match &spawned {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("state").exists(),
+            "state root was created through the ancestor junction: {spawned_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn spawn_owner_creates_a_missing_state_directory_before_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = tmp.path().join("service");
+        std::fs::create_dir_all(&service).unwrap();
+        let state = tmp.path().join("state");
+        let artifacts = WindowsWhpxOwnerArtifacts {
+            runtime_path: tmp.path().join("missing-runtime.exe"),
+            runtime_sha256: "a".repeat(64),
+            shim_path: tmp.path().join("missing-shim.exe"),
+            shim_sha256: "b".repeat(64),
+            vm_rootfs: tmp.path().join("rootfs"),
+            system_image_manifest: tmp.path().join("manifest.json"),
+            system_image_manifest_sha256: "c".repeat(64),
+        };
+        let spawned = spawn_owner(
+            &service,
+            &artifacts,
+            r"\\.\pipe\a3s-box-whpx-owner-test",
+            &state,
+            &tmp.path().join("ready"),
+        );
+        assert!(spawned.is_err());
+        let metadata = std::fs::symlink_metadata(&state).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
     }
 }

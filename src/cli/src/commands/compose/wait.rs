@@ -1,5 +1,7 @@
 //! Compose dependency readiness and completion waits.
 
+use a3s_box_core::error::BoxError;
+
 use super::*;
 
 /// Bound the delay between a dependency becoming healthy and the next Compose
@@ -11,16 +13,15 @@ pub(super) async fn wait_for_healthy(
     project_name: &str,
     service_names: &[String],
     timeout_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
         if std::time::Instant::now() > deadline {
-            return Err(format!(
+            return Err(BoxError::TimeoutError(format!(
                 "Timed out waiting for services to become healthy: {}",
                 service_names.join(", ")
-            )
-            .into());
+            )));
         }
 
         let state =
@@ -45,12 +46,12 @@ pub(super) async fn wait_for_healthy(
     }
 }
 
-pub(super) fn validate_compose_up_platform_support() -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn validate_compose_up_platform_support() -> Result<(), BoxError> {
     #[cfg(windows)]
     {
-        Err(crate::platform::unsupported_command(
-            "compose up",
-            "bridge networking support",
+        Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("compose up", "bridge networking support")
+                .to_string(),
         ))
     }
     #[cfg(not(windows))]
@@ -70,16 +71,15 @@ pub(super) async fn wait_for_completed(
     project_name: &str,
     service_names: &[String],
     timeout_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
         if std::time::Instant::now() > deadline {
-            return Err(format!(
+            return Err(BoxError::TimeoutError(format!(
                 "Timed out waiting for services to complete: {}",
                 service_names.join(", ")
-            )
-            .into());
+            )));
         }
 
         let state =
@@ -127,11 +127,10 @@ pub(super) async fn wait_for_completed(
                 continue;
             };
             if code != 0 {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "dependency service '{}' did not complete successfully (exit code {})",
                     svc_name, code
-                )
-                .into());
+                )));
             }
         }
 

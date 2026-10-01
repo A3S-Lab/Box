@@ -90,10 +90,61 @@ impl VmManager {
     pub(crate) fn cleanup_runtime_owned_microvm_bundle(&self) -> Result<()> {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         self.rootfs_provider.cleanup(&box_dir, false)?;
-        match std::fs::remove_dir_all(self.socket_dir()) {
+        let socket_dir = self.socket_dir();
+        #[cfg(windows)]
+        super::sandbox::refuse_directory_reparse(&socket_dir)?;
+        match std::fs::remove_dir_all(&socket_dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(BoxError::IoError(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_runtime_owned_microvm_bundle_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let box_id = "junction-microvm";
+        let mut manager = VmManager::with_box_id(
+            a3s_box_core::BoxConfig::default(),
+            a3s_box_core::EventEmitter::new(10),
+            box_id.to_string(),
+        );
+        manager.home_dir = home.path().to_path_buf();
+        let socket_dir = manager.socket_dir();
+        std::fs::create_dir_all(socket_dir.parent().unwrap()).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            socket_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = manager.cleanup_runtime_owned_microvm_bundle();
+        assert!(
+            removed.is_err(),
+            "microvm cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&socket_dir).unwrap();
+        assert!(
+            metadata.file_attributes() & 0x400 != 0,
+            "microvm cleanup removed the directory junction"
+        );
     }
 }

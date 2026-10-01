@@ -211,28 +211,6 @@ impl NetworkStore {
     }
 }
 
-impl a3s_box_core::traits::NetworkStoreBackend for NetworkStore {
-    fn get(&self, name: &str) -> Result<Option<NetworkConfig>> {
-        self.get(name)
-    }
-
-    fn create(&self, config: NetworkConfig) -> Result<()> {
-        self.create(config)
-    }
-
-    fn remove(&self, name: &str) -> Result<NetworkConfig> {
-        self.remove(name)
-    }
-
-    fn list(&self) -> Result<Vec<NetworkConfig>> {
-        self.list()
-    }
-
-    fn update(&self, config: &NetworkConfig) -> Result<()> {
-        self.update(config)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

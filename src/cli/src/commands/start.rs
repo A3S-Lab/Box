@@ -1,5 +1,6 @@
 //! `a3s-box start` command — Start one or more eligible boxes.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, OperationId, RestartExecutionOptions,
 };
@@ -19,7 +20,7 @@ pub struct StartArgs {
     pub boxes: Vec<String>,
 }
 
-pub async fn execute(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: StartArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -32,27 +33,32 @@ pub async fn execute(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> 
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(super::IntoBoxError::into_box_error(errors.join("\n")))
     }
 }
 
-async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn start_one(state: &StateFile, query: &str) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let mut lifecycle_lock = Some(crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
     // The caller's state snapshot may have waited behind commit/restart. Reload
     // under the per-box lock before deciding that this box is still startable.
     let locked_state = StateFile::load_default()?;
     let record = locked_state
         .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box {query} was removed while waiting for its lifecycle lock"))?
+        .ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {query} was removed while waiting for its lifecycle lock"
+            ))
+        })?
         .clone();
     let health_check = (!record.healthcheck_disabled)
         .then_some(record.health_check.as_ref())
         .flatten();
-    super::common::validate_health_check_support(health_check)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let plan =
-        start_plan(&record).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    super::common::validate_health_check_support(health_check).map_err(BoxError::ConfigError)?;
+    let plan = start_plan(&record).map_err(super::IntoBoxError::into_box_error)?;
 
     let name = record.name.clone();
 
@@ -84,7 +90,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                         crate::process::graceful_stop(pid, libc::SIGTERM, 5).await;
                     }
                     crate::cleanup::cleanup_removed_box(&record)?;
-                    return Err(error.into());
+                    return Err(super::IntoBoxError::into_box_error(error));
                 }
             }
         }
@@ -107,7 +113,8 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                 } => {
                     let operation_id = match operation_id {
                         Some(operation_id) => operation_id,
-                        None => OperationId::new(format!("cli-start-{}", uuid::Uuid::new_v4()))?,
+                        None => OperationId::new(format!("cli-start-{}", uuid::Uuid::new_v4()))
+                            .map_err(super::IntoBoxError::into_box_error)?,
                     };
                     manager
                         .restart_with_options(
@@ -130,7 +137,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                     .find_by_id(&box_id)
                     .is_some_and(super::run::is_completed_managed_start);
                 if !completed {
-                    return Err(error.into());
+                    return Err(super::IntoBoxError::into_box_error(error));
                 }
             }
 
@@ -143,16 +150,14 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    return Err(format!(
+                    return Err(BoxError::StateError(format!(
                         "started {box_id} but refused to invent success without a rootfs diff baseline: {error}"
-                    )
-                    .into());
+                    )));
                 }
                 Err(error) => {
-                    return Err(format!(
+                    return Err(BoxError::StateError(format!(
                         "started {box_id} but rootfs diff baseline task failed: {error}"
-                    )
-                    .into());
+                    )));
                 }
             }
 
@@ -162,7 +167,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
     drop(lifecycle_lock);
     if let Some(record) = started_record.filter(crate::status::is_active) {
         crate::health::spawn_detached_health_checker(&record)
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
     }
 
     println!("{name}");

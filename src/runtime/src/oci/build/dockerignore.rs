@@ -13,6 +13,8 @@
 
 use std::path::{Component, Path};
 
+use a3s_box_core::error::Result;
+
 /// A single parsed ignore rule.
 struct Rule {
     /// Pattern split into `/`-separated segments.
@@ -29,10 +31,12 @@ pub(crate) struct DockerIgnore {
 impl DockerIgnore {
     /// Load `<context_dir>/.dockerignore`. Returns an empty (matches-nothing)
     /// matcher when the file is absent or unreadable.
-    pub(crate) fn load(context_dir: &Path) -> Self {
-        let contents =
-            std::fs::read_to_string(context_dir.join(".dockerignore")).unwrap_or_default();
-        Self::parse(&contents)
+    pub(crate) fn load(context_dir: &Path) -> Result<Self> {
+        let path = context_dir.join(".dockerignore");
+        #[cfg(windows)]
+        refuse_dockerignore_ancestor_junction(&path)?;
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        Ok(Self::parse(&contents))
     }
 
     fn parse(contents: &str) -> Self {
@@ -82,6 +86,34 @@ impl DockerIgnore {
         }
         excluded
     }
+}
+
+#[cfg(windows)]
+fn refuse_dockerignore_ancestor_junction(path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(a3s_box_core::error::BoxError::IoError(error));
+            }
+        };
+        if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(a3s_box_core::error::BoxError::BuildError(format!(
+                "refusing to read .dockerignore through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Match `/`-separated pattern segments against path segments, with `**`
@@ -143,6 +175,40 @@ mod tests {
     }
     fn ex(d: &DockerIgnore, p: &str) -> bool {
         d.is_excluded(&PathBuf::from(p))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join(".dockerignore"), "secret.txt\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = match DockerIgnore::load(&link) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("dockerignore followed an ancestor junction"),
+        };
+        assert!(
+            error.contains("junction"),
+            "dockerignore followed an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join(".dockerignore")).unwrap(),
+            b"secret.txt\n"
+        );
     }
 
     #[test]

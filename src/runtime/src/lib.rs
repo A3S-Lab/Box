@@ -8,7 +8,6 @@
 //! - `pool` — Warm VM pool with autoscaling (enabled by default)
 //! - `scale` — Multi-node scale manager and instance registry (enabled by default)
 //! - `compose` — Multi-container compose orchestration (enabled by default)
-//! - `operator` — Kubernetes CRD autoscaler controller (enabled by default)
 //! - `build` — Dockerfile/Containerfile build engine (enabled by default)
 //! - `runtime-provider-qualification` — Explicit downstream real-process
 //!   qualification seam for the Linux A3S Runtime provider (disabled by
@@ -53,8 +52,6 @@ pub mod volume;
 // -- Optional modules (feature-gated) --
 #[cfg(feature = "compose")]
 pub mod compose;
-#[cfg(feature = "operator")]
-pub mod operator;
 #[cfg(feature = "pool")]
 pub mod pool;
 #[cfg(feature = "scale")]
@@ -193,8 +190,9 @@ pub use vm::{archive_stopped_guest_native_rootfs, BoxState, PullProgressFn, VmMa
 #[cfg(all(feature = "vm", target_os = "windows"))]
 pub use vm::{
     clear_windows_guest_stop_request, finalize_box_terminal_rootfs_metadata,
-    stage_windows_guest_stop_request, wait_windows_guest_stop_delivered,
-    WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS, WINDOWS_STOP_DELIVERY_TIMEOUT_MS,
+    harvest_volume_posix_sidecars, stage_windows_guest_stop_request,
+    wait_windows_guest_stop_delivered, WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS,
+    WINDOWS_STOP_DELIVERY_TIMEOUT_MS,
 };
 #[cfg(feature = "vm")]
 pub use vmm::{
@@ -227,9 +225,6 @@ pub use oci::{
 #[cfg(feature = "compose")]
 #[allow(deprecated)]
 pub use compose::{ComposeProject, ComposeRuntimePlan, HealthCheckSpec};
-
-#[cfg(feature = "operator")]
-pub use operator::AutoscalerController;
 
 #[cfg(feature = "pool")]
 pub use pool::WarmPool;

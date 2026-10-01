@@ -424,8 +424,13 @@ fn paused_microvm_commit_fails_closed() {
     let mut microvm = make_record("id", "vm", "paused", Some(std::process::id()));
     microvm.isolation = ExecutionIsolation::Microvm;
 
-    let error = commit_capture_mode(&microvm).unwrap_err().to_string();
-    assert!(error.contains("paused MicroVM"));
+    let error = commit_capture_mode(&microvm).unwrap_err();
+    match error {
+        BoxError::StateError(message) => {
+            assert!(message.contains("paused MicroVM"), "{message}");
+        }
+        other => panic!("expected StateError, got {other:?}"),
+    }
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -527,4 +532,186 @@ fn test_build_oci_image() {
         .as_str()
         .unwrap()
         .starts_with("sha256:"));
+}
+
+#[cfg(windows)]
+#[test]
+fn create_tar_from_guest_metadata_does_not_follow_an_ancestor_junction() {
+    use a3s_box_core::rootfs_metadata::{
+        RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+    };
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    let rootfs = outside.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join("secret.txt"), b"secret").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let manifest = RootfsMetadataManifest::new(vec![RootfsMetadataEntry {
+        path_base64: base64::engine::general_purpose::STANDARD.encode(b"secret.txt"),
+        kind: RootfsEntryKind::Regular,
+        mode: 0o100644,
+        uid: 0,
+        gid: 0,
+        mtime: 1,
+        size: 6,
+        link_target_base64: None,
+    }]);
+    let output = tmp.path().join("rootfs.tar");
+
+    let error = create_tar_from_guest_metadata(&link.join("rootfs"), &manifest, &output)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("junction"),
+        "ancestor junction was packed into the commit archive: {error}"
+    );
+    assert!(
+        !output.exists()
+            || !std::fs::read(&output)
+                .unwrap()
+                .windows(6)
+                .any(|bytes| bytes == b"secret")
+    );
+    assert_eq!(std::fs::read(rootfs.join("secret.txt")).unwrap(), b"secret");
+}
+
+#[cfg(windows)]
+#[test]
+fn create_tar_from_guest_metadata_does_not_create_through_an_ancestor_junction() {
+    use a3s_box_core::rootfs_metadata::{
+        RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+    };
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let rootfs = tmp.path().join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join("probe"), b"payload").unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let manifest = RootfsMetadataManifest::new(vec![RootfsMetadataEntry {
+        path_base64: base64::engine::general_purpose::STANDARD.encode(b"probe"),
+        kind: RootfsEntryKind::Regular,
+        mode: 0o100644,
+        uid: 0,
+        gid: 0,
+        mtime: 1,
+        size: 7,
+        link_target_base64: None,
+    }]);
+    let output = link.join("rootfs.tar");
+
+    let error = create_tar_from_guest_metadata(&rootfs, &manifest, &output)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("junction"),
+        "archive was created through an ancestor junction: {error}"
+    );
+    assert!(!outside.join("rootfs.tar").exists());
+    assert_eq!(std::fs::read(rootfs.join("probe")).unwrap(), b"payload");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_live_commit_is_a_configuration_error() {
+    use crate::test_helpers::fixtures::make_record;
+
+    let record = make_record("id", "web", "running", Some(1));
+    let error = commit_capture_mode(&record).unwrap_err();
+    match error {
+        BoxError::ConfigError(message) => {
+            assert!(message.contains("Windows commit requires"), "{message}");
+            assert!(message.contains("web"), "{message}");
+        }
+        other => panic!("expected ConfigError, got {other:?}"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn build_oci_image_does_not_create_blobs_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let image = link.join("image");
+    let built = build_oci_image_from_tar(
+        &image,
+        &tmp.path().join("missing.tar"),
+        "test",
+        &None,
+        &None,
+        &[],
+    );
+    let built_debug = match &built {
+        Ok(()) => "Ok".to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        !outside.join("image").exists(),
+        "OCI image blobs were created through the ancestor junction: {built_debug}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(windows)]
+#[test]
+fn build_oci_image_creates_blobs_for_a_missing_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let image = tmp.path().join("image");
+    let built = build_oci_image_from_tar(
+        &image,
+        &tmp.path().join("missing.tar"),
+        "test",
+        &None,
+        &None,
+        &[],
+    );
+    assert!(built.is_err());
+    let blobs = image.join("blobs").join("sha256");
+    let metadata = std::fs::symlink_metadata(&blobs).unwrap();
+    assert!(metadata.is_dir());
+    assert!(!metadata.file_type().is_symlink());
 }

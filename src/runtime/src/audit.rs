@@ -37,6 +37,8 @@ impl AuditLog {
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
+            #[cfg(windows)]
+            crate::vm::refuse_directory_reparse(parent)?;
             fs::create_dir_all(parent).map_err(|e| {
                 BoxError::AuditError(format!(
                     "Failed to create audit log directory {}: {}",
@@ -259,12 +261,6 @@ pub fn read_audit_log(path: &Path, query: &AuditQuery) -> Result<Vec<AuditEvent>
     Ok(events)
 }
 
-impl a3s_box_core::traits::AuditSink for AuditLog {
-    fn record(&self, event: &AuditEvent) -> Result<()> {
-        self.log(event)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +473,50 @@ mod tests {
         let path = dir.path().join("audit.jsonl");
         let log = AuditLog::new(&path, AuditConfig::default()).unwrap();
         assert_eq!(log.path(), path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn audit_log_does_not_write_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let audit_dir = parent.join("audit");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            audit_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let path = audit_dir.join("audit.jsonl");
+        let created = AuditLog::new(&path, AuditConfig::default());
+        let created_debug = match &created {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        let wrote = created.as_ref().ok().and_then(|log| {
+            log.log(&AuditEvent::new(
+                AuditAction::BoxCreate,
+                AuditOutcome::Success,
+            ))
+            .err()
+            .map(|error| error.to_string())
+        });
+        assert!(
+            !outside.join("audit.jsonl").exists(),
+            "audit log wrote through the directory junction: created={created_debug} wrote={wrote:?}"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(fs::symlink_metadata(&audit_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

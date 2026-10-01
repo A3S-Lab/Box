@@ -652,3 +652,118 @@ async fn sdk_start_rejects_persisted_windows_health_check_without_claiming() {
     assert_eq!(persisted[0]["status"], "created");
     assert!(persisted[0]["managed_execution"]["pending_operation"].is_null());
 }
+
+#[cfg(windows)]
+#[test]
+fn cleanup_removed_box_does_not_delete_through_a_directory_junction() {
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let box_dir = home.path().join("boxes").join(id);
+    std::fs::create_dir_all(box_dir.parent().unwrap()).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        box_dir.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let mut record = box_record(id, "junction", "stopped");
+    record.box_dir = box_dir.clone();
+    record.exec_socket_path = box_dir.join("exec.sock");
+    record.volume_names.clear();
+    record.anonymous_volumes.clear();
+    record.network_name = None;
+
+    let removed = cleanup_removed_box(&A3sBoxPaths::from_home(home.path()), &record);
+    assert!(
+        removed.is_err(),
+        "sdk removal deleted through a directory junction: {removed:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    let metadata = std::fs::symlink_metadata(&box_dir).unwrap();
+    assert!(
+        metadata.file_attributes() & 0x400 != 0,
+        "sdk removal removed the directory junction"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_external_socket_dir_does_not_delete_through_a_directory_junction() {
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_dir = home.path().join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let sockets = home.path().join("sockets");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        sockets.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let removed = cleanup_external_socket_dir(&box_dir, &sockets.join("exec.sock"));
+    assert!(
+        removed.is_err(),
+        "sdk socket cleanup deleted through a directory junction: {removed:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    let metadata = std::fs::symlink_metadata(&sockets).unwrap();
+    assert!(
+        metadata.file_attributes() & 0x400 != 0,
+        "sdk socket cleanup removed the directory junction"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn box_dir_guard_does_not_delete_through_a_directory_junction() {
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let link = home.path().join("box");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    {
+        let _guard = BoxDirGuard::new(link.clone());
+    }
+
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    let metadata = std::fs::symlink_metadata(&link).unwrap();
+    assert!(
+        metadata.file_attributes() & 0x400 != 0,
+        "sdk box dir guard removed the directory junction"
+    );
+}

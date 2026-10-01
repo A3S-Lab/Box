@@ -1,5 +1,39 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn load_compose_file_does_not_follow_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(outside.join(".env"), "SECRET=outside\n").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let error = load_compose_file_with_environment(Some(&link.join("compose.yaml")), [])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("junction"),
+        "compose file was read through an ancestor junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join(".env")).unwrap(),
+        b"SECRET=outside\n"
+    );
+}
+
 #[test]
 fn compose_bind_sources_are_relative_to_the_compose_file() {
     let base = std::path::Path::new("/project/deploy");
@@ -92,8 +126,10 @@ fn service_config_hash_tracks_runtime_isolation() {
 #[test]
 fn test_load_compose_file_not_found() {
     let result = load_compose_file(Some(std::path::Path::new("/nonexistent/compose.yaml")));
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    let Err(a3s_box_core::error::BoxError::ConfigError(message)) = result else {
+        panic!("a missing compose file must be a configuration error");
+    };
+    assert!(message.contains("not found"));
 }
 
 #[test]
@@ -150,14 +186,14 @@ fn test_load_compose_file_reports_unreadable_dotenv() {
     std::fs::write(&compose_path, "services: {}\n").unwrap();
     std::fs::create_dir(directory.path().join(".env")).unwrap();
 
-    let error =
+    let Err(a3s_box_core::error::BoxError::IoError(error)) =
         load_compose_file_with_environment(Some(&compose_path), HashMap::<String, String>::new())
-            .unwrap_err();
-
-    assert!(error
-        .to_string()
-        .contains("Failed to read Compose environment file"));
-    assert!(error.to_string().contains(".env"));
+    else {
+        panic!("an unreadable Compose environment file must be an I/O error");
+    };
+    let message = error.to_string();
+    assert!(message.contains("Failed to read Compose environment file"));
+    assert!(message.contains(".env"));
 }
 
 #[test]
@@ -170,10 +206,11 @@ fn test_load_compose_file_rejects_unknown_yaml_fields_with_structured_path() {
     )
     .unwrap();
 
-    let error =
+    let Err(a3s_box_core::error::BoxError::ConfigError(message)) =
         load_compose_file_with_environment(Some(&compose_path), HashMap::<String, String>::new())
-            .unwrap_err();
-    let message = error.to_string();
+    else {
+        panic!("an unsupported Compose field must be a configuration error");
+    };
 
     assert!(message.contains("compose.unsupported_field"));
     assert!(message.contains("/services/api/build"));
@@ -299,7 +336,11 @@ fn test_validate_compose_restart_policies_rejects_invalid_service_policy() {
         networks: HashMap::new(),
     };
 
-    let error = validate_compose_restart_policies(&config).unwrap_err();
+    let Err(a3s_box_core::error::BoxError::ConfigError(error)) =
+        validate_compose_restart_policies(&config)
+    else {
+        panic!("an invalid restart policy must be a configuration error");
+    };
 
     assert!(error.contains("Service 'web' has invalid restart policy"));
     assert!(error.contains("Invalid restart policy"));
@@ -463,8 +504,11 @@ fn cached_image_config_with_health(
 #[cfg(windows)]
 #[test]
 fn windows_compose_up_rejects_bridge_networking_before_runtime_setup() {
-    let error = validate_compose_up_platform_support().unwrap_err();
-    let message = error.to_string();
+    let Err(a3s_box_core::error::BoxError::ConfigError(message)) =
+        validate_compose_up_platform_support()
+    else {
+        panic!("compose up on Windows must be a configuration error");
+    };
 
     assert!(message.contains("'compose up' is not supported"));
     assert!(message.contains("bridge networking support"));

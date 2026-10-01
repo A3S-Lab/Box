@@ -1,5 +1,6 @@
 //! `a3s-box rename` command — Rename a box.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::resolve;
@@ -14,20 +15,28 @@ pub struct RenameArgs {
     pub new_name: String,
 }
 
-pub async fn execute(args: RenameArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: RenameArgs) -> Result<(), BoxError> {
     // Do the name-conflict check and the rename atomically under the state lock
     // (load-fresh + mutate + save) so a concurrent writer cannot be clobbered.
-    let old_name = StateFile::modify(|state| -> Result<String, Box<dyn std::error::Error>> {
-        if state.find_by_name(&args.new_name).is_some() {
-            return Err(format!("Name \"{}\" is already in use", args.new_name).into());
-        }
-        let record = resolve::resolve_mut(state, &args.r#box)?;
+    let old_name = StateFile::modify(|state| -> Result<String, BoxError> {
+        reject_rename_conflict(state, &args.new_name)?;
+        let record = resolve::resolve_mut(state, &args.r#box)
+            .map_err(super::IntoBoxError::into_box_error)?;
         let old_name = record.name.clone();
         record.name = args.new_name.clone();
         Ok(old_name)
     })?;
 
     println!("Renamed {} → {}", old_name, args.new_name);
+    Ok(())
+}
+
+fn reject_rename_conflict(state: &StateFile, new_name: &str) -> Result<(), BoxError> {
+    if state.find_by_name(new_name).is_some() {
+        return Err(BoxError::StateError(format!(
+            "Name \"{new_name}\" is already in use"
+        )));
+    }
     Ok(())
 }
 
@@ -140,13 +149,26 @@ mod tests {
 
         // "box_b" already exists — rename should fail
         assert!(state.find_by_name("box_b").is_some());
+        match reject_rename_conflict(&state, "box_b") {
+            Err(BoxError::StateError(message)) => {
+                assert!(message.contains("already in use"), "{message}");
+                assert!(message.contains("box_b"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
     fn test_rename_not_found() {
         let (_tmp, mut state) = setup_state(vec![make_record("id-1", "box_a")]);
-        let result = resolve::resolve_mut(&mut state, "nonexistent");
-        assert!(result.is_err());
+        let result = resolve::resolve_mut(&mut state, "nonexistent")
+            .map_err(crate::commands::IntoBoxError::into_box_error);
+        match result {
+            Err(BoxError::StateError(message)) => {
+                assert!(message.contains("nonexistent"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]

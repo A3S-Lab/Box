@@ -8,6 +8,7 @@
 //! Box and requires a stop/recreate cycle. MicroVMs cannot hot-resize the
 //! underlying libkrun allocation.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[cfg(not(windows))]
@@ -78,9 +79,12 @@ pub struct ContainerUpdateArgs {
     pub request_id: Option<String>,
 }
 
-pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ContainerUpdateArgs) -> Result<(), BoxError> {
     let initial_state = StateFile::load_default()?;
-    let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
+    let box_id = resolve::resolve(&initial_state, &args.name)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     drop(initial_state);
     #[cfg(not(windows))]
     let mut lifecycle_lock = Some(crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
@@ -91,9 +95,12 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     // guest application and persistence. The managed path transfers ownership
     // to the execution manager below because it acquires the same lock itself.
     let mut state = StateFile::load_default()?;
-    let record = state
-        .find_by_id_mut(&box_id)
-        .ok_or_else(|| format!("Box {} was removed while waiting to update", args.name))?;
+    let record = state.find_by_id_mut(&box_id).ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} was removed while waiting to update",
+            args.name
+        ))
+    })?;
 
     let name = record.name.clone();
     let requires_live_apply = record.is_active();
@@ -111,7 +118,8 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     }
 
     if let Some(ref mem_str) = args.memory {
-        let mb = parse_memory(mem_str).map_err(|e| format!("Invalid --memory: {e}"))?;
+        let mb = parse_memory(mem_str)
+            .map_err(|error| BoxError::ConfigError(format!("Invalid --memory: {error}")))?;
         update.memory_mb = Some(mb);
         record.memory_mb = mb;
         updated.push(format!("memory={mem_str}"));
@@ -119,8 +127,9 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
 
     // Tier 2: cgroup-based limits — can be applied live
     if let Some(ref reservation) = args.memory_reservation {
-        let bytes = common::parse_memory_bytes(reservation)
-            .map_err(|e| format!("Invalid --memory-reservation: {e}"))?;
+        let bytes = common::parse_memory_bytes(reservation).map_err(|error| {
+            BoxError::ConfigError(format!("Invalid --memory-reservation: {error}"))
+        })?;
         update.limits.memory_reservation = Some(bytes);
         record.resource_limits.memory_reservation = Some(bytes);
         updated.push(format!("memory-reservation={reservation}"));
@@ -129,7 +138,7 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     if let Some(ref swap) = args.memory_swap {
         // Same fail-closed parse as the run/create path so `update --memory-swap`
         // can't silently grant unlimited swap on an overflowing value.
-        let val = common::parse_memory_swap(swap)?;
+        let val = common::parse_memory_swap(swap).map_err(BoxError::ConfigError)?;
         update.limits.memory_swap = Some(val);
         record.resource_limits.memory_swap = Some(val);
         updated.push(format!("memory-swap={swap}"));
@@ -166,8 +175,8 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     }
 
     if let Some(ref restart) = args.restart {
-        let (policy, max_count) = crate::state::parse_restart_policy(restart)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let (policy, max_count) =
+            crate::state::parse_restart_policy(restart).map_err(BoxError::ConfigError)?;
         record.restart_policy = policy;
         record.max_restart_count = max_count;
         updated.push(format!("restart={restart}"));
@@ -179,15 +188,14 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     }
 
     validate_running_update(requires_live_apply, &update)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .map_err(|error| map_running_update_error(requires_live_apply, &update, error))?;
 
     #[cfg(not(windows))]
-    let update_request_id = resolve_update_request_id(args.request_id.clone())
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let update_request_id =
+        resolve_update_request_id(args.request_id.clone()).map_err(BoxError::ConfigError)?;
     #[cfg(not(windows))]
     let managed_live_update = if requires_live_apply && update.has_tier2_changes() {
-        managed::resolve(record, &update, &update_request_id)
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?
+        managed::resolve(record, &update, &update_request_id).map_err(BoxError::StateError)?
     } else {
         None
     };
@@ -229,12 +237,11 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
                 let manager = super::configured_local_execution_manager(&home).await?;
                 managed::apply(&manager, &target)
                     .await
-                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                    .map_err(BoxError::StateError)?;
                 managed_tier2_persisted = true;
             } else {
                 apply_legacy_live_tier2_update(&live_apply_record, &update, &update_request_id)
-                    .await
-                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                    .await?;
             }
             live_tier2_applied = true;
         }
@@ -245,11 +252,10 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
         Some(
             crate::lifecycle::acquire_box_lifecycle_lock(&box_id)
                 .await
-                .map_err(|error| -> Box<dyn std::error::Error> {
-                    format!(
+                .map_err(|error| {
+                    BoxError::StateError(format!(
                         "managed live resources for {name} were already applied and persisted, but the lifecycle lock for the remaining policy update could not be reacquired: {error}; retry the command"
-                    )
-                    .into()
+                    ))
                 })?,
         )
     } else {
@@ -260,22 +266,20 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     // the canonical store transaction. The CLI writes only remaining policy
     // fields; legacy and stopped paths retain the existing atomic persistence.
     let requires_cli_persist = !managed_tier2_persisted || restart_policy_updated;
-    let persist_result: Result<(), std::io::Error> = if requires_cli_persist {
+    let persist_result: Result<(), BoxError> = if requires_cli_persist {
         StateFile::modify(|s| {
             let rec = s.find_by_id_mut(&box_id).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("box {name} was removed while applying its update"),
-                )
+                BoxError::StateError(format!("box {name} was removed while applying its update"))
             })?;
             if !managed_tier2_persisted {
                 // Re-check under the state lock. An inactive box may have
                 // started, or a legacy active box may have restarted while the
                 // guest call was in flight. Never persist a limit that missed
                 // the execution which is now active.
-                validate_running_update(rec.is_active(), &update).map_err(std::io::Error::other)?;
+                validate_running_update(rec.is_active(), &update)
+                    .map_err(|error| map_running_update_error(rec.is_active(), &update, error))?;
                 validate_live_apply_target(&live_apply_baseline, rec, &update)
-                    .map_err(std::io::Error::other)?;
+                    .map_err(BoxError::StateError)?;
                 apply_persisted_resource_update(rec, &update);
             }
             if restart_policy_updated {
@@ -283,16 +287,18 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
                 rec.max_restart_count = new_max_restart;
             }
             sync_managed_creation_intent(rec, restart_policy_updated)
-                .map_err(std::io::Error::other)?;
-            Ok::<(), std::io::Error>(())
+                .map_err(BoxError::ConfigError)?;
+            Ok::<(), BoxError>(())
         })
     } else {
         Ok(())
     };
     if let Err(error) = persist_result {
-        return Err(
-            persist_update_error(&error, live_tier2_applied, managed_tier2_persisted).into(),
-        );
+        return Err(annotate_persisted_update_error(
+            error,
+            live_tier2_applied,
+            managed_tier2_persisted,
+        ));
     }
     println!("{name}");
 
@@ -352,9 +358,9 @@ async fn apply_legacy_live_tier2_update(
     record: &crate::state::BoxRecord,
     update: &ResourceUpdate,
     request_id: &str,
-) -> Result<(), String> {
+) -> Result<(), BoxError> {
     if record.isolation.is_sandbox() {
-        let config = crate::boot::config_from_record(record)?;
+        let config = crate::boot::config_from_record(record).map_err(BoxError::ConfigError)?;
         let box_dir = record.box_dir.clone();
         let box_id = record.id.clone();
         let box_name = record.name.clone();
@@ -363,45 +369,45 @@ async fn apply_legacy_live_tier2_update(
         })
         .await
         .map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "A3S OCI resource update worker failed for {box_name}: {error}; no state changes were persisted"
-            )
+            ))
         })?
         .map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "failed to apply A3S OCI resource update to {box_name}: {error}; no state changes were persisted"
-            )
+            ))
         });
     }
 
     let exec_socket_path =
         crate::socket_paths::runtime_socket(record, crate::socket_paths::RuntimeSocket::Exec);
     if !exec_socket_path.exists() {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "cannot apply live update to running box {}: exec socket is missing at {}; no state changes were persisted. Run `a3s-box ps` to reconcile state, then retry or restart {}",
             record.name,
             exec_socket_path.display(),
             record.name
-        ));
+        )));
     }
 
     let client = ExecClient::connect(&exec_socket_path)
         .await
         .map_err(|error| {
-            annotate_legacy_update_unavailable(
+            BoxError::ExecError(annotate_legacy_update_unavailable(
                 format!(
                     "failed to connect to {} for live update: {error}; no state changes were persisted",
                     record.name
                 ),
                 request_id,
-            )
+            ))
         })?;
     let commands = update.build_microvm_cgroup_commands();
     if commands.is_empty() {
-        return Err(
+        return Err(BoxError::StateError(
             "live resource update produced no enforceable guest commands; no state changes were persisted"
                 .to_string(),
-        );
+        ));
     }
     let request = ExecRequest {
         request_id: Some(request_id.to_string()),
@@ -424,20 +430,20 @@ async fn apply_legacy_live_tier2_update(
         Ok(output) if output.exit_code == 0 => Ok(()),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!(
+            Err(BoxError::ExecError(format!(
                 "live cgroup update failed for {} (exit {}): {}; no state changes were persisted, but the guest may have applied commands before the failure, so retry or restart the box",
                 record.name,
                 output.exit_code,
                 stderr.trim()
-            ))
+            )))
         }
-        Err(error) => Err(annotate_legacy_update_unavailable(
+        Err(error) => Err(BoxError::ExecError(annotate_legacy_update_unavailable(
             format!(
                 "failed to apply live update to {}: {error}; no state changes were persisted",
                 record.name
             ),
             request_id,
-        )),
+        ))),
     }
 }
 
@@ -456,6 +462,28 @@ fn persist_update_error(
         )
     } else {
         error.to_string()
+    }
+}
+
+fn annotate_persisted_update_error(
+    error: BoxError,
+    live_tier2_applied: bool,
+    managed_tier2_persisted: bool,
+) -> BoxError {
+    let suffix = if managed_tier2_persisted {
+        "; the managed live resource update was already applied and persisted, but the remaining policy changes were not; retry the command"
+    } else if live_tier2_applied {
+        "; the guest accepted the live resource update before persistence failed, so running limits may have changed without a matching durable record; retry the update or restart the box"
+    } else {
+        return error;
+    };
+    match error {
+        BoxError::ConfigError(message) => BoxError::ConfigError(format!("{message}{suffix}")),
+        BoxError::StateError(message) => BoxError::StateError(format!("{message}{suffix}")),
+        BoxError::IoError(error) => {
+            BoxError::IoError(std::io::Error::other(format!("{error}{suffix}")))
+        }
+        other => other,
     }
 }
 
@@ -531,6 +559,20 @@ fn validate_running_update(is_running: bool, update: &ResourceUpdate) -> Result<
     Ok(())
 }
 
+fn map_running_update_error(is_running: bool, update: &ResourceUpdate, error: String) -> BoxError {
+    if validate_update_values(update).is_err() {
+        return BoxError::ConfigError(error);
+    }
+    #[cfg(windows)]
+    if is_running && update.has_tier2_changes() && !update.has_tier1_changes() {
+        return BoxError::ConfigError(error);
+    }
+    if is_running && update.has_tier1_changes() {
+        return BoxError::StateError(error);
+    }
+    BoxError::ConfigError(error)
+}
+
 /// Keep the durable managed creation request in sync with the compatibility
 /// fields on `BoxRecord`. Managed `start` reconstructs the VM from this request,
 /// so updating only the record would look successful but boot with stale limits.
@@ -573,6 +615,7 @@ fn sync_managed_creation_intent(
 mod tests {
     use super::*;
     use a3s_box_core::config::{BoxConfig, ResourceLimits};
+    use a3s_box_core::error::BoxError;
     use a3s_box_core::{CreateExecutionRequest, ExecutionGeneration, OperationId};
     use a3s_box_runtime::ManagedExecutionMetadata;
 
@@ -599,6 +642,21 @@ mod tests {
         let err = validate_update(&update);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("vCPU"));
+    }
+
+    #[test]
+    fn running_tier1_update_is_a_state_error() {
+        let update = ResourceUpdate {
+            memory_mb: Some(2048),
+            ..Default::default()
+        };
+        let error = validate_running_update(true, &update).unwrap_err();
+        match map_running_update_error(true, &update, error) {
+            BoxError::StateError(message) => {
+                assert!(message.contains("memory"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -649,9 +707,15 @@ mod tests {
             ..Default::default()
         };
 
-        let error = validate_running_update(false, &update).unwrap_err();
-        assert!(error.contains("cpuset.cpus"));
-        assert!(error.contains("ascending ranges"));
+        let err = validate_running_update(false, &update).unwrap_err();
+        assert!(err.contains("cpuset.cpus"));
+        assert!(err.contains("ascending ranges"));
+        match map_running_update_error(false, &update, err) {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("cpuset.cpus"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -802,6 +866,12 @@ mod tests {
         let error = validate_running_update(true, &update).unwrap_err();
         assert!(error.contains("not supported on Windows"));
         assert!(error.contains("stop the box"));
+        match map_running_update_error(true, &update, error) {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("not supported on Windows"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[cfg(not(windows))]

@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
 use base64::Engine;
 use clap::Args;
 use sha2::{Digest, Sha256};
@@ -50,19 +51,22 @@ enum CommitCaptureMode {
     OfflineGuestNative,
 }
 
-pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: CommitArgs) -> Result<(), BoxError> {
     let initial_state = StateFile::load_default()?;
-    let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
+    let box_id = resolve::resolve(&initial_state, &args.name)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     // A start/restart may have completed while this command waited. Re-read the
     // record under the same lock used by every boot path before trusting its
     // stopped state or opening any guest-controlled rootfs path.
     let state = StateFile::load_default()?;
     let record = state.find_by_id(&box_id).ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Box '{}' was removed while waiting for its lifecycle lock",
             args.name
-        )
+        ))
     })?;
     let capture_mode = commit_capture_mode(record)?;
 
@@ -80,13 +84,13 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
                 .map(|rootfs| rootfs.path().to_path_buf())
                 .or_else(|| super::resolve_box_rootfs(&record.box_dir))
                 .ok_or_else(|| {
-                    format!(
+                    BoxError::StateError(format!(
                         "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/). \
                          For overlay-backed boxes the filesystem is only available while the box exists; \
                          commit a running box.",
                         args.name,
                         record.box_dir.display()
-                    )
+                    ))
                 })?,
         )
     };
@@ -101,7 +105,8 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     println!("Committing {}...", record.name);
 
     // Create a temporary directory for the OCI image layout
-    let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
+    let tmp =
+        tempfile::tempdir().map_err(|error| super::io_error("Failed to create temp dir", error))?;
     let image_dir = tmp.path();
     let rootfs_tar = image_dir.join("rootfs.tar");
 
@@ -168,9 +173,7 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn commit_capture_mode(
-    record: &crate::state::BoxRecord,
-) -> Result<CommitCaptureMode, Box<dyn std::error::Error>> {
+fn commit_capture_mode(record: &crate::state::BoxRecord) -> Result<CommitCaptureMode, BoxError> {
     let live_pid = record.pid.is_some_and(|pid| {
         crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
     });
@@ -178,19 +181,17 @@ fn commit_capture_mode(
         record.isolation.is_sandbox() && matches!(record.status.as_str(), "running" | "paused");
     if live_sandbox_host {
         #[cfg(windows)]
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "Windows commit requires box '{}' to be stopped because WHPX has no post-boot guest archive channel",
             record.name
-        )
-        .into());
+        )));
         #[cfg(not(windows))]
         {
             if !live_pid {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "Cannot commit box '{}' because its host process is not live",
                     record.name
-                )
-                .into());
+                )));
             }
             // SandboxViaOci leaves exec_socket_path empty: the prepared host
             // rootfs is the commit source (same walk as managed snapshots).
@@ -200,29 +201,26 @@ fn commit_capture_mode(
     }
     if record.status == "running" {
         #[cfg(windows)]
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "Windows commit requires box '{}' to be stopped because WHPX has no post-boot guest archive channel",
             record.name
-        )
-        .into());
+        )));
         #[cfg(not(windows))]
         {
             if !live_pid {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "Cannot commit running box '{}' because its host process is not live",
                     record.name
-                )
-                .into());
+                )));
             }
             return Ok(CommitCaptureMode::LiveGuest);
         }
     }
     if record.status == "paused" {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot commit paused MicroVM box '{}'; resume it first, or use a Sandbox",
             record.name
-        )
-        .into());
+        )));
     }
     super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
     if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
@@ -232,11 +230,10 @@ fn commit_capture_mode(
         }
         #[cfg(not(all(unix, target_os = "linux")))]
         {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "Cannot commit stopped Sandbox box '{}' because managed host-rootfs commit requires Linux",
                 record.name
-            )
-            .into());
+            )));
         }
     }
     if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
@@ -253,7 +250,7 @@ async fn capture_rootfs_tar(
     output: &Path,
     pause: bool,
     capture_mode: CommitCaptureMode,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if capture_mode == CommitCaptureMode::LiveHostRootfs {
         return capture_live_host_rootfs_tar(record, output, pause).await;
     }
@@ -264,33 +261,35 @@ async fn capture_rootfs_tar(
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     if capture_mode == CommitCaptureMode::StoppedHostRootfs {
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "Cannot commit stopped Sandbox box '{}' because managed host-rootfs commit requires Linux",
             record.name
-        )
-        .into());
+        )));
     }
 
     if capture_mode == CommitCaptureMode::LiveGuest && record.exec_socket_path.exists() {
+        refuse_archive_ancestor_reparse(output)?;
         let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
         let mut file = tokio::fs::File::create(output).await?;
         let written = client.archive_rootfs(&mut file, pause).await?;
         if written == 0 {
-            return Err("Guest rootfs archive was empty".into());
+            return Err(BoxError::ExecError(
+                "Guest rootfs archive was empty".to_string(),
+            ));
         }
         file.sync_all().await?;
         return Ok(());
     }
 
     if capture_mode == CommitCaptureMode::LiveGuest {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot commit running box '{}' because its guest archive endpoint is unavailable",
             record.name
-        )
-        .into());
+        )));
     }
 
     if capture_mode == CommitCaptureMode::OfflineGuestNative {
+        refuse_archive_ancestor_reparse(output)?;
         let mut file = tokio::fs::File::create(output).await?;
         super::rootfs_capture::archive_stopped_guest_native_rootfs(record, &mut file).await?;
         file.sync_all().await?;
@@ -298,10 +297,10 @@ async fn capture_rootfs_tar(
     }
 
     let rootfs_dir = rootfs_dir.ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Cannot commit stopped box '{}' because its offline rootfs is unavailable",
             record.name
-        )
+        ))
     })?;
     let manifest = read_guest_rootfs_metadata(rootfs_dir)?;
     create_tar_from_guest_metadata(rootfs_dir, &manifest, output)
@@ -312,25 +311,26 @@ pub(crate) async fn capture_live_host_rootfs_tar(
     record: &crate::state::BoxRecord,
     output: &Path,
     pause: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use a3s_box_core::{ExecutionId, ExecutionManager};
     use a3s_box_runtime::ManagedExecutionState;
 
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Cannot capture host rootfs for running Sandbox box '{}' because it has no managed lifecycle metadata",
             record.name
-        )
+        ))
     })?;
-    let execution_id = ExecutionId::new(record.id.clone())?;
+    let execution_id =
+        ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
 
     let managed_state = record.managed_state()?.ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Cannot capture host rootfs for running Sandbox box '{}' because managed state is missing",
             record.name
-        )
+        ))
     })?;
 
     if !(pause && managed_state == ManagedExecutionState::Running) {
@@ -338,23 +338,26 @@ pub(crate) async fn capture_live_host_rootfs_tar(
     }
 
     let mut generation = metadata.generation;
-    manager.pause(&execution_id, generation, true).await?;
+    manager
+        .pause(&execution_id, generation, true)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     let refreshed = StateFile::load_default()?;
     let paused_record = refreshed.find_by_id(&record.id).ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Box '{}' disappeared while pausing for host-rootfs capture",
             record.name
-        )
+        ))
     })?;
     generation = paused_record
         .managed_execution
         .as_ref()
         .map(|meta| meta.generation)
         .ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "Box '{}' lost managed metadata while pausing for host-rootfs capture",
                 record.name
-            )
+            ))
         })?;
     let capture_result = capture_paused_or_running_host_rootfs(paused_record, output);
     if let Err(error) = capture_result {
@@ -362,7 +365,10 @@ pub(crate) async fn capture_live_host_rootfs_tar(
         let _ = manager.resume(&execution_id, generation).await;
         return Err(error);
     }
-    manager.resume(&execution_id, generation).await?;
+    manager
+        .resume(&execution_id, generation)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     Ok(())
 }
 
@@ -370,13 +376,13 @@ pub(crate) async fn capture_live_host_rootfs_tar(
 fn capture_paused_or_running_host_rootfs(
     record: &crate::state::BoxRecord,
     output: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let (rootfs, manifest) = a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record)
         .map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "Cannot capture Sandbox host rootfs for box '{}': {error}",
                 record.name
-            )
+            ))
         })?;
     create_tar_from_guest_metadata(&rootfs, &manifest, output)
 }
@@ -386,12 +392,11 @@ async fn capture_live_host_rootfs_tar(
     record: &crate::state::BoxRecord,
     _output: &Path,
     _pause: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Cannot commit running Sandbox box '{}' because host-rootfs commit requires Linux",
         record.name
-    )
-    .into())
+    )))
 }
 
 #[cfg(windows)]
@@ -401,14 +406,14 @@ async fn capture_rootfs_tar(
     output: &Path,
     _pause: bool,
     capture_mode: CommitCaptureMode,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     debug_assert_eq!(capture_mode, CommitCaptureMode::OfflineDirectory);
 
     let rootfs_dir = rootfs_dir.ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Cannot commit stopped box '{}' because its offline rootfs is unavailable",
             record.name
-        )
+        ))
     })?;
     let manifest = read_guest_rootfs_metadata(rootfs_dir)?;
     create_tar_from_guest_metadata(rootfs_dir, &manifest, output)
@@ -420,53 +425,126 @@ const MAX_GUEST_PATH_BYTES: usize = 4096;
 
 pub(crate) fn read_guest_rootfs_metadata(
     rootfs_dir: &Path,
-) -> Result<a3s_box_core::rootfs_metadata::RootfsMetadataManifest, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_core::rootfs_metadata::RootfsMetadataManifest, BoxError> {
     use std::io::Read;
 
     let metadata_path = rootfs_dir
         .join(a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let file = open_regular_file_no_follow(&metadata_path).map_err(|error| {
-        format!(
+        BoxError::StateError(format!(
             "Guest rootfs metadata is unavailable at {}: {error}. Start the box with this A3S Box version and stop it cleanly before capturing the offline rootfs.",
             metadata_path.display()
-        )
+        ))
     })?;
     let length = file.metadata()?.len();
     if length > MAX_ROOTFS_METADATA_BYTES {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Guest rootfs metadata at {} exceeds the {} byte limit",
             metadata_path.display(),
             MAX_ROOTFS_METADATA_BYTES
-        )
-        .into());
+        )));
     }
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(MAX_ROOTFS_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_ROOTFS_METADATA_BYTES {
-        return Err("Guest rootfs metadata grew beyond the byte limit while reading".into());
+        return Err(BoxError::StateError(
+            "Guest rootfs metadata grew beyond the byte limit while reading".to_string(),
+        ));
     }
     let manifest: a3s_box_core::rootfs_metadata::RootfsMetadataManifest =
         serde_json::from_slice(&bytes)?;
     manifest
         .validate()
-        .map_err(|error| format!("Invalid guest rootfs metadata: {error}"))?;
+        .map_err(|error| BoxError::StateError(format!("Invalid guest rootfs metadata: {error}")))?;
     if manifest.entries.len() > MAX_ROOTFS_METADATA_ENTRIES {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Guest rootfs metadata has {} entries, exceeding the {} entry limit",
             manifest.entries.len(),
             MAX_ROOTFS_METADATA_ENTRIES
-        )
-        .into());
+        )));
     }
     Ok(manifest)
+}
+
+pub(crate) fn refuse_archive_ancestor_reparse(path: &Path) -> Result<(), BoxError> {
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(BoxError::StateError(format!(
+                "refusing to archive through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a directory that is itself a junction.
+///
+/// Ancestor checks skip the final component so a new file can be created.
+/// A directory operation still follows that final component, so a junction
+/// directory must be rejected before `tar -C` or `create_dir_all`.
+#[cfg(windows)]
+pub(crate) fn refuse_directory_reparse(path: &Path) -> Result<(), BoxError> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    // `Metadata::is_dir` is false when `is_symlink` is true, including a
+    // directory junction. The directory attribute is the leaf signal.
+    let directory = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if directory && (metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata)) {
+        return Err(BoxError::StateError(format!(
+            "refusing to archive through a directory junction: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a directory junction anywhere under `root` before archive tools follow it.
+#[cfg(windows)]
+pub(crate) fn refuse_nested_directory_reparse(root: &Path) -> Result<(), BoxError> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|error| super::io_error(format!("Failed to read {}", dir.display()), error))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| super::io_error("Failed to read directory entry", error))?;
+            let path = entry.path();
+            refuse_directory_reparse(&path)?;
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                super::io_error(format!("Failed to inspect {}", path.display()), error)
+            })?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn create_tar_from_guest_metadata(
     rootfs_dir: &Path,
     manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
     output: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use a3s_box_core::rootfs_metadata::RootfsEntryKind;
     use std::collections::{HashMap, HashSet};
     use std::io::Cursor;
@@ -478,9 +556,13 @@ pub(crate) fn create_tar_from_guest_metadata(
     for entry in &manifest.entries {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&entry.path_base64)
-            .map_err(|error| format!("Invalid rootfs metadata path: {error}"))?;
+            .map_err(|error| {
+                BoxError::StateError(format!("Invalid rootfs metadata path: {error}"))
+            })?;
         if bytes.len() > MAX_GUEST_PATH_BYTES {
-            return Err("Rootfs metadata path exceeds the guest path limit".into());
+            return Err(BoxError::ExecError(
+                "Rootfs metadata path exceeds the guest path limit".to_string(),
+            ));
         }
         let path = guest_entry_bytes_to_host_path(&bytes, "rootfs metadata path")?;
         validate_archive_path(&path)?;
@@ -488,33 +570,40 @@ pub(crate) fn create_tar_from_guest_metadata(
         {
             let key = windows_guest_path_key(&bytes, "rootfs metadata path")?;
             if !windows_path_keys.insert(key) {
-                return Err(format!(
+                return Err(BoxError::ExecError(format!(
                     "Windows-equivalent duplicate rootfs metadata path: {}",
                     path.display()
-                )
-                .into());
+                )));
             }
         }
         if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
-            return Err(format!("Reserved rootfs metadata path: {}", path.display()).into());
+            return Err(BoxError::ExecError(format!(
+                "Reserved rootfs metadata path: {}",
+                path.display()
+            )));
         }
         if !paths.insert(path.clone()) {
-            return Err(format!("Duplicate rootfs metadata path: {}", path.display()).into());
+            return Err(BoxError::ExecError(format!(
+                "Duplicate rootfs metadata path: {}",
+                path.display()
+            )));
         }
         decoded.push((bytes, path, entry));
     }
     decoded.sort_by(|left, right| left.0.cmp(&right.0));
 
+    refuse_archive_ancestor_reparse(rootfs_dir)?;
+    refuse_archive_ancestor_reparse(output)?;
     let file = std::fs::File::create(output)?;
     let mut builder = tar::Builder::new(file);
     let mut hardlinks = HashMap::<HostFileIdentity, std::path::PathBuf>::new();
     for (_, path, entry) in decoded {
         let source = resolve_source_without_link_parent(rootfs_dir, &path)?;
         let host_metadata = std::fs::symlink_metadata(&source).map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "Rootfs changed after terminal metadata capture at {}: {error}",
                 source.display()
-            )
+            ))
         })?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(entry.mode & 0o7777);
@@ -526,7 +615,10 @@ pub(crate) fn create_tar_from_guest_metadata(
             RootfsEntryKind::Directory => {
                 if !host_metadata.file_type().is_dir() || metadata_is_reparse_point(&host_metadata)
                 {
-                    return Err(format!("Rootfs entry changed type: {}", path.display()).into());
+                    return Err(BoxError::StateError(format!(
+                        "Rootfs entry changed type: {}",
+                        path.display()
+                    )));
                 }
                 header.set_entry_type(tar::EntryType::Directory);
                 header.set_size(0);
@@ -536,9 +628,10 @@ pub(crate) fn create_tar_from_guest_metadata(
             RootfsEntryKind::Regular => {
                 if !host_metadata.file_type().is_file() || metadata_is_reparse_point(&host_metadata)
                 {
-                    return Err(
-                        format!("Rootfs entry changed after capture: {}", path.display()).into(),
-                    );
+                    return Err(BoxError::StateError(format!(
+                        "Rootfs entry changed after capture: {}",
+                        path.display()
+                    )));
                 }
                 let (file, identity, link_count) = open_verified_regular_file(&source, entry.size)?;
                 if link_count > 1 {
@@ -563,15 +656,23 @@ pub(crate) fn create_tar_from_guest_metadata(
                 if !host_metadata.file_type().is_symlink()
                     && !metadata_is_reparse_point(&host_metadata)
                 {
-                    return Err(format!("Rootfs entry changed type: {}", path.display()).into());
+                    return Err(BoxError::StateError(format!(
+                        "Rootfs entry changed type: {}",
+                        path.display()
+                    )));
                 }
-                let target = entry
-                    .link_target_base64
-                    .as_ref()
-                    .ok_or_else(|| format!("Missing symlink target: {}", path.display()))?;
-                let target = base64::engine::general_purpose::STANDARD.decode(target)?;
+                let target = entry.link_target_base64.as_ref().ok_or_else(|| {
+                    BoxError::ExecError(format!("Missing symlink target: {}", path.display()))
+                })?;
+                let target = base64::engine::general_purpose::STANDARD
+                    .decode(target)
+                    .map_err(|error| {
+                        BoxError::ExecError(format!("Invalid symlink target encoding: {error}"))
+                    })?;
                 if target.len() > MAX_GUEST_PATH_BYTES {
-                    return Err("Rootfs symlink target exceeds the guest path limit".into());
+                    return Err(BoxError::ExecError(
+                        "Rootfs symlink target exceeds the guest path limit".to_string(),
+                    ));
                 }
                 header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
@@ -594,12 +695,14 @@ fn append_symlink_with_raw_target<W: std::io::Write>(
     header: &mut tar::Header,
     path: &Path,
     target: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     const LINK_NAME_OFFSET: usize = 157;
     const LINK_NAME_LENGTH: usize = 100;
 
     if target.contains(&0) {
-        return Err("Rootfs symlink target contains a NUL byte".into());
+        return Err(BoxError::ExecError(
+            "Rootfs symlink target contains a NUL byte".to_string(),
+        ));
     }
     if target.len() > LINK_NAME_LENGTH {
         let mut long_header = tar::Header::new_gnu();
@@ -651,11 +754,14 @@ fn open_regular_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 fn open_verified_regular_file(
     path: &Path,
     expected_size: u64,
-) -> Result<(std::fs::File, Option<HostFileIdentity>, u64), Box<dyn std::error::Error>> {
+) -> Result<(std::fs::File, Option<HostFileIdentity>, u64), BoxError> {
     let file = open_regular_file_no_follow(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() != expected_size {
-        return Err(format!("Rootfs entry changed after capture: {}", path.display()).into());
+        return Err(BoxError::StateError(format!(
+            "Rootfs entry changed after capture: {}",
+            path.display()
+        )));
     }
 
     use std::os::unix::fs::MetadataExt;
@@ -670,11 +776,14 @@ fn open_verified_regular_file(
 fn open_verified_regular_file(
     path: &Path,
     expected_size: u64,
-) -> Result<(std::fs::File, Option<HostFileIdentity>, u64), Box<dyn std::error::Error>> {
+) -> Result<(std::fs::File, Option<HostFileIdentity>, u64), BoxError> {
     let (file, identity) = a3s_box_core::windows_file::open_regular_file(path, None)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() != expected_size {
-        return Err(format!("Rootfs entry changed after capture: {}", path.display()).into());
+        return Err(BoxError::StateError(format!(
+            "Rootfs entry changed after capture: {}",
+            path.display()
+        )));
     }
     // A repeated stable file identity necessarily denotes another directory
     // entry for the same NTFS file. Checking every identity avoids relying on
@@ -693,7 +802,7 @@ fn open_verified_regular_file(
 fn guest_entry_bytes_to_host_path(
     bytes: &[u8],
     _description: &str,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+) -> Result<std::path::PathBuf, BoxError> {
     use std::os::unix::ffi::OsStringExt;
     Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
         bytes.to_vec(),
@@ -704,20 +813,23 @@ fn guest_entry_bytes_to_host_path(
 fn guest_entry_bytes_to_host_path(
     bytes: &[u8],
     description: &str,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let value = std::str::from_utf8(bytes)
-        .map_err(|_| format!("{description} is not UTF-8 and cannot be represented on Windows"))?;
+) -> Result<std::path::PathBuf, BoxError> {
+    let value = std::str::from_utf8(bytes).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "{description} is not UTF-8 and cannot be represented on Windows"
+        ))
+    })?;
     validate_windows_guest_path(value, description)?;
     Ok(std::path::PathBuf::from(value))
 }
 
 #[cfg(windows)]
-fn windows_guest_path_key(
-    bytes: &[u8],
-    description: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let value = std::str::from_utf8(bytes)
-        .map_err(|_| format!("{description} is not UTF-8 and cannot be represented on Windows"))?;
+fn windows_guest_path_key(bytes: &[u8], description: &str) -> Result<String, BoxError> {
+    let value = std::str::from_utf8(bytes).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "{description} is not UTF-8 and cannot be represented on Windows"
+        ))
+    })?;
     let components = validate_windows_guest_path(value, description)?;
     Ok(components
         .into_iter()
@@ -730,9 +842,11 @@ fn windows_guest_path_key(
 fn validate_windows_guest_path<'a>(
     value: &'a str,
     description: &str,
-) -> Result<Vec<&'a str>, Box<dyn std::error::Error>> {
+) -> Result<Vec<&'a str>, BoxError> {
     if value.is_empty() || value.starts_with('/') || value.ends_with('/') {
-        return Err(format!("{description} is not a relative Linux path").into());
+        return Err(BoxError::ExecError(format!(
+            "{description} is not a relative Linux path"
+        )));
     }
 
     let mut normalized = Vec::new();
@@ -741,32 +855,34 @@ fn validate_windows_guest_path<'a>(
             continue;
         }
         if component.is_empty() || component == ".." {
-            return Err(format!("Unsafe {description}: ambiguous path component").into());
+            return Err(BoxError::ExecError(format!(
+                "Unsafe {description}: ambiguous path component"
+            )));
         }
         if component.ends_with('.') || component.ends_with(' ') {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "{description} contains a name with a trailing dot or space that Windows aliases"
-            )
-            .into());
+            )));
         }
         if component.chars().any(|character| {
             character <= '\u{1f}'
                 || matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*')
         }) {
-            return Err(
-                format!("{description} contains a name Windows cannot represent safely").into(),
-            );
+            return Err(BoxError::ConfigError(format!(
+                "{description} contains a name Windows cannot represent safely"
+            )));
         }
         if is_windows_reserved_name(component) {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "{description} contains reserved Windows device name '{component}'"
-            )
-            .into());
+            )));
         }
         normalized.push(component);
     }
     if normalized.is_empty() && value != "." {
-        return Err(format!("{description} has no representable path component").into());
+        return Err(BoxError::ExecError(format!(
+            "{description} has no representable path component"
+        )));
     }
     Ok(normalized)
 }
@@ -787,10 +903,13 @@ fn is_windows_reserved_name(component: &str) -> bool {
 fn resolve_source_without_link_parent(
     root: &Path,
     relative: &Path,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+) -> Result<std::path::PathBuf, BoxError> {
     let root_metadata = std::fs::symlink_metadata(root)?;
     if !root_metadata.is_dir() || metadata_is_reparse_point(&root_metadata) {
-        return Err(format!("Rootfs is not a plain directory: {}", root.display()).into());
+        return Err(BoxError::StateError(format!(
+            "Rootfs is not a plain directory: {}",
+            root.display()
+        )));
     }
 
     let mut current = root.to_path_buf();
@@ -803,11 +922,10 @@ fn resolve_source_without_link_parent(
         if index + 1 < components.len() {
             let metadata = std::fs::symlink_metadata(&current)?;
             if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
-                return Err(format!(
+                return Err(BoxError::ExecError(format!(
                     "Link or non-directory parent in rootfs metadata path: {}",
                     current.display()
-                )
-                .into());
+                )));
             }
         }
     }
@@ -815,20 +933,22 @@ fn resolve_source_without_link_parent(
 }
 
 #[cfg(windows)]
-fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
-fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn validate_archive_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_archive_path(path: &Path) -> Result<(), BoxError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err("Rootfs metadata contains an absolute or empty path".into());
+        return Err(BoxError::ExecError(
+            "Rootfs metadata contains an absolute or empty path".to_string(),
+        ));
     }
     if path.components().any(|component| {
         !matches!(
@@ -836,7 +956,10 @@ fn validate_archive_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> 
             std::path::Component::Normal(_) | std::path::Component::CurDir
         )
     }) {
-        return Err(format!("Unsafe rootfs metadata path: {}", path.display()).into());
+        return Err(BoxError::ExecError(format!(
+            "Unsafe rootfs metadata path: {}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -869,7 +992,7 @@ fn build_oci_image(
     message: &Option<String>,
     author: &Option<String>,
     changes: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let tar_path = output_dir.join("rootfs.host.tar");
     {
         let file = std::fs::File::create(&tar_path)?;
@@ -891,11 +1014,19 @@ fn build_oci_image_from_tar(
     message: &Option<String>,
     author: &Option<String>,
     changes: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
     let blobs_dir = output_dir.join("blobs").join("sha256");
+    #[cfg(windows)]
+    {
+        let mut blob_prefix = std::path::PathBuf::new();
+        for component in blobs_dir.components() {
+            blob_prefix.push(component);
+            refuse_directory_reparse(&blob_prefix)?;
+        }
+    }
     std::fs::create_dir_all(&blobs_dir)?;
 
     // 1. Create layer tarball (gzipped)
@@ -991,7 +1122,7 @@ fn build_oci_image_from_tar(
     Ok(())
 }
 
-fn compute_file_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+fn compute_file_sha256(path: &Path) -> Result<String, BoxError> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -1008,7 +1139,7 @@ fn compute_file_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>
 
 /// Compute the diff_id (sha256 of uncompressed tar) for a directory.
 #[cfg(test)]
-fn compute_diff_id(rootfs_dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
+fn compute_diff_id(rootfs_dir: &Path) -> Result<String, BoxError> {
     let mut hasher = Sha256::new();
     let buf = Vec::new();
     let mut builder = tar::Builder::new(buf);

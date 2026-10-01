@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use a3s_box_core::compose::ComposeConfig;
+use a3s_box_core::error::BoxError;
 use a3s_box_runtime::NetworkStore;
 
 use super::{ComposeDownArgs, LABEL_PROJECT, LABEL_SERVICE};
@@ -60,7 +61,7 @@ impl ServiceBox {
     }
 }
 
-pub(super) fn cleanup_service_box(svc: &ServiceBox) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn cleanup_service_box(svc: &ServiceBox) -> Result<(), BoxError> {
     cleanup_partial_service_box(
         &svc.box_id,
         &svc.box_dir,
@@ -78,7 +79,7 @@ pub(super) fn cleanup_partial_service_box(
     network_name: Option<&str>,
     volume_names: &[String],
     anonymous_volumes: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if let Err(error) = crate::cleanup::cleanup_box_resources(box_id, volume_names, network_name) {
         tracing::error!(
             box_id,
@@ -118,6 +119,13 @@ pub(super) fn cleanup_partial_service_box(
             format!("host netdevice lease teardown failed for Compose service {box_id}: {error}"),
         ));
     }
+    #[cfg(windows)]
+    if let Err(error) = crate::commands::commit::refuse_directory_reparse(box_dir) {
+        return Err(BoxError::StateError(format!(
+            "refusing to remove Compose box directory {}: {error}",
+            box_dir.display()
+        )));
+    }
     if let Err(error) = a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(box_dir) {
         tracing::error!(
             box_id,
@@ -137,10 +145,20 @@ pub(super) fn cleanup_partial_service_box(
     // use APFS; guest-native ext4 has no host mount. Resource cleanup above
     // only detaches volumes and networking. Fail closed on overlay so wipe
     // cannot invent success while merged remains mounted.
-    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged"))
-        .map_err(|error| format!("Overlay unmount failed for Compose service {box_id}: {error}"))?;
-    a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&box_dir.join("rootfs"))
-        .map_err(|error| format!("Rootfs unmount failed for Compose service {box_id}: {error}"))?;
+    a3s_box_runtime::rootfs::unmount_box_overlay_for_reuse(&box_dir.join("merged")).map_err(
+        |error| {
+            BoxError::StateError(format!(
+                "Overlay unmount failed for Compose service {box_id}: {error}"
+            ))
+        },
+    )?;
+    a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&box_dir.join("rootfs")).map_err(
+        |error| {
+            BoxError::StateError(format!(
+                "Rootfs unmount failed for Compose service {box_id}: {error}"
+            ))
+        },
+    )?;
     match std::fs::remove_dir_all(box_dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -169,24 +187,25 @@ fn chain_socket_cleanup(
     box_dir: &std::path::Path,
     exec_socket_path: &std::path::Path,
     primary: String,
-) -> Box<dyn std::error::Error> {
+) -> BoxError {
     match crate::cleanup::cleanup_external_socket_dir(box_dir, exec_socket_path) {
-        Ok(()) => primary.into(),
-        Err(error) => format!("{primary}; socket directory cleanup also failed: {error}").into(),
+        Ok(()) => BoxError::StateError(primary),
+        Err(error) => BoxError::StateError(format!(
+            "{primary}; socket directory cleanup also failed: {error}"
+        )),
     }
 }
 
 /// Chain a partial-service wipe failure into the primary compose-up error.
 pub(super) fn chain_partial_cleanup_error(
-    primary: impl Into<Box<dyn std::error::Error>>,
-    cleanup: Result<(), Box<dyn std::error::Error>>,
-) -> Box<dyn std::error::Error> {
-    let primary = primary.into();
+    primary: BoxError,
+    cleanup: Result<(), BoxError>,
+) -> BoxError {
     match cleanup {
         Ok(()) => primary,
-        Err(cleanup) => {
-            format!("{primary}; also failed to clean partial Compose service: {cleanup}").into()
-        }
+        Err(cleanup) => BoxError::StateError(format!(
+            "{primary}; also failed to clean partial Compose service: {cleanup}"
+        )),
     }
 }
 
@@ -203,15 +222,14 @@ pub(super) async fn rollback_compose_up<T>(
     state: &mut StateFile,
     started_services: &[ServiceBox],
     created_networks: &[String],
-    error: impl Into<Box<dyn std::error::Error>>,
-) -> Result<T, Box<dyn std::error::Error>> {
-    let primary = error.into();
+    error: BoxError,
+) -> Result<T, BoxError> {
     let service_cleanup = rollback_started_services(state, started_services).await;
     let network_cleanup = cleanup_created_networks(created_networks);
     match (service_cleanup, network_cleanup) {
-        (Ok(()), Ok(())) => Err(primary),
+        (Ok(()), Ok(())) => Err(error),
         (svc, net) => {
-            let mut message = primary.to_string();
+            let mut message = error.to_string();
             if let Err(cleanup) = svc {
                 message.push_str(&format!(
                     "; also failed to roll back compose services: {cleanup}"
@@ -222,7 +240,7 @@ pub(super) async fn rollback_compose_up<T>(
                     "; also failed to roll back compose networks: {cleanup}"
                 ));
             }
-            Err(message.into())
+            Err(BoxError::StateError(message))
         }
     }
 }
@@ -230,7 +248,7 @@ pub(super) async fn rollback_compose_up<T>(
 async fn rollback_started_services(
     state: &mut StateFile,
     started_services: &[ServiceBox],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if started_services.is_empty() {
         return Ok(());
     }
@@ -250,17 +268,14 @@ async fn rollback_started_services(
 }
 
 /// Collapse per-service teardown failures into a single fail-closed rollback Err.
-fn compose_up_service_rollback_result(
-    errors: Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn compose_up_service_rollback_result(errors: Vec<String>) -> Result<(), BoxError> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!(
+        Err(BoxError::StateError(format!(
             "failed to roll back compose service(s): {}",
             errors.join("; ")
-        )
-        .into())
+        )))
     }
 }
 
@@ -323,7 +338,7 @@ pub(super) async fn stop_service_process(svc: &ServiceBox) {
 pub(super) async fn teardown_service_box(
     state: &mut StateFile,
     discovered: &ServiceBox,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     teardown_service_box_inner(state, discovered, false).await
 }
 
@@ -331,7 +346,7 @@ async fn teardown_service_box_inner(
     state: &mut StateFile,
     discovered: &ServiceBox,
     cleanup_owned_if_unregistered: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&discovered.box_id).await?;
     let current_state = StateFile::load_default()?;
     let service = teardown_target(&current_state, discovered, cleanup_owned_if_unregistered);
@@ -371,10 +386,9 @@ async fn teardown_service_box_inner(
         (Ok(_), Ok(())) => Ok(()),
         (Ok(_), Err(cleanup)) => Err(cleanup),
         (Err(removal), Ok(())) => Err(removal.into()),
-        (Err(removal), Err(cleanup)) => Err(format!(
+        (Err(removal), Err(cleanup)) => Err(BoxError::StateError(format!(
             "failed to remove compose service state: {removal}; also failed to clean service: {cleanup}"
-        )
-        .into()),
+        ))),
     }
 }
 
@@ -389,7 +403,7 @@ fn teardown_target(
         .or_else(|| cleanup_owned_if_unregistered.then(|| discovered.clone()))
 }
 
-fn cleanup_created_networks(created_networks: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn cleanup_created_networks(created_networks: &[String]) -> Result<(), BoxError> {
     if created_networks.is_empty() {
         return Ok(());
     }
@@ -403,7 +417,7 @@ fn cleanup_created_networks(created_networks: &[String]) -> Result<(), Box<dyn s
 fn cleanup_created_networks_with_store(
     net_store: &NetworkStore,
     created_networks: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for net_name in created_networks.iter().rev() {
         if let Some(mut net_config) = net_store.get(net_name)? {
             let endpoint_ids: Vec<_> = net_config.endpoints.keys().cloned().collect();
@@ -423,7 +437,7 @@ pub(super) async fn execute_down(
     project_name: &str,
     config: &ComposeConfig,
     down_args: ComposeDownArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let mut state = StateFile::load_default()?;
 
     // Find all boxes belonging to this project
@@ -541,6 +555,47 @@ mod tests {
         ServiceBox::from_record(&record)
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_partial_service_box_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("box-dir");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = cleanup_partial_service_box(
+            "compose-junction",
+            &link,
+            &link.join("sockets").join("exec.sock"),
+            None,
+            &[],
+            &[],
+        );
+        assert!(
+            removed.is_err(),
+            "Compose cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "Compose cleanup removed the directory junction"
+        );
+    }
+
     #[test]
     fn teardown_names_are_exact_and_deduplicated() {
         let config = ComposeConfig::from_yaml_str(
@@ -609,6 +664,9 @@ mod tests {
         );
     }
 
+    // Directory mode 0555 denies the parent write on Unix. Windows
+    // `set_readonly` does not, so this assertion is not meaningful there.
+    #[cfg(unix)]
     #[test]
     fn compose_up_network_rollback_fails_closed_on_remove() {
         let dir = tempfile::tempdir().unwrap();
@@ -655,19 +713,22 @@ mod tests {
     #[test]
     fn compose_up_service_rollback_fails_closed_on_teardown_errors() {
         assert!(compose_up_service_rollback_result(Vec::new()).is_ok());
-        let err = compose_up_service_rollback_result(vec![
+        let Err(BoxError::StateError(message)) = compose_up_service_rollback_result(vec![
             "api: lock busy".to_string(),
             "db: wipe refused".to_string(),
-        ])
-        .expect_err("teardown errors must not invent clean service rollback");
-        let message = err.to_string();
+        ]) else {
+            panic!("teardown errors must not invent clean service rollback");
+        };
         assert!(message.contains("api: lock busy"));
         assert!(message.contains("db: wipe refused"));
     }
 
     #[test]
     fn chain_partial_cleanup_error_surfaces_wipe_failure() {
-        let chained = chain_partial_cleanup_error("boot failed", Err("wipe refused".into()));
+        let chained = chain_partial_cleanup_error(
+            BoxError::StateError("boot failed".to_string()),
+            Err(BoxError::StateError("wipe refused".to_string())),
+        );
         let message = chained.to_string();
         assert!(message.contains("boot failed"));
         assert!(message.contains("wipe refused"));

@@ -183,6 +183,8 @@ impl Dockerfile {
 
     /// Parse a Dockerfile from a file path.
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
+        #[cfg(windows)]
+        refuse_dockerfile_ancestor_junction(path)?;
         let content = std::fs::read_to_string(path).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to read Dockerfile at {}: {}",
@@ -192,6 +194,32 @@ impl Dockerfile {
         })?;
         Self::parse(&content)
     }
+}
+
+#[cfg(windows)]
+fn refuse_dockerfile_ancestor_junction(path: &std::path::Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(BoxError::BuildError(format!(
+                "refusing to read a Dockerfile through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Join lines ending with `\` into single logical lines.

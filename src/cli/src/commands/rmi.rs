@@ -1,5 +1,6 @@
 //! `a3s-box rmi` command — remove one or more cached images.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage::{self, ImageReferenceScope};
@@ -16,12 +17,14 @@ pub struct RmiArgs {
     pub force: bool,
 }
 
-pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: RmiArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
     // Fail closed on state load so we cannot invent an empty protect set and
     // remove in-use images (image-prune / system-prune parity).
     let state = StateFile::load_default().map_err(|error| {
-        format!("Failed to load box state for rmi: {error}; refusing rmi success")
+        BoxError::StateError(format!(
+            "Failed to load box state for rmi: {error}; refusing rmi success"
+        ))
     })?;
     let protected_images = image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
 
@@ -78,11 +81,10 @@ pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!(
+        Err(BoxError::OciImageError(format!(
             "Failed to remove image(s):\n{}; refusing rmi success",
             errors.join("\n")
-        )
-        .into())
+        )))
     }
 }
 

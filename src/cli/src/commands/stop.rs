@@ -1,5 +1,6 @@
 //! `a3s-box stop` command — Graceful stop of one or more boxes.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use a3s_box_core::{
@@ -26,7 +27,7 @@ pub struct StopArgs {
     pub timeout: Option<u64>,
 }
 
-pub async fn execute(args: StopArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: StopArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -39,16 +40,15 @@ pub async fn execute(args: StopArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(super::IntoBoxError::into_box_error(errors.join("\n")))
     }
 }
 
-async fn stop_one(
-    state: &StateFile,
-    query: &str,
-    timeout: Option<u64>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn stop_one(state: &StateFile, query: &str, timeout: Option<u64>) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     // Reload only after acquiring the shared per-box lock. Otherwise a start or
     // restart can publish a new PID while this command is waiting on the old
@@ -56,7 +56,9 @@ async fn stop_one(
     let current_state = StateFile::load_default()?;
     let record = current_state
         .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box {query} was removed while waiting to stop"))?
+        .ok_or_else(|| {
+            BoxError::StateError(format!("Box {query} was removed while waiting to stop"))
+        })?
         .clone();
     drop(current_state);
 
@@ -73,9 +75,13 @@ async fn stop_one(
         let manager = super::configured_local_execution_manager(&home).await?;
         manager
             .kill_with_options(&execution_id, generation, options)
-            .await?;
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         if auto_remove {
-            manager.remove_execution(&execution_id, generation).await?;
+            manager
+                .remove_execution(&execution_id, generation)
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
             println!("{name} (auto-removed)");
             return Ok(());
         }
@@ -89,10 +95,9 @@ async fn stop_one(
         return Ok(());
     }
 
-    status::require_active(&record, "stop")
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    status::require_active(&record, "stop").map_err(super::IntoBoxError::into_box_error)?;
     let pid = lifecycle::require_live_pid(&record, "stop")
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     let name = record.name.clone();
     let auto_remove = record.auto_remove;
@@ -116,7 +121,7 @@ async fn stop_one(
     // Deliver the stop signal to the container (honouring its STOPSIGNAL), then
     // wait for the VM to exit; SIGKILL the shim after the timeout.
     lifecycle::resume_paused_for_termination(&record, pid, "stop")
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        .map_err(super::IntoBoxError::into_box_error)?;
     let stop_outcome = Some(
         process::graceful_stop_via_guest(
             pid,
@@ -158,10 +163,9 @@ async fn stop_one(
         Ok::<bool, std::io::Error>(updated)
     })?;
     if !persisted {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Box {name} changed execution while it was stopping; did not overwrite the replacement state"
-        )
-        .into());
+        )));
     }
     crate::audit::record(
         a3s_box_core::audit::AuditAction::BoxStop,
@@ -184,16 +188,16 @@ enum StopPlan {
     },
 }
 
-fn stop_plan(
-    record: &crate::state::BoxRecord,
-    timeout: Option<u64>,
-) -> Result<StopPlan, Box<dyn std::error::Error>> {
+fn stop_plan(record: &crate::state::BoxRecord, timeout: Option<u64>) -> Result<StopPlan, BoxError> {
     let Some(metadata) = record.managed_execution.as_ref() else {
         return Ok(StopPlan::Legacy);
     };
-    let state = record
-        .managed_state()?
-        .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+    let state = record.managed_state()?.ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed lifecycle metadata",
+            record.name
+        ))
+    })?;
     if !matches!(
         state,
         ManagedExecutionState::Running
@@ -202,11 +206,10 @@ fn stop_plan(
             | ManagedExecutionState::Creating
             | ManagedExecutionState::Starting
     ) {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot stop box {} because it is {state}. Use `a3s-box ps -a` to inspect state.",
             record.name
-        )
-        .into());
+        )));
     }
     let signal = record
         .stop_signal
@@ -214,7 +217,8 @@ fn stop_plan(
         .map(parse_signal_name)
         .unwrap_or(15);
     Ok(StopPlan::Managed {
-        execution_id: ExecutionId::new(record.id.clone())?,
+        execution_id: ExecutionId::new(record.id.clone())
+            .map_err(super::IntoBoxError::into_box_error)?,
         generation: metadata.generation,
         options: KillExecutionOptions {
             signal: Some(signal),
@@ -326,11 +330,13 @@ mod tests {
 
     #[test]
     fn managed_stop_rejects_non_active_stable_state() {
-        let error = stop_plan(&managed_record(ManagedExecutionState::Stopped), None)
-            .unwrap_err()
-            .to_string();
+        let Err(BoxError::StateError(message)) =
+            stop_plan(&managed_record(ManagedExecutionState::Stopped), None)
+        else {
+            panic!("refusing a stopped box must be a state error");
+        };
 
-        assert!(error.contains("because it is stopped"));
+        assert!(message.contains("because it is stopped"));
     }
 
     #[test]

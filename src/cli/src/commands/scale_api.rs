@@ -6,9 +6,11 @@ use std::{
     time::Duration,
 };
 
+use a3s_box_core::error::BoxError;
 use a3s_box_runtime::{
     serve_scale_api, DurableScaleAuthority, LocalScaleReconciler, ScaleApiState,
-    ScaleEndpointConfig, ScaleServiceCatalog,
+    ScaleAuthorityError, ScaleCatalogError, ScaleEndpointConfig, ScaleEndpointConfigError,
+    ScaleServiceCatalog,
 };
 use clap::Args;
 
@@ -57,31 +59,25 @@ pub struct ScaleApiArgs {
     max_instances: u32,
 }
 
-pub async fn execute(args: ScaleApiArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ScaleApiArgs) -> Result<(), BoxError> {
     let state = args
         .state
         .unwrap_or_else(|| a3s_box_core::dirs_home().join("scale-authority.json"));
-    let authority = DurableScaleAuthority::open(state, args.max_instances)?;
+    let authority =
+        DurableScaleAuthority::open(state, args.max_instances).map_err(scale_authority_error)?;
     let authority = if let Some(services) = args.services {
         let catalog = ScaleServiceCatalog::from_acl_file(
             &services,
             "gateway-scale",
             resolve_isolation(args.isolation),
-        )?;
+        )
+        .map_err(scale_catalog_error)?;
         let home = a3s_box_core::dirs_home();
         let manager = super::configured_local_execution_manager(&home).await?;
         let advertise_host =
-            match args.endpoint_advertise_host {
-                Some(host) => host,
-                None if !args.endpoint_bind_address.is_unspecified() => {
-                    args.endpoint_bind_address.to_string()
-                }
-                None => return Err(
-                    "--endpoint-advertise-host is required when the bind address is unspecified"
-                        .into(),
-                ),
-            };
-        let endpoint_config = ScaleEndpointConfig::new(args.endpoint_bind_address, advertise_host)?
+            required_advertise_host(args.endpoint_advertise_host, args.endpoint_bind_address)?;
+        let endpoint_config = ScaleEndpointConfig::new(args.endpoint_bind_address, advertise_host)
+            .map_err(scale_endpoint_config_error)?
             .with_drain_timeout(Duration::from_secs(args.endpoint_drain_timeout_secs));
         ScaleApiState::with_reconciler(
             authority,
@@ -96,6 +92,46 @@ pub async fn execute(args: ScaleApiArgs) -> Result<(), Box<dyn std::error::Error
     tracing::info!(address = %args.address, "starting Gateway scale authority");
     serve_scale_api(args.address, authority).await?;
     Ok(())
+}
+
+fn required_advertise_host(
+    configured: Option<String>,
+    bind_address: std::net::IpAddr,
+) -> Result<String, BoxError> {
+    match configured {
+        Some(host) => Ok(host),
+        None if !bind_address.is_unspecified() => Ok(bind_address.to_string()),
+        None => Err(BoxError::ConfigError(
+            "--endpoint-advertise-host is required when the bind address is unspecified".into(),
+        )),
+    }
+}
+
+fn scale_authority_error(error: ScaleAuthorityError) -> BoxError {
+    match error {
+        ScaleAuthorityError::Conflict(message, _) => {
+            BoxError::StateError(format!("scale operation conflict: {message}"))
+        }
+        ScaleAuthorityError::State(message) => {
+            BoxError::StateError(format!("scale authority state error: {message}"))
+        }
+    }
+}
+
+fn scale_catalog_error(error: ScaleCatalogError) -> BoxError {
+    match error {
+        ScaleCatalogError::Read { path, source } => super::io_error(
+            format!("failed to read scale service catalog {path}"),
+            source,
+        ),
+        ScaleCatalogError::Invalid(message) => {
+            BoxError::ConfigError(format!("invalid scale service catalog: {message}"))
+        }
+    }
+}
+
+fn scale_endpoint_config_error(error: ScaleEndpointConfigError) -> BoxError {
+    BoxError::ConfigError(error.to_string())
 }
 
 #[cfg(test)]
@@ -161,5 +197,32 @@ mod tests {
             args.services.as_deref(),
             Some(std::path::Path::new("services.acl"))
         );
+    }
+
+    #[test]
+    fn unspecified_bind_without_advertise_host_is_a_configuration_error() {
+        match super::required_advertise_host(None, IpAddr::V4(Ipv4Addr::UNSPECIFIED)) {
+            Err(a3s_box_core::error::BoxError::ConfigError(message)) => {
+                assert!(message.contains("--endpoint-advertise-host"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_acl_scale_catalog_is_a_configuration_error() {
+        let error = a3s_box_runtime::ScaleServiceCatalog::from_acl_file(
+            std::path::Path::new("services.txt"),
+            "gateway-scale",
+            super::resolve_isolation(None),
+        )
+        .expect_err("a non-acl catalog is rejected before it is read");
+        match super::scale_catalog_error(error) {
+            a3s_box_core::error::BoxError::ConfigError(message) => {
+                assert!(message.contains(".acl"), "{message}");
+                assert!(message.contains("services.txt"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

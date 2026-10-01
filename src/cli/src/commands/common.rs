@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use a3s_box_core::config::{
     validate_vcpu_count, ExecutionIsolation, ResourceLimits, DEFAULT_VCPUS,
 };
+use a3s_box_core::error::BoxError;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
 use clap::{Args, ValueEnum};
@@ -277,12 +278,10 @@ pub(crate) fn parse_env_vars(vars: &[String]) -> Result<HashMap<String, String>,
 /// Load environment variables from a file.
 ///
 /// Each line should be KEY=VALUE. Empty lines and lines starting with '#' are skipped.
-pub(crate) fn parse_env_file(
-    path: &str,
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+pub(crate) fn parse_env_file(path: &str) -> Result<HashMap<String, String>, BoxError> {
     let mut map = HashMap::new();
     for (key, value) in a3s_box_core::env::parse_env_file(path)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        .map_err(|message| BoxError::IoError(std::io::Error::other(message)))?
     {
         map.insert(key, value);
     }
@@ -293,9 +292,7 @@ pub(crate) fn parse_env_file(
 ///
 /// CLI `--env` values take precedence over `--env-file` values, matching the
 /// existing a3s-box run/create behavior.
-pub(crate) fn build_env_map(
-    common: &CommonBoxArgs,
-) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+pub(crate) fn build_env_map(common: &CommonBoxArgs) -> Result<HashMap<String, String>, BoxError> {
     // Runtime `--env` honors `docker run -e KEY` host-env passthrough (bare key).
     let mut env: HashMap<String, String> = a3s_box_core::env::parse_runtime_env_vars(&common.env)
         .into_iter()
@@ -371,12 +368,12 @@ fn health_check_command(test: &[String]) -> Option<Vec<String>> {
 }
 
 /// Load OCI config from the local image cache without pulling from a registry.
-pub(crate) async fn cached_image_config(
-    image: &str,
-) -> Result<Option<OciImageConfig>, Box<dyn std::error::Error>> {
+pub(crate) async fn cached_image_config(image: &str) -> Result<Option<OciImageConfig>, BoxError> {
     let store = super::open_image_store()?;
     let images = store.list().await;
-    let Some(stored) = image_usage::resolve_stored_image(&images, image)? else {
+    let Some(stored) =
+        image_usage::resolve_stored_image(&images, image).map_err(BoxError::StateError)?
+    else {
         return Ok(None);
     };
 
@@ -644,17 +641,15 @@ pub(crate) fn parse_memory_swap(s: &str) -> Result<i64, String> {
 }
 
 /// Build ResourceLimits from common box args.
-pub(crate) fn build_resource_limits(
-    args: &CommonBoxArgs,
-) -> Result<ResourceLimits, Box<dyn std::error::Error>> {
+pub(crate) fn build_resource_limits(args: &CommonBoxArgs) -> Result<ResourceLimits, BoxError> {
     let memory_reservation = match &args.memory_reservation {
-        Some(s) => {
-            Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-reservation: {e}"))?)
-        }
+        Some(value) => Some(parse_memory_bytes(value).map_err(|error| {
+            BoxError::ConfigError(format!("Invalid --memory-reservation: {error}"))
+        })?),
         None => None,
     };
     let memory_swap = match &args.memory_swap {
-        Some(s) => Some(parse_memory_swap(s)?),
+        Some(value) => Some(parse_memory_swap(value).map_err(BoxError::ConfigError)?),
         None => None,
     };
 
@@ -662,12 +657,11 @@ pub(crate) fn build_resource_limits(
         pids_limit: args.pids_limit,
         cpuset_cpus: match &args.cpuset_cpus {
             Some(cpuset) if !a3s_box_runtime::is_valid_cpuset(cpuset) => {
-                return Err(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Invalid --cpuset-cpus value {cpuset:?}: expected a comma-separated list of CPU \
                      indices or ascending ranges such as \"0-3\" or \"0,2,4\" (inverted ranges like \
                      \"3-1\" are rejected)."
-                )
-                .into());
+                )));
             }
             other => other.clone(),
         },
@@ -931,7 +925,13 @@ mod tests {
     #[test]
     fn test_parse_env_file_missing_file() {
         let result = parse_env_file("/nonexistent/path/env");
-        assert!(result.is_err());
+        match result {
+            Err(BoxError::IoError(error)) => {
+                let message = error.to_string();
+                assert!(message.contains("Failed to read env file"), "{message}");
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
     }
 
     #[test]

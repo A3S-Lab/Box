@@ -64,6 +64,9 @@ fn extract_layer_with_cap(
         )));
     }
 
+    #[cfg(windows)]
+    crate::vm::refuse_directory_reparse(target_dir)?;
+
     // Create target directory
     std::fs::create_dir_all(target_dir).map_err(|e| {
         BoxError::OciImageError(format!(
@@ -162,6 +165,8 @@ fn extract_layer_with_cap(
         // the newest layer entry (or the original mode when this layer did not
         // modify the directory).
         parent_write_guards.prepare(target_dir, &staging_path)?;
+        #[cfg(windows)]
+        remove_extraction_junctions(target_dir, &staging_path)?;
 
         let file_name = path
             .file_name()
@@ -1245,6 +1250,29 @@ impl Drop for LayerParentWriteGuards {
     }
 }
 
+/// Remove mount-point junctions along an extraction path.
+///
+/// `unpack_in` refuses to follow a junction out of the destination, which
+/// aborts the layer. Replacing the junction first keeps the new bytes inside
+/// the extraction root and leaves the previous target untouched.
+#[cfg(windows)]
+fn remove_extraction_junctions(target_dir: &Path, relative: &Path) -> Result<()> {
+    let mut cursor = target_dir.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        cursor.push(name);
+        a3s_box_core::windows_file::remove_directory_junction(&cursor).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to remove extraction junction {}: {error}",
+                cursor.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Resolve `rel` beneath `target_dir`, following symlinks, returning the real
 /// path ONLY if it stays inside `target_dir`.
 ///
@@ -1278,7 +1306,24 @@ fn remove_path(path: &Path) {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
     };
-    let result = if meta.is_dir() {
+    // A directory junction is both a symlink and a directory. `remove_dir_all`
+    // leaves the junction in place, so remove the link itself.
+    let result = if meta.file_type().is_symlink() {
+        #[cfg(windows)]
+        match a3s_box_core::windows_file::remove_directory_junction(path) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to remove whiteout junction"
+                );
+                return;
+            }
+        }
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
+    } else if meta.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
@@ -1701,6 +1746,105 @@ mod tests {
             !target.join("dir/.wh.removed.txt").exists(),
             "whiteout marker must not be written to the rootfs"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_layer_does_not_write_through_a_child_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let target = temp_dir.path().join("extracted");
+        fs::create_dir_all(&target).unwrap();
+        let child = target.join("child");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            child.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let layer = temp_dir.path().join("layer.tar.gz");
+        create_test_layer(&layer, &[("child/planted.txt", b"planted")]);
+
+        extract_layer(&layer, &target).unwrap();
+
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "extract wrote through the child junction"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert_eq!(
+            fs::read(target.join("child/planted.txt")).unwrap(),
+            b"planted"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_layer_does_not_write_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("extracted");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let layer = temp_dir.path().join("layer.tar.gz");
+        create_test_layer(&layer, &[("planted.txt", b"planted")]);
+
+        let extracted = extract_layer(&layer, &link);
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "extract wrote through a directory junction: {extracted:?}"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "extract replaced the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn whiteout_does_not_delete_through_a_child_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let target = temp_dir.path().join("extracted");
+        let parent = target.join("dir");
+        fs::create_dir_all(&parent).unwrap();
+        let child = parent.join("child");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            child.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let layer = temp_dir.path().join("whiteout.tar.gz");
+        create_test_layer(&layer, &[("dir/.wh.child", b"")]);
+
+        extract_layer(&layer, &target).unwrap();
+
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(!child.exists(), "whiteout left the junction in place");
     }
 
     #[test]

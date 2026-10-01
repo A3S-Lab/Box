@@ -1,5 +1,6 @@
 //! `a3s-box logout` command — Remove stored registry credentials.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 const DEFAULT_REGISTRY_SERVER: &str = "index.docker.io";
@@ -10,7 +11,7 @@ pub struct LogoutArgs {
     pub server: Option<String>,
 }
 
-pub async fn execute(args: LogoutArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: LogoutArgs) -> Result<(), BoxError> {
     let server = registry_server_or_default(args.server);
 
     let store = a3s_box_runtime::CredentialStore::default_path()?;

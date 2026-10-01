@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::log::{LogDriver, LogEntry};
 
 use crate::resolve;
@@ -46,10 +47,20 @@ struct LogSource {
     structured: bool,
 }
 
-pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: LogsArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
-    let since = args.since.as_deref().map(parse_time_filter).transpose()?;
-    let until = args.until.as_deref().map(parse_time_filter).transpose()?;
+    let since = args
+        .since
+        .as_deref()
+        .map(parse_time_filter)
+        .transpose()
+        .map_err(BoxError::ConfigError)?;
+    let until = args
+        .until
+        .as_deref()
+        .map(parse_time_filter)
+        .transpose()
+        .map_err(BoxError::ConfigError)?;
 
     match resolve::resolve(&state, &args.r#box) {
         Ok(record) => {
@@ -58,17 +69,21 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .await?
                 {
                     Some(record) => record,
-                    None => return Err(format!("No such container: {}", args.r#box).into()),
+                    None => {
+                        return Err(BoxError::StateError(format!(
+                            "No such container: {}",
+                            args.r#box
+                        )))
+                    }
                 };
             let box_id = record.id.clone();
 
             // If logging is disabled, tell the user
             if record.log_config.driver == LogDriver::None {
-                return Err(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Logging is disabled for box {} (log-driver=none)",
                     record.name
-                )
-                .into());
+                )));
             }
             let managed_target = if record_is_oci_routed(&record)
                 && matches!(record.status.as_str(), "running" | "paused")
@@ -101,8 +116,10 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
             stream_logs(&box_id, log_source, managed_target, args, since, until).await
         }
         Err(resolve_error) => {
-            let Some(archive) = crate::log_archive::resolve_archive(&args.r#box)? else {
-                return Err(resolve_error.into());
+            let Some(archive) = crate::log_archive::resolve_archive(&args.r#box)
+                .map_err(super::IntoBoxError::into_box_error)?
+            else {
+                return Err(super::IntoBoxError::into_box_error(resolve_error));
             };
             let Some(log_source) = resolve_archived_log_source(&archive) else {
                 return Ok(());
@@ -121,7 +138,7 @@ async fn stream_logs(
     args: LogsArgs,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let use_json = log_source.structured;
     let log_path = log_source.path;
     let has_time_filter = since.is_some() || until.is_some();
@@ -259,8 +276,8 @@ async fn stream_logs(
                         }
                     }
                 }
-                Err(e) => {
-                    return Err(format!("Error reading log: {e}").into());
+                Err(error) => {
+                    return Err(super::io_error("Error reading log", error));
                 }
             }
         }
@@ -382,7 +399,7 @@ fn resolve_archived_log_source_in(log_dir: &Path) -> Option<LogSource> {
 async fn wait_for_log_source(
     box_id: &str,
     managed_target: Option<&ManagedLogTarget>,
-) -> Result<Option<LogSource>, Box<dyn std::error::Error>> {
+) -> Result<Option<LogSource>, BoxError> {
     loop {
         let state =
             super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
@@ -419,28 +436,31 @@ fn record_is_oci_routed(record: &BoxRecord) -> bool {
         .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
 }
 
-async fn prepare_managed_log_target(
-    record: &BoxRecord,
-) -> Result<ManagedLogTarget, Box<dyn std::error::Error>> {
+async fn prepare_managed_log_target(record: &BoxRecord) -> Result<ManagedLogTarget, BoxError> {
     use a3s_box_core::ExecutionManager;
 
-    let metadata = record
-        .managed_execution
-        .as_ref()
-        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
-    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed execution metadata",
+            record.name
+        ))
+    })?;
+    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())
+        .map_err(super::IntoBoxError::into_box_error)?;
     let generation = metadata.generation;
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
-    let status = manager.inspect(&execution_id).await?;
+    let status = manager
+        .inspect(&execution_id)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     if status.generation != generation {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Box {} changed from managed generation {} to {} while opening logs",
             record.name,
             generation.get(),
             status.generation.get()
-        )
-        .into());
+        )));
     }
     Ok(ManagedLogTarget {
         manager,
@@ -684,6 +704,17 @@ mod tests {
     #[test]
     fn test_parse_duration_invalid() {
         assert!(parse_duration("abc").is_err());
+    }
+
+    #[test]
+    fn invalid_log_duration_is_a_configuration_error() {
+        let error = parse_duration("0").map_err(BoxError::ConfigError);
+        match error {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("resolved to 0"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]

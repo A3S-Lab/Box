@@ -5,7 +5,7 @@ use clap::Args;
 #[derive(Args)]
 pub struct VersionArgs;
 
-pub async fn execute(_args: VersionArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(_args: VersionArgs) -> Result<(), a3s_box_core::error::BoxError> {
     println!("{}", version_line());
     Ok(())
 }

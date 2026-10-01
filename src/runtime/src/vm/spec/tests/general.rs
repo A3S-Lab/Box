@@ -101,6 +101,16 @@ fn test_persistent_box_requests_terminal_rootfs_metadata() {
     let spec = vm.build_instance_spec(&layout).unwrap();
 
     assert_eq!(env_value(&spec, "BOX_PERSIST_ROOTFS_METADATA"), Some("1"));
+    #[cfg(windows)]
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        Some("1")
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        None
+    );
 }
 
 #[cfg(windows)]
@@ -114,6 +124,10 @@ fn test_windows_box_enables_host_control_without_published_ports() {
 
     assert!(spec.port_map.is_empty());
     assert_eq!(env_value(&spec, "BOX_WINDOWS_PORT_FWD"), Some("1"));
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        None
+    );
 }
 
 #[test]
@@ -284,6 +298,218 @@ fn test_build_instance_spec_marks_named_volume_for_copy_up() {
     let spec = vm.build_instance_spec(&layout).unwrap();
 
     assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data:copy"));
+    #[cfg(target_os = "windows")]
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        Some("1")
+    );
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        None
+    );
+}
+
+#[test]
+fn test_build_instance_spec_skips_copy_up_when_the_managed_path_is_a_file() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let store = crate::volume::VolumeStore::new(
+        home.path().join("volumes.json"),
+        home.path().join("volumes"),
+    );
+    let volume = store
+        .create(a3s_box_core::volume::VolumeConfig::new("data", ""))
+        .unwrap();
+    let volume_dir = std::path::PathBuf::from(&volume.mount_point);
+    std::fs::remove_dir_all(&volume_dir).unwrap();
+    std::fs::write(&volume_dir, b"not-a-directory").unwrap();
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", volume.mount_point)],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let spec = vm.build_instance_spec(&layout).unwrap();
+
+    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data:file"));
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        None
+    );
+    assert_eq!(std::fs::read(&volume_dir).unwrap(), b"not-a-directory");
+}
+
+#[test]
+fn test_build_instance_spec_refuses_a_managed_path_through_a_linked_volume_store() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir_all(outside.join("data")).unwrap();
+    std::fs::write(outside.join("data").join("secret.txt"), b"secret").unwrap();
+    let volumes = home.path().join("volumes");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &volumes).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            volumes.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+    }
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let host_path = volumes.join("data");
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", host_path.display())],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let error = vm
+        .build_instance_spec(&layout)
+        .expect_err("a managed path through a linked volume store must not be mounted");
+    assert!(error.to_string().contains("not a directory"), "{error}");
+    assert_eq!(
+        std::fs::read(outside.join("data").join("secret.txt")).unwrap(),
+        b"secret"
+    );
+}
+
+#[test]
+fn test_build_instance_spec_refuses_a_managed_path_when_home_is_a_link() {
+    let root = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(outside.join("volumes").join("data")).unwrap();
+    std::fs::write(
+        outside.join("volumes").join("data").join("secret.txt"),
+        b"secret",
+    )
+    .unwrap();
+    let home = root.path().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &home).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            home.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+    }
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let host_path = home.join("volumes").join("data");
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", host_path.display())],
+        ..Default::default()
+    });
+    vm.home_dir = home;
+
+    let error = vm
+        .build_instance_spec(&layout)
+        .expect_err("a managed path under a linked home must not be mounted");
+    assert!(error.to_string().contains("not a directory"), "{error}");
+    assert_eq!(
+        std::fs::read(outside.join("volumes").join("data").join("secret.txt")).unwrap(),
+        b"secret"
+    );
+}
+
+#[test]
+fn test_build_instance_spec_ignores_a_mount_point_outside_the_managed_directory() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let outside = home.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let store = crate::volume::VolumeStore::new(
+        home.path().join("volumes.json"),
+        home.path().join("volumes"),
+    );
+    store
+        .create(a3s_box_core::volume::VolumeConfig::new("data", ""))
+        .unwrap();
+    let mut volumes = store.load().unwrap();
+    volumes.get_mut("data").unwrap().mount_point = outside.to_string_lossy().into_owned();
+    store.save(&volumes).unwrap();
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", outside.display())],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let spec = vm.build_instance_spec(&layout).unwrap();
+
+    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data"));
+}
+
+#[test]
+fn test_build_instance_spec_ignores_a_stored_sidecar_filename() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let store = crate::volume::VolumeStore::new(
+        home.path().join("volumes.json"),
+        home.path().join("volumes"),
+    );
+    store
+        .create(a3s_box_core::volume::VolumeConfig::new("data", ""))
+        .unwrap();
+    let suffix = a3s_box_core::volume_posix::VOLUME_POSIX_SIDECAR_SUFFIX;
+    let name = format!("data{suffix}");
+    let mount = home.path().join("volumes").join(&name);
+    let mut volumes = store.load().unwrap();
+    volumes.insert(
+        name.clone(),
+        a3s_box_core::volume::VolumeConfig::new(&name, &mount.to_string_lossy()),
+    );
+    store.save(&volumes).unwrap();
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", mount.display())],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let spec = vm.build_instance_spec(&layout).unwrap();
+
+    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data"));
+}
+
+#[test]
+fn test_build_instance_spec_keeps_copy_up_when_the_stored_name_is_a_sidecar_filename() {
+    let home = tempdir().unwrap();
+    let layout_dir = tempdir().unwrap();
+    let layout = test_layout(layout_dir.path(), Some(test_oci_config(None, None)), true);
+    let store = crate::volume::VolumeStore::new(
+        home.path().join("volumes.json"),
+        home.path().join("volumes"),
+    );
+    let created = store
+        .create(a3s_box_core::volume::VolumeConfig::new("data", ""))
+        .unwrap();
+    let suffix = a3s_box_core::volume_posix::VOLUME_POSIX_SIDECAR_SUFFIX;
+    let mut volumes = store.load().unwrap();
+    volumes.get_mut("data").unwrap().name = format!("data{suffix}");
+    store.save(&volumes).unwrap();
+    let mut vm = test_vm_manager(BoxConfig {
+        volumes: vec![format!("{}:/data", created.mount_point)],
+        ..Default::default()
+    });
+    vm.home_dir = home.path().to_path_buf();
+
+    let spec = vm.build_instance_spec(&layout).unwrap();
+
+    assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/data:copy"));
 }
 
 #[test]
@@ -327,6 +553,10 @@ fn test_build_instance_spec_windows_bind_uses_linux_guest_target() {
     let spec = vm.build_instance_spec(&layout).unwrap();
 
     assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/tests"));
+    assert_eq!(
+        env_value(&spec, a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV),
+        None
+    );
     assert!(
         vm.anonymous_volumes.is_empty(),
         "the user bind must cover the matching OCI volume"
@@ -564,6 +794,76 @@ fn prepare_volume_mount_rejects_symlink_or_reparse_host_source() {
         error.contains("symlink/reparse") || error.contains("plain file or directory"),
         "{error}"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_volume_mount_rejects_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temp = TempDir::new().unwrap();
+    let outside = temp.path().join("outside");
+    let child = outside.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("secret.txt"), b"secret").unwrap();
+    let parent = temp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let host = link.join("child");
+    let volume = format!("{}:/data", host.display());
+
+    let error = VmManager::parse_volume_mount(&volume, 0, std::path::Path::new("/tmp"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("symlink/reparse"),
+        "ancestor junction widened the volume share: {error}"
+    );
+    assert_eq!(std::fs::read(child.join("secret.txt")).unwrap(), b"secret");
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_volume_mount_does_not_create_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temp = TempDir::new().unwrap();
+    let outside = temp.path().join("outside");
+    let child = outside.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("secret.txt"), b"secret").unwrap();
+    let parent = temp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let host = link.join("child").join("new");
+    let volume = format!("{}:/data", host.display());
+
+    let error = VmManager::parse_volume_mount(&volume, 0, std::path::Path::new("/tmp"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("symlink/reparse"),
+        "ancestor junction widened the volume share: {error}"
+    );
+    assert!(
+        !outside.join("child").join("new").exists(),
+        "volume creation wrote through the ancestor junction"
+    );
+    assert_eq!(std::fs::read(child.join("secret.txt")).unwrap(), b"secret");
 }
 
 #[test]

@@ -42,19 +42,18 @@ path = "examples/linux_kvm_live_session_qualification.rs"
 required-features = ["vm"]
 
 [features]
-default = ["vm", "pool", "scale", "compose", "operator", "build"]
+default = ["vm", "pool", "scale", "compose", "build"]
 vm = []
 pool = ["vm"]
 scale = ["dep:axum", "compose"]
 compose = ["vm"]
-operator = []
 build = ["dep:a3s-acl"]
 # Downstream product qualification may inject a real-process execution backend
 # and generation-fenced connector without enabling that seam in release builds.
 runtime-provider-qualification = ["vm"]
 
 [dependencies]
-a3s-box-core = { version = "3.2", path = "../core" }
+a3s-box-core = { version = "3.3", path = "../core" }
 a3s-transport = { workspace = true }
 
 # Async runtime

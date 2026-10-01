@@ -178,6 +178,8 @@ pub(crate) fn remove_file_mount_staging_in(temp_dir: &Path, box_id: &str) -> Res
     }
 
     for path in owned {
+        #[cfg(windows)]
+        crate::vm::refuse_directory_reparse(&path)?;
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -196,6 +198,41 @@ pub(crate) fn remove_file_mount_staging_in(temp_dir: &Path, box_id: &str) -> Res
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_file_mount_staging_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let root = TempDir::new().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let staging = root.path().join("a3s-fs-mount-box1");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            staging.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = remove_file_mount_staging_in(root.path(), "box1");
+        assert!(
+            removed.is_err(),
+            "file-mount staging cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&staging).unwrap();
+        assert!(
+            metadata.file_attributes() & 0x400 != 0,
+            "file-mount staging cleanup removed the directory junction"
+        );
+    }
 
     #[test]
     fn test_fs_manager_new_empty() {

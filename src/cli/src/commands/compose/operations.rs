@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use a3s_box_core::compose::ComposeConfig;
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use super::{LABEL_PROJECT, LABEL_SERVICE};
@@ -11,9 +12,9 @@ use crate::state::{BoxRecord, StateFile};
 pub(super) fn select_up_config(
     mut config: ComposeConfig,
     requested: &[String],
-) -> Result<ComposeConfig, Box<dyn std::error::Error>> {
+) -> Result<ComposeConfig, BoxError> {
     if requested.is_empty() {
-        config.service_order()?;
+        config.service_order().map_err(BoxError::ConfigError)?;
         return Ok(config);
     }
 
@@ -22,7 +23,7 @@ pub(super) fn select_up_config(
         collect_service_dependencies(&config, service, &mut selected)?;
     }
     config.services.retain(|name, _| selected.contains(name));
-    config.service_order()?;
+    config.service_order().map_err(BoxError::ConfigError)?;
     Ok(config)
 }
 
@@ -30,11 +31,12 @@ fn collect_service_dependencies(
     config: &ComposeConfig,
     service: &str,
     selected: &mut BTreeSet<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let definition = config
-        .services
-        .get(service)
-        .ok_or_else(|| format!("service '{service}' is not defined in the Compose project"))?;
+) -> Result<(), BoxError> {
+    let definition = config.services.get(service).ok_or_else(|| {
+        BoxError::ConfigError(format!(
+            "service '{service}' is not defined in the Compose project"
+        ))
+    })?;
     if !selected.insert(service.to_string()) {
         return Ok(());
     }
@@ -218,7 +220,7 @@ pub async fn execute_start(
     project_name: &str,
     config: &ComposeConfig,
     args: ProjectServicesArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     let queries = matching_ids(&boxes, |status| {
         matches!(status, "created" | "stopped" | "dead")
@@ -234,7 +236,7 @@ pub async fn execute_stop(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeStopArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, true)?;
     let queries = matching_ids(&boxes, |status| matches!(status, "running" | "paused"));
     if queries.is_empty() {
@@ -252,7 +254,7 @@ pub async fn execute_restart(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeRestartArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     super::super::restart::execute(super::super::restart::RestartArgs {
         boxes: ids(&boxes),
@@ -265,14 +267,14 @@ pub async fn execute_rm(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeRmArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, true)?;
     let active = matching_ids(&boxes, |status| matches!(status, "running" | "paused"));
     if !active.is_empty() {
         if !args.stop {
-            return Err(
-                "selected services are active; pass --stop or run `compose stop` first".into(),
-            );
+            return Err(BoxError::StateError(
+                "selected services are active; pass --stop or run `compose stop` first".to_string(),
+            ));
         }
         super::super::stop::execute(super::super::stop::StopArgs {
             boxes: active,
@@ -292,7 +294,7 @@ pub async fn execute_kill(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeKillArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, true)?;
     let queries = matching_ids(&boxes, |status| matches!(status, "running" | "paused"));
     if queries.is_empty() {
@@ -310,7 +312,7 @@ pub async fn execute_pause(
     project_name: &str,
     config: &ComposeConfig,
     args: ProjectServicesArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     let queries = matching_ids(&boxes, |status| status == "running");
     if queries.is_empty() {
@@ -324,7 +326,7 @@ pub async fn execute_unpause(
     project_name: &str,
     config: &ComposeConfig,
     args: ProjectServicesArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     let queries = matching_ids(&boxes, |status| status == "paused");
     if queries.is_empty() {
@@ -338,7 +340,7 @@ pub async fn execute_wait(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeWaitArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     super::super::wait::execute(super::super::wait::WaitArgs {
         boxes: ids(&boxes),
@@ -353,7 +355,7 @@ pub async fn execute_exec(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeExecArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let service_box = one_service(project_name, config, &args.service)?;
     super::super::exec::execute(super::super::exec::ExecArgs {
         r#box: service_box.id,
@@ -373,7 +375,7 @@ pub async fn execute_top(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeTopArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let boxes = select_boxes(project_name, config, &args.services, false)?;
     for service_box in boxes {
         println!("{}", service_box.service);
@@ -391,12 +393,12 @@ pub async fn execute_port(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposePortArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let service_box = one_service(project_name, config, &args.service)?;
     let requested = args.private_port.as_deref().map(normalize_private_port);
     let mut found = false;
     for value in &service_box.record.port_map {
-        let mapping = a3s_box_core::parse_port_mapping(value)?;
+        let mapping = a3s_box_core::parse_port_mapping(value).map_err(BoxError::ConfigError)?;
         let private = format!("{}/{}", mapping.guest_port, mapping.protocol.as_str());
         if requested.as_deref().is_some_and(|value| value != private) {
             continue;
@@ -405,11 +407,10 @@ pub async fn execute_port(
         println!("0.0.0.0:{}", mapping.host_port);
     }
     if requested.is_some() && !found {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "service '{}' does not publish the requested port",
             args.service
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -418,7 +419,7 @@ pub async fn execute_cp(
     project_name: &str,
     config: &ComposeConfig,
     args: ComposeCpArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let src = resolve_copy_endpoint(project_name, config, args.src)?;
     let dst = resolve_copy_endpoint(project_name, config, args.dst)?;
     super::super::cp::execute(super::super::cp::CpArgs { src, dst }).await
@@ -428,7 +429,7 @@ pub fn execute_images(
     _project_name: &str,
     config: &ComposeConfig,
     args: ProjectServicesArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let services = selected_service_names(config, &args.services)?;
     let mut table = crate::output::new_table(&["SERVICE", "IMAGE"]);
     for service in services {
@@ -447,7 +448,7 @@ pub async fn execute_pull(
     _project_name: &str,
     config: &ComposeConfig,
     args: ComposePullArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let services = selected_service_names(config, &args.services)?;
     let mut images = BTreeSet::new();
     for service in services {
@@ -460,7 +461,9 @@ pub async fn execute_pull(
         }
     }
     if images.is_empty() {
-        return Err("selected services do not declare an image".into());
+        return Err(BoxError::ConfigError(
+            "selected services do not declare an image".to_string(),
+        ));
     }
     for image in images {
         super::super::pull::execute(super::super::pull::PullArgs {
@@ -476,7 +479,7 @@ pub async fn execute_pull(
     Ok(())
 }
 
-pub async fn execute_ls(args: ComposeLsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute_ls(args: ComposeLsArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
     let mut projects: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for record in state.records() {
@@ -510,10 +513,7 @@ pub async fn execute_ls(args: ComposeLsArgs) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-pub fn execute_volumes(
-    _project_name: &str,
-    config: &ComposeConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn execute_volumes(_project_name: &str, config: &ComposeConfig) -> Result<(), BoxError> {
     let mut volumes = config.volumes.keys().cloned().collect::<Vec<_>>();
     volumes.sort();
     for volume in volumes {
@@ -527,7 +527,7 @@ fn select_boxes(
     config: &ComposeConfig,
     requested: &[String],
     reverse: bool,
-) -> Result<Vec<ProjectBox>, Box<dyn std::error::Error>> {
+) -> Result<Vec<ProjectBox>, BoxError> {
     let state = StateFile::load_default()?;
     let mut by_service: BTreeMap<String, Vec<ProjectBox>> = BTreeMap::new();
     for record in state.find_by_label(LABEL_PROJECT, project_name) {
@@ -546,10 +546,9 @@ fn select_boxes(
             });
     }
     if by_service.is_empty() {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "No services found for project '{project_name}'. Run `compose up` first."
-        )
-        .into());
+        )));
     }
 
     let existing = by_service.keys().cloned().collect::<BTreeSet<_>>();
@@ -559,7 +558,9 @@ fn select_boxes(
     for service in service_order {
         let Some(mut boxes) = by_service.remove(&service) else {
             if !requested.is_empty() {
-                return Err(format!("service '{service}' has not been created").into());
+                return Err(BoxError::StateError(format!(
+                    "service '{service}' has not been created"
+                )));
             }
             continue;
         };
@@ -574,9 +575,9 @@ fn service_box_order(
     existing: &BTreeSet<String>,
     requested: &[String],
     reverse: bool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, BoxError> {
     let mut service_order = if requested.is_empty() {
-        let mut order = config.service_order()?;
+        let mut order = config.service_order().map_err(BoxError::ConfigError)?;
         for service in existing {
             if !order.contains(service) {
                 order.push(service.clone());
@@ -597,12 +598,12 @@ fn validate_requested_services(
     config: &ComposeConfig,
     existing: &BTreeSet<String>,
     requested: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), a3s_box_core::error::BoxError> {
     for service in requested {
         if !config.services.contains_key(service) && !existing.contains(service) {
-            return Err(
-                format!("service '{service}' is not defined in the Compose project").into(),
-            );
+            return Err(a3s_box_core::error::BoxError::ConfigError(format!(
+                "service '{service}' is not defined in the Compose project"
+            )));
         }
     }
     Ok(())
@@ -611,15 +612,17 @@ fn validate_requested_services(
 pub(super) fn selected_service_names(
     config: &ComposeConfig,
     requested: &[String],
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, a3s_box_core::error::BoxError> {
     if requested.is_empty() {
-        return Ok(config.service_order()?);
+        return config
+            .service_order()
+            .map_err(a3s_box_core::error::BoxError::ConfigError);
     }
     for service in requested {
         if !config.services.contains_key(service) {
-            return Err(
-                format!("service '{service}' is not defined in the Compose project").into(),
-            );
+            return Err(a3s_box_core::error::BoxError::ConfigError(format!(
+                "service '{service}' is not defined in the Compose project"
+            )));
         }
     }
     Ok(unique_service_names(requested))
@@ -638,26 +641,24 @@ fn one_service(
     project_name: &str,
     config: &ComposeConfig,
     service: &str,
-) -> Result<ProjectBox, Box<dyn std::error::Error>> {
+) -> Result<ProjectBox, BoxError> {
     let boxes = select_boxes(project_name, config, &[service.to_string()], false)?;
     if boxes.len() != 1 {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "service '{service}' resolves to {} boxes; select one instance explicitly",
             boxes.len()
-        )
-        .into());
+        )));
     }
-    boxes
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("service '{service}' did not resolve to a box").into())
+    boxes.into_iter().next().ok_or_else(|| {
+        BoxError::StateError(format!("service '{service}' did not resolve to a box"))
+    })
 }
 
 fn resolve_copy_endpoint(
     project_name: &str,
     config: &ComposeConfig,
     endpoint: String,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, BoxError> {
     let Some((service, path)) = endpoint.split_once(':') else {
         return Ok(endpoint);
     };
@@ -665,7 +666,9 @@ fn resolve_copy_endpoint(
         return Ok(endpoint);
     }
     if !config.services.contains_key(service) {
-        return Err(format!("service '{service}' is not defined in the Compose project").into());
+        return Err(BoxError::ConfigError(format!(
+            "service '{service}' is not defined in the Compose project"
+        )));
     }
     let service_box = one_service(project_name, config, service)?;
     Ok(format!("{}:{path}", service_box.id))
@@ -704,8 +707,12 @@ mod tests {
     #[test]
     fn service_selection_rejects_unknown_names() {
         let config = ComposeConfig::from_yaml_str("services:\n  web:\n    image: nginx\n").unwrap();
-        let error = selected_service_names(&config, &["db".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("service 'db' is not defined"));
+        let Err(a3s_box_core::error::BoxError::ConfigError(message)) =
+            selected_service_names(&config, &["db".to_string()])
+        else {
+            panic!("unknown compose service must be a configuration error");
+        };
+        assert!(message.contains("service 'db' is not defined"));
     }
 
     #[test]
@@ -752,11 +759,11 @@ mod tests {
     fn copy_endpoint_rejects_non_project_service_names() {
         let config = ComposeConfig::from_yaml_str("services:\n  api:\n    image: api\n").unwrap();
 
-        let error =
-            resolve_copy_endpoint("project", &config, "other:/tmp/data".to_string()).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("service 'other' is not defined in the Compose project"));
+        let Err(BoxError::ConfigError(message)) =
+            resolve_copy_endpoint("project", &config, "other:/tmp/data".to_string())
+        else {
+            panic!("a non-project copy service must be a configuration error");
+        };
+        assert!(message.contains("service 'other' is not defined in the Compose project"));
     }
 }

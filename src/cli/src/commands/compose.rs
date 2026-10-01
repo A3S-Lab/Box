@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use a3s_box_core::compose::{normalize_compose, ComposeConfig, ComposeSourceFormat, ServiceConfig};
 use a3s_box_core::config::DEFAULT_VCPUS;
+use a3s_box_core::error::BoxError;
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeRuntimePlan, NetworkStore, VmManager};
 use sha2::{Digest, Sha256};
@@ -58,7 +59,7 @@ const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
 ];
 
-pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ComposeArgs) -> Result<(), BoxError> {
     let ComposeArgs {
         file,
         project_name,
@@ -132,34 +133,36 @@ pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>
             operations::execute_pull(&project_name, &config, command_args).await
         }
         ComposeCommand::Volumes => operations::execute_volumes(&project_name, &config),
-        ComposeCommand::Ls(_) => {
-            Err("Compose ls was not dispatched before project file loading".into())
-        }
+        ComposeCommand::Ls(_) => Err(BoxError::StateError(
+            "Compose ls was not dispatched before project file loading".to_string(),
+        )),
     }
 }
 
 /// Find and load the compose file.
 fn load_compose_file(
     explicit_path: Option<&std::path::Path>,
-) -> Result<(PathBuf, ComposeConfig), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, ComposeConfig), BoxError> {
     load_compose_file_with_environment(explicit_path, std::env::vars())
 }
 
 fn load_compose_file_with_environment(
     explicit_path: Option<&std::path::Path>,
     shell_environment: impl IntoIterator<Item = (String, String)>,
-) -> Result<(PathBuf, ComposeConfig), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, ComposeConfig), BoxError> {
     let cwd = std::env::current_dir()?;
     let path = resolve_compose_path(explicit_path, &cwd)?;
+    super::commit::refuse_archive_ancestor_reparse(&path)?;
 
     let source = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        .map_err(|error| super::io_error(format!("Failed to read {}", path.display()), error))?;
 
     let mut environment = HashMap::new();
     let environment_path = path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(".env");
+    super::commit::refuse_archive_ancestor_reparse(&environment_path)?;
     match std::fs::read_to_string(&environment_path) {
         Ok(contents) => {
             for (key, value) in a3s_box_core::env::parse_env_file_content(&contents) {
@@ -168,12 +171,13 @@ fn load_compose_file_with_environment(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(format!(
-                "Failed to read Compose environment file {}: {}",
-                environment_path.display(),
-                error
-            )
-            .into());
+            return Err(super::io_error(
+                format!(
+                    "Failed to read Compose environment file {}",
+                    environment_path.display()
+                ),
+                error,
+            ));
         }
     }
     environment.extend(shell_environment);
@@ -188,7 +192,9 @@ fn load_compose_file_with_environment(
         ComposeSourceFormat::Yaml
     };
     let config = normalize_compose(&source, format, &environment)
-        .map_err(|error| format!("Failed to normalize {}: {error}", path.display()))?
+        .map_err(|error| {
+            BoxError::ConfigError(format!("Failed to normalize {}: {error}", path.display()))
+        })?
         .into_config();
 
     Ok((path, config))
@@ -197,7 +203,7 @@ fn load_compose_file_with_environment(
 fn resolve_compose_path(
     explicit_path: Option<&std::path::Path>,
     search_directory: &std::path::Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<PathBuf, BoxError> {
     if let Some(p) = explicit_path {
         let path = if p.is_absolute() {
             p.to_path_buf()
@@ -205,7 +211,10 @@ fn resolve_compose_path(
             search_directory.join(p)
         };
         if !path.exists() {
-            return Err(format!("Compose file not found: {}", path.display()).into());
+            return Err(BoxError::ConfigError(format!(
+                "Compose file not found: {}",
+                path.display()
+            )));
         }
         Ok(path)
     } else {
@@ -215,25 +224,22 @@ fn resolve_compose_path(
             .find(|p| p.exists())
         {
             Some(path) => Ok(path),
-            None => Err(format!(
+            None => Err(BoxError::ConfigError(format!(
                 "No compose file found. Looked for: {}",
                 COMPOSE_FILES.join(", ")
-            )
-            .into()),
+            ))),
         }
     }
 }
 
-fn validate_compose_restart_policies(config: &ComposeConfig) -> Result<(), String> {
+fn validate_compose_restart_policies(config: &ComposeConfig) -> Result<(), BoxError> {
     for (service_name, service) in &config.services {
-        service_restart_policy(service_name, Some(service))?;
+        service_restart_policy(service_name, Some(service)).map_err(BoxError::ConfigError)?;
     }
     Ok(())
 }
 
-async fn validate_compose_health_support(
-    project: &ComposeRuntimePlan,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn validate_compose_health_support(project: &ComposeRuntimePlan) -> Result<(), BoxError> {
     #[cfg(windows)]
     {
         let default_network = project.default_network_name();
@@ -252,7 +258,7 @@ async fn validate_compose_health_support(
                         start_period_secs: health_check.start_period_secs,
                     });
             validate_known_compose_health(service_name, disabled, service_health_check, None)
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                .map_err(BoxError::ConfigError)?;
         }
 
         for service_name in &project.service_order {
@@ -281,12 +287,12 @@ async fn validate_compose_health_support(
                 image_config = common::cached_image_config(&image).await?;
             }
             let image_config = image_config.ok_or_else(|| {
-                format!(
+                BoxError::OciImageError(format!(
                     "Compose service '{service_name}' image metadata was unavailable after pulling {image}"
-                )
+                ))
             })?;
             validate_known_compose_health(service_name, false, None, Some(&image_config))
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                .map_err(BoxError::ConfigError)?;
         }
     }
 
@@ -345,14 +351,13 @@ async fn execute_up(
     config: ComposeConfig,
     compose_path: PathBuf,
     up_args: ComposeUpArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let isolation = common::resolve_isolation(up_args.isolation);
     let config = operations::select_up_config(config, &up_args.services)?;
     let base_dir = compose_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    validate_compose_restart_policies(&config)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    validate_compose_restart_policies(&config)?;
     let project = ComposeRuntimePlan::with_base_dir(project_name, config, base_dir)?;
     validate_compose_up_platform_support()?;
     // Windows has no guest health-probe transport. Resolve declared health
@@ -419,7 +424,10 @@ async fn execute_up(
                         &mut state,
                         &started_services,
                         &created_networks,
-                        format!("Failed to create network '{}': {}", net_name, error),
+                        BoxError::NetworkError(format!(
+                            "Failed to create network '{}': {}",
+                            net_name, error
+                        )),
                     )
                     .await;
                 }
@@ -459,7 +467,9 @@ async fn execute_up(
 
     for svc_name in &project.service_order {
         let service = project.config.services.get(svc_name).ok_or_else(|| {
-            format!("Service '{svc_name}' disappeared from the resolved Compose project")
+            BoxError::StateError(format!(
+                "Service '{svc_name}' disappeared from the resolved Compose project"
+            ))
         })?;
         let mut desired_box_config = project.build_box_config(svc_name, Some(&default_net))?;
         desired_box_config.isolation = isolation;
@@ -581,8 +591,7 @@ async fn execute_up(
                 labels.insert(LABEL_SECRET_ID.to_string(), lease.identity().to_string());
             }
             let (restart_policy, max_restart_count) =
-                service_restart_policy(svc_name, Some(service))
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                service_restart_policy(svc_name, Some(service)).map_err(BoxError::ConfigError)?;
             let restart_policy = sandbox_managed::execution_restart_policy(&restart_policy)?;
             let healthcheck_disabled = project.healthcheck_disabled(svc_name);
             let service_health_check = project.healthcheck(svc_name)?.map(|hc| HealthCheck {
@@ -627,7 +636,7 @@ async fn execute_up(
                             &mut state,
                             &rollback_services,
                             &created_networks,
-                            error,
+                            super::IntoBoxError::into_box_error(error),
                         )
                         .await;
                     }
@@ -685,7 +694,7 @@ async fn execute_up(
                 &started_services,
                 &created_networks,
                 chain_partial_cleanup_error(
-                    error,
+                    super::io_error("Failed to create Compose service socket directory", error),
                     cleanup_partial_service_box(
                         &box_id,
                         &box_dir,
@@ -704,7 +713,7 @@ async fn execute_up(
                 &started_services,
                 &created_networks,
                 chain_partial_cleanup_error(
-                    error,
+                    super::io_error("Failed to create Compose service log directory", error),
                     cleanup_partial_service_box(
                         &box_id,
                         &box_dir,
@@ -728,48 +737,44 @@ async fn execute_up(
             // endpoint. Register the bare service name plus declared network
             // aliases so peers can use Compose DNS names, not only the
             // `{project}-{svc}` box name.
-            let endpoint =
-                match net_store.with_write_lock(
-                    |networks| -> Result<
-                        a3s_box_core::network::NetworkEndpoint,
-                        Box<dyn std::error::Error>,
-                    > {
-                        let net_config = networks.get_mut(net_name).ok_or_else(
-                            || -> Box<dyn std::error::Error> {
-                                format!("Compose network '{}' was not created", net_name).into()
-                            },
-                        )?;
-                        super::network::validate_attachable_network(net_config)
-                            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-                        net_config
-                            .connect_with_aliases(&box_id, &box_name, &network_aliases)
-                            .map_err(|e| -> Box<dyn std::error::Error> {
-                                format!("Failed to connect service '{}' to network: {e}", svc_name)
-                                    .into()
-                            })
-                    },
-                ) {
-                    Ok(endpoint) => endpoint,
-                    Err(error) => {
-                        return rollback_compose_up(
-                            &mut state,
-                            &started_services,
-                            &created_networks,
-                            chain_partial_cleanup_error(
-                                error,
-                                cleanup_partial_service_box(
-                                    &box_id,
-                                    &box_dir,
-                                    &initial_exec_socket_path,
-                                    network_name.as_deref(),
-                                    &volume_names,
-                                    &[],
-                                ),
+            let endpoint = match net_store.with_write_lock(
+                |networks| -> Result<a3s_box_core::network::NetworkEndpoint, BoxError> {
+                    let net_config = networks.get_mut(net_name).ok_or_else(|| {
+                        BoxError::NetworkError(format!(
+                            "Compose network '{net_name}' was not created"
+                        ))
+                    })?;
+                    super::network::validate_attachable_network(net_config)?;
+                    net_config
+                        .connect_with_aliases(&box_id, &box_name, &network_aliases)
+                        .map_err(|error| {
+                            BoxError::NetworkError(format!(
+                                "Failed to connect service '{svc_name}' to network: {error}"
+                            ))
+                        })
+                },
+            ) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    return rollback_compose_up(
+                        &mut state,
+                        &started_services,
+                        &created_networks,
+                        chain_partial_cleanup_error(
+                            error,
+                            cleanup_partial_service_box(
+                                &box_id,
+                                &box_dir,
+                                &initial_exec_socket_path,
+                                network_name.as_deref(),
+                                &volume_names,
+                                &[],
                             ),
-                        )
-                        .await;
-                    }
-                };
+                        ),
+                    )
+                    .await;
+                }
+            };
             print!(
                 "  [+] {} (image={}, ip={})",
                 svc_name, image, endpoint.ip_address
@@ -782,7 +787,7 @@ async fn execute_up(
                 &started_services,
                 &created_networks,
                 chain_partial_cleanup_error(
-                    format!("Failed to start service '{}': {}", svc_name, e),
+                    BoxError::StateError(format!("Failed to start service '{svc_name}': {e}")),
                     cleanup_partial_service_box(
                         &box_id,
                         &box_dir,
@@ -847,8 +852,8 @@ async fn execute_up(
         } else {
             "none".to_string()
         };
-        let (restart_policy, max_restart_count) = service_restart_policy(svc_name, svc)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let (restart_policy, max_restart_count) =
+            service_restart_policy(svc_name, svc).map_err(BoxError::ConfigError)?;
 
         let record = BoxRecord {
             id: box_id.clone(),
@@ -930,7 +935,7 @@ async fn execute_up(
                     &mut state,
                     &rollback_services,
                     &created_networks,
-                    error,
+                    error.into(),
                 )
                 .await;
             }
@@ -940,8 +945,13 @@ async fn execute_up(
         // writes, clobbering them (the lost-registration → orphan-VM race).
         if let Err(error) = StateFile::add_record(record.clone()) {
             let rollback_services = rollback_with_current(&started_services, service_box);
-            return rollback_compose_up(&mut state, &rollback_services, &created_networks, error)
-                .await;
+            return rollback_compose_up(
+                &mut state,
+                &rollback_services,
+                &created_networks,
+                error.into(),
+            )
+            .await;
         }
         if let Err(error) = super::volume::attach_volumes(&volume_names, &box_id) {
             let rollback_services = rollback_with_current(&started_services, service_box);
@@ -962,7 +972,7 @@ async fn execute_up(
                     &mut state,
                     &rollback_services,
                     &created_networks,
-                    error,
+                    super::IntoBoxError::into_box_error(error),
                 )
                 .await;
             }
@@ -991,7 +1001,7 @@ async fn execute_up(
         tokio::select! {
             result = logs => result?,
             signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| format!("Failed to listen for Ctrl-C: {error}"))?;
+                signal?;
                 operations::execute_stop(
                     project_name,
                     &project.config,
@@ -1024,7 +1034,7 @@ fn compose_image_references(config: &ComposeConfig) -> Vec<String> {
 /// Every task is allowed to finish even after another pull fails. Cancelling a
 /// pull future midway could strand its temporary layer directory, whereas the
 /// ImagePuller cleanup path runs when a pull reaches its normal error result.
-async fn prefetch_compose_images(config: &ComposeConfig) -> Result<(), Box<dyn std::error::Error>> {
+async fn prefetch_compose_images(config: &ComposeConfig) -> Result<(), BoxError> {
     let images = compose_image_references(config);
     if images.is_empty() {
         return Ok(());
@@ -1035,19 +1045,20 @@ async fn prefetch_compose_images(config: &ComposeConfig) -> Result<(), Box<dyn s
     let mut tasks = tokio::task::JoinSet::new();
 
     for image in images {
-        let permit = limiter.clone().acquire_owned().await?;
+        let permit = limiter.clone().acquire_owned().await.map_err(|error| {
+            BoxError::StateError(format!("Compose image pull limiter closed: {error}"))
+        })?;
         let store = store.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            let reference = a3s_box_runtime::ImageReference::parse(&image)
-                .map_err(|error| format!("invalid image '{image}': {error}"))?;
+            let reference = a3s_box_runtime::ImageReference::parse(&image).map_err(|error| {
+                BoxError::ConfigError(format!("invalid image '{image}': {error}"))
+            })?;
             let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
             let puller = a3s_box_runtime::ImagePuller::with_platform(store, auth, None);
-            puller
-                .pull(&image)
-                .await
-                .map(|_| ())
-                .map_err(|error| format!("failed to pull Compose image '{image}': {error}"))
+            puller.pull(&image).await.map(|_| ()).map_err(|error| {
+                BoxError::OciImageError(format!("failed to pull Compose image '{image}': {error}"))
+            })
         });
     }
 
@@ -1058,14 +1069,16 @@ async fn prefetch_compose_images(config: &ComposeConfig) -> Result<(), Box<dyn s
             Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
             Ok(Err(_)) => {}
             Err(error) if first_error.is_none() => {
-                first_error = Some(format!("Compose image pull task failed: {error}"));
+                first_error = Some(BoxError::StateError(format!(
+                    "Compose image pull task failed: {error}"
+                )));
             }
             Err(_) => {}
         }
     }
 
     match first_error {
-        Some(error) => Err(error.into()),
+        Some(error) => Err(error),
         None => Ok(()),
     }
 }
@@ -1087,7 +1100,7 @@ fn service_config_hash(
 fn find_existing_service(
     project_name: &str,
     service_name: &str,
-) -> Result<Option<ExistingService>, Box<dyn std::error::Error>> {
+) -> Result<Option<ExistingService>, BoxError> {
     let state = StateFile::load_default()?;
     let matching = state
         .find_by_label(LABEL_PROJECT, project_name)
@@ -1095,11 +1108,10 @@ fn find_existing_service(
         .filter(|record| record.labels.get(LABEL_SERVICE).map(String::as_str) == Some(service_name))
         .collect::<Vec<_>>();
     if matching.len() > 1 {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "service '{service_name}' has {} existing boxes; scaling is not yet enabled for this project",
             matching.len()
-        )
-        .into());
+        )));
     }
     Ok(matching.first().map(|record| {
         (
@@ -1111,7 +1123,7 @@ fn find_existing_service(
 
 fn resolve_service_volumes(
     volume_specs: &[String],
-) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<String>, Vec<String>), BoxError> {
     let mut resolved = Vec::new();
     let mut names = Vec::new();
 

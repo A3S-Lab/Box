@@ -2,6 +2,7 @@
 
 use a3s_box_core::compose::{ComposeConfig, ServiceConfig};
 use a3s_box_core::config::BoxConfig;
+use a3s_box_core::error::BoxError;
 
 #[cfg(target_os = "linux")]
 const SECRET_SCOPE: &str = "compose";
@@ -16,34 +17,46 @@ fn uses_secrets(config: &ComposeConfig) -> bool {
 #[cfg(target_os = "linux")]
 fn material_from_process_environment(
     source: &str,
-) -> Result<a3s_box_runtime::BoxSecretMaterial, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_runtime::BoxSecretMaterial, BoxError> {
     let value = std::env::var(source).map_err(|_| {
-        format!(
+        BoxError::ConfigError(format!(
             "Compose Secret source environment variable {source:?} is unset or is not valid UTF-8"
-        )
+        ))
     })?;
-    a3s_box_runtime::BoxSecretMaterial::new(value.into_bytes()).map_err(|error| error.into())
+    a3s_box_runtime::BoxSecretMaterial::new(value.into_bytes()).map_err(|error| match error {
+        a3s_box_runtime::BoxSecretMaterializationError::Rejected(message) => {
+            BoxError::ConfigError(format!("Secret reference was rejected: {message}"))
+        }
+        a3s_box_runtime::BoxSecretMaterializationError::Unavailable(message) => {
+            BoxError::StateError(format!(
+                "Secret material is temporarily unavailable: {message}"
+            ))
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
-async fn scoped_store(
-) -> Result<a3s_box_runtime::BoxTransientSecretStore, Box<dyn std::error::Error>> {
+async fn scoped_store() -> Result<a3s_box_runtime::BoxTransientSecretStore, BoxError> {
     let root = a3s_box_core::dirs_home().join("runtime-secrets");
-    Ok(a3s_box_runtime::BoxTransientSecretStore::new(root)
+    a3s_box_runtime::BoxTransientSecretStore::new(root)
         .private_scope(SECRET_SCOPE)
-        .await?)
+        .await
+        .map_err(|error| BoxError::StateError(error.to_string()))
 }
 
 /// Fail before network, state, or VM mutation when Secret prerequisites are
 /// unavailable. Values are immediately wrapped in zeroizing memory and dropped.
-pub(super) async fn preflight(config: &ComposeConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn preflight(config: &ComposeConfig) -> Result<(), BoxError> {
     if !uses_secrets(config) {
         return Ok(());
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        Err("Compose transient Secret environment projection requires a private Linux tmpfs".into())
+        Err(BoxError::ConfigError(
+            "Compose transient Secret environment projection requires a private Linux tmpfs"
+                .to_string(),
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -81,9 +94,10 @@ impl ComposeSecretLease {
     pub(super) fn configure_vm(
         &self,
         manager: &mut a3s_box_runtime::VmManager,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.store.configure_vm(manager)?;
-        Ok(())
+    ) -> Result<(), BoxError> {
+        self.store
+            .configure_vm(manager)
+            .map_err(|error| BoxError::StateError(error.to_string()))
     }
 
     /// Transfer cleanup ownership to the persisted box record.
@@ -122,7 +136,7 @@ impl ComposeSecretLease {
     pub(super) fn configure_vm(
         &self,
         _manager: &mut a3s_box_runtime::VmManager,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), BoxError> {
         unreachable!("Secret preflight rejects non-Linux Compose execution")
     }
 
@@ -136,7 +150,7 @@ pub(super) async fn project_service(
     service: &ServiceConfig,
     box_id: &str,
     box_config: &mut BoxConfig,
-) -> Result<Option<ComposeSecretLease>, Box<dyn std::error::Error>> {
+) -> Result<Option<ComposeSecretLease>, BoxError> {
     if service.secret_environment.is_empty() {
         return Ok(None);
     }
@@ -144,7 +158,9 @@ pub(super) async fn project_service(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (box_id, box_config);
-        Err("Compose transient Secret environment projection requires Linux".into())
+        Err(BoxError::ConfigError(
+            "Compose transient Secret environment projection requires Linux".to_string(),
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -159,7 +175,10 @@ pub(super) async fn project_service(
         for (target, source) in references {
             bindings.push((target.clone(), material_from_process_environment(source)?));
         }
-        let projection = store.materialize_environment(&identity, bindings).await?;
+        let projection = store
+            .materialize_environment(&identity, bindings)
+            .await
+            .map_err(|error| BoxError::StateError(error.to_string()))?;
         box_config.volumes.extend(projection.volumes);
         box_config.extra_env.push((
             a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST.to_string(),
@@ -174,15 +193,46 @@ pub(super) async fn project_service(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn cleanup_persisted(identity: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cleanup_persisted(identity: &str) -> Result<(), BoxError> {
     let root = a3s_box_core::dirs_home()
         .join("runtime-secrets")
         .join(SECRET_SCOPE);
-    a3s_box_runtime::BoxTransientSecretStore::new(root).cleanup_identity_sync(identity)?;
-    Ok(())
+    a3s_box_runtime::BoxTransientSecretStore::new(root)
+        .cleanup_identity_sync(identity)
+        .map_err(|error| {
+            BoxError::StateError(format!(
+                "Failed to clean Compose transient Secret material: {error}"
+            ))
+        })
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn cleanup_persisted(_identity: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cleanup_persisted(_identity: &str) -> Result<(), BoxError> {
     Ok(())
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn non_linux_secret_projection_is_a_configuration_error() {
+        let config = ComposeConfig::from_yaml_str(
+            "services:\n  web:\n    image: nginx\n    secret_environment:\n      TOKEN: TOKEN_ENV\n",
+        )
+        .unwrap();
+        let Err(BoxError::ConfigError(message)) = preflight(&config).await else {
+            panic!("non-Linux Compose secrets must be a configuration error");
+        };
+        assert!(message.contains("private Linux tmpfs"));
+
+        let service = config.services.get("web").expect("web service");
+        let mut box_config = BoxConfig::default();
+        let Err(BoxError::ConfigError(message)) =
+            project_service(service, "box", &mut box_config).await
+        else {
+            panic!("non-Linux secret projection must be a configuration error");
+        };
+        assert!(message.contains("requires Linux"));
+    }
 }

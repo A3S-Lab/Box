@@ -13,6 +13,12 @@ use super::super::layer::{
 };
 use super::control::BuildExecutionControl;
 use super::stages::resolve_stage_rootfs;
+#[cfg(windows)]
+use super::utils::recreate_copied_source_junction;
+#[cfg(windows)]
+use super::utils::refuse_copy_through_ancestor_junction;
+#[cfg(windows)]
+use super::utils::remove_copied_destination_junction;
 use super::utils::{
     assert_within, copy_dir_filtered, expand_args, extract_tar_to_dst, is_tar_archive,
     reject_path_traversal, resolve_chown, resolve_path,
@@ -71,6 +77,17 @@ fn copy_dir_filtered_to_guest_rootfs(
     ignore: Option<&DockerIgnore>,
     changed: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    remove_copied_destination_junction(dst)?;
+    #[cfg(windows)]
+    if recreate_copied_source_junction(src, dst)? {
+        record_guest_change(rootfs_dir, dst, changed)?;
+        return Ok(());
+    }
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(src)?;
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(dst)?;
     let destination_existed = std::fs::symlink_metadata(dst).is_ok();
     std::fs::create_dir_all(dst).map_err(|error| {
         BoxError::BuildError(format!(
@@ -144,6 +161,19 @@ fn copy_dir_filtered_to_guest_rootfs(
                     _target.display()
                 ))
             })?;
+            #[cfg(windows)]
+            if a3s_box_core::windows_file::recreate_directory_junction(&src_path, &dst_path)
+                .map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to recreate COPY directory junction {} -> {}: {error}",
+                        dst_path.display(),
+                        _target.display()
+                    ))
+                })?
+            {
+                record_guest_change(rootfs_dir, &dst_path, changed)?;
+                continue;
+            }
             #[cfg(not(unix))]
             std::fs::write(&dst_path, []).map_err(|error| {
                 BoxError::BuildError(format!(
@@ -159,6 +189,8 @@ fn copy_dir_filtered_to_guest_rootfs(
                     &src_path, &dst_path, rootfs_dir, &entry_rel, ignore, changed,
                 )?;
             } else {
+                #[cfg(windows)]
+                remove_copied_destination_junction(&dst_path)?;
                 std::fs::copy(&src_path, &dst_path).map_err(|error| {
                     BoxError::BuildError(format!(
                         "Failed to copy {} to {}: {error}",
@@ -1170,6 +1202,11 @@ fn copy_run_bind_mount_source(
     target: &Path,
     ignore: Option<&DockerIgnore>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    {
+        refuse_copy_through_ancestor_junction(source)?;
+        refuse_copy_through_ancestor_junction(target)?;
+    }
     let meta = std::fs::symlink_metadata(source).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to inspect RUN bind mount source {}: {}",
@@ -1494,6 +1531,18 @@ struct PoolRunCacheMountOverlay {
     _lock: crate::file_lock::FileLock,
 }
 
+fn ensure_run_cache_root(cache_root: &Path) -> Result<()> {
+    #[cfg(windows)]
+    super::utils::refuse_build_context_junction(cache_root)?;
+    std::fs::create_dir_all(cache_root).map_err(|e| {
+        BoxError::BuildError(format!(
+            "Failed to create RUN cache root {}: {}",
+            cache_root.display(),
+            e
+        ))
+    })
+}
+
 #[cfg_attr(not(feature = "pool"), allow(dead_code))]
 impl PoolRunCacheMounts {
     fn activate_with_cache_root(
@@ -1513,13 +1562,7 @@ impl PoolRunCacheMounts {
             return Ok(mounts);
         }
 
-        std::fs::create_dir_all(cache_root).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create RUN cache root {}: {}",
-                cache_root.display(),
-                e
-            ))
-        })?;
+        ensure_run_cache_root(cache_root)?;
         let staging_dir = create_run_overlay_staging_dir(rootfs_dir, "cache")?;
         mounts.staging_dir = Some(staging_dir.clone());
 
@@ -1923,9 +1966,21 @@ impl Drop for RunTmpfsMountOverlays {
 #[cfg_attr(not(feature = "pool"), allow(dead_code))]
 fn remove_path_any(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            std::fs::remove_dir_all(path)
+        Ok(meta) if meta.file_type().is_symlink() => {
+            #[cfg(windows)]
+            match a3s_box_core::windows_file::remove_directory_junction(path) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Failed to remove RUN cache mount target {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
         }
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
         Ok(_) => std::fs::remove_file(path),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
@@ -2908,8 +2963,9 @@ mod tests {
     #[cfg(unix)]
     use super::run_command_failed_error;
     use super::{
+        copy_dir_filtered_to_guest_rootfs, copy_run_bind_mount_source, ensure_run_cache_root,
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
-        instruction_to_string, shell_command_in_workdir,
+        instruction_to_string, remove_path_any, shell_command_in_workdir,
     };
     use crate::oci::build::engine::{BuildConfig, BuildNetworkPolicy, BuildState};
     #[cfg(unix)]
@@ -2919,6 +2975,65 @@ mod tests {
 
     fn shell_run(command: &str) -> RunCommand {
         RunCommand::Shell(command.to_string())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_run_cache_root_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = ensure_run_cache_root(&link.join("cache"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "RUN cache root was created through an ancestor junction: {error}"
+        );
+        assert!(!outside.join("cache").exists());
+        assert_eq!(std::fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_run_cache_root_does_not_follow_a_junction_directory() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = ensure_run_cache_root(&link).unwrap_err().to_string();
+        assert!(
+            error.contains("junction"),
+            "RUN cache root followed a junction directory: {error}"
+        );
+        assert_eq!(std::fs::read(outside.join("keep.txt")).unwrap(), b"keep");
     }
 
     #[test]
@@ -4585,5 +4700,159 @@ mod tests {
         assert!(err.contains("Dockerfile RUN is not supported on macOS yet"));
         assert!(err.contains("--run-pool"));
         assert!(err.contains(super::UNSAFE_HOST_RUN_ENV));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_run_bind_mount_source_does_not_write_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("planted.txt");
+        std::fs::write(&source, b"planted").unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = copy_run_bind_mount_source(
+            &source,
+            std::path::Path::new("planted.txt"),
+            &link.join("planted.txt"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("junction"),
+            "RUN bind mount wrote through an ancestor junction: {error}"
+        );
+        assert!(!outside.join("planted.txt").exists());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_run_bind_mount_source_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let dest_dir = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("copied.txt");
+
+        let error = copy_run_bind_mount_source(
+            &link.join("secret.txt"),
+            std::path::Path::new("secret.txt"),
+            &dest,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("junction"),
+            "RUN bind mount read through an ancestor junction: {error}"
+        );
+        assert!(!dest.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_filtered_to_guest_rootfs_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let data = outside.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let rootfs = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let dst = rootfs.join("app");
+        let mut changed = Vec::new();
+
+        let error = copy_dir_filtered_to_guest_rootfs(
+            &link.join("data"),
+            &dst,
+            &rootfs,
+            std::path::Path::new("."),
+            None,
+            &mut changed,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("junction"),
+            "ancestor junction was copied into the guest rootfs: {error}"
+        );
+        assert!(!dst.join("secret.txt").exists());
+        assert_eq!(std::fs::read(data.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_path_any_unlinks_a_junction_without_deleting_its_target() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = temp_dir.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        remove_path_any(&link).unwrap();
+
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(
+            !link.exists(),
+            "RUN cache removal left the junction in place"
+        );
     }
 }

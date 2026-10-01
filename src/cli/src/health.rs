@@ -133,7 +133,7 @@ pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), St
 pub(crate) async fn run_detached_health_worker(
     box_id: String,
     generation: i64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), a3s_box_core::error::BoxError> {
     let Some(_lock) = HealthWorkerLock::try_acquire(&box_id, generation)? else {
         return Ok(());
     };
@@ -157,8 +157,10 @@ pub(crate) async fn run_detached_health_worker(
 pub(crate) async fn run_detached_health_worker(
     _box_id: String,
     _generation: i64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err("container health checks are not supported on Windows".into())
+) -> Result<(), a3s_box_core::error::BoxError> {
+    Err(a3s_box_core::error::BoxError::ConfigError(
+        "container health checks are not supported on Windows".into(),
+    ))
 }
 
 #[cfg(not(windows))]

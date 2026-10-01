@@ -243,6 +243,88 @@ fn preserve_owner(meta: &std::fs::Metadata, dst: &Path) {
 #[cfg(not(unix))]
 fn preserve_owner(_meta: &std::fs::Metadata, _dst: &Path) {}
 
+/// Remove a destination junction before copying so later writes stay on `dst`.
+#[cfg(windows)]
+fn remove_directory_junction_for_copy(dst: &Path) -> Result<()> {
+    a3s_box_core::windows_file::remove_directory_junction(dst).map_err(|error| {
+        BoxError::CacheError(format!(
+            "Failed to remove destination directory junction {}: {error}",
+            dst.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Recreate `dst` when `src` is a Windows mount-point junction.
+///
+/// `read_dir` follows a junction, so a source that is itself a junction is
+/// recreated before the recursive copy. A child junction is handled per entry.
+#[cfg(windows)]
+fn recreate_source_directory_junction(src: &Path, dst: &Path) -> Result<bool> {
+    refuse_copy_through_ancestor_junction(src)?;
+    refuse_copy_through_ancestor_junction(dst)?;
+    let metadata = std::fs::symlink_metadata(src).map_err(|error| {
+        BoxError::CacheError(format!(
+            "Failed to read directory metadata for {}: {error}",
+            src.display()
+        ))
+    })?;
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if let Some(parent) = dst.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BoxError::CacheError(format!(
+                "Failed to create directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    a3s_box_core::windows_file::recreate_directory_junction(src, dst).map_err(|error| {
+        BoxError::CacheError(format!(
+            "Failed to recreate directory junction {}: {error}",
+            dst.display()
+        ))
+    })
+}
+
+/// Refuse a copy whose source is reached through a directory junction.
+/// The leaf may itself be a junction; that case is recreated above.
+#[cfg(windows)]
+fn refuse_copy_through_ancestor_junction(path: &Path) -> Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BoxError::CacheError(format!(
+                    "Failed to inspect copy source {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if metadata.file_type().is_symlink() || windows_reparse_point(&metadata) {
+            return Err(BoxError::CacheError(format!(
+                "refusing to copy through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -261,6 +343,17 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             let _ = std::fs::remove_dir_all(dst);
         }
     }
+
+    #[cfg(windows)]
+    remove_directory_junction_for_copy(dst)?;
+    #[cfg(windows)]
+    if recreate_source_directory_junction(src, dst)? {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(src)?;
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(dst)?;
 
     std::fs::create_dir_all(dst).map_err(|e| {
         BoxError::CacheError(format!(
@@ -324,19 +417,33 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
                 // targets such as `/bin/busybox` are intentionally broken from
                 // the Windows host's perspective but valid inside the guest.
                 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-                let result = if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                    std::os::windows::fs::symlink_dir(&target, &dst_path)
+                let directory = meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+                if directory
+                    && a3s_box_core::windows_file::recreate_directory_junction(&src_path, &dst_path)
+                        .map_err(|error| {
+                            BoxError::CacheError(format!(
+                                "Failed to recreate directory junction {} -> {}: {error}",
+                                dst_path.display(),
+                                target.display()
+                            ))
+                        })?
+                {
+                    // The junction names the same target. Its contents stay there.
                 } else {
-                    std::os::windows::fs::symlink_file(&target, &dst_path)
-                };
-                result.map_err(|e| {
-                    BoxError::CacheError(format!(
-                        "Failed to create symlink {} -> {}: {}",
-                        dst_path.display(),
-                        target.display(),
-                        e
-                    ))
-                })?;
+                    let result = if directory {
+                        std::os::windows::fs::symlink_dir(&target, &dst_path)
+                    } else {
+                        std::os::windows::fs::symlink_file(&target, &dst_path)
+                    };
+                    result.map_err(|e| {
+                        BoxError::CacheError(format!(
+                            "Failed to create symlink {} -> {}: {}",
+                            dst_path.display(),
+                            target.display(),
+                            e
+                        ))
+                    })?;
+                }
             }
             #[cfg(not(any(unix, windows)))]
             {
@@ -348,6 +455,8 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         } else if meta.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
+            #[cfg(windows)]
+            remove_directory_junction_for_copy(&dst_path)?;
             copy_file_cow(&src_path, &dst_path).map_err(|e| {
                 BoxError::CacheError(format!(
                     "Failed to copy {} to {}: {}",
@@ -984,6 +1093,335 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
             "ccc"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_does_not_follow_a_child_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let child = src.join("child");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            child.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        let dst = tmp.path().join("dst");
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let copied = std::fs::symlink_metadata(dst.join("child")).unwrap();
+        let followed = copied.is_dir()
+            && !copied.file_type().is_symlink()
+            && copied.file_attributes() & 0x0000_0400 == 0;
+        assert!(
+            !followed,
+            "copy followed the junction into a real directory"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let data = outside.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let dst = tmp.path().join("dst");
+
+        let error = copy_dir_recursive(&link.join("data"), &dst)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "ancestor junction was copied: {error}"
+        );
+        assert!(!dst.join("secret.txt").exists());
+        assert_eq!(std::fs::read(data.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("marker.txt"), b"marker").unwrap();
+        let outside = tmp.path().join("outside");
+        let child = outside.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let created = link.join("child").join("new");
+
+        let error = copy_dir_recursive(&src, &created).unwrap_err().to_string();
+        assert!(
+            error.contains("junction"),
+            "ancestor junction received the copy: {error}"
+        );
+        assert!(!outside.join("child").join("new").exists());
+        assert_eq!(std::fs::read(child.join("secret.txt")).unwrap(), b"secret");
+        assert_eq!(std::fs::read(src.join("marker.txt")).unwrap(), b"marker");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_recreates_a_source_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let src = tmp.path().join("src");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            src.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        let dst = tmp.path().join("dst");
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let copied = std::fs::symlink_metadata(&dst).unwrap();
+        assert!(
+            copied.file_attributes() & 0x0000_0400 != 0,
+            "copy followed the source junction into {:?}",
+            copied.file_type()
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_does_not_recreate_a_source_junction_through_a_destination_ancestor() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let source_target = tmp.path().join("source-target");
+        std::fs::create_dir_all(&source_target).unwrap();
+        std::fs::write(source_target.join("secret.txt"), b"secret").unwrap();
+        let src = tmp.path().join("src");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        for (junction, target) in [(&src, &source_target), (&link, &outside)] {
+            let mut command = std::process::Command::new("cmd");
+            command.raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                junction.display(),
+                target.display()
+            ));
+            assert!(command.status().expect("mklink").success());
+        }
+
+        let error = copy_dir_recursive(&src, &link.join("missing").join("out"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "source junction was recreated through a destination ancestor: {error}"
+        );
+        assert!(
+            !outside.join("missing").exists(),
+            "copy created a destination parent through the junction"
+        );
+        assert_eq!(
+            std::fs::read(source_target.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_does_not_write_through_a_destination_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("planted.txt"), b"planted").unwrap();
+        let dst = tmp.path().join("dst");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            dst.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "copy wrote through the destination junction"
+        );
+        let copied = std::fs::symlink_metadata(&dst).unwrap();
+        assert_eq!(
+            copied.file_attributes() & 0x0000_0400,
+            0,
+            "destination stayed a junction: {:?}",
+            copied.file_type()
+        );
+        assert_eq!(std::fs::read(dst.join("planted.txt")).unwrap(), b"planted");
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_replaces_a_child_junction_with_a_file() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("child"), b"planted").unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let child = dst.join("child");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            child.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert!(
+            !outside.join("child").exists(),
+            "copy wrote the file through the child junction"
+        );
+        let copied = std::fs::symlink_metadata(&child).unwrap();
+        assert_eq!(
+            copied.file_attributes() & 0x0000_0400,
+            0,
+            "child stayed a junction: {:?}",
+            copied.file_type()
+        );
+        assert!(
+            copied.is_file(),
+            "child was not replaced by the source file"
+        );
+        assert_eq!(std::fs::read(&child).unwrap(), b"planted");
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_dir_recursive_replaces_an_existing_child_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::fs::write(other.join("marker.txt"), b"marker").unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let src_child = src.join("child");
+        let mut source_link = std::process::Command::new("cmd");
+        source_link.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            src_child.display(),
+            other.display()
+        ));
+        assert!(source_link.status().expect("mklink").success());
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let dst_child = dst.join("child");
+        let mut dest_link = std::process::Command::new("cmd");
+        dest_link.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            dst_child.display(),
+            outside.display()
+        ));
+        assert!(dest_link.status().expect("mklink").success());
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let copied = std::fs::symlink_metadata(&dst_child).unwrap();
+        assert!(
+            copied.file_attributes() & 0x0000_0400 != 0,
+            "existing child junction was not replaced: {:?}",
+            copied.file_type()
+        );
+        assert_eq!(
+            std::fs::read(dst_child.join("marker.txt")).unwrap(),
+            b"marker"
+        );
+        assert!(!outside.join("marker.txt").exists());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
         );
     }
 

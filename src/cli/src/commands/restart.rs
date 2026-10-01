@@ -3,6 +3,7 @@
 //! Managed records use the durable lifecycle manager. Legacy records retain
 //! the equivalent of `a3s-box stop` followed by `a3s-box start`.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManager, OperationId, RestartExecutionOptions,
 };
@@ -27,7 +28,7 @@ pub struct RestartArgs {
     pub timeout: u64,
 }
 
-pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: RestartArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -40,16 +41,15 @@ pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(super::IntoBoxError::into_box_error(errors.join("\n")))
     }
 }
 
-async fn restart_one(
-    state: &StateFile,
-    query: &str,
-    timeout: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn restart_one(state: &StateFile, query: &str, timeout: u64) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let mut lifecycle_lock = Some(lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
     // The command-level state snapshot can be arbitrarily old after waiting
     // behind start/commit/monitor. Reload while holding the per-box lock before
@@ -57,17 +57,20 @@ async fn restart_one(
     let current_state = StateFile::load_default()?;
     let record = current_state
         .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box {query} was removed while waiting to restart"))?
+        .ok_or_else(|| {
+            BoxError::StateError(format!("Box {query} was removed while waiting to restart"))
+        })?
         .clone();
     drop(current_state);
     let health_check = (!record.healthcheck_disabled)
         .then_some(record.health_check.as_ref())
         .flatten();
     super::common::validate_health_check_support(health_check)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     let name = record.name.clone();
-    let restart_plan = restart_plan(&record, timeout)?;
+    let restart_plan =
+        restart_plan(&record, timeout).map_err(super::IntoBoxError::into_box_error)?;
     let box_dir = record.box_dir.clone();
     let exec_socket_path = record.exec_socket_path.clone();
 
@@ -83,7 +86,8 @@ async fn restart_one(
         drop(lifecycle_lock.take());
         let operation_id = match operation_id {
             Some(operation_id) => operation_id,
-            None => OperationId::new(format!("cli-restart-{}", uuid::Uuid::new_v4()))?,
+            None => OperationId::new(format!("cli-restart-{}", uuid::Uuid::new_v4()))
+                .map_err(super::IntoBoxError::into_box_error)?,
         };
         let home = a3s_box_core::dirs_home();
         let manager = super::configured_local_execution_manager(&home).await?;
@@ -94,15 +98,16 @@ async fn restart_one(
                 &operation_id,
                 RestartExecutionOptions { stop_timeout_secs },
             )
-            .await?;
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         create_baseline_snapshot(&box_id, &box_dir).await?;
 
         let current = StateFile::load_default()?;
         let record = current
             .find_by_id(&box_id)
-            .ok_or_else(|| format!("{name} was removed during restart"))?;
+            .ok_or_else(|| BoxError::StateError(format!("{name} was removed during restart")))?;
         crate::health::spawn_detached_health_checker(record)
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
         println!("{name}");
         return Ok(());
     }
@@ -110,7 +115,7 @@ async fn restart_one(
     // Phase 1: Stop the box if it is active.
     if restart_plan == RestartPlan::LegacyStopThenStart {
         let pid = lifecycle::require_live_pid(&record, "restart")
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
         let stop_signal = record
             .stop_signal
             .as_deref()
@@ -118,7 +123,7 @@ async fn restart_one(
             .unwrap_or(libc::SIGTERM);
         let effective_timeout = record.stop_timeout.unwrap_or(timeout);
         lifecycle::resume_paused_for_termination(&record, pid, "restart")
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
         // Deliver the stop signal inside the guest so the container honours its
         // STOPSIGNAL and runs its own shutdown (then the VM halts cleanly), as
         // `stop` does. Signalling the host shim never reaches the container and
@@ -153,10 +158,9 @@ async fn restart_one(
             Ok::<bool, std::io::Error>(updated)
         })?;
         if !persisted {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Box {name} changed execution while it was stopping; did not overwrite the replacement state"
-            )
-            .into());
+            )));
         }
     }
 
@@ -172,13 +176,15 @@ async fn restart_one(
         boot::BootOutcome::Restarted { .. } => println!("{name}"),
         boot::BootOutcome::AlreadyRunning => println!("{name} (already started)"),
         boot::BootOutcome::RemovedDuringBoot => {
-            return Err(format!("{name} was removed during restart").into());
+            return Err(BoxError::StateError(format!(
+                "{name} was removed during restart"
+            )));
         }
     }
     let current = StateFile::load_default()?;
     if let Some(record) = current.find_by_id(&box_id) {
         crate::health::spawn_detached_health_checker(record)
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
     }
     Ok(())
 }
@@ -186,7 +192,7 @@ async fn restart_one(
 pub(crate) async fn create_baseline_snapshot(
     box_id: &str,
     box_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let baseline_box_dir = box_dir.to_path_buf();
     let baseline_box_id = box_id.to_string();
     match tokio::task::spawn_blocking(move || {
@@ -196,14 +202,12 @@ pub(crate) async fn create_baseline_snapshot(
     .await
     {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(format!(
+        Ok(Err(error)) => Err(BoxError::StateError(format!(
             "restarted {baseline_box_id} but refused to invent success without a rootfs diff baseline: {error}"
-        )
-        .into()),
-        Err(error) => Err(format!(
+        ))),
+        Err(error) => Err(BoxError::StateError(format!(
             "restarted {baseline_box_id} but rootfs diff baseline task failed: {error}"
-        )
-        .into()),
+        ))),
     }
 }
 

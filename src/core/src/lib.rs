@@ -17,7 +17,6 @@ pub mod guest_exec;
 pub mod lifecycle_profile;
 pub mod log;
 pub mod network;
-pub mod operator;
 pub mod platform;
 pub mod port;
 pub mod pty;
@@ -31,6 +30,7 @@ pub mod tee;
 pub mod traits;
 pub mod vmm;
 pub mod volume;
+pub mod volume_posix;
 #[cfg(windows)]
 pub mod windows_file;
 #[cfg(windows)]
@@ -59,13 +59,13 @@ pub use network::{
     IsolationMode, KeepNetworkAuthorityFlag, NetworkConfig, NetworkEndpoint, NetworkMode,
     NetworkPolicy, PolicyAction, OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV,
 };
-pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::{
     BridgeNetworkBackend, HostFamily, HostGuestChannel, Platform, PlatformCapabilities, VmBackend,
 };
 pub use port::{
     normalize_and_resolve_port_maps, normalize_port_maps, parse_port_mapping,
-    resolve_auto_host_port, PortMapping, PortProtocol,
+    resolve_auto_host_port, PortMapping, PortProtocol, PUBLISHED_UDP_ASSOCIATION_QUEUE,
+    PUBLISHED_UDP_IDLE_TIMEOUT, PUBLISHED_UDP_MAX_ASSOCIATIONS,
 };
 pub use pty::PTY_VSOCK_PORT;
 pub use scale::{
@@ -82,19 +82,17 @@ pub use snapshot::{
 pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{
-    AuditSink, CacheBackend, CacheEntry, CacheStats, CreateExecutionRequest, CredentialProvider,
-    EventBus, ExecutionCpuStats, ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest,
-    ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionMemoryStats, ExecutionPortConnector,
-    ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInfo,
-    ExecutionProcessInput, ExecutionProcessInventory, ExecutionProcessSignal,
-    ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionResourceUpdate,
-    ExecutionRestartPolicy, ExecutionRuntimeEvent, ExecutionSessionManager, ExecutionSnapshot,
-    ExecutionSnapshotId, ExecutionState, ExecutionStats, ExecutionStatus, ExecutionUdpPort,
-    ExecutionUdpPortIo, ImageRegistry, ImageStoreBackend, KillExecutionOptions, KillOutcome,
-    MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
-    RestartExecutionOptions, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
-    MAX_EXECUTION_EVENT_BATCH_ITEMS,
+    CacheBackend, CacheEntry, CacheStats, CreateExecutionRequest, ExecutionCpuStats,
+    ExecutionEventBatch, ExecutionEventKind, ExecutionEventsRequest, ExecutionGeneration,
+    ExecutionHealthCheck, ExecutionId, ExecutionLease, ExecutionManager, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionMemoryStats, ExecutionPortConnector, ExecutionPortIo,
+    ExecutionPortStream, ExecutionProcess, ExecutionProcessInfo, ExecutionProcessInput,
+    ExecutionProcessInventory, ExecutionProcessSignal, ExecutionProcessStream,
+    ExecutionRecordPolicy, ExecutionReservation, ExecutionResourceUpdate, ExecutionRestartPolicy,
+    ExecutionRuntimeEvent, ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId,
+    ExecutionState, ExecutionStats, ExecutionStatus, ExecutionUdpPort, ExecutionUdpPortIo,
+    KillExecutionOptions, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
+    StoredImage, MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, RawBlockDevice, TeeInstanceConfig,

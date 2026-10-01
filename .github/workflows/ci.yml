@@ -32,6 +32,10 @@ jobs:
       - name: Verify OCI SDK and artifact pins agree
         shell: bash
         run: bash scripts/check-oci-pins.sh
+      - name: Verify no tracked build artifacts or archives
+        run: |
+          python3 scripts/check_no_tracked_artifacts.py --self-test
+          python3 scripts/check_no_tracked_artifacts.py
       - name: Verify live-session report honesty checkers
         run: |
           python3 scripts/verify-linux-native-live-session-report.py --self-test

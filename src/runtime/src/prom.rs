@@ -338,44 +338,6 @@ impl Default for RuntimeMetrics {
     }
 }
 
-impl a3s_box_core::traits::MetricsCollector for RuntimeMetrics {
-    fn record_vm_boot(&self, duration_secs: f64) {
-        self.vm_boot_duration.observe(duration_secs);
-    }
-
-    fn inc_vm_state(&self, state: &str) {
-        self.vm_count.with_label_values(&[state]).inc();
-    }
-
-    fn dec_vm_state(&self, state: &str) {
-        self.vm_count.with_label_values(&[state]).dec();
-    }
-
-    fn inc_vm_created(&self) {
-        self.vm_created_total.inc();
-    }
-
-    fn inc_vm_destroyed(&self) {
-        self.vm_destroyed_total.inc();
-    }
-
-    fn record_exec(&self, duration_secs: f64, success: bool) {
-        self.exec_total.inc();
-        self.exec_duration.observe(duration_secs);
-        if !success {
-            self.exec_errors_total.inc();
-        }
-    }
-
-    fn inc_cache_hit(&self) {
-        self.rootfs_cache_hits.inc();
-    }
-
-    fn inc_cache_miss(&self) {
-        self.rootfs_cache_misses.inc();
-    }
-}
-
 impl std::fmt::Debug for RuntimeMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeMetrics").finish()
@@ -385,7 +347,6 @@ impl std::fmt::Debug for RuntimeMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a3s_box_core::traits::MetricsCollector;
 
     #[test]
     fn test_metrics_creation() {
@@ -566,41 +527,6 @@ mod tests {
         let _first = RuntimeMetrics::try_with_registry(registry.clone()).unwrap();
         let second = RuntimeMetrics::try_with_registry(registry);
         assert!(second.is_err());
-    }
-
-    #[test]
-    fn test_metrics_collector_trait_updates_registered_metrics() {
-        let m = RuntimeMetrics::new();
-
-        MetricsCollector::record_vm_boot(&m, 0.25);
-        MetricsCollector::inc_vm_state(&m, "ready");
-        MetricsCollector::inc_vm_created(&m);
-        MetricsCollector::inc_vm_destroyed(&m);
-        MetricsCollector::record_exec(&m, 0.05, false);
-        MetricsCollector::inc_cache_hit(&m);
-        MetricsCollector::inc_cache_miss(&m);
-        MetricsCollector::dec_vm_state(&m, "ready");
-
-        assert_eq!(m.vm_boot_duration.get_sample_count(), 1);
-        assert_eq!(m.vm_count.with_label_values(&["ready"]).get(), 0);
-        assert_eq!(m.vm_created_total.get(), 1);
-        assert_eq!(m.vm_destroyed_total.get(), 1);
-        assert_eq!(m.exec_total.get(), 1);
-        assert_eq!(m.exec_errors_total.get(), 1);
-        assert_eq!(m.exec_duration.get_sample_count(), 1);
-        assert_eq!(m.rootfs_cache_hits.get(), 1);
-        assert_eq!(m.rootfs_cache_misses.get(), 1);
-    }
-
-    #[test]
-    fn test_metrics_collector_trait_does_not_count_successful_exec_as_error() {
-        let m = RuntimeMetrics::new();
-
-        MetricsCollector::record_exec(&m, 0.01, true);
-
-        assert_eq!(m.exec_total.get(), 1);
-        assert_eq!(m.exec_errors_total.get(), 0);
-        assert_eq!(m.exec_duration.get_sample_count(), 1);
     }
 
     #[test]

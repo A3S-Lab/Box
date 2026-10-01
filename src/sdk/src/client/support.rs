@@ -656,6 +656,8 @@ fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) -> Result<()> {
             .map_err(ClientError::Runtime)?;
         a3s_box_runtime::rootfs::unmount_box_rootfs_for_reuse(&record.box_dir.join("rootfs"))
             .map_err(ClientError::Runtime)?;
+        #[cfg(windows)]
+        a3s_box_runtime::vm::refuse_directory_reparse(&record.box_dir)?;
         match std::fs::remove_dir_all(&record.box_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -735,6 +737,8 @@ fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) -> Resul
     if socket_dir.starts_with(box_dir) {
         return Ok(());
     }
+    #[cfg(windows)]
+    a3s_box_runtime::vm::refuse_directory_reparse(socket_dir)?;
     match std::fs::remove_dir_all(socket_dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1104,6 +1108,10 @@ impl BoxDirGuard {
 impl Drop for BoxDirGuard {
     fn drop(&mut self) {
         if self.armed {
+            #[cfg(windows)]
+            if a3s_box_runtime::vm::refuse_directory_reparse(&self.path).is_err() {
+                return;
+            }
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }

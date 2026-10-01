@@ -362,6 +362,7 @@ Implementation completion is **not** this document’s job. Each axis closes onl
 | soak-test-plan.md | Evidence profiles for promotion; Partial rows stay Partial |
 | sdk-api-and-programmable-cicd.md | SDK required surface; pending rows are not §4 preservation targets |
 | cow-snapshot-fork-design.md / native-snapshot-fork-feasibility.md | KVM-scoped acceleration designs under Axis D |
+| [codebase-optimization-plan.md](codebase-optimization-plan.md) | Structure (S-x) and supply-chain (C-x) domains; Phase 3 (C-1..C-3) preconditions B5 but never reorders an axis |
 
 When documents conflict, **ROADMAP open checkboxes and fail-closed claims win** over aspirational design prose.
 

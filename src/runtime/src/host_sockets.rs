@@ -81,7 +81,8 @@ pub fn ensure_runtime_socket_dir(home_dir: &Path, box_id: &str) -> Result<PathBu
 
     #[cfg(not(unix))]
     {
-        let _ = home_dir;
+        let box_dir = home_dir.join("boxes").join(box_id);
+        crate::vm::refuse_directory_reparse(&box_dir)?;
         std::fs::create_dir_all(&socket_dir).map_err(|error| BoxError::BoxBootError {
             message: format!(
                 "Failed to create socket directory {}: {error}",
@@ -265,6 +266,41 @@ mod tests {
         let shared_mode = fs::metadata(&shared).unwrap().permissions().mode() & 0o7777;
         assert_eq!(shared_mode, 0o1777);
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_runtime_socket_dir_does_not_create_through_a_box_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let home = unique_tmp_subdir("junction-home");
+        let outside = unique_tmp_subdir("junction-outside");
+        fs::create_dir_all(home.join("boxes")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let box_id = "box1";
+        let box_dir = home.join("boxes").join(box_id);
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            box_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = ensure_runtime_socket_dir(&home, box_id);
+        assert!(
+            !outside.join("sockets").exists(),
+            "socket directory was created through the box junction: {created:?}"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(fs::symlink_metadata(&box_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir(&box_dir);
+        let _ = fs::remove_dir_all(&outside);
         let _ = fs::remove_dir_all(&home);
     }
 }

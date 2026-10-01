@@ -6,6 +6,22 @@
 //! boots. Unresolved `host_port=0` is allocated here when the caller uses
 //! [`normalize_and_resolve_port_maps`]; backends that still see `0` fail closed.
 
+/// Reclaim a published UDP association after neither direction has traffic.
+///
+/// Netproxy NAT and the Windows MicroVM port-forward worker share this bound.
+pub const PUBLISHED_UDP_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Maximum concurrent peers for one published UDP port.
+///
+/// Netproxy NAT and the Windows MicroVM port-forward worker share this bound.
+pub const PUBLISHED_UDP_MAX_ASSOCIATIONS: usize = 256;
+
+/// Datagrams queued for one published UDP peer while the guest catches up.
+///
+/// This matches the netproxy smoltcp UDP packet buffer. A full queue drops the
+/// new datagram and keeps the association.
+pub const PUBLISHED_UDP_ASSOCIATION_QUEUE: usize = 16;
+
 /// Supported published-port protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortProtocol {
@@ -181,6 +197,16 @@ fn parse_port(input: &str, value: &str, label: &str, allow_zero: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_udp_association_bounds_match_the_nat_contract() {
+        assert_eq!(
+            PUBLISHED_UDP_IDLE_TIMEOUT,
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(PUBLISHED_UDP_MAX_ASSOCIATIONS, 256);
+        assert_eq!(PUBLISHED_UDP_ASSOCIATION_QUEUE, 16);
+    }
 
     #[test]
     fn test_parse_port_mapping_host_guest() {

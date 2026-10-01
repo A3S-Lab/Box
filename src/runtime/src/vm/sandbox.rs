@@ -31,6 +31,35 @@ use crate::sandbox::{
 
 use super::VmManager;
 
+/// A directory that is itself a junction must stay in place. `remove_dir_all`
+/// on Windows unlinks the junction and returns success while the target's
+/// files remain. Missing paths are not a junction.
+#[cfg(windows)]
+pub fn refuse_directory_reparse(path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    // `Metadata::is_dir` is false when `is_symlink` is true, including a
+    // directory junction. The directory attribute is the leaf signal.
+    let directory = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if directory
+        && (metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+    {
+        return Err(BoxError::StateError(format!(
+            "refusing to delete through a directory junction: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Product-owned bundle ready to be loaded through the public A3S OCI SDK.
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeOwnedSandboxBundle {
@@ -585,6 +614,8 @@ impl VmManager {
         self.rootfs_provider
             .cleanup(&box_dir, self.config.persistent)?;
         for path in [box_dir.join("sandbox").join("bundle"), self.socket_dir()] {
+            #[cfg(windows)]
+            refuse_directory_reparse(&path)?;
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -745,6 +776,9 @@ impl VmManager {
         // are registered in A3S's volume store; arbitrary bind mounts remain
         // external and are never chowned implicitly.
         for volume in volumes.values() {
+            if !volume_store.mount_point_is_managed(&volume.name, &volume.mount_point) {
+                continue;
+            }
             let Ok(source) = PathBuf::from(&volume.mount_point).canonicalize() else {
                 // A stale, unused volume entry must not prevent unrelated boxes
                 // from starting. A mounted missing path already fails while the
@@ -882,9 +916,11 @@ fn parse_sandbox_volume(value: &str) -> Result<SandboxMount> {
         )));
     }
     let source = PathBuf::from(source);
+    super::spec::refuse_existing_symlink_or_reparse_prefixes(&source, "Volume host path")?;
     if !source.exists() {
         std::fs::create_dir_all(&source).map_err(BoxError::IoError)?;
     }
+    super::spec::refuse_symlink_or_reparse_volume_source(&source)?;
     let source = source.canonicalize().map_err(BoxError::IoError)?;
     let destination = normalized_container_path(destination, "volume destination")?;
     Ok(SandboxMount {
@@ -1391,6 +1427,76 @@ mod tests {
 
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_runtime_owned_sandbox_bundle_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let box_id = "junction-box";
+        let socket_dir = crate::host_sockets::runtime_socket_dir(home.path(), box_id);
+        std::fs::create_dir_all(socket_dir.parent().unwrap()).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            socket_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let manager = VmManager {
+            config: BoxConfig::default(),
+            box_id: box_id.to_string(),
+            boot_mode: super::super::VmBootMode::Workload,
+            state: Arc::new(RwLock::new(crate::vm::BoxState::Created)),
+            event_emitter: EventEmitter::new(10),
+            provider: None,
+            handler: Arc::new(RwLock::new(None)),
+            exec_client: None,
+            net_manager: None,
+            home_dir: home.path().to_path_buf(),
+            anonymous_volumes: Vec::new(),
+            created_anonymous_volumes: Vec::new(),
+            image_config: None,
+            restore_rootfs_cache_key: None,
+            healthcheck_disabled: false,
+            preserve_rootfs_on_boot_failure: false,
+            retain_box_dir_after_boot_terminal: false,
+            rootfs_provider: crate::rootfs::default_provider(),
+            exec_socket_path: None,
+            pty_socket_path: None,
+            port_forward_socket_path: None,
+            prom: None,
+            shim_exit_code: None,
+            pull_progress_fn: None,
+            log_config: a3s_box_core::log::LogConfig::default(),
+            resolved_execution_plan: None,
+            managed_secret_root: None,
+            transient_registry_auth: None,
+        };
+
+        let removed = manager.cleanup_runtime_owned_sandbox_bundle();
+        assert!(
+            removed.is_err(),
+            "sandbox cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&socket_dir).unwrap();
+        assert!(
+            metadata.file_attributes() & 0x400 != 0,
+            "sandbox cleanup removed the directory junction"
+        );
+    }
+
     #[test]
     fn runtime_owned_process_resolves_path_and_named_identity_from_rootfs() {
         let rootfs = tempfile::tempdir().unwrap();
@@ -1462,6 +1568,41 @@ mod tests {
         assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
         assert!(normalized_container_path("relative", "test path").is_err());
         assert!(normalized_container_path("/work/../escape", "test path").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sandbox_volume_rejects_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let child = outside.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let host = link.join("child").join("new");
+        let value = format!("{}:/work", host.display());
+
+        let error = parse_sandbox_volume(&value).unwrap_err().to_string();
+        assert!(
+            error.contains("symlink/reparse"),
+            "ancestor junction widened the sandbox volume: {error}"
+        );
+        assert!(
+            !outside.join("child").join("new").exists(),
+            "sandbox volume creation wrote through the ancestor junction"
+        );
+        assert_eq!(std::fs::read(child.join("secret.txt")).unwrap(), b"secret");
     }
 
     #[test]

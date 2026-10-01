@@ -1,5 +1,6 @@
 //! `a3s-box image-inspect` command — display detailed image metadata as JSON.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage;
@@ -10,31 +11,28 @@ pub struct ImageInspectArgs {
     pub image: String,
 }
 
-pub async fn execute(args: ImageInspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ImageInspectArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
     let images = store.list().await;
-    let stored = image_usage::resolve_required_stored_image(&images, &args.image)?;
+    let stored = image_usage::resolve_required_stored_image(&images, &args.image)
+        .map_err(BoxError::OciImageError)?;
     println!("{}", build_image_inspect_json(&stored)?);
     Ok(())
 }
 
 /// Try to inspect `reference` as an image. Returns `Ok(None)` when no image
 /// matches (so a polymorphic `inspect` can fall back to other object types).
-pub(crate) async fn try_image_inspect_json(
-    reference: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) async fn try_image_inspect_json(reference: &str) -> Result<Option<String>, BoxError> {
     let store = super::open_image_store()?;
     let images = store.list().await;
-    match image_usage::resolve_stored_image(&images, reference)? {
+    match image_usage::resolve_stored_image(&images, reference).map_err(BoxError::OciImageError)? {
         Some(stored) => Ok(Some(build_image_inspect_json(&stored)?)),
         None => Ok(None),
     }
 }
 
 /// Build the JSON inspection document for a stored image.
-fn build_image_inspect_json(
-    stored: &a3s_box_runtime::StoredImage,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn build_image_inspect_json(stored: &a3s_box_runtime::StoredImage) -> Result<String, BoxError> {
     // Load OCI image to get full config
     let oci = a3s_box_runtime::OciImage::from_path(&stored.path)?;
     let config = oci.config();

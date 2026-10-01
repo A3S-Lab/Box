@@ -362,6 +362,11 @@ mod linux {
             // Secret files are user-volume mounts and therefore resolve only
             // after the workload shares are present.
             exec_config.materialize_secret_environment()?;
+            if a3s_box_guest_init::volume_metadata::volume_posix_metadata_enabled() {
+                a3s_box_guest_init::volume_metadata::restore_volume_posix_metadata(
+                    std::path::Path::new("/"),
+                )?;
+            }
 
             // A guest-native block provider has no host-visible tree after
             // ownership handoff. Capture its pristine diff baseline now, after
@@ -841,13 +846,24 @@ mod linux {
 
     #[cfg(target_os = "linux")]
     fn persist_terminal_rootfs_metadata() {
-        if std::env::var("BOX_PERSIST_ROOTFS_METADATA").as_deref() != Ok("1") {
-            return;
+        if std::env::var("BOX_PERSIST_ROOTFS_METADATA").as_deref() == Ok("1") {
+            if let Err(error) = a3s_box_guest_init::rootfs_archive::persist_rootfs_metadata(
+                std::path::Path::new("/"),
+            ) {
+                warn!(%error, "Failed to persist terminal rootfs metadata");
+            }
         }
-        if let Err(error) =
-            a3s_box_guest_init::rootfs_archive::persist_rootfs_metadata(std::path::Path::new("/"))
-        {
-            warn!(%error, "Failed to persist terminal rootfs metadata");
+        // Managed-volume capture is independent of rootfs persistence. A
+        // non-persistent box still has to publish the manifest so the host can
+        // copy it into the VolumeStore sidecar before deleting the box.
+        if a3s_box_guest_init::volume_metadata::volume_posix_metadata_enabled() {
+            if let Err(error) =
+                a3s_box_guest_init::volume_metadata::persist_configured_volume_posix_metadata(
+                    std::path::Path::new("/"),
+                )
+            {
+                warn!(%error, "Failed to persist volume posix metadata");
+            }
         }
     }
 

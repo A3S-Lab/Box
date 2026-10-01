@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
@@ -84,23 +85,20 @@ pub struct BuildArgs {
     pub run_cache_dir: Option<String>,
 }
 
-pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let context_dir = PathBuf::from(&args.path)
-        .canonicalize()
-        .map_err(|e| format!("Invalid build context path '{}': {}", args.path, e))?;
+pub async fn execute(args: BuildArgs) -> Result<(), BoxError> {
+    let context_dir = resolve_build_context(&args.path)?;
 
     if !context_dir.is_dir() {
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "Build context '{}' is not a directory",
             context_dir.display()
-        )
-        .into());
+        )));
     }
 
     let dockerfile_path = resolve_build_file(&context_dir, args.file.as_deref())?;
 
     // Parse build args
-    let build_args = parse_build_args(&args.build_arg)?;
+    let build_args = parse_build_args(&args.build_arg).map_err(BoxError::ConfigError)?;
 
     let platforms = parse_platforms(args.platform.as_deref())?;
 
@@ -140,7 +138,7 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
 
 fn resolve_run_pool_config(
     args: &BuildArgs,
-) -> Result<Option<a3s_box_runtime::BuildRunPoolConfig>, Box<dyn std::error::Error>> {
+) -> Result<Option<a3s_box_runtime::BuildRunPoolConfig>, BoxError> {
     let env_socket = std::env::var(BUILD_RUN_POOL_SOCKET_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -158,12 +156,18 @@ fn resolve_run_pool_config(
     }
 
     if args.run_pool_timeout == 0 {
-        return Err("--run-pool-timeout must be greater than 0".into());
+        return Err(BoxError::ConfigError(
+            "--run-pool-timeout must be greater than 0".to_string(),
+        ));
     }
     let timeout_ns = args
         .run_pool_timeout
         .checked_mul(1_000_000_000)
-        .ok_or("--run-pool-timeout is too large to express as nanoseconds")?;
+        .ok_or_else(|| {
+            BoxError::ConfigError(
+                "--run-pool-timeout is too large to express as nanoseconds".to_string(),
+            )
+        })?;
 
     let socket = args
         .run_pool_socket
@@ -171,12 +175,12 @@ fn resolve_run_pool_config(
         .or(env_socket)
         .unwrap_or_else(|| super::pool::DEFAULT_SOCKET.to_string());
     let memory_mb = crate::output::parse_memory(&args.run_pool_memory)
-        .map_err(|e| format!("Invalid --run-pool-memory: {e}"))?;
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --run-pool-memory: {error}")))?;
     if args.run_pool_autostart && args.run_pool_image.is_none() {
-        return Err(
+        return Err(BoxError::ConfigError(
             "--run-pool-autostart requires --run-pool-image so the helper VM image is explicit"
-                .into(),
-        );
+                .to_string(),
+        ));
     }
     let run_cache_dir = args
         .run_cache_dir
@@ -202,7 +206,7 @@ fn resolve_run_pool_config(
 
 fn pool_autostart_config_for_build(
     config: &a3s_box_runtime::BuildRunPoolConfig,
-) -> Result<super::pool::PoolAutoStartConfig, Box<dyn std::error::Error>> {
+) -> Result<super::pool::PoolAutoStartConfig, BoxError> {
     Ok(super::pool::PoolAutoStartConfig {
         socket: config.socket.clone(),
         image: None,
@@ -225,29 +229,59 @@ fn parse_build_args(args: &[String]) -> Result<HashMap<String, String>, String> 
 
 fn parse_platforms(
     platform: Option<&str>,
-) -> Result<Vec<a3s_box_core::platform::Platform>, Box<dyn std::error::Error>> {
+) -> Result<Vec<a3s_box_core::platform::Platform>, BoxError> {
     let Some(platform) = platform else {
         return Ok(vec![]);
     };
 
     let platforms = a3s_box_core::platform::Platform::parse_list(platform)
-        .map_err(|e| format!("Invalid --platform: {e}"))?;
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --platform: {error}")))?;
     if platforms.len() > 1 {
-        return Err(
-            "Multi-platform builds are not implemented yet; pass a single --platform value".into(),
-        );
+        return Err(BoxError::ConfigError(
+            "Multi-platform builds are not implemented yet; pass a single --platform value"
+                .to_string(),
+        ));
     }
     if platforms.iter().any(|p| p.os != "linux") {
-        return Err("Only linux target platforms are supported for builds".into());
+        return Err(BoxError::ConfigError(
+            "Only linux target platforms are supported for builds".to_string(),
+        ));
     }
 
     Ok(platforms)
 }
 
+fn resolve_build_context(path: &str) -> Result<PathBuf, BoxError> {
+    let path = PathBuf::from(path);
+    super::commit::refuse_archive_ancestor_reparse(&path)?;
+    refuse_build_reparse_leaf(&path)?;
+    path.canonicalize().map_err(|error| {
+        BoxError::ConfigError(format!(
+            "Invalid build context path '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn refuse_build_reparse_leaf(path: &std::path::Path) -> Result<(), BoxError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    if metadata.file_type().is_symlink() || super::commit::metadata_is_reparse_point(&metadata) {
+        return Err(BoxError::StateError(format!(
+            "refusing to build through a directory junction: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn resolve_build_file(
     context_dir: &std::path::Path,
     file: Option<&str>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<PathBuf, BoxError> {
     if let Some(file) = file {
         let path = PathBuf::from(file);
         let build_file = if path.is_absolute() {
@@ -255,31 +289,38 @@ fn resolve_build_file(
         } else {
             context_dir.join(path)
         };
+        super::commit::refuse_archive_ancestor_reparse(&build_file)?;
+        refuse_build_reparse_leaf(&build_file)?;
 
         if build_file.exists() {
             return Ok(build_file);
         }
 
-        return Err(format!("Build file not found at {}", build_file.display()).into());
+        return Err(BoxError::ConfigError(format!(
+            "Build file not found at {}",
+            build_file.display()
+        )));
     }
 
     for candidate in ["Dockerfile", "Containerfile"] {
         let path = context_dir.join(candidate);
+        super::commit::refuse_archive_ancestor_reparse(&path)?;
+        refuse_build_reparse_leaf(&path)?;
         if path.exists() {
             return Ok(path);
         }
     }
 
-    Err(format!(
+    Err(BoxError::ConfigError(format!(
         "Build file not found: expected Dockerfile or Containerfile in {}",
         context_dir.display()
-    )
-    .into())
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::error::BoxError;
 
     struct EnvGuard {
         key: &'static str,
@@ -388,6 +429,20 @@ mod tests {
     }
 
     #[test]
+    fn zero_run_pool_timeout_is_a_configuration_error() {
+        let mut args = build_args();
+        args.run_pool = true;
+        args.run_pool_timeout = 0;
+
+        match resolve_run_pool_config(&args).unwrap_err() {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("greater than 0"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_resolve_run_pool_config_rejects_overflow_timeout() {
         let mut args = build_args();
         args.run_pool = true;
@@ -475,6 +530,101 @@ mod tests {
         assert!(err.contains("Only linux target platforms"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn resolve_build_context_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Dockerfile"), "FROM scratch\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = resolve_build_context(link.to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "build context followed an ancestor junction: {error}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_build_context_does_not_follow_a_child_under_a_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let nested = outside.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("Dockerfile"), "FROM scratch\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = resolve_build_context(link.join("nested").to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "build context followed a junction ancestor: {error}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_build_file_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Customfile"), "FROM scratch\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = resolve_build_file(
+            &parent,
+            Some(link.join("Customfile").to_str().expect("utf-8")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("junction"),
+            "build file was opened through an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("Customfile")).unwrap(),
+            b"FROM scratch\n"
+        );
+    }
+
     #[test]
     fn test_resolve_build_file_prefers_dockerfile() {
         let tmp = tempfile::tempdir().unwrap();
@@ -510,5 +660,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Dockerfile or Containerfile"));
+    }
+
+    #[test]
+    fn missing_dockerfile_is_a_configuration_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        match resolve_build_file(tmp.path(), None).unwrap_err() {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("Dockerfile or Containerfile"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

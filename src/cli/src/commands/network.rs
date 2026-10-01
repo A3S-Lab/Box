@@ -3,6 +3,7 @@
 //! Provides create/ls/rm/inspect/connect/disconnect for user-defined
 //! bridge networks that enable container-to-container communication.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::network::{
     EgressMatchRule, IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode,
 };
@@ -117,7 +118,7 @@ pub struct PruneArgs {
 }
 
 /// Dispatch network subcommands.
-pub async fn execute(args: NetworkArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: NetworkArgs) -> Result<(), BoxError> {
     match args.command {
         NetworkCommand::Create(a) => execute_create(a).await,
         NetworkCommand::Ls(a) => execute_ls(a).await,
@@ -153,16 +154,16 @@ fn network_is_unused(
 pub(crate) fn prune_unused_networks(
     store: &NetworkStore,
     state: &crate::state::StateFile,
-) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<String>, Vec<String>), BoxError> {
     let in_use: std::collections::HashSet<String> = state
         .records()
         .iter()
         .filter_map(|record| crate::cleanup::record_network_name(record).map(str::to_string))
         .collect();
 
-    let mut networks = store
-        .list()
-        .map_err(|error| format!("Failed to list networks for prune: {error}"))?;
+    let mut networks = store.list().map_err(|error| {
+        BoxError::NetworkError(format!("Failed to list networks for prune: {error}"))
+    })?;
     networks.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut removed = Vec::new();
@@ -179,7 +180,7 @@ pub(crate) fn prune_unused_networks(
     Ok((removed, errors))
 }
 
-async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_prune(args: PruneArgs) -> Result<(), BoxError> {
     if !args.force {
         println!("WARNING! This will remove all networks not used by at least one box.");
         print!("Are you sure you want to continue? [y/N] ");
@@ -210,20 +211,20 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(BoxError::NetworkError(errors.join("\n")))
     }
 }
 
-async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_create(args: CreateArgs) -> Result<(), BoxError> {
     #[cfg(windows)]
     {
         // Bridge attach is unsupported on WHPX; refuse to create bridge networks so
         // operators are not left with objects that only fail later at run/connect.
         if args.driver == "bridge" || args.driver.is_empty() {
-            return Err(
+            return Err(BoxError::NetworkError(
                 "bridge networking is not supported on Windows; `a3s-box network create` cannot create attachable networks on this platform"
-                    .into(),
-            );
+                    .to_string(),
+            ));
         }
     }
 
@@ -232,7 +233,7 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
     validate_network_driver(&args.driver)?;
 
     let mut config = NetworkConfig::new(&args.name, &args.subnet)
-        .map_err(|e| format!("Invalid network configuration: {e}"))?;
+        .map_err(|e| BoxError::ConfigError(format!("Invalid network configuration: {e}")))?;
 
     config.driver = args.driver;
 
@@ -242,23 +243,24 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
         "strict" => IsolationMode::Strict,
         "custom" => IsolationMode::Custom,
         other => {
-            return Err(
-                format!("Unknown isolation mode '{other}'. Use: none, strict, custom").into(),
-            )
+            return Err(BoxError::ConfigError(format!(
+                "Unknown isolation mode '{other}'. Use: none, strict, custom"
+            )))
         }
     };
     for spec in &args.egress {
         config.egress.push(
-            EgressMatchRule::parse(spec).map_err(|error| format!("invalid --egress: {error}"))?,
+            EgressMatchRule::parse(spec)
+                .map_err(|error| BoxError::ConfigError(format!("invalid --egress: {error}")))?,
         );
     }
     validate_attachable_network(&config)?;
 
     // Parse labels
     for label in &args.labels {
-        let (key, value) = label
-            .split_once('=')
-            .ok_or_else(|| format!("Invalid label (expected KEY=VALUE): {label}"))?;
+        let (key, value) = label.split_once('=').ok_or_else(|| {
+            BoxError::ConfigError(format!("Invalid label (expected KEY=VALUE): {label}"))
+        })?;
         config.labels.insert(key.to_string(), value.to_string());
     }
 
@@ -270,11 +272,10 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
     // path already derives distinct per-index subnets to avoid it.
     for existing in store.list()? {
         if subnets_overlap(&config.subnet, &existing.subnet) {
-            return Err(format!(
+            return Err(BoxError::NetworkError(format!(
                 "subnet {} overlaps with existing network '{}' ({})",
                 config.subnet, existing.name, existing.subnet
-            )
-            .into());
+            )));
         }
     }
 
@@ -316,21 +317,21 @@ fn subnets_overlap(a: &str, b: &str) -> bool {
     (net_a & mask) == (net_b & mask)
 }
 
-pub(crate) fn validate_attachable_network(config: &NetworkConfig) -> Result<(), String> {
-    config.validate_runtime()
+pub(crate) fn validate_attachable_network(config: &NetworkConfig) -> Result<(), BoxError> {
+    config.validate_runtime().map_err(BoxError::NetworkError)
 }
 
-pub(crate) fn validate_network_driver(driver: &str) -> Result<(), String> {
+pub(crate) fn validate_network_driver(driver: &str) -> Result<(), BoxError> {
     if driver == "bridge" {
         Ok(())
     } else {
-        Err(format!(
+        Err(BoxError::ConfigError(format!(
             "Unsupported network driver '{driver}'. Only 'bridge' is currently supported"
-        ))
+        )))
     }
 }
 
-async fn execute_ls(args: LsArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_ls(args: LsArgs) -> Result<(), BoxError> {
     let store = NetworkStore::default_path()?;
     let mut networks = store.list()?;
     networks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -369,9 +370,11 @@ async fn execute_ls(args: LsArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn execute_rm(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_rm(args: RmArgs) -> Result<(), BoxError> {
     if args.names.is_empty() {
-        return Err("requires at least 1 argument".into());
+        return Err(BoxError::ConfigError(
+            "requires at least 1 argument".to_string(),
+        ));
     }
 
     let store = NetworkStore::default_path()?;
@@ -399,7 +402,7 @@ async fn execute_rm(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(BoxError::NetworkError(errors.join("\n")))
     }
 }
 
@@ -408,7 +411,7 @@ fn force_disconnect_network_endpoints(
     state: &mut crate::state::StateFile,
     network_name: &str,
     config: &mut NetworkConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let configured_box_ids: Vec<String> = state
         .records()
         .iter()
@@ -421,11 +424,10 @@ fn force_disconnect_network_endpoints(
             continue;
         };
         if crate::status::is_active(record) {
-            return Err(format!(
+            return Err(BoxError::NetworkError(format!(
                 "network '{network_name}' has active box {}. Stop it before force-removing the network because network hot-plug is not supported yet.",
                 record.name
-            )
-            .into());
+            )));
         }
     }
     for box_id in &configured_box_ids {
@@ -433,11 +435,10 @@ fn force_disconnect_network_endpoints(
             continue;
         };
         if crate::status::is_active(record) {
-            return Err(format!(
+            return Err(BoxError::NetworkError(format!(
                 "network '{network_name}' is configured on active box {}. Stop it before force-removing the network because network hot-plug is not supported yet.",
                 record.name
-            )
-            .into());
+            )));
         }
     }
 
@@ -460,55 +461,51 @@ fn force_disconnect_network_endpoints(
     Ok(())
 }
 
-async fn execute_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_inspect(args: InspectArgs) -> Result<(), BoxError> {
     let store = NetworkStore::default_path()?;
 
     let config = store
         .get(&args.name)?
-        .ok_or_else(|| format!("network '{}' not found", args.name))?;
+        .ok_or_else(|| BoxError::NetworkError(format!("network '{}' not found", args.name)))?;
 
     let json = serde_json::to_string_pretty(&config)?;
     println!("{json}");
     Ok(())
 }
 
-async fn execute_connect(args: ConnectArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_connect(args: ConnectArgs) -> Result<(), BoxError> {
     let store = NetworkStore::default_path()?;
     let mut state = crate::state::StateFile::load_default()?;
 
     // Resolve box name/ID using Docker-compatible resolution
-    let record = crate::resolve::resolve(&state, &args.container)?.clone();
+    let record = crate::resolve::resolve(&state, &args.container)
+        .map_err(|error| BoxError::StateError(error.to_string()))?
+        .clone();
     require_inactive_for_network_change(&record, "connect to a network")?;
 
     if let Some(existing) = crate::cleanup::record_network_name(&record) {
         if existing != args.network {
-            return Err(format!(
+            return Err(BoxError::NetworkError(format!(
                 "Box {} is already configured for network '{}'. Disconnect it before connecting to '{}'.",
                 record.name, existing, args.network
-            )
-            .into());
+            )));
         }
     }
 
     // Atomic load → validate → allocate-IP → save under the store's
     // cross-process lock (concurrent connects can't dup IPs or lose endpoints).
-    let endpoint = store.with_write_lock(
-        |networks| -> Result<NetworkEndpoint, Box<dyn std::error::Error>> {
-            let config =
-                networks
-                    .get_mut(&args.network)
-                    .ok_or_else(|| -> Box<dyn std::error::Error> {
-                        format!("network '{}' not found", args.network).into()
-                    })?;
-            validate_attachable_network(config)?;
-            ensure_endpoint(config, &record.id, &record.name).map_err(
-                |e| -> Box<dyn std::error::Error> { format!("Failed to connect: {e}").into() },
-            )
-        },
-    )?;
+    let endpoint = store.with_write_lock(|networks| -> Result<NetworkEndpoint, BoxError> {
+        let config = networks.get_mut(&args.network).ok_or_else(|| {
+            BoxError::NetworkError(format!("network '{}' not found", args.network))
+        })?;
+        validate_attachable_network(config)?;
+        ensure_endpoint(config, &record.id, &record.name)
+            .map_err(|e| BoxError::NetworkError(format!("Failed to connect: {e}")))
+    })?;
 
     {
-        let state_record = crate::resolve::resolve_mut(&mut state, &record.id)?;
+        let state_record = crate::resolve::resolve_mut(&mut state, &record.id)
+            .map_err(|error| BoxError::StateError(error.to_string()))?;
         set_record_network(state_record, &args.network);
     }
     state.save()?;
@@ -520,26 +517,27 @@ async fn execute_connect(args: ConnectArgs) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-async fn execute_disconnect(args: DisconnectArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_disconnect(args: DisconnectArgs) -> Result<(), BoxError> {
     let store = NetworkStore::default_path()?;
     let mut state = crate::state::StateFile::load_default()?;
 
     // Resolve box name/ID using Docker-compatible resolution
-    let record = crate::resolve::resolve(&state, &args.container)?.clone();
+    let record = crate::resolve::resolve(&state, &args.container)
+        .map_err(|error| BoxError::StateError(error.to_string()))?
+        .clone();
     require_inactive_for_network_change(&record, "disconnect from a network")?;
 
     let configured_network = crate::cleanup::record_network_name(&record).map(str::to_string);
     if configured_network.as_deref() != Some(args.network.as_str()) && !args.force {
-        return Err(format!(
+        return Err(BoxError::NetworkError(format!(
             "Box {} is not configured for network '{}'. Use --force to remove a stale endpoint only.",
             record.name, args.network
-        )
-        .into());
+        )));
     }
 
     let is_configured_network = configured_network.as_deref() == Some(args.network.as_str());
 
-    store.with_write_lock(|networks| -> Result<(), Box<dyn std::error::Error>> {
+    store.with_write_lock(|networks| -> Result<(), BoxError> {
         if let Some(config) = networks.get_mut(&args.network) {
             match config.disconnect(&record.id) {
                 Ok(_) => {} // persisted by with_write_lock
@@ -551,16 +549,24 @@ async fn execute_disconnect(args: DisconnectArgs) -> Result<(), Box<dyn std::err
                         "Ignoring missing network endpoint during forced disconnect"
                     );
                 }
-                Err(error) => return Err(format!("Failed to disconnect: {error}").into()),
+                Err(error) => {
+                    return Err(BoxError::NetworkError(format!(
+                        "Failed to disconnect: {error}"
+                    )))
+                }
             }
         } else if !args.force {
-            return Err(format!("network '{}' not found", args.network).into());
+            return Err(BoxError::NetworkError(format!(
+                "network '{}' not found",
+                args.network
+            )));
         }
         Ok(())
     })?;
 
     if is_configured_network {
-        let state_record = crate::resolve::resolve_mut(&mut state, &record.id)?;
+        let state_record = crate::resolve::resolve_mut(&mut state, &record.id)
+            .map_err(|error| BoxError::StateError(error.to_string()))?;
         clear_record_network(state_record);
         state.save()?;
     }
@@ -584,15 +590,15 @@ fn ensure_endpoint(
 fn require_inactive_for_network_change(
     record: &crate::state::BoxRecord,
     action: &str,
-) -> Result<(), String> {
+) -> Result<(), BoxError> {
     if !crate::status::is_active(record) {
         return Ok(());
     }
 
-    Err(format!(
+    Err(BoxError::NetworkError(format!(
         "Cannot {action} box {} because network hot-plug is not supported yet. Stop it first, run the network command, then start it again.",
         record.name
-    ))
+    )))
 }
 
 fn set_record_network(record: &mut crate::state::BoxRecord, network: &str) {
@@ -622,8 +628,10 @@ mod tests {
     fn test_validate_network_driver_accepts_bridge_only() {
         assert!(validate_network_driver("bridge").is_ok());
 
-        let error = validate_network_driver("overlay").unwrap_err();
-        assert!(error.contains("Unsupported network driver"));
+        assert!(matches!(
+            validate_network_driver("overlay"),
+            Err(BoxError::ConfigError(error)) if error.contains("Unsupported network driver")
+        ));
     }
 
     #[test]
@@ -631,9 +639,11 @@ mod tests {
         let mut config = NetworkConfig::new("testnet", "10.89.0.0/24").unwrap();
         config.policy.isolation = IsolationMode::Custom;
 
-        let error = validate_attachable_network(&config).unwrap_err();
-
-        assert!(error.contains("Unsupported network isolation mode"));
+        assert!(matches!(
+            validate_attachable_network(&config),
+            Err(BoxError::NetworkError(error))
+                if error.contains("Unsupported network isolation mode")
+        ));
     }
 
     #[test]
@@ -947,11 +957,15 @@ mod tests {
 
         let err = prune_unused_networks(&store, &state)
             .expect_err("unreadable NetworkStore must not invent empty prune success");
-        assert!(err
-            .to_string()
-            .contains("Failed to list networks for prune"));
+        assert!(matches!(
+            &err,
+            BoxError::NetworkError(message) if message.contains("Failed to list networks for prune")
+        ));
     }
 
+    // Directory mode 0555 denies the parent write on Unix. Windows
+    // `set_readonly` does not, so this assertion is not meaningful there.
+    #[cfg(unix)]
     #[test]
     fn prune_unused_networks_surfaces_remove_errors() {
         let (dir, store) = temp_store();

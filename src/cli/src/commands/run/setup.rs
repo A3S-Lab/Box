@@ -1,4 +1,5 @@
 use super::*;
+use a3s_box_core::error::BoxError;
 
 pub(super) struct RunRecordPolicy {
     pub(super) name: String,
@@ -15,41 +16,38 @@ pub(super) struct RunRecordPolicy {
 // Phase 1: Parse args, build config, boot VM, save state
 // ============================================================================
 
-pub(super) async fn setup_and_boot(
-    args: &RunArgs,
-) -> Result<RunContext, Box<dyn std::error::Error>> {
+pub(super) async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, BoxError> {
     #[cfg(windows)]
     if args.tty {
-        return Err(crate::platform::unsupported_command(
-            "run -it",
-            "interactive PTY support",
+        return Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("run -it", "interactive PTY support").to_string(),
         ));
     }
     let create_start = std::time::Instant::now();
-    common::validate_runtime_options(&args.common)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    common::validate_runtime_options(&args.common).map_err(BoxError::ConfigError)?;
     #[cfg(windows)]
     if args.tee || args.tee_simulate || args.tee_workload_id.is_some() {
-        return Err(
+        return Err(BoxError::ConfigError(
             "TEE configuration is not supported on Windows; remove --tee / --tee-simulate / --tee-workload-id"
-                .into(),
-        );
+                .to_string(),
+        ));
     }
     let (restart_policy, max_restart_count) =
-        crate::state::parse_restart_policy(&args.common.restart)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let restart_policy = execution_restart_policy(&restart_policy)?;
+        crate::state::parse_restart_policy(&args.common.restart).map_err(BoxError::ConfigError)?;
+    let restart_policy =
+        execution_restart_policy(&restart_policy).map_err(BoxError::ConfigError)?;
 
-    let memory_mb =
-        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+    let memory_mb = parse_memory(&args.common.memory)
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --memory: {error}")))?;
     let resource_limits = common::build_resource_limits(&args.common)?;
 
     let log_driver: a3s_box_core::log::LogDriver = args
         .log_driver
         .parse()
-        .map_err(|e: String| format!("Invalid --log-driver: {e}"))?;
+        .map_err(|error: String| BoxError::ConfigError(format!("Invalid --log-driver: {error}")))?;
     let log_opts = common::parse_env_vars(&args.log_opts)
-        .map_err(|e| e.replace("environment variable", "log option"))?;
+        .map_err(|error| error.replace("environment variable", "log option"))
+        .map_err(BoxError::ConfigError)?;
     let log_config = a3s_box_core::log::LogConfig {
         driver: log_driver,
         options: log_opts,
@@ -58,10 +56,11 @@ pub(super) async fn setup_and_boot(
     let name = args.common.name.clone().unwrap_or_else(generate_name);
     let mut env = common::build_env_map(&args.common)?;
     apply_run_env_defaults(args, &mut env);
-    let port_map = common::normalize_port_maps(&args.common.publish)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let port_map =
+        common::normalize_port_maps(&args.common.publish).map_err(BoxError::ConfigError)?;
     let labels = common::parse_env_vars(&args.common.labels)
-        .map_err(|e| e.replace("environment variable", "label"))?
+        .map_err(|error| error.replace("environment variable", "label"))
+        .map_err(BoxError::ConfigError)?
         .into_iter()
         .collect();
     let entrypoint_override = args
@@ -75,9 +74,10 @@ pub(super) async fn setup_and_boot(
 
     // Parse --shm-size once; reuse for both tmpfs entry and the box record.
     let shm_size = match &args.common.shm_size {
-        Some(s) => {
-            Some(common::parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?)
-        }
+        Some(s) => Some(
+            common::parse_memory_bytes(s)
+                .map_err(|error| BoxError::ConfigError(format!("Invalid --shm-size: {error}")))?,
+        ),
         None => None,
     };
     let network_mode = common::resolve_network(args.common.network.as_deref());
@@ -100,7 +100,7 @@ pub(super) async fn setup_and_boot(
         args.common.tmpfs.clone(),
         tee,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::ConfigError)?;
     a3s_box_core::resolve_execution(&config)?;
 
     // Probe the route selected by the active migration policy after complete,
@@ -113,8 +113,12 @@ pub(super) async fn setup_and_boot(
         &home,
         Some(std::sync::Arc::clone(&pull_progress_fn)),
     )
-    .await?;
-    manager.preflight_isolation(config.isolation).await?;
+    .await
+    .map_err(super::super::IntoBoxError::into_box_error)?;
+    manager
+        .preflight_isolation(config.isolation)
+        .await
+        .map_err(super::super::IntoBoxError::into_box_error)?;
 
     // Image config is cache-first and happens after preflight so an image
     // HEALTHCHECK can be rejected before named-volume creation.
@@ -139,7 +143,8 @@ pub(super) async fn setup_and_boot(
         image_config.stop_signal.as_deref(),
     );
 
-    let operation_id = OperationId::new(format!("cli-run-{}", uuid::Uuid::new_v4()))?;
+    let operation_id = OperationId::new(format!("cli-run-{}", uuid::Uuid::new_v4()))
+        .map_err(super::super::IntoBoxError::into_box_error)?;
     let request = build_execution_request(
         args,
         &operation_id,
@@ -157,7 +162,10 @@ pub(super) async fn setup_and_boot(
         },
     );
     let reserve_start = std::time::Instant::now();
-    let reservation = manager.create(request, &operation_id).await?;
+    let reservation = manager
+        .create(request, &operation_id)
+        .await
+        .map_err(super::super::IntoBoxError::into_box_error)?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase("cli.reserve", reserve_start.elapsed());
     let execution_id = reservation.execution_id.clone();
     let box_id = execution_id.to_string();
@@ -178,7 +186,7 @@ pub(super) async fn setup_and_boot(
             Ok(Some(record)) => (reservation.generation, Some(record)),
             Ok(None) => {
                 return Err(chain_failed_managed_run_cleanup(
-                    error.into(),
+                    super::super::IntoBoxError::into_box_error(error),
                     manager
                         .remove_execution(&execution_id, reservation.generation)
                         .await,
@@ -186,8 +194,9 @@ pub(super) async fn setup_and_boot(
             }
             Err(recovery_error) => {
                 return Err(chain_failed_managed_run_cleanup(
-                    format!("{error}; failed to inspect managed startup outcome: {recovery_error}")
-                        .into(),
+                    BoxError::StateError(format!(
+                        "{error}; failed to inspect managed startup outcome: {recovery_error}"
+                    )),
                     manager
                         .remove_execution(&execution_id, reservation.generation)
                         .await,
@@ -208,7 +217,9 @@ pub(super) async fn setup_and_boot(
         None => StateFile::load_readonly()?
             .find_by_id(&box_id)
             .cloned()
-            .ok_or_else(|| format!("managed run {box_id} disappeared after startup"))?,
+            .ok_or_else(|| {
+                BoxError::StateError(format!("managed run {box_id} disappeared after startup"))
+            })?,
     };
     let box_dir = record.box_dir.clone();
     let exec_socket_path = record.exec_socket_path.clone();
@@ -275,7 +286,7 @@ pub(super) fn runtime_start_progress_message(name: &str, elapsed_seconds: u64) -
     )
 }
 
-fn completed_start_record(box_id: &str) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {
+fn completed_start_record(box_id: &str) -> Result<Option<BoxRecord>, BoxError> {
     let state = StateFile::load_readonly()?;
     let Some(record) = state.find_by_id(box_id) else {
         return Ok(None);
@@ -317,7 +328,7 @@ fn pull_progress_callback(image_name: String) -> a3s_box_runtime::PullProgressFn
 async fn pull_image_config(
     args: &RunArgs,
     progress: a3s_box_runtime::PullProgressFn,
-) -> Result<a3s_box_runtime::oci::OciImageConfig, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_runtime::oci::OciImageConfig, BoxError> {
     let store = std::sync::Arc::new(crate::commands::open_image_store()?);
     let reference = a3s_box_runtime::ImageReference::parse(&args.common.image)?;
     let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
@@ -328,14 +339,14 @@ async fn pull_image_config(
 }
 
 fn chain_failed_managed_run_cleanup(
-    primary: Box<dyn std::error::Error>,
+    primary: BoxError,
     cleanup: Result<bool, impl std::fmt::Display>,
-) -> Box<dyn std::error::Error> {
+) -> BoxError {
     match cleanup {
         Ok(_) => primary,
-        Err(cleanup) => {
-            format!("{primary}; also failed to roll back managed run: {cleanup}").into()
-        }
+        Err(cleanup) => BoxError::StateError(format!(
+            "{primary}; also failed to roll back managed run: {cleanup}"
+        )),
     }
 }
 
@@ -488,20 +499,36 @@ pub(super) fn interactive_keepalive_entrypoint() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::chain_failed_managed_run_cleanup;
+    use a3s_box_core::error::BoxError;
 
     #[test]
     fn chain_failed_managed_run_cleanup_surfaces_both_errors() {
-        let err =
-            chain_failed_managed_run_cleanup("start failed".into(), Err::<bool, _>("wipe refused"));
-        let message = err.to_string();
-        assert!(message.contains("start failed"));
-        assert!(message.contains("wipe refused"));
-        assert!(message.contains("also failed to roll back managed run"));
+        let err = chain_failed_managed_run_cleanup(
+            BoxError::StateError("start failed".to_string()),
+            Err::<bool, _>("wipe refused"),
+        );
+        match err {
+            BoxError::StateError(message) => {
+                assert!(message.contains("start failed"), "{message}");
+                assert!(message.contains("wipe refused"), "{message}");
+                assert!(
+                    message.contains("also failed to roll back managed run"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
     fn chain_failed_managed_run_cleanup_keeps_primary_when_cleanup_ok() {
-        let err = chain_failed_managed_run_cleanup("start failed".into(), Ok::<bool, &str>(true));
-        assert_eq!(err.to_string(), "start failed");
+        let err = chain_failed_managed_run_cleanup(
+            BoxError::StateError("start failed".to_string()),
+            Ok::<bool, &str>(true),
+        );
+        match err {
+            BoxError::StateError(message) => assert_eq!(message, "start failed"),
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 }

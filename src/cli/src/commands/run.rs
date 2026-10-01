@@ -10,6 +10,7 @@ use super::pool::{
 use crate::output::parse_memory;
 use crate::state::{generate_name, BoxRecord, StateFile};
 use a3s_box_core::config::{BoxConfig, ResourceConfig, SidecarConfig, TeeConfig};
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionManager,
     ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, OperationId,
@@ -158,9 +159,8 @@ pub(super) fn is_completed_managed_start(record: &BoxRecord) -> bool {
             .is_ok_and(|state| state == Some(a3s_box_runtime::ManagedExecutionState::Stopped))
 }
 
-pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
-    validate_run_mode(&args, std::io::stdin().is_terminal())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+pub async fn execute(args: RunArgs) -> Result<(), BoxError> {
+    validate_run_mode(&args, std::io::stdin().is_terminal()).map_err(BoxError::ConfigError)?;
 
     let env_pool_socket = std::env::var(RUN_POOL_SOCKET_ENV).ok();
     if let Some(pool_socket) = selected_pool_socket(&args, env_pool_socket.as_deref()) {
@@ -184,18 +184,21 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.detach {
         if !ctx.completed_during_start {
             crate::health::spawn_detached_health_checker(&ctx.record)
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                .map_err(super::IntoBoxError::into_box_error)?;
         }
         println!("{}", ctx.box_id);
         return Ok(());
     }
 
     ctx.health_checker = match (ctx.completed_during_start, ctx.record.health_check.as_ref()) {
-        (false, Some(health_check)) => Some(crate::health::spawn_health_checker(
-            ctx.box_id.clone(),
-            ctx.exec_socket_path.clone(),
-            health_check.clone(),
-        )?),
+        (false, Some(health_check)) => Some(
+            crate::health::spawn_health_checker(
+                ctx.box_id.clone(),
+                ctx.exec_socket_path.clone(),
+                health_check.clone(),
+            )
+            .map_err(BoxError::ConfigError)?,
+        ),
         _ => None,
     };
 
@@ -298,9 +301,9 @@ fn selected_pool_socket(args: &RunArgs, env_socket: Option<&str>) -> Option<Stri
 fn pool_autostart_config_for_run(
     args: &RunArgs,
     socket: &str,
-) -> Result<PoolAutoStartConfig, Box<dyn std::error::Error>> {
-    let memory_mb =
-        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+) -> Result<PoolAutoStartConfig, BoxError> {
+    let memory_mb = parse_memory(&args.common.memory)
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --memory: {error}")))?;
     let prewarm_image = if args.common.volumes.is_empty()
         && args.package_cache.is_empty()
         && args.common.cpus == 2
@@ -362,7 +365,7 @@ fn has_unsupported_pool_common_options(common: &CommonBoxArgs) -> bool {
         || common.persistent
 }
 
-async fn execute_pool_run(args: &RunArgs, socket: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_pool_run(args: &RunArgs, socket: &str) -> Result<(), BoxError> {
     use std::io::Write;
 
     let output =
@@ -376,15 +379,11 @@ async fn execute_pool_run(args: &RunArgs, socket: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn build_pool_client_run(
-    args: &RunArgs,
-    socket: &str,
-) -> Result<PoolClientRun, Box<dyn std::error::Error>> {
-    common::validate_runtime_options(&args.common)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+fn build_pool_client_run(args: &RunArgs, socket: &str) -> Result<PoolClientRun, BoxError> {
+    common::validate_runtime_options(&args.common).map_err(BoxError::ConfigError)?;
 
-    let memory_mb =
-        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+    let memory_mb = parse_memory(&args.common.memory)
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --memory: {error}")))?;
     let mut env = common::build_env_map(&args.common)?;
     apply_run_env_defaults(args, &mut env);
     let mut volume_specs = args.common.volumes.clone();
@@ -400,7 +399,7 @@ fn build_pool_client_run(
         socket: socket.to_string(),
         image: Some(args.common.image.clone()),
         user: common::normalize_user_option(args.common.user.as_deref())
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+            .map_err(BoxError::ConfigError)?,
         workdir: args.common.workdir.clone(),
         rootfs: None,
         env: env_entries,
@@ -411,8 +410,8 @@ fn build_pool_client_run(
         timeout_ns: match args.timeout {
             None => None,
             Some(secs) => Some(secs.checked_mul(1_000_000_000).ok_or_else(|| {
-                Box::<dyn std::error::Error>::from(
-                    "--timeout is too large to express as nanoseconds",
+                BoxError::ConfigError(
+                    "--timeout is too large to express as nanoseconds".to_string(),
                 )
             })?),
         },
@@ -434,7 +433,7 @@ use setup::{
 // ============================================================================
 
 #[cfg(not(windows))]
-async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), BoxError> {
     use crate::terminal;
     use a3s_box_core::pty::PtyRequest;
     use a3s_box_core::ExecutionSessionManager;
@@ -455,7 +454,7 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
 
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let user = common::normalize_user_option(args.common.user.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .map_err(BoxError::ConfigError)?;
     let env = common::build_env_map(&args.common)?
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
@@ -473,7 +472,8 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
         let process = ctx
             .manager
             .start_pty(&ctx.execution_id, ctx.generation, request)
-            .await?;
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         let _raw_mode = terminal::raw_mode()?;
         super::exec::run_managed_pty_session(process).await
     } else {
@@ -498,10 +498,9 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
 }
 
 #[cfg(windows)]
-async fn run_tty(_ctx: RunContext, _args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "run -it",
-        "interactive PTY support",
+async fn run_tty(_ctx: RunContext, _args: &RunArgs) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        crate::platform::unsupported_command("run -it", "interactive PTY support").to_string(),
     ))
 }
 
@@ -527,9 +526,7 @@ fn parse_health_check(common: &common::CommonBoxArgs) -> Option<crate::state::He
 }
 
 /// Resolve named volumes, returning (resolved_specs, volume_names).
-fn resolve_volumes(
-    volume_specs: &[String],
-) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+fn resolve_volumes(volume_specs: &[String]) -> Result<(Vec<String>, Vec<String>), BoxError> {
     let mut resolved = Vec::new();
     let mut names = Vec::new();
     for spec in volume_specs {
@@ -598,7 +595,7 @@ async fn cleanup_box(
     ctx: &mut RunContext,
     auto_remove: bool,
     exit_code: Option<i32>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     archive_auto_removed_logs(ctx, auto_remove, exit_code, false);
     cleanup_managed_execution(ctx, auto_remove, exit_code, false, false).await
 }
@@ -609,7 +606,16 @@ async fn cleanup_managed_execution(
     exit_code: Option<i32>,
     stopped_by_user: bool,
     natural_exit: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
+    if auto_remove {
+        #[cfg(windows)]
+        if let Err(error) = crate::commands::commit::refuse_directory_reparse(&ctx.box_dir) {
+            return Err(BoxError::StateError(format!(
+                "refusing to remove box directory {}: {error}",
+                ctx.box_dir.display()
+            )));
+        }
+    }
     if let Some(ref handle) = ctx.health_checker {
         handle.abort();
     }
@@ -644,10 +650,10 @@ async fn cleanup_managed_execution(
     };
 
     cleanup_result.map_err(|error| {
-        format!(
+        BoxError::StateError(format!(
             "failed to stop managed execution {}; state was preserved for recovery: {error}",
             ctx.box_id
-        )
+        ))
     })?;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "foreground.manager_reconcile",
@@ -656,46 +662,49 @@ async fn cleanup_managed_execution(
 
     let removal_start = std::time::Instant::now();
     if auto_remove {
-        StateFile::remove_record(&ctx.box_id)
-            .map_err(|error| format!("failed to remove box {} state: {error}", ctx.box_id))?;
+        StateFile::remove_record(&ctx.box_id).map_err(|error| {
+            BoxError::StateError(format!(
+                "failed to remove box {} state: {error}",
+                ctx.box_id
+            ))
+        })?;
         if natural_exit {
             // Explicit managed kills remove auto-remove anonymous volumes in the
             // backend. Natural exit has no kill path, so the CLI owns cleanup.
             crate::cleanup::cleanup_anonymous_volumes(&ctx.box_id, &ctx.anonymous_volumes).map_err(
                 |error| {
-                    format!(
+                    BoxError::StateError(format!(
                         "removed box {} state but refused to wipe {}: anonymous volume cleanup failed: {error}",
                         ctx.box_id,
                         ctx.box_dir.display()
-                    )
+                    ))
                 },
             )?;
         }
         let home = a3s_box_core::dirs_home();
         a3s_box_runtime::teardown_sandbox_host_netdevice_lease(&home, &ctx.box_id).map_err(
             |error| {
-                format!(
+                BoxError::StateError(format!(
                     "removed box {} state but refused to wipe {}: host netdevice lease teardown failed: {error}",
                     ctx.box_id,
                     ctx.box_dir.display()
-                )
+                ))
             },
         )?;
         a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&ctx.box_dir).map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "removed box {} state but refused to wipe {}: MicroVM :ro virtio-fs alias detach failed: {error}",
                 ctx.box_id,
                 ctx.box_dir.display()
-            )
+            ))
         })?;
         if let Err(error) = std::fs::remove_dir_all(&ctx.box_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "removed box {} state but failed to remove {}: {error}",
                     ctx.box_id,
                     ctx.box_dir.display()
-                )
-                .into());
+                )));
             }
         }
     } else {
@@ -703,7 +712,12 @@ async fn cleanup_managed_execution(
             mark_record_stopped(s, &ctx.box_id, exit_code, stopped_by_user);
             Ok::<(), std::io::Error>(())
         })
-        .map_err(|error| format!("failed to mark box {} stopped: {error}", ctx.box_id))?;
+        .map_err(|error| {
+            BoxError::StateError(format!(
+                "failed to mark box {} stopped: {error}",
+                ctx.box_id
+            ))
+        })?;
     }
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "foreground.removal",

@@ -237,6 +237,69 @@ async fn test_cleanup_failure_is_reported_and_preserves_recovery_state() {
     assert!(context.box_dir.exists());
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn cleanup_managed_execution_does_not_delete_through_a_directory_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = temporary.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let id = "550e8400-e29b-41d4-a716-446655440099";
+    let link = temporary.path().join("boxes").join(id);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let mut record = crate::test_helpers::fixtures::make_record(id, "run-cleanup", "running", None);
+    record.box_dir = link.clone();
+    record.exec_socket_path = link.join("sockets").join("exec.sock");
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let manager = LocalExecutionManager::new(
+        temporary.path().join("empty-state.json"),
+        temporary.path(),
+        std::sync::Arc::new(backend),
+    );
+    let mut context = RunContext {
+        manager,
+        execution_id: ExecutionId::new(id).unwrap(),
+        generation: ExecutionGeneration::new(1).unwrap(),
+        box_id: id.to_string(),
+        box_dir: link.clone(),
+        name: record.name.clone(),
+        record,
+        exec_socket_path: temporary.path().join("exec.sock"),
+        pty_socket_path: temporary.path().join("pty.sock"),
+        anonymous_volumes: Vec::new(),
+        health_checker: None,
+        completed_during_start: false,
+    };
+
+    let removed = cleanup_managed_execution(&mut context, true, Some(1), false, false).await;
+    assert!(
+        removed
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("junction")),
+        "auto-remove cleanup deleted through a directory junction: {removed:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    let metadata = std::fs::symlink_metadata(&link).unwrap();
+    assert!(
+        crate::commands::commit::metadata_is_reparse_point(&metadata),
+        "auto-remove cleanup removed the directory junction"
+    );
+}
+
 #[test]
 fn test_foreground_exit_code_preserves_vm_code() {
     assert_eq!(

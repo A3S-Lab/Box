@@ -5,6 +5,7 @@
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
 
 use crate::resolve;
@@ -44,13 +45,19 @@ struct TopProcess {
     command: String,
 }
 
-pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: TopArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
+    let record =
+        resolve::resolve(&state, &args.r#box).map_err(super::IntoBoxError::into_box_error)?;
     let record =
         match super::observe_inventory::refresh_managed_inventory_record(record.clone()).await? {
             Some(record) => record,
-            None => return Err(format!("No such container: {}", args.r#box).into()),
+            None => {
+                return Err(BoxError::StateError(format!(
+                    "No such container: {}",
+                    args.r#box
+                )))
+            }
         };
 
     let cmd = build_ps_command(args.format, &args.ps_args);

@@ -34,25 +34,37 @@ pub(crate) fn canonical_sha256_digest_hex(digest: &str) -> Result<&str> {
 }
 
 /// Reject symlink/reparse-backed directories before walking an OCI layout.
+/// An ancestor junction is refused as well: `symlink_metadata` of the leaf
+/// follows it and would otherwise see a plain directory.
 pub(crate) fn validate_plain_directory(path: &Path, what: &str) -> Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BoxError::OciImageError(format!(
+                    "Failed to inspect {what} directory {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        if metadata_is_link_or_reparse(&metadata) {
+            return Err(BoxError::OciImageError(format!(
+                "refusing {what} directory {} because it is not a plain directory (symlink/reparse or non-directory)",
+                path.display()
+            )));
+        }
+    }
+
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         BoxError::OciImageError(format!(
             "Failed to inspect {what} directory {}: {error}",
             path.display()
         ))
     })?;
-
-    #[cfg(windows)]
-    let is_link_or_reparse = {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        metadata.file_type().is_symlink()
-            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    };
-    #[cfg(not(windows))]
-    let is_link_or_reparse = metadata.file_type().is_symlink();
-
-    if is_link_or_reparse || !metadata.is_dir() {
+    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(BoxError::OciImageError(format!(
             "refusing {what} directory {} because it is not a plain directory (symlink/reparse or non-directory)",
             path.display()
@@ -60,6 +72,19 @@ pub(crate) fn validate_plain_directory(path: &Path, what: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 pub(crate) fn open_regular_file_no_follow(path: &Path, what: &str) -> Result<File> {
@@ -1407,5 +1432,41 @@ mod tests {
             .append_data(&mut header, "test.txt", b"hello" as &[u8])
             .unwrap();
         builder.finish().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oci_layout_rejects_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        let layout = outside.join("layout");
+        fs::create_dir_all(&layout).unwrap();
+        fs::write(
+            layout.join("oci-layout"),
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(layout.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = OciImage::validate_oci_layout(&link.join("layout"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("symlink/reparse"),
+            "ancestor junction admitted the OCI layout: {error}"
+        );
+        assert_eq!(fs::read(layout.join("secret.txt")).unwrap(), b"secret");
     }
 }

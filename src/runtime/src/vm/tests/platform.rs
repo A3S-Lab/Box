@@ -201,6 +201,50 @@ fn test_collect_windows_guest_result_refuses_stream_symlink() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn test_collect_windows_guest_result_does_not_write_through_a_logs_directory_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let box_dir = tmp.path().join("box");
+    let rootfs = box_dir.join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    let logs = box_dir.join("logs");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        logs.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "once\n").unwrap();
+    std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "").unwrap();
+    std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "7\n").unwrap();
+
+    let config = a3s_box_core::log::LogConfig::default();
+    let collected = collect_windows_guest_result(&box_dir, &config, 0);
+    assert!(
+        !outside.join("console.log").exists(),
+        "guest collection wrote through the logs junction: {collected:?}"
+    );
+    assert!(
+        !outside.join("container.json").exists(),
+        "guest collection wrote through the logs junction: {collected:?}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert!(std::fs::symlink_metadata(&logs)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn test_collect_windows_guest_result_rejects_false_success() {
     let tmp = tempfile::tempdir().unwrap();
     let box_dir = tmp.path().join("box");

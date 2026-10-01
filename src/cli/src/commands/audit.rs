@@ -3,6 +3,7 @@
 //! Reads persistent audit events with optional filters.
 
 use a3s_box_core::audit::{AuditAction, AuditOutcome};
+use a3s_box_core::error::BoxError;
 use a3s_box_runtime::{read_audit_log, AuditLog, AuditQuery};
 use clap::Args;
 
@@ -29,32 +30,16 @@ pub struct AuditArgs {
     pub json: bool,
 }
 
-pub async fn execute(args: AuditArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: AuditArgs) -> Result<(), BoxError> {
     let audit_log = AuditLog::default_path()?;
     let path = audit_log.path();
 
-    // Parse action filter
     let action = match &args.action {
-        Some(a) => {
-            let parsed: AuditAction =
-                serde_json::from_str(&format!("\"{}\"", a)).map_err(|_| {
-                    format!(
-                        "Unknown action '{}'. Examples: box_create, exec_command, image_pull",
-                        a
-                    )
-                })?;
-            Some(parsed)
-        }
+        Some(action) => Some(parse_action_filter(action)?),
         None => None,
     };
-
-    // Parse outcome filter
     let outcome = match &args.outcome {
-        Some(o) => {
-            let parsed: AuditOutcome = serde_json::from_str(&format!("\"{}\"", o))
-                .map_err(|_| format!("Unknown outcome '{}'. Use: success, failure, denied", o))?;
-            Some(parsed)
-        }
+        Some(outcome) => Some(parse_outcome_filter(outcome)?),
         None => None,
     };
 
@@ -113,6 +98,22 @@ pub async fn execute(args: AuditArgs) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+fn parse_action_filter(action: &str) -> Result<AuditAction, BoxError> {
+    serde_json::from_str(&format!("\"{action}\"")).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Unknown action '{action}'. Examples: box_create, exec_command, image_pull"
+        ))
+    })
+}
+
+fn parse_outcome_filter(outcome: &str) -> Result<AuditOutcome, BoxError> {
+    serde_json::from_str(&format!("\"{outcome}\"")).map_err(|_| {
+        BoxError::ConfigError(format!(
+            "Unknown outcome '{outcome}'. Use: success, failure, denied"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +134,27 @@ mod tests {
     fn test_parse_invalid_action() {
         let result: Result<AuditAction, _> = serde_json::from_str("\"nonexistent\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_action_is_a_configuration_error() {
+        match parse_action_filter("nonexistent") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("Unknown action"), "{message}");
+                assert!(message.contains("nonexistent"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_outcome_is_a_configuration_error() {
+        match parse_outcome_filter("maybe") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("Unknown outcome"), "{message}");
+                assert!(message.contains("maybe"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

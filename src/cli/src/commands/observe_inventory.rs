@@ -21,6 +21,7 @@
 //! invented pool `ps` path. Creating stays out of scope (create race). Do not
 //! observe Running boxes on every list.
 
+use a3s_box_core::error::BoxError;
 #[cfg(target_os = "linux")]
 use a3s_box_core::NetworkMode;
 use a3s_box_core::{
@@ -120,35 +121,29 @@ pub(crate) fn needs_managed_restart_resume(record: &BoxRecord) -> bool {
         )
 }
 
-fn managed_generation(
-    record: &BoxRecord,
-) -> Result<ExecutionGeneration, Box<dyn std::error::Error>> {
+fn managed_generation(record: &BoxRecord) -> Result<ExecutionGeneration, BoxError> {
     record
         .managed_execution
         .as_ref()
         .map(|metadata| metadata.generation)
         .ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "box {} lost managed generation during removal resume",
                 record.id
-            )
-            .into()
+            ))
         })
 }
 
-fn managed_create_operation_id(
-    record: &BoxRecord,
-) -> Result<OperationId, Box<dyn std::error::Error>> {
+fn managed_create_operation_id(record: &BoxRecord) -> Result<OperationId, BoxError> {
     record
         .managed_execution
         .as_ref()
         .map(|metadata| metadata.operation_id.clone())
         .ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "box {} lost managed creation operation during restart resume",
                 record.id
-            )
-            .into()
+            ))
         })
 }
 
@@ -158,15 +153,18 @@ fn managed_create_operation_id(
 async fn resume_one_managed_restart(
     manager: &impl ExecutionManager,
     record: &BoxRecord,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let operation_id = managed_create_operation_id(record)?;
-    let execution_id = ExecutionId::new(record.id.clone())?;
+    let execution_id =
+        ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
     match manager.reconcile(&operation_id).await {
         Ok(_) => Ok(()),
         Err(error) => match manager.inspect(&execution_id).await {
-            Ok(status) if status.state == ExecutionState::Creating => Err(error.into()),
+            Ok(status) if status.state == ExecutionState::Creating => {
+                Err(super::IntoBoxError::into_box_error(error))
+            }
             Ok(_) => Ok(()),
-            Err(_) => Err(error.into()),
+            Err(_) => Err(super::IntoBoxError::into_box_error(error)),
         },
     }
 }
@@ -178,13 +176,17 @@ async fn resume_one_managed_restart(
 pub(crate) async fn observe_managed_inventory_claims(
     manager: &impl ExecutionManager,
     candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for record in candidates {
         if !needs_managed_inventory_observation(record) {
             continue;
         }
-        let execution_id = ExecutionId::new(record.id.clone())?;
-        manager.inspect(&execution_id).await?;
+        let execution_id =
+            ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
+        manager
+            .inspect(&execution_id)
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
     }
     Ok(())
 }
@@ -194,8 +196,8 @@ pub(crate) async fn observe_managed_inventory_claims(
 /// Fail closed: one inspect / remove-retry / restart-reconcile error refuses
 /// inventory success so `ps` / `prune` / `info` cannot project stale transitional
 /// claims. Passt backend-loss observation errors also fail closed.
-pub(crate) async fn refresh_default_home_after_inventory_observation(
-) -> Result<StateFile, Box<dyn std::error::Error>> {
+pub(crate) async fn refresh_default_home_after_inventory_observation() -> Result<StateFile, BoxError>
+{
     let home = a3s_box_core::dirs_home();
     observe_bridge_passt_backend_loss(&home)?;
     let state = StateFile::load_default()?;
@@ -222,14 +224,18 @@ pub(crate) async fn refresh_default_home_after_inventory_observation(
 pub(crate) async fn resume_managed_removal_claims(
     manager: &impl ExecutionManager,
     candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for record in candidates {
         if !needs_managed_removal_resume(record) {
             continue;
         }
-        let execution_id = ExecutionId::new(record.id.clone())?;
+        let execution_id =
+            ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
         let generation = managed_generation(record)?;
-        manager.remove(&execution_id, generation).await?;
+        manager
+            .remove(&execution_id, generation)
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
     }
     Ok(())
 }
@@ -238,7 +244,7 @@ pub(crate) async fn resume_managed_removal_claims(
 pub(crate) async fn resume_managed_restart_claims(
     manager: &impl ExecutionManager,
     candidates: impl IntoIterator<Item = &BoxRecord>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for record in candidates {
         if !needs_managed_restart_resume(record) {
             continue;
@@ -251,7 +257,7 @@ pub(crate) async fn resume_managed_restart_claims(
 /// Observe / remove-retry / restart-reconcile one claim; `None` if remove finished.
 pub(crate) async fn refresh_managed_inventory_record(
     record: BoxRecord,
-) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {
+) -> Result<Option<BoxRecord>, BoxError> {
     let needs_observe = needs_managed_inventory_observation(&record);
     let needs_remove = needs_managed_removal_resume(&record);
     let needs_restart = needs_managed_restart_resume(&record);

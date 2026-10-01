@@ -34,6 +34,8 @@ pub mod terminal_status;
 pub mod user;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod volume;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub mod volume_metadata;
 
 pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};
 pub use network::configure_guest_network;

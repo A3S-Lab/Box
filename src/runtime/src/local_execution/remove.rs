@@ -201,11 +201,46 @@ fn remove_anonymous_volumes(home_dir: &Path, record: &BoxRecord) -> ExecutionMan
 }
 
 fn remove_tree_if_present(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    refuse_windows_tree_delete(path)?;
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Ancestors that are reparse points are refused. The leaf is refused only
+/// when it is a directory junction: a cloud placeholder file is also a
+/// reparse point, and a missing leaf is a directory that has not been created.
+#[cfg(windows)]
+fn refuse_windows_tree_delete(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    let mut prefix = PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(std::io::Error::other(format!(
+                "refusing to delete through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    crate::vm::refuse_directory_reparse(path)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn remove_host_cgroup(record: &BoxRecord) -> ExecutionManagerResult<()> {
@@ -336,5 +371,67 @@ mod tests {
             .remove_execution(&reservation.execution_id, reservation.generation)
             .await
             .unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_execution_paths_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::process::CommandExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(outside.join("sockets")).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::fs::write(outside.join("sockets").join("nested.txt"), b"nested").unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let box_dir = home.path().join("boxes").join(id);
+        std::fs::create_dir_all(box_dir.parent().unwrap()).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            box_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let record: BoxRecord = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "short_id": "11111111",
+            "name": "junction-remove",
+            "image": "alpine:latest",
+            "status": "stopped",
+            "pid": null,
+            "cpus": 1,
+            "memory_mb": 128,
+            "volumes": [],
+            "env": {},
+            "cmd": ["sleep", "60"],
+            "box_dir": &box_dir,
+            "console_log": box_dir.join("logs/console.log"),
+            "created_at": "2026-07-15T00:00:00Z",
+            "started_at": null,
+            "auto_remove": false
+        }))
+        .unwrap();
+
+        let removed = cleanup_execution_paths(home.path(), &record);
+        assert!(
+            removed.is_err(),
+            "managed removal deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("sockets").join("nested.txt")).unwrap(),
+            b"nested"
+        );
+        let metadata = std::fs::symlink_metadata(&box_dir).unwrap();
+        assert!(
+            metadata.file_attributes() & 0x400 != 0,
+            "managed removal removed the directory junction"
+        );
     }
 }

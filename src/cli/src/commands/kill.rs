@@ -2,6 +2,7 @@
 
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager, KillExecutionOptions};
 use a3s_box_runtime::ManagedExecutionState;
 
@@ -75,8 +76,8 @@ fn parse_signal(name: &str) -> Result<i32, String> {
     }
 }
 
-pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let signal = parse_signal(&args.signal)?;
+pub async fn execute(args: KillArgs) -> Result<(), BoxError> {
+    let signal = parse_signal(&args.signal).map_err(BoxError::ConfigError)?;
     let state = StateFile::load_default()?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -89,16 +90,15 @@ pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(super::IntoBoxError::into_box_error(errors.join("\n")))
     }
 }
 
-async fn kill_one(
-    state: &StateFile,
-    query: &str,
-    signal: i32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn kill_one(state: &StateFile, query: &str, signal: i32) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let mut lifecycle_lock = Some(lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
     // Select fresh lifecycle metadata while holding the same lock as
     // start/restart/commit. Managed operations release this guard and enter the
@@ -106,7 +106,11 @@ async fn kill_one(
     let current_state = StateFile::load_default()?;
     let record = current_state
         .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box {query} was removed while waiting to send a signal"))?
+        .ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {query} was removed while waiting to send a signal"
+            ))
+        })?
         .clone();
     drop(current_state);
 
@@ -119,7 +123,10 @@ async fn kill_one(
             drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
             let manager = super::configured_local_execution_manager(&home).await?;
-            manager.pause(&execution_id, generation, true).await?;
+            manager
+                .pause(&execution_id, generation, true)
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
             println!("{}", record.name);
             return Ok(());
         }
@@ -130,7 +137,10 @@ async fn kill_one(
             drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
             let manager = super::configured_local_execution_manager(&home).await?;
-            manager.resume(&execution_id, generation).await?;
+            manager
+                .resume(&execution_id, generation)
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
             println!("{}", record.name);
             return Ok(());
         }
@@ -152,9 +162,13 @@ async fn kill_one(
                         timeout_secs: Some(0),
                     },
                 )
-                .await?;
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
             if auto_remove {
-                manager.remove_execution(&execution_id, generation).await?;
+                manager
+                    .remove_execution(&execution_id, generation)
+                    .await
+                    .map_err(super::IntoBoxError::into_box_error)?;
                 println!("{name} (auto-removed)");
             } else {
                 println!("{name}");
@@ -164,9 +178,9 @@ async fn kill_one(
     }
 
     status::require_active(&record, "send a signal to")
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        .map_err(super::IntoBoxError::into_box_error)?;
     let pid = lifecycle::require_live_pid(&record, "send a signal to")
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     let name = record.name.clone();
     let expected_pid_start_time = record.pid_start_time;
@@ -176,7 +190,7 @@ async fn kill_one(
     // strand the VM (and the via-guest path below cannot reach a frozen guest).
     if record.status == "paused" && is_stopping_signal(signal) {
         lifecycle::resume_paused_for_termination(&record, pid, "kill")
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            .map_err(super::IntoBoxError::into_box_error)?;
     }
 
     #[cfg(unix)]
@@ -203,18 +217,17 @@ async fn kill_one(
             // kernel reuse its PID for an unrelated process, which we must never
             // signal. The one-shot identity check in require_live_pid is now stale.
             if !process::is_process_alive_with_identity(pid, record.pid_start_time) {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "box {} is no longer running its original shim (PID {pid} exited or was reused); \
                      not sending {signal} to a possibly-reused PID",
                     record.name
-                )
-                .into());
+                )));
             }
             process::send_signal(pid, signal).map_err(|err| {
-                format!(
+                BoxError::ExecError(format!(
                     "Failed to send signal {signal} to box {} (PID {pid}): {err}",
                     record.name
-                )
+                ))
             })?;
         }
     }
@@ -223,9 +236,9 @@ async fn kill_one(
         if is_stopping_signal(signal) {
             process::terminate_process(pid);
         } else {
-            return Err(crate::platform::unsupported_command(
-                "kill",
-                "non-terminating host signals",
+            return Err(BoxError::ConfigError(
+                crate::platform::unsupported_command("kill", "non-terminating host signals")
+                    .to_string(),
             ));
         }
     }
@@ -262,10 +275,9 @@ async fn kill_one(
             Ok::<bool, std::io::Error>(updated)
         })?;
         if !persisted {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Box {name} changed execution while signal {signal} was being delivered; did not overwrite the replacement state"
-            )
-            .into());
+            )));
         }
     } else if let Some(new_status) = signal_status_transition(signal) {
         let persisted = StateFile::modify(|s| {
@@ -281,10 +293,9 @@ async fn kill_one(
             Ok::<bool, std::io::Error>(updated)
         })?;
         if !persisted {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Box {name} changed execution while signal {signal} was being delivered; did not overwrite the replacement state"
-            )
-            .into());
+            )));
         }
     }
 
@@ -309,21 +320,25 @@ enum KillPlan {
     },
 }
 
-fn kill_plan(
-    record: &crate::state::BoxRecord,
-    signal: i32,
-) -> Result<KillPlan, Box<dyn std::error::Error>> {
+fn kill_plan(record: &crate::state::BoxRecord, signal: i32) -> Result<KillPlan, BoxError> {
     let Some(metadata) = record.managed_execution.as_ref() else {
         return Ok(KillPlan::Direct);
     };
-    let state = record
-        .managed_state()?
-        .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
-    let execution_id = ExecutionId::new(record.id.clone())?;
+    let state = record.managed_state()?.ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed lifecycle metadata",
+            record.name
+        ))
+    })?;
+    let execution_id =
+        ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
     let generation = metadata.generation;
     if signal == SIGSTOP {
         if state != ManagedExecutionState::Running {
-            return Err(format!("Cannot pause box {} because it is {state}", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Cannot pause box {} because it is {state}",
+                record.name
+            )));
         }
         return Ok(KillPlan::ManagedPause {
             execution_id,
@@ -332,7 +347,10 @@ fn kill_plan(
     }
     if signal == SIGCONT {
         if state != ManagedExecutionState::Paused {
-            return Err(format!("Cannot resume box {} because it is {state}", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Cannot resume box {} because it is {state}",
+                record.name
+            )));
         }
         return Ok(KillPlan::ManagedResume {
             execution_id,
@@ -348,9 +366,10 @@ fn kill_plan(
                 | ManagedExecutionState::Creating
                 | ManagedExecutionState::Starting
         ) {
-            return Err(
-                format!("Cannot terminate box {} because it is {state}", record.name).into(),
-            );
+            return Err(BoxError::StateError(format!(
+                "Cannot terminate box {} because it is {state}",
+                record.name
+            )));
         }
         return Ok(KillPlan::ManagedTerminate {
             execution_id,
@@ -361,11 +380,10 @@ fn kill_plan(
         state,
         ManagedExecutionState::Running | ManagedExecutionState::Paused
     ) {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot send signal {signal} to box {} because it is {state}",
             record.name
-        )
-        .into());
+        )));
     }
     Ok(KillPlan::Direct)
 }
@@ -488,6 +506,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_signal_is_a_configuration_error() {
+        let Err(BoxError::ConfigError(message)) =
+            parse_signal("INVALID").map_err(BoxError::ConfigError)
+        else {
+            panic!("unknown signal must be a configuration error");
+        };
+        assert!(message.contains("Unknown signal"));
+    }
+
+    #[test]
     fn test_is_stopping_signal() {
         assert!(is_stopping_signal(SIGKILL));
         assert!(is_stopping_signal(SIGTERM));
@@ -562,10 +590,12 @@ mod tests {
 
     #[test]
     fn managed_signal_rejects_incompatible_lifecycle_state() {
-        let error = kill_plan(&managed_record(ManagedExecutionState::Stopped), SIGTERM)
-            .unwrap_err()
-            .to_string();
+        let Err(BoxError::StateError(message)) =
+            kill_plan(&managed_record(ManagedExecutionState::Stopped), SIGTERM)
+        else {
+            panic!("refusing a stopped box must be a state error");
+        };
 
-        assert!(error.contains("because it is stopped"));
+        assert!(message.contains("because it is stopped"));
     }
 }

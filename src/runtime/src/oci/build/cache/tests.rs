@@ -234,3 +234,36 @@ fn test_hash_context_sources_missing_source_is_none() {
     let srcs = vec!["does-not-exist".to_string()];
     assert!(hash_context_sources(ctx.path(), &srcs).is_none());
 }
+
+#[cfg(windows)]
+#[test]
+fn hash_context_sources_does_not_follow_a_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let ctx = TempDir::new().unwrap();
+    let outside = ctx.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret"), b"one").unwrap();
+    let context = ctx.path().join("context");
+    fs::create_dir_all(&context).unwrap();
+    fs::write(context.join("visible.txt"), b"visible").unwrap();
+    let escape = context.join("escape");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        escape.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let sources = vec![".".to_string()];
+    let first = hash_context_sources(&context, &sources);
+    fs::write(outside.join("secret"), b"two").unwrap();
+    let second = hash_context_sources(&context, &sources);
+
+    assert!(first.is_some(), "context hash failed closed on a junction");
+    assert_eq!(
+        first, second,
+        "context hash followed a junction and absorbed the outside file"
+    );
+}

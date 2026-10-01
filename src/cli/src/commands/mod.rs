@@ -4,7 +4,7 @@ mod attach;
 mod attest;
 mod audit;
 mod build;
-mod commit;
+pub(crate) mod commit;
 pub(crate) mod common;
 pub(crate) mod compose;
 mod container_update;
@@ -220,31 +220,142 @@ pub(crate) fn images_dir() -> PathBuf {
 /// VM-only backend.
 pub(crate) async fn configured_local_execution_manager(
     home: &Path,
-) -> Result<a3s_box_runtime::LocalExecutionManager, Box<dyn std::error::Error>> {
-    Ok(
-        a3s_box_runtime::LocalExecutionManager::with_configured_backend(
-            home.join("boxes.json"),
-            home,
-        )
-        .await?,
-    )
+) -> Result<a3s_box_runtime::LocalExecutionManager, a3s_box_core::error::BoxError> {
+    a3s_box_runtime::LocalExecutionManager::with_configured_backend(home.join("boxes.json"), home)
+        .await
+        .map_err(execution_error)
 }
 
 /// Open the shared image store.
 ///
 /// The cache size limit can be configured via the `A3S_IMAGE_CACHE_SIZE`
 /// environment variable (e.g., `500m`, `20g`). Defaults to 10 GB.
-pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn std::error::Error>>
-{
+pub(crate) fn open_image_store(
+) -> Result<a3s_box_runtime::ImageStore, a3s_box_core::error::BoxError> {
     let dir = images_dir();
-    let max_size = match std::env::var(IMAGE_CACHE_SIZE_ENV) {
-        Ok(val) => crate::output::parse_size_bytes(&val).map_err(|e| {
-            format!("Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)")
-        })?,
-        Err(_) => a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
-    };
-    let store = a3s_box_runtime::ImageStore::new(&dir, max_size)?;
-    Ok(store)
+    let max_size = image_cache_max_bytes(std::env::var(IMAGE_CACHE_SIZE_ENV).ok())?;
+    a3s_box_runtime::ImageStore::new(&dir, max_size)
+}
+
+/// Resolve `A3S_IMAGE_CACHE_SIZE`. `None` is the default limit; a present
+/// value that is not a size is a configuration error, not an erased string.
+pub(crate) fn image_cache_max_bytes(
+    raw: Option<String>,
+) -> Result<u64, a3s_box_core::error::BoxError> {
+    match raw {
+        Some(val) => crate::output::parse_size_bytes(&val).map_err(|e| {
+            a3s_box_core::error::BoxError::ConfigError(format!(
+                "Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)"
+            ))
+        }),
+        None => Ok(a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE),
+    }
+}
+
+/// Keep the callee's variant and attach operator context to its inner message.
+pub(crate) fn annotate_box_error(
+    error: a3s_box_core::error::BoxError,
+    prefix: &str,
+    suffix: &str,
+) -> a3s_box_core::error::BoxError {
+    use a3s_box_core::error::BoxError;
+    let render = |message: String| format!("{prefix}{message}{suffix}");
+    match error {
+        BoxError::TimeoutError(message) => BoxError::TimeoutError(render(message)),
+        BoxError::SerializationError(message) => BoxError::SerializationError(render(message)),
+        BoxError::ConfigError(message) => BoxError::ConfigError(render(message)),
+        BoxError::TeeConfig(message) => BoxError::TeeConfig(render(message)),
+        BoxError::TeeNotSupported(message) => BoxError::TeeNotSupported(render(message)),
+        BoxError::AttestationError(message) => BoxError::AttestationError(render(message)),
+        BoxError::OciImageError(message) => BoxError::OciImageError(render(message)),
+        BoxError::CacheError(message) => BoxError::CacheError(render(message)),
+        BoxError::PoolError(message) => BoxError::PoolError(render(message)),
+        BoxError::ExecError(message) => BoxError::ExecError(render(message)),
+        BoxError::BuildError(message) => BoxError::BuildError(render(message)),
+        BoxError::NetworkError(message) => BoxError::NetworkError(render(message)),
+        BoxError::StateError(message) => BoxError::StateError(render(message)),
+        BoxError::AuditError(message) => BoxError::AuditError(render(message)),
+        BoxError::ResizeError(message) => BoxError::ResizeError(render(message)),
+        BoxError::Other(message) => BoxError::Other(render(message)),
+        BoxError::IoError(error) => {
+            BoxError::IoError(std::io::Error::other(format!("{prefix}{error}{suffix}")))
+        }
+        BoxError::BoxBootError { message, hint } => BoxError::BoxBootError {
+            message: render(message),
+            hint,
+        },
+        BoxError::RegistryError { registry, message } => BoxError::RegistryError {
+            registry,
+            message: render(message),
+        },
+    }
+}
+
+/// Map the execution manager's own variants. Request mistakes are configuration;
+/// the rest are lifecycle state.
+pub(crate) fn execution_error(
+    error: a3s_box_core::ExecutionManagerError,
+) -> a3s_box_core::error::BoxError {
+    use a3s_box_core::error::BoxError;
+    use a3s_box_core::ExecutionManagerError;
+    match error {
+        ExecutionManagerError::InvalidRequest(message) => {
+            BoxError::ConfigError(format!("invalid execution request: {message}"))
+        }
+        ExecutionManagerError::NotFound(id) => {
+            BoxError::StateError(format!("execution not found: {id}"))
+        }
+        ExecutionManagerError::Conflict {
+            execution_id,
+            message,
+        } => BoxError::StateError(format!("execution conflict for {execution_id}: {message}")),
+        ExecutionManagerError::Unavailable(message) => {
+            BoxError::StateError(format!("execution backend unavailable: {message}"))
+        }
+        ExecutionManagerError::Internal(message) => {
+            BoxError::StateError(format!("execution lifecycle failed: {message}"))
+        }
+    }
+}
+
+pub(crate) trait IntoBoxError {
+    fn into_box_error(self) -> a3s_box_core::error::BoxError;
+}
+
+impl IntoBoxError for String {
+    fn into_box_error(self) -> a3s_box_core::error::BoxError {
+        a3s_box_core::error::BoxError::StateError(self)
+    }
+}
+
+impl IntoBoxError for &str {
+    fn into_box_error(self) -> a3s_box_core::error::BoxError {
+        a3s_box_core::error::BoxError::StateError(self.to_string())
+    }
+}
+
+impl IntoBoxError for crate::resolve::ResolveError {
+    fn into_box_error(self) -> a3s_box_core::error::BoxError {
+        a3s_box_core::error::BoxError::StateError(self.to_string())
+    }
+}
+
+impl IntoBoxError for a3s_box_core::ExecutionManagerError {
+    fn into_box_error(self) -> a3s_box_core::error::BoxError {
+        execution_error(self)
+    }
+}
+
+/// Keep an I/O failure matchable as `BoxError::IoError` without dropping the
+/// operation that failed.
+pub(crate) fn io_error(
+    context: impl std::fmt::Display,
+    err: std::io::Error,
+) -> a3s_box_core::error::BoxError {
+    a3s_box_core::error::BoxError::IoError(std::io::Error::new(
+        err.kind(),
+        format!("{context}: {err}"),
+    ))
 }
 
 /// Resolve a box's on-disk full root filesystem directory.
@@ -642,8 +753,8 @@ mod console_tail_tests {
 }
 
 /// Dispatch a parsed CLI to the appropriate command handler.
-pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    type CommandFuture = Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>>>>;
+pub async fn dispatch(cli: Cli) -> Result<(), a3s_box_core::error::BoxError> {
+    type CommandFuture = Pin<Box<dyn Future<Output = Result<(), a3s_box_core::error::BoxError>>>>;
 
     // Keep one selected handler on the heap. Without this indirection the async
     // match stores enough state for the largest of every command, which can
@@ -791,5 +902,28 @@ mod isolation_cli_tests {
         };
         assert_eq!(args.isolation, Some(common::IsolationArg::Sandbox));
         assert!(args.services.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod image_cache_tests {
+    use super::*;
+
+    #[test]
+    fn missing_image_cache_size_uses_the_runtime_default() {
+        assert_eq!(
+            image_cache_max_bytes(None).unwrap(),
+            a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE
+        );
+    }
+
+    #[test]
+    fn invalid_image_cache_size_is_a_config_error() {
+        let err = image_cache_max_bytes(Some("lots".to_string())).unwrap_err();
+        assert!(
+            matches!(err, a3s_box_core::error::BoxError::ConfigError(ref message)
+                if message.contains("A3S_IMAGE_CACHE_SIZE") && message.contains("lots")),
+            "{err}"
+        );
     }
 }

@@ -8,6 +8,7 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 use sha2::{Digest, Sha256};
 
@@ -29,9 +30,8 @@ pub struct ImportArgs {
     pub message: Option<String>,
 }
 
-pub async fn execute(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let raw = std::fs::read(&args.file)
-        .map_err(|e| format!("Failed to read import source '{}': {}", args.file, e))?;
+pub async fn execute(args: ImportArgs) -> Result<(), BoxError> {
+    let raw = read_import_source(&args.file)?;
 
     // Accept gzip-compressed or plain tar input. The layer's diff_id is the
     // SHA256 of the UNCOMPRESSED tar; the layer blob is gzip-compressed.
@@ -39,7 +39,7 @@ pub async fn execute(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>>
         let mut d = flate2::read::GzDecoder::new(&raw[..]);
         let mut out = Vec::new();
         d.read_to_end(&mut out)
-            .map_err(|e| format!("Failed to decompress import source: {e}"))?;
+            .map_err(|e| super::io_error("Failed to decompress import source", e))?;
         out
     } else {
         raw
@@ -52,7 +52,7 @@ pub async fn execute(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Assemble an OCI layout in a temp dir.
     let staging =
-        tempfile::TempDir::new().map_err(|e| format!("Failed to create staging dir: {e}"))?;
+        tempfile::TempDir::new().map_err(|e| super::io_error("Failed to create staging dir", e))?;
     let blobs = staging.path().join("blobs").join("sha256");
     std::fs::create_dir_all(&blobs)?;
     std::fs::write(blobs.join(&layer_digest), &layer_blob)?;
@@ -134,7 +134,7 @@ pub async fn execute(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn gzip(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn gzip(data: &[u8]) -> Result<Vec<u8>, BoxError> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Write;
@@ -147,7 +147,7 @@ fn gzip(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 fn apply_changes(
     changes: &[String],
     config: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<(), BoxError> {
     for change in changes {
         let trimmed = change.trim();
         let (instr, rest) = match trimmed.split_once(char::is_whitespace) {
@@ -199,9 +199,9 @@ fn apply_changes(
                 None
             }
             other => {
-                return Err(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Unsupported --change instruction '{other}' (supported: CMD, ENTRYPOINT, ENV, WORKDIR, USER, EXPOSE, LABEL, VOLUME)"
-                ))
+                )))
             }
         };
     }
@@ -220,19 +220,57 @@ pub(crate) fn parse_exec_or_shell(rest: &str) -> serde_json::Value {
     serde_json::json!(["/bin/sh", "-c", t])
 }
 
-pub(crate) fn parse_key_value(rest: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_key_value(rest: &str) -> Result<(String, String), BoxError> {
     if let Some((k, v)) = rest.split_once('=') {
         Ok((k.trim().to_string(), v.trim().to_string()))
     } else if let Some((k, v)) = rest.split_once(char::is_whitespace) {
         Ok((k.trim().to_string(), v.trim().to_string()))
     } else {
-        Err(format!("Invalid key/value in --change: '{rest}'"))
+        Err(BoxError::ConfigError(format!(
+            "Invalid key/value in --change: '{rest}'"
+        )))
     }
+}
+
+pub(crate) fn read_import_source(path: &str) -> Result<Vec<u8>, BoxError> {
+    super::commit::refuse_archive_ancestor_reparse(std::path::Path::new(path))?;
+    std::fs::read(path)
+        .map_err(|e| super::io_error(format!("Failed to read import source '{path}'"), e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn read_import_source_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("image.tar"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = read_import_source(link.join("image.tar").to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "import source was read through an ancestor junction: {error}"
+        );
+        assert_eq!(std::fs::read(outside.join("image.tar")).unwrap(), b"secret");
+    }
 
     #[test]
     fn test_apply_changes_cmd_entrypoint_env() {
@@ -264,7 +302,10 @@ mod tests {
     fn test_apply_changes_rejects_unknown() {
         let mut cfg = serde_json::Map::new();
         let err = apply_changes(&["FROM scratch".into()], &mut cfg).unwrap_err();
-        assert!(err.contains("Unsupported --change instruction 'FROM'"));
+        assert!(matches!(
+            err,
+            BoxError::ConfigError(message) if message.contains("Unsupported --change instruction 'FROM'")
+        ));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! `a3s-box ps` command — List boxes.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::output;
@@ -26,7 +27,7 @@ pub struct PsArgs {
     pub filters: Vec<String>,
 }
 
-pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: PsArgs) -> Result<(), BoxError> {
     // Present-tense inventory: retire abandoned managed Starting/Killing/
     // Pausing/Resuming/Snapshotting/UpdatingResources via manager inspect,
     // resume Removing via remove-retry, and resume Restart* via reconcile,

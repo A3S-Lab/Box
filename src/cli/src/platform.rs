@@ -4,7 +4,7 @@
 use a3s_box_core::PlatformCapabilities;
 
 #[cfg(windows)]
-pub(crate) fn unsupported_command(command: &str, required: &str) -> Box<dyn std::error::Error> {
+pub(crate) fn unsupported_command(command: &str, required: &str) -> String {
     let capabilities = PlatformCapabilities::current();
     format!(
         "'{command}' is not supported on {}/{}: requires {required} (host channel: {:?}, VM backend: {:?})",
@@ -13,5 +13,4 @@ pub(crate) fn unsupported_command(command: &str, required: &str) -> Box<dyn std:
         capabilities.host_guest_channel,
         capabilities.vm_backend
     )
-    .into()
 }

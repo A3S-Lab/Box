@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::exec::{
     ExecOutput, ExecRequest, FileRequest, FileResponse, FilesystemRequest, FilesystemResponse,
 };
@@ -23,10 +24,7 @@ pub(super) enum CopySession {
 }
 
 impl CopySession {
-    pub(super) async fn execute(
-        &self,
-        request: ExecRequest,
-    ) -> Result<ExecOutput, Box<dyn std::error::Error>> {
+    pub(super) async fn execute(&self, request: ExecRequest) -> Result<ExecOutput, BoxError> {
         match self {
             Self::Managed {
                 manager,
@@ -35,18 +33,15 @@ impl CopySession {
             } => manager
                 .execute(execution_id, *generation, request)
                 .await
-                .map_err(|error| error.into()),
-            Self::Legacy(client) => client
-                .exec_command(&request)
-                .await
-                .map_err(|error| error.into()),
+                .map_err(super::super::IntoBoxError::into_box_error),
+            Self::Legacy(client) => client.exec_command(&request).await,
         }
     }
 
     pub(super) async fn transfer_file(
         &self,
         request: FileRequest,
-    ) -> Result<FileResponse, Box<dyn std::error::Error>> {
+    ) -> Result<FileResponse, BoxError> {
         match self {
             Self::Managed {
                 manager,
@@ -55,18 +50,15 @@ impl CopySession {
             } => manager
                 .transfer_file(execution_id, *generation, request)
                 .await
-                .map_err(|error| error.into()),
-            Self::Legacy(client) => client
-                .file_transfer(&request)
-                .await
-                .map_err(|error| error.into()),
+                .map_err(super::super::IntoBoxError::into_box_error),
+            Self::Legacy(client) => client.file_transfer(&request).await,
         }
     }
 
     pub(super) async fn filesystem(
         &self,
         request: FilesystemRequest,
-    ) -> Result<FilesystemResponse, Box<dyn std::error::Error>> {
+    ) -> Result<FilesystemResponse, BoxError> {
         match self {
             Self::Managed {
                 manager,
@@ -75,11 +67,8 @@ impl CopySession {
             } => manager
                 .filesystem(execution_id, *generation, request)
                 .await
-                .map_err(|error| error.into()),
-            Self::Legacy(client) => client
-                .filesystem(&request)
-                .await
-                .map_err(|error| error.into()),
+                .map_err(super::super::IntoBoxError::into_box_error),
+            Self::Legacy(client) => client.filesystem(&request).await,
         }
     }
 }
@@ -97,9 +86,7 @@ pub(super) enum CopyRoute {
 
 /// Select the copy transport without allowing OCI-routed records to fall back
 /// to a Box-owned compatibility socket.
-pub(super) fn resolve_copy_route(
-    record: &BoxRecord,
-) -> Result<CopyRoute, Box<dyn std::error::Error>> {
+pub(super) fn resolve_copy_route(record: &BoxRecord) -> Result<CopyRoute, BoxError> {
     if record
         .managed_execution
         .as_ref()
@@ -108,14 +95,20 @@ pub(super) fn resolve_copy_route(
         // Managed OCI file/filesystem copy is available while Running or
         // freezer-Paused; exec-based tar paths stay Running-only elsewhere.
         if record.status != "running" && record.status != "paused" {
-            return Err(format!("Box {} is neither running nor paused", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Box {} is neither running nor paused",
+                record.name
+            )));
         }
-        let metadata = record
-            .managed_execution
-            .as_ref()
-            .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+        let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {} lost managed execution metadata",
+                record.name
+            ))
+        })?;
         return Ok(CopyRoute::Managed {
-            execution_id: ExecutionId::new(record.id.clone())?,
+            execution_id: ExecutionId::new(record.id.clone())
+                .map_err(super::super::IntoBoxError::into_box_error)?,
             generation: metadata.generation,
         });
     }
@@ -124,20 +117,24 @@ pub(super) fn resolve_copy_route(
         record,
         crate::socket_paths::RuntimeSocket::Exec,
     )
-    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    .map_err(BoxError::StateError)?;
     Ok(CopyRoute::Legacy { exec_socket_path })
 }
 
 /// Connect to the persisted runtime route for one box.
-pub(super) async fn connect_copy_session(
-    box_name: &str,
-) -> Result<CopySession, Box<dyn std::error::Error>> {
+pub(super) async fn connect_copy_session(box_name: &str) -> Result<CopySession, BoxError> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, box_name)?.clone();
+    let record = resolve::resolve(&state, box_name)
+        .map_err(super::super::IntoBoxError::into_box_error)?
+        .clone();
     let record =
         match super::super::observe_inventory::refresh_managed_inventory_record(record).await? {
             Some(record) => record,
-            None => return Err(format!("No such container: {box_name}").into()),
+            None => {
+                return Err(BoxError::StateError(format!(
+                    "No such container: {box_name}"
+                )))
+            }
         };
     match resolve_copy_route(&record)? {
         CopyRoute::Managed {
