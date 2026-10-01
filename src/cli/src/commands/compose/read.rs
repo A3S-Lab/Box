@@ -178,9 +178,7 @@ pub(super) async fn execute_logs(
             continue;
         }
 
-        let content = std::fs::read_to_string(&log_path).map_err(|error| {
-            super::super::io_error(format!("Failed to read logs for {svc_name}"), error)
-        })?;
+        let content = read_service_log(&log_path, svc_name)?;
 
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(logs_args.tail);
@@ -227,6 +225,7 @@ pub(super) async fn execute_logs(
                         String::new()
                     };
 
+                    refuse_service_log(log_path)?;
                     if let Ok(file) = std::fs::File::open(log_path) {
                         use std::io::{Read, Seek, SeekFrom};
                         let mut file = file;
@@ -247,4 +246,72 @@ pub(super) async fn execute_logs(
     }
 
     Ok(())
+}
+
+fn read_service_log(path: &std::path::Path, service: &str) -> Result<String, BoxError> {
+    refuse_service_log(path)?;
+    std::fs::read_to_string(path).map_err(|error| {
+        super::super::io_error(format!("Failed to read logs for {service}"), error)
+    })
+}
+
+fn refuse_service_log(path: &std::path::Path) -> Result<(), BoxError> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            super::super::commit::refuse_directory_reparse(&prefix)?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compose_logs_read_a_real_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("console.log");
+        std::fs::write(&path, b"hello\n").unwrap();
+        assert_eq!(read_service_log(&path, "api").unwrap(), "hello\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compose_logs_do_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("console.log"), b"secret-service-log\n").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = read_service_log(&link.join("console.log"), "api");
+        match loaded {
+            Ok(text) => panic!("read Compose logs through a junction: {text}"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("console.log")).unwrap(),
+            b"secret-service-log\n"
+        );
+    }
 }
