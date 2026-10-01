@@ -509,6 +509,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is its parent directory.
   Saving a network catalog does not create or write that catalog through a
   Windows junction that is its parent directory.
+  Creating a Compose service directory does not create that directory
+  through a Windows junction that is an ancestor of it.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

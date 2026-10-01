@@ -59,6 +59,19 @@ const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
 ];
 
+fn create_service_directory(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
+    std::fs::create_dir_all(path)
+}
+
 pub async fn execute(args: ComposeArgs) -> Result<(), BoxError> {
     let ComposeArgs {
         file,
@@ -688,7 +701,7 @@ async fn execute_up(
         let initial_exec_socket_path = box_dir.join("sockets").join("exec.sock");
 
         // Create box directory structure
-        if let Err(error) = std::fs::create_dir_all(box_dir.join("sockets")) {
+        if let Err(error) = create_service_directory(&box_dir.join("sockets")) {
             return rollback_compose_up(
                 &mut state,
                 &started_services,
@@ -707,7 +720,7 @@ async fn execute_up(
             )
             .await;
         }
-        if let Err(error) = std::fs::create_dir_all(box_dir.join("logs")) {
+        if let Err(error) = create_service_directory(&box_dir.join("logs")) {
             return rollback_compose_up(
                 &mut state,
                 &started_services,
@@ -980,7 +993,7 @@ async fn execute_up(
 
         // Ensure the log dir exists; the shim runs the log processor (default
         // json-file driver) for each service box's lifetime.
-        let _ = std::fs::create_dir_all(box_dir.join("logs"));
+        let _ = create_service_directory(&box_dir.join("logs"));
 
         println!(" ✓");
     }

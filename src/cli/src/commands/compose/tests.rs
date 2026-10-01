@@ -2,6 +2,47 @@ use super::*;
 
 #[cfg(windows)]
 #[test]
+fn create_service_directory_does_not_create_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("box");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let created = create_service_directory(&link.join("sockets"));
+    assert!(
+        created.is_err(),
+        "compose created a socket directory through a junction: {created:?}"
+    );
+    assert!(
+        !outside.join("sockets").exists(),
+        "sockets was created through the junction"
+    );
+    assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+}
+
+#[cfg(windows)]
+#[test]
+fn create_service_directory_creates_a_missing_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sockets = tmp.path().join("box").join("sockets");
+    create_service_directory(&sockets).unwrap();
+    assert!(sockets.is_dir());
+}
+
+#[cfg(windows)]
+#[test]
 fn load_compose_file_does_not_follow_an_ancestor_junction() {
     use std::os::windows::process::CommandExt;
 
