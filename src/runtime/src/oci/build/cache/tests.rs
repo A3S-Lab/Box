@@ -270,6 +270,37 @@ fn hash_context_sources_does_not_follow_a_junction() {
 
 #[cfg(windows)]
 #[test]
+fn hash_context_sources_does_not_read_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let dir = TempDir::new().unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), b"secret-context").unwrap();
+    let parent = dir.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let hashed = hash_context_sources(&link, &["secret.txt".to_string()]);
+    assert!(
+        hashed.is_none(),
+        "context hash read secret.txt through an ancestor junction: {hashed:?}"
+    );
+    assert_eq!(
+        fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-context"
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn open_in_does_not_create_the_cache_through_an_ancestor_junction() {
     use std::os::windows::process::CommandExt;
 

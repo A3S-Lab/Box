@@ -353,6 +353,16 @@ pub(crate) fn hash_context_sources(context_dir: &Path, src_patterns: &[String]) 
         // Match handle_copy/handle_add: a leading slash is context-relative, not
         // a host absolute path (which `Path::join` would otherwise jump to).
         let src_path = context_dir.join(src.trim_start_matches('/'));
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in src_path.components() {
+                prefix.push(component);
+                if crate::vm::refuse_directory_reparse(&prefix).is_err() {
+                    return None;
+                }
+            }
+        }
         if !src_path.exists() {
             return None;
         }
