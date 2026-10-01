@@ -355,6 +355,14 @@ impl VmManager {
                 "Single-file bind guest path has no file name: {guest_path}"
             ))
         })?;
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in source.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         let stage_dir = filemounts_dir.join(index.to_string());
         #[cfg(windows)]
         {
@@ -509,6 +517,53 @@ mod tests {
             "filemount staging directory was created through the junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_single_file_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-file").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let filemounts = tmp.path().join("filemounts");
+
+        let staged = VmManager::stage_single_file_mount(
+            &link.join("secret.txt"),
+            "/data/secret.txt",
+            0,
+            &filemounts,
+        );
+        let adopted = filemounts.join("0").join("secret.txt");
+        if adopted.is_file() {
+            panic!(
+                "single-file stage read through an ancestor junction: {}",
+                String::from_utf8_lossy(&std::fs::read(&adopted).unwrap())
+            );
+        }
+        match staged {
+            Ok(_) => panic!("single-file stage succeeded through an ancestor junction"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-file"
+        );
     }
 
     #[test]
