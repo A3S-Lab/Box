@@ -200,6 +200,14 @@ pub struct AuditQuery {
 
 /// Read audit events from a log file, applying optional filters.
 pub fn read_audit_log(path: &Path, query: &AuditQuery) -> Result<Vec<AuditEvent>> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -558,5 +566,52 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_audit_log_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let logs = outside.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let event = AuditEvent::new(AuditAction::SecretInject, AuditOutcome::Success)
+            .with_message("secret-user");
+        fs::write(
+            logs.join("audit.jsonl"),
+            serde_json::to_string(&event).unwrap(),
+        )
+        .unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let events = read_audit_log(
+            &link.join("logs").join("audit.jsonl"),
+            &AuditQuery::default(),
+        );
+        match events {
+            Ok(events) => panic!(
+                "read audit events through a junction: {:?}",
+                events
+                    .iter()
+                    .map(|event| event.message.clone())
+                    .collect::<Vec<_>>()
+            ),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(logs.join("audit.jsonl").is_file());
     }
 }
