@@ -302,6 +302,55 @@
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn restore_snapshot_does_not_create_box_directories_through_a_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let source = dir.path().join("rootfs-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("app.txt"), "snapshot-data").unwrap();
+        let store = SnapshotStore::new(&client.paths().snapshots_dir).unwrap();
+        let mut metadata = SnapshotMetadata::new(
+            "snap-restore".to_string(),
+            "after-migration".to_string(),
+            "source-box".to_string(),
+            "alpine:3.20".to_string(),
+        );
+        metadata.healthcheck_disabled = true;
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
+        store.save(metadata, &source).unwrap();
+
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let boxes = client.paths().home.join("boxes");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            boxes.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let restored = client.restore_snapshot("snap-restore", RestoreSnapshot::new().name("restored-api"));
+        for entry in std::fs::read_dir(&outside).unwrap() {
+            let entry = entry.unwrap();
+            assert_eq!(
+                entry.file_name(),
+                "secret.txt",
+                "restore created a box directory through the junction"
+            );
+        }
+        assert!(
+            restored.is_err(),
+            "restore followed a boxes directory junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
     #[test]
     fn restores_snapshot_by_name_and_chooses_available_default_box_name() {
         let dir = tempfile::tempdir().unwrap();

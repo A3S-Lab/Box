@@ -859,6 +859,16 @@ impl A3sBoxClient {
         let socket_dir = box_dir.join("sockets");
         let logs_dir = box_dir.join("logs");
         let mut box_dir_guard = BoxDirGuard::new(box_dir.clone());
+        #[cfg(windows)]
+        {
+            for directory in [&socket_dir, &logs_dir] {
+                let mut prefix = PathBuf::new();
+                for component in directory.components() {
+                    prefix.push(component);
+                    a3s_box_runtime::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
+        }
         std::fs::create_dir_all(&socket_dir)?;
         std::fs::create_dir_all(&logs_dir)?;
         let restored_rootfs = store.restore_rootfs_to_box(&metadata.id, &box_dir)?;
