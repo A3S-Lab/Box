@@ -367,6 +367,16 @@ pub(crate) fn io_error(
 /// the overlay is unmounted because the box is stopped).
 pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
     let is_populated = |p: &std::path::Path| -> bool {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in p.components() {
+                prefix.push(component);
+                if commit::refuse_directory_reparse(&prefix).is_err() {
+                    return false;
+                }
+            }
+        }
         p.is_dir()
             && std::fs::read_dir(p)
                 .map(|mut it| it.next().is_some())
@@ -859,6 +869,39 @@ mod isolation_cli_tests {
 
         std::fs::write(rootfs.join("file"), "rootfs").unwrap();
         assert_eq!(resolve_box_rootfs(temporary.path()), Some(rootfs));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rootfs_resolution_does_not_adopt_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let rootfs = outside.join("box").join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join("secret.txt"), b"secret-rootfs").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let resolved = resolve_box_rootfs(&link.join("box"));
+        assert!(
+            resolved.is_none(),
+            "resolved a rootfs through a junction: {}",
+            resolved.unwrap().display()
+        );
+        assert_eq!(
+            std::fs::read(rootfs.join("secret.txt")).unwrap(),
+            b"secret-rootfs"
+        );
     }
 
     #[test]
