@@ -1668,6 +1668,8 @@ tip while harness reports still keep
   junction that is an ancestor of the log directory.
   Resolving a removed log archive does not read it through a Windows
   junction that is an ancestor of the archive root.
+  Creating a Sandbox directory does not create it through a Windows
+  junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

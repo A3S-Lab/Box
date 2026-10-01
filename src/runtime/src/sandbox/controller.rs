@@ -92,12 +92,43 @@ pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    refuse_private_dir_tree(path)?;
     std::fs::create_dir_all(path).map_err(BoxError::IoError)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(BoxError::IoError)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn refuse_private_dir_tree(path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        let directory = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+        if directory
+            && (metadata.file_type().is_symlink()
+                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        {
+            return Err(BoxError::StateError(format!(
+                "refusing to create through a directory junction: {}",
+                prefix.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -309,5 +340,54 @@ mod tests {
         assert!(excerpt.starts_with("..."));
         assert!(excerpt.contains("seccomp unknown architecture `NATIVE`"));
         assert!(excerpt.len() <= START_FAILURE_LOG_LIMIT_BYTES as usize + 3);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn create_private_dir_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = create_private_dir(&link.join("bundle"));
+        assert!(
+            created.is_err(),
+            "sandbox directory create followed an ancestor junction: {created:?}"
+        );
+        assert!(
+            !outside.join("bundle").exists(),
+            "sandbox directory create wrote through an ancestor junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[test]
+    fn create_private_dir_creates_a_real_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("sandbox").join("bundle");
+        create_private_dir(&directory).expect("real directory");
+        let metadata = std::fs::symlink_metadata(&directory).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
     }
 }
