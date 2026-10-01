@@ -129,6 +129,14 @@ pub(crate) fn publish_portable_bundle(
             bundle_directory.display()
         ))
     })?;
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in operation_directory.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(operation_directory).map_err(BoxError::IoError)?;
     ensure_private_handoff_ancestors(operation_directory)?;
     validate_plain_directory(operation_directory, "portable OCI operation directory")?;
@@ -807,5 +815,71 @@ mod tests {
             .is_file());
         assert!(!rootfs.join(PORTABLE_ROOTFS_METADATA_FILE).exists());
         assert_eq!(std::fs::read(rootfs.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publish_portable_bundle_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let source = temp.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(&source, vec![entry(b".", RootfsEntryKind::Directory)]);
+
+        let published = publish_portable_bundle(
+            &source,
+            &Spec::default(),
+            &link.join("create-1").join("bundle"),
+        );
+        assert!(
+            !outside.join("create-1").exists(),
+            "portable bundle created a directory through the junction"
+        );
+        assert!(
+            published.is_err(),
+            "portable bundle followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publish_portable_bundle_creates_a_real_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        write_source(&source, vec![entry(b".", RootfsEntryKind::Directory)]);
+        let bundle = temp
+            .path()
+            .join("handoffs")
+            .join("box-1")
+            .join("create-1")
+            .join("bundle");
+
+        let published = publish_portable_bundle(&source, &Spec::default(), &bundle);
+        assert!(
+            bundle.parent().unwrap().is_dir(),
+            "portable bundle did not create its operation directory"
+        );
+        if let Err(error) = &published {
+            assert!(
+                !error.to_string().to_ascii_lowercase().contains("junction"),
+                "real directory was refused as a junction: {error}"
+            );
+        }
     }
 }
