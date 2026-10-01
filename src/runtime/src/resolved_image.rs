@@ -21,6 +21,14 @@ const MAX_IMAGE_CONFIG_BYTES: u64 = 1024 * 1024;
 /// entrypoint, command, environment, working directory, and user.
 pub fn load_resolved_image_config(box_dir: &Path) -> Result<Option<SnapshotImageConfig>> {
     let path = box_dir.join(RESOLVED_IMAGE_CONFIG_FILE);
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     match std::fs::symlink_metadata(&path) {
         Ok(_) => read_regular_json(&path, "resolved image configuration").map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -298,5 +306,48 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error}").contains("resolved OCI image configuration"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_resolved_image_config_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let box_target = outside.join("box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(
+            box_target.join(RESOLVED_IMAGE_CONFIG_FILE),
+            b"{\"user\":\"secret-user\"}\n",
+        )
+        .unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = load_resolved_image_config(&link.join("box"));
+        match loaded {
+            Ok(Some(config)) => panic!(
+                "loaded resolved image config through a junction: user={:?}",
+                config.user
+            ),
+            Ok(None) => panic!("resolved image config through a junction was treated as missing"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(box_target.join(RESOLVED_IMAGE_CONFIG_FILE)).unwrap(),
+            b"{\"user\":\"secret-user\"}\n"
+        );
     }
 }
