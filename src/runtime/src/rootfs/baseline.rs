@@ -24,7 +24,13 @@ pub fn guest_diff_baseline_required(box_dir: &Path) -> Result<bool> {
 /// Capture a rootfs tree while excluding runtime-owned control files.
 pub fn walk_rootfs(root: &Path) -> Result<HashMap<String, RootfsFileInfo>> {
     #[cfg(windows)]
-    crate::vm::refuse_directory_reparse(root)?;
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in root.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let mut entries = HashMap::new();
     walk_recursive(root, root, &mut entries)?;
     Ok(entries)
@@ -595,6 +601,45 @@ mod tests {
                 .err()
                 .is_some_and(|error| error.to_string().contains("junction")),
             "diff baseline followed a directory junction: {walked:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn walk_rootfs_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        let box_target = outside.join("box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join("secret.txt"), b"secret").unwrap();
+        let parent = directory.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let walked = walk_rootfs(&link.join("box"));
+        let recorded = walked
+            .as_ref()
+            .ok()
+            .is_some_and(|entries| entries.keys().any(|path| path.contains("secret")));
+        assert!(
+            !recorded,
+            "diff baseline recorded a file through an ancestor junction: {walked:?}"
+        );
+        assert!(
+            walked
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "diff baseline followed an ancestor junction: {walked:?}"
         );
     }
 }
