@@ -336,6 +336,19 @@ fn prepare_marker_paths(spec: &ManagedOciLogWorkerSpec) -> ExecutionManagerResul
             "managed OCI projection markers do not share one directory".to_string(),
         ));
     }
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in directory.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                ExecutionManagerError::Internal(format!(
+                    "refusing to create projection directory {}: {error}",
+                    directory.display()
+                ))
+            })?;
+        }
+    }
     std::fs::create_dir_all(directory)
         .map_err(|error| projection_io("create projection directory", directory, error))
 }
@@ -495,5 +508,46 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("bounded regular file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn projection_markers_do_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("parent");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let link = parent.join("link");
+        let status = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                link.display(),
+                outside.display()
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let prepared = prepare_marker_paths(&spec(&link.join("projection")));
+        assert!(
+            !outside.join("projection").exists(),
+            "log projection created a directory through the junction"
+        );
+        assert!(
+            prepared.is_err(),
+            "log projection followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn projection_markers_create_a_real_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("boxes").join("projection");
+        prepare_marker_paths(&spec(&directory)).expect("projection directory on a real path");
+        assert!(directory.is_dir());
     }
 }
