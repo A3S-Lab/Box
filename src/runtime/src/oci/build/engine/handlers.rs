@@ -1423,6 +1423,14 @@ fn seed_run_cache_mount(
             cache_dir.display()
         ))
     })?;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in parent.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(parent).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to create RUN cache parent {}: {}",
@@ -5256,5 +5264,82 @@ mod tests {
             .expect("overlay staging on a real rootfs");
         assert!(created.is_dir());
         assert!(created.starts_with(&rootfs));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn seed_run_cache_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let seed = temp_dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("cached.txt"), b"seed").unwrap();
+
+        let mount = super::RunCacheMount {
+            raw: String::new(),
+            id: None,
+            from: Some("base".to_string()),
+            source: "/".to_string(),
+            sharing: crate::oci::build::dockerfile::RunCacheSharing::Shared,
+            mode: None,
+            uid: None,
+            gid: None,
+            target: "/cache".to_string(),
+        };
+        let seeded = super::seed_run_cache_mount(
+            &link.join("caches").join("id"),
+            &mount,
+            &[(Some("base".to_string()), seed)],
+        );
+        assert!(
+            !outside.join("caches").exists(),
+            "RUN cache seed created a directory through the junction"
+        );
+        assert!(
+            seeded.is_err(),
+            "RUN cache seed followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn seed_run_cache_creates_a_real_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let seed = temp_dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("cached.txt"), b"seed").unwrap();
+        let cache_dir = temp_dir.path().join("caches").join("id");
+        let mount = super::RunCacheMount {
+            raw: String::new(),
+            id: None,
+            from: Some("base".to_string()),
+            source: "/".to_string(),
+            sharing: crate::oci::build::dockerfile::RunCacheSharing::Shared,
+            mode: None,
+            uid: None,
+            gid: None,
+            target: "/cache".to_string(),
+        };
+        super::seed_run_cache_mount(&cache_dir, &mount, &[(Some("base".to_string()), seed)])
+            .expect("seed a real cache directory");
+        assert_eq!(
+            std::fs::read(cache_dir.join("cached.txt")).unwrap(),
+            b"seed"
+        );
     }
 }
