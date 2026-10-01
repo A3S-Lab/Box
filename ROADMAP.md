@@ -1534,6 +1534,8 @@ tip while harness reports still keep
   a Windows junction that is an ancestor of that directory.
   Booting a box does not create its log directory through a Windows
   junction that is an ancestor of that directory.
+  Staging a MicroVM read-only virtio-fs alias does not create that alias
+  through a Windows junction that is an ancestor of the filemounts directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

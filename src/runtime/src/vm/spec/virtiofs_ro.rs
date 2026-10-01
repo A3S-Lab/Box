@@ -148,7 +148,14 @@ pub(super) fn stage_virtiofs_ro_share(
         )));
     }
 
-    crate::vm::refuse_directory_reparse(filemounts_dir)?;
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in filemounts_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
 
     let root = ro_alias_root(filemounts_dir);
     std::fs::create_dir_all(&root).map_err(BoxError::IoError)?;
@@ -620,6 +627,49 @@ mod tests {
         assert!(bindflt_absent(HRESULT_FROM_WIN32_NOT_FOUND));
         // Access denied must stay fail-closed (not an absent mapping).
         assert!(!bindflt_absent(0x8007_0005u32 as i32));
+    }
+
+    #[test]
+    fn stage_does_not_create_filemounts_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("box");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let staged = stage_virtiofs_ro_share(&source, &link.join(".filemounts"), 0);
+        assert!(
+            staged.is_err(),
+            "staging followed an ancestor junction: {staged:?}"
+        );
+        assert!(
+            !outside.join(".filemounts").exists(),
+            ".filemounts was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn stage_creates_filemounts_for_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let filemounts = tmp.path().join(".filemounts");
+        let _ = stage_virtiofs_ro_share(&source, &filemounts, 0);
+        assert!(filemounts.is_dir());
     }
 
     #[test]
