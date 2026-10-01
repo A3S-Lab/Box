@@ -219,12 +219,31 @@ impl ExecutionResourceGuard {
         }
 
         let boxes_root = self.home_dir.join("boxes");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in boxes_root.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)
+                    .map_err(|error| resource_error(record, "create managed boxes root", error))?;
+            }
+        }
         std::fs::create_dir_all(&boxes_root)
             .map_err(|error| resource_error(record, "create managed boxes root", error))?;
         let canonical_boxes_root = boxes_root
             .canonicalize()
             .map_err(|error| resource_error(record, "resolve managed boxes root", error))?;
         let box_dir = boxes_root.join(&record.id);
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in box_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                    resource_error(record, "create managed box directory", error)
+                })?;
+            }
+        }
         std::fs::create_dir_all(&box_dir)
             .map_err(|error| resource_error(record, "create managed box directory", error))?;
         let canonical_box_dir = box_dir
@@ -622,6 +641,41 @@ mod tests {
             ExecutionResourceGuard::prepare(temporary.path(), &record),
             Err(ExecutionManagerError::Unavailable(_))
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepare_does_not_create_managed_boxes_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let snapshot_id = "managed-snapshot";
+        create_snapshot(&outside, snapshot_id);
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let record = snapshot_record(&link, snapshot_id);
+        let prepared = ExecutionResourceGuard::prepare(&link, &record);
+        assert!(
+            !outside.join("boxes").exists(),
+            "managed boxes were created through the junction"
+        );
+        assert!(
+            prepared.is_err(),
+            "managed boxes followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[cfg(unix)]
