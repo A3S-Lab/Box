@@ -73,6 +73,14 @@ impl RootfsBuilder {
     fn create_directories(&self) -> Result<()> {
         for dir in self.layout.required_dirs() {
             let full_path = self.rootfs_path.join(dir.trim_start_matches('/'));
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in full_path.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             fs::create_dir_all(&full_path).map_err(|e| {
                 BoxError::BuildError(format!(
                     "Failed to create directory {}: {}",
@@ -266,6 +274,38 @@ mod tests {
         assert!(
             built.is_err(),
             "rootfs builder followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rootfs_builder_does_not_create_through_a_nested_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let link = rootfs.join("var");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let built = RootfsBuilder::new(&rootfs).build();
+        assert!(
+            !outside.join("tmp").exists() && !outside.join("log").exists(),
+            "rootfs builder created a directory through a nested junction"
+        );
+        assert!(
+            built.is_err(),
+            "rootfs builder followed a nested directory junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }

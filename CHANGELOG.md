@@ -599,6 +599,8 @@ All notable changes to A3S Box will be documented in this file.
   through a Windows junction that is an ancestor of that directory.
   Preparing an overlay rootfs does not create its directories through a Windows
   junction that is an ancestor of the box directory.
+  Building a guest rootfs does not create a nested directory through a Windows
+  junction inside that rootfs.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
