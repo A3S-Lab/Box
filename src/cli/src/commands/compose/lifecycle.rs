@@ -120,11 +120,17 @@ pub(super) fn cleanup_partial_service_box(
         ));
     }
     #[cfg(windows)]
-    if let Err(error) = crate::commands::commit::refuse_directory_reparse(box_dir) {
-        return Err(BoxError::StateError(format!(
-            "refusing to remove Compose box directory {}: {error}",
-            box_dir.display()
-        )));
+    {
+        let mut box_prefix = std::path::PathBuf::new();
+        for component in box_dir.components() {
+            box_prefix.push(component);
+            if let Err(error) = crate::commands::commit::refuse_directory_reparse(&box_prefix) {
+                return Err(BoxError::StateError(format!(
+                    "refusing to remove Compose box directory {}: {error}",
+                    box_dir.display()
+                )));
+            }
+        }
     }
     if let Err(error) = a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(box_dir) {
         tracing::error!(
@@ -594,6 +600,51 @@ mod tests {
             crate::commands::commit::metadata_is_reparse_point(&metadata),
             "Compose cleanup removed the directory junction"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_partial_service_box_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let box_dir = link.join("box");
+
+        let removed = cleanup_partial_service_box(
+            "compose-ancestor",
+            &box_dir,
+            &box_dir.join("sockets").join("exec.sock"),
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            std::fs::read(box_target.join("secret.txt")).unwrap(),
+            b"secret",
+            "Compose cleanup deleted a box through an ancestor junction: {removed:?}"
+        );
+        assert!(
+            removed.is_err(),
+            "Compose cleanup followed an ancestor junction: {removed:?}"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

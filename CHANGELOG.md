@@ -633,6 +633,8 @@ All notable changes to A3S Box will be documented in this file.
   that is an ancestor of the archive root.
   Archiving a console log does not copy it through a Windows junction that
   is an ancestor of that file.
+  Compose cleanup does not delete a partial service directory through a
+  Windows junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
