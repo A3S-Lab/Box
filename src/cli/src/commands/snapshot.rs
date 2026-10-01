@@ -351,6 +351,25 @@ fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, BoxError> 
     ))
 }
 
+fn create_restored_directories(
+    socket_dir: &std::path::Path,
+    logs_dir: &std::path::Path,
+) -> std::io::Result<()> {
+    for path in [socket_dir, logs_dir] {
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in path.components() {
+                prefix.push(component);
+                crate::commands::commit::refuse_directory_reparse(&prefix)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+        }
+        std::fs::create_dir_all(path)?;
+    }
+    Ok(())
+}
+
 /// Restore a box from a snapshot.
 async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), BoxError> {
     use crate::state::{generate_name, BoxRecord, StateFile};
@@ -386,8 +405,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), BoxError> {
     // guard removes it on any early return and is disarmed once registered.
     let mut dir_guard = crate::cleanup::BoxDirGuard::new(box_dir.clone());
 
-    std::fs::create_dir_all(&socket_dir)?;
-    std::fs::create_dir_all(&logs_dir)?;
+    create_restored_directories(&socket_dir, &logs_dir)?;
 
     // Directory snapshots publish their shared-lower marker while holding the
     // snapshot-store lock. Guest-native snapshots instead materialize a private
@@ -714,6 +732,46 @@ fn format_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::test_helpers::fixtures::make_record;
+
+    #[cfg(windows)]
+    #[test]
+    fn create_restored_directories_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("box");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = create_restored_directories(&link.join("sockets"), &link.join("logs"));
+        assert!(
+            created.is_err(),
+            "restore created directories through a junction: {created:?}"
+        );
+        assert!(!outside.join("sockets").exists());
+        assert!(!outside.join("logs").exists());
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_restored_directories_creates_missing_directories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        create_restored_directories(&box_dir.join("sockets"), &box_dir.join("logs")).unwrap();
+        assert!(box_dir.join("sockets").is_dir());
+        assert!(box_dir.join("logs").is_dir());
+    }
 
     #[test]
     fn snapshot_source_state_rejects_active_microvm_boxes() {
