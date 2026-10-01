@@ -27,6 +27,16 @@ async fn wait_for_provider_exit(
     }
 }
 
+#[cfg(windows)]
+fn refuse_windows_directory_tree(path: &Path) -> Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        super::sandbox::refuse_directory_reparse(&prefix)?;
+    }
+    Ok(())
+}
+
 impl VmManager {
     /// Destroy the VM with the default shutdown timeout and SIGTERM.
     pub async fn destroy(&mut self) -> Result<()> {
@@ -492,7 +502,7 @@ impl VmManager {
         let socket_directory: Result<()> = {
             #[cfg(windows)]
             {
-                super::sandbox::refuse_directory_reparse(&socket_dir)
+                refuse_windows_directory_tree(&socket_dir)
             }
             #[cfg(not(windows))]
             {
@@ -593,7 +603,7 @@ impl VmManager {
             let box_directory: Result<()> = {
                 #[cfg(windows)]
                 {
-                    super::sandbox::refuse_directory_reparse(&box_dir)
+                    refuse_windows_directory_tree(&box_dir)
                 }
                 #[cfg(not(windows))]
                 {

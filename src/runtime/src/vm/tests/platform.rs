@@ -76,6 +76,74 @@ fn collect_windows_guest_result_does_not_create_logs_through_an_ancestor_junctio
 }
 
 #[cfg(target_os = "windows")]
+#[tokio::test]
+async fn destroy_does_not_delete_a_box_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    let box_id = "junction-destroy";
+    let rootfs = outside.join(box_id).join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join("secret.txt"), b"keep").unwrap();
+    let boxes = home.path().join("boxes");
+    std::fs::create_dir_all(boxes.parent().unwrap()).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        boxes.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let mut manager = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(10),
+        box_id.to_string(),
+    );
+    manager.home_dir = home.path().to_path_buf();
+    *manager.state.write().await = BoxState::Ready;
+
+    let destroyed = manager.destroy().await;
+    assert_eq!(
+        std::fs::read(rootfs.join("secret.txt")).unwrap(),
+        b"keep",
+        "destroy deleted a box directory through the junction"
+    );
+    assert!(destroyed.is_err(), "destroy followed an ancestor junction");
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn destroy_removes_a_real_box_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "real-destroy";
+    let rootfs = home.path().join("boxes").join(box_id).join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join("secret.txt"), b"gone").unwrap();
+
+    let mut manager = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(10),
+        box_id.to_string(),
+    );
+    manager.home_dir = home.path().to_path_buf();
+    *manager.state.write().await = BoxState::Ready;
+
+    let destroyed = manager.destroy().await;
+    assert!(
+        !rootfs.exists(),
+        "destroy left a real box directory in place"
+    );
+    if let Err(error) = destroyed {
+        assert!(
+            !error.to_string().contains("junction"),
+            "real destroy was refused as a junction: {error}"
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
 #[test]
 fn test_collect_windows_guest_result_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();

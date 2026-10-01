@@ -1634,6 +1634,8 @@ tip while harness reports still keep
   that is an ancestor of the staging directory.
   Collecting a Windows guest result does not create its logs directory
   through a Windows junction that is an ancestor of the box directory.
+  Destroying a VM does not delete its box directory through a Windows
+  junction that is an ancestor of the boxes directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
