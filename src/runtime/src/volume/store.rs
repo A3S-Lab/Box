@@ -80,6 +80,14 @@ impl VolumeStore {
     /// Save all volumes to disk (atomic write).
     pub fn save(&self, volumes: &HashMap<String, VolumeConfig>) -> Result<()> {
         if let Some(parent) = self.path.parent() {
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in parent.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             std::fs::create_dir_all(parent).map_err(|e| {
                 BoxError::ConfigError(format!(
                     "failed to create directory {}: {}",
@@ -993,6 +1001,40 @@ mod tests {
         assert!(modified.is_err(), "{modified:?}");
         assert!(store.get("data").unwrap().unwrap().in_use_by.is_empty());
         assert_eq!(std::fs::read(&volume_dir).unwrap(), b"not-a-directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn save_does_not_write_through_a_directory_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = dir.path().join("catalog");
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            parent.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+        let store = VolumeStore::new(parent.join("volumes.json"), parent.join("volumes"));
+        let saved = store.save(&HashMap::new());
+        assert!(
+            saved.is_err(),
+            "save followed a directory junction: {saved:?}"
+        );
+        assert!(
+            !outside.join("volumes.json").exists(),
+            "volumes.json was written through the junction"
+        );
+        assert!(
+            !outside.join("volumes.json.tmp").exists(),
+            "volumes.json.tmp was written through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[test]
