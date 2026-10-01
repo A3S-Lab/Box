@@ -56,8 +56,7 @@ pub async fn execute(args: DiffArgs) -> Result<(), BoxError> {
     let snapshot_path = record.box_dir.join(DIFF_BASELINE_FILE);
     ensure_diff_baseline_present(&snapshot_path)?;
 
-    let snapshot_data = std::fs::read_to_string(&snapshot_path)
-        .map_err(|error| super::io_error("Failed to read snapshot", error))?;
+    let snapshot_data = read_diff_baseline(&snapshot_path)?;
     let baseline: HashMap<String, RootfsFileInfo> =
         serde_json::from_str(&snapshot_data).map_err(|error| {
             BoxError::SerializationError(format!("Failed to parse snapshot: {error}"))
@@ -426,6 +425,19 @@ fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), BoxError> {
     )))
 }
 
+fn read_diff_baseline(snapshot_path: &Path) -> Result<String, BoxError> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in snapshot_path.components() {
+            prefix.push(component);
+            super::commit::refuse_directory_reparse(&prefix)?;
+        }
+    }
+    std::fs::read_to_string(snapshot_path)
+        .map_err(|error| super::io_error("Failed to read snapshot", error))
+}
+
 /// Create the per-box baseline snapshot used by `a3s-box diff`.
 ///
 /// The caller should invoke this after the rootfs is prepared and before user
@@ -518,6 +530,43 @@ mod tests {
         let present = dir.path().join(DIFF_BASELINE_FILE);
         std::fs::write(&present, "{}").unwrap();
         ensure_diff_baseline_present(&present).unwrap();
+        assert_eq!(read_diff_baseline(&present).unwrap(), "{}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn diff_baseline_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let box_dir = outside.join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(
+            box_dir.join(DIFF_BASELINE_FILE),
+            br#"{"/secret-file":{"size":1,"mode":420,"mtime":0,"is_dir":false}}"#,
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = read_diff_baseline(&link.join("box").join(DIFF_BASELINE_FILE));
+        match loaded {
+            Ok(text) => panic!("read diff baseline through a junction: {text}"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(box_dir.join(DIFF_BASELINE_FILE).is_file());
     }
 
     #[test]
