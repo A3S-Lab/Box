@@ -1718,6 +1718,8 @@ tip while harness reports still keep
   that is an ancestor of the catalog file.
   Hashing build context sources does not read them through a Windows
   junction that is an ancestor of the source path.
+  A COPY source is not read through a Windows junction that is an
+  ancestor of the source path.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

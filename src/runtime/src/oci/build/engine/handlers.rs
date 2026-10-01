@@ -375,6 +375,14 @@ pub(super) fn handle_copy(
             src.trim_start_matches('/')
         });
         let src_path = context_dir.join(src.trim_start_matches('/'));
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in src_path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         if !src_path.exists() {
             return Err(BoxError::BuildError(format!(
                 "COPY source not found: {} (in context {})",
@@ -5042,6 +5050,60 @@ mod tests {
         assert_eq!(
             std::fs::read(rootfs.join("app").join("input.txt")).unwrap(),
             b"guest"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_copy_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-copy").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let rootfs = temp_dir.path().join("rootfs");
+        let layers = temp_dir.path().join("layers");
+        std::fs::create_dir_all(&layers).unwrap();
+
+        let copied = super::handle_copy(
+            &["secret.txt".to_string()],
+            "/app/copied.txt",
+            None,
+            &link,
+            &rootfs,
+            &layers,
+            "/",
+            0,
+            None,
+        );
+        let adopted = rootfs.join("app").join("copied.txt");
+        if adopted.is_file() {
+            panic!(
+                "COPY read through an ancestor junction: {}",
+                String::from_utf8_lossy(&std::fs::read(&adopted).unwrap())
+            );
+        }
+        match copied {
+            Ok(_) => panic!("COPY succeeded through an ancestor junction"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-copy"
         );
     }
 
