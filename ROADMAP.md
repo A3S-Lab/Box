@@ -1664,6 +1664,8 @@ tip while harness reports still keep
   junction that is an ancestor of that directory.
   Configuring shim logs does not create that directory through a Windows
   junction that is an ancestor of the log directory.
+  Opening a Windows WHPX owner log does not write it through a Windows
+  junction that is an ancestor of the log directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

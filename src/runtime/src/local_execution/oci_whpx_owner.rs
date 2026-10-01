@@ -509,12 +509,16 @@ fn spawn_owner(
 
 fn open_owner_log(path: &Path) -> ExecutionManagerResult<std::fs::File> {
     if let Some(parent) = path.parent() {
-        crate::vm::refuse_directory_reparse(parent).map_err(|error| {
-            ExecutionManagerError::Unavailable(format!(
-                "refusing Windows WHPX OCI owner log directory {}: {error}",
-                parent.display()
-            ))
-        })?;
+        let mut parent_prefix = PathBuf::new();
+        for component in parent.components() {
+            parent_prefix.push(component);
+            crate::vm::refuse_directory_reparse(&parent_prefix).map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "refusing Windows WHPX OCI owner log directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
     }
     std::fs::OpenOptions::new()
         .create(true)
@@ -849,6 +853,46 @@ mod tests {
             b"secret"
         );
         assert!(std::fs::symlink_metadata(&service)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn open_owner_log_does_not_write_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let logs = outside.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let opened = open_owner_log(&link.join("logs").join("owner.stdout.log"));
+        let opened_debug = match &opened {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !logs.join("owner.stdout.log").exists(),
+            "owner log was created through an ancestor junction: {opened_debug}"
+        );
+        assert!(
+            opened.is_err(),
+            "owner log followed an ancestor junction: {opened_debug}"
+        );
+        assert_eq!(std::fs::read(logs.join("secret.txt")).unwrap(), b"secret");
+        assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
