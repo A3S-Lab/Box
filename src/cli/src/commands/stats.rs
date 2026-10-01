@@ -349,6 +349,14 @@ fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
 }
 
 fn read_passt_pcap_stats(path: &Path, guest_mac: [u8; 6]) -> Option<NetworkStats> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            super::commit::refuse_directory_reparse(&prefix).ok()?;
+        }
+    }
     let data = std::fs::read(path).ok()?;
     parse_passt_pcap_stats(&data, guest_mac)
 }
@@ -819,6 +827,53 @@ mod tests {
             Some(NetworkStats {
                 rx_bytes: 4,
                 tx_bytes: 5
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_passt_pcap_stats_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let guest = [0x02, 0x42, 0x0a, 0x58, 0x00, 0x02];
+        let gateway = [0x9a, 0x55, 0x9a, 0x55, 0x9a, 0x55];
+        let capture = little_endian_pcap(&[ethernet_frame(guest, gateway, 64)]);
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("passt.pcap"), &capture).unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let stats = read_passt_pcap_stats(&link.join("passt.pcap"), guest);
+        assert!(
+            stats.is_none(),
+            "passt capture was read through an ancestor junction: {stats:?}"
+        );
+        assert_eq!(std::fs::read(outside.join("passt.pcap")).unwrap(), capture);
+    }
+
+    #[test]
+    fn read_passt_pcap_stats_reads_a_real_capture() {
+        let guest = [0x02, 0x42, 0x0a, 0x58, 0x00, 0x02];
+        let gateway = [0x9a, 0x55, 0x9a, 0x55, 0x9a, 0x55];
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("passt.pcap");
+        std::fs::write(&path, little_endian_pcap(&[ethernet_frame(guest, gateway, 64)])).unwrap();
+        assert_eq!(
+            read_passt_pcap_stats(&path, guest),
+            Some(NetworkStats {
+                rx_bytes: 64,
+                tx_bytes: 0
             })
         );
     }

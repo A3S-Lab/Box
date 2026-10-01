@@ -659,6 +659,8 @@ All notable changes to A3S Box will be documented in this file.
   that is an ancestor of the image directory.
   Box stats does not read network counters through a Windows junction
   that is an ancestor of the stats file.
+  Box stats does not read a passt capture through a Windows junction
+  that is an ancestor of the capture file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
