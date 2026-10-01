@@ -1550,6 +1550,8 @@ tip while harness reports still keep
   a Windows junction that is an ancestor of that directory.
   Creating a guest boot control directory does not create that directory
   through a Windows junction that is an ancestor of it.
+  Saving a scale authority journal does not create its parent directory
+  through a Windows junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

@@ -98,6 +98,19 @@ fn persist(path: &Path, state: &ScaleAuthorityState) -> Result<(), ScaleAuthorit
     let parent = path.parent().ok_or_else(|| {
         ScaleAuthorityError::State(format!("{} has no parent directory", path.display()))
     })?;
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in parent.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                ScaleAuthorityError::State(format!(
+                    "failed to create {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
     std::fs::create_dir_all(parent).map_err(|error| {
         ScaleAuthorityError::State(format!("failed to create {}: {error}", parent.display()))
     })?;
@@ -130,6 +143,52 @@ mod tests {
             desired_replicas: desired,
             reason: "fixture load".to_string(),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn apply_does_not_create_the_journal_parent_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut authority =
+            DurableScaleAuthority::open(link.join("journals").join("scale-authority.json"), 10)
+                .expect("open does not create the journal");
+        let applied = authority.apply(&request("scale-junction", "0", 0, 1));
+        assert!(
+            applied.is_err(),
+            "scale journal followed an ancestor junction: {applied:?}"
+        );
+        assert!(
+            !outside.join("journals").exists(),
+            "scale journal parent was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn apply_creates_a_missing_journal_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("journals").join("scale-authority.json");
+        let mut authority = DurableScaleAuthority::open(&path, 10).unwrap();
+        authority
+            .apply(&request("scale-real", "0", 0, 1))
+            .expect("apply creates a real journal parent");
+        assert!(path.is_file());
     }
 
     #[test]
