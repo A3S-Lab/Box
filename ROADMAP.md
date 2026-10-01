@@ -1680,6 +1680,8 @@ tip while harness reports still keep
   that is an ancestor of the stats file.
   Box stats does not read a passt capture through a Windows junction
   that is an ancestor of the capture file.
+  Reading a guest file does not read it through a Windows junction
+  that is an ancestor of the rootfs directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

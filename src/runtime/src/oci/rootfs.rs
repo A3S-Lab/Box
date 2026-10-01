@@ -668,6 +668,14 @@ pub(crate) fn read_guest_file_to_string(
     relative_path: &str,
 ) -> Result<Option<String>> {
     let path = resolve_guest_file_path(rootfs_path, relative_path)?;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -869,6 +877,55 @@ mod tests {
         );
         assert!(written.is_err(), "guest file followed an ancestor junction");
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_guest_file_to_string_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let guest = outside.join("rootfs").join("etc");
+        fs::create_dir_all(&guest).unwrap();
+        fs::write(guest.join("passwd"), b"secret-user:x:0:0::/:/bin/sh\n").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let read = read_guest_file_to_string(&link.join("rootfs"), "etc/passwd");
+        match read {
+            Ok(Some(content)) => panic!("read guest passwd through a junction: {content}"),
+            Ok(None) => panic!("guest passwd through a junction was treated as missing"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            fs::read(guest.join("passwd")).unwrap(),
+            b"secret-user:x:0:0::/:/bin/sh\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_guest_file_to_string_reads_a_real_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let guest = temp_dir.path().join("rootfs").join("etc");
+        fs::create_dir_all(&guest).unwrap();
+        fs::write(guest.join("passwd"), b"root:x:0:0:root:/root:/bin/sh\n").unwrap();
+
+        let read = read_guest_file_to_string(&temp_dir.path().join("rootfs"), "etc/passwd")
+            .expect("real guest file");
+        assert_eq!(read.as_deref(), Some("root:x:0:0:root:/root:/bin/sh\n"));
     }
 
     #[cfg(windows)]
