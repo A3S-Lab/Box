@@ -47,6 +47,14 @@ impl SnapshotStore {
 
     /// Create a new snapshot store at the given directory.
     pub fn new(base_dir: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in base_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(base_dir).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to create snapshot directory {}: {}",
@@ -433,6 +441,38 @@ mod tests {
         std::fs::create_dir_all(rootfs.join("etc")).unwrap();
         std::fs::write(rootfs.join("etc/config"), "key=value").unwrap();
         rootfs
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_does_not_create_the_store_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = SnapshotStore::new(&link.join("store"));
+        assert!(
+            created.is_err(),
+            "snapshot store followed an ancestor junction"
+        );
+        assert!(
+            !outside.join("store").exists(),
+            "snapshot store was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[test]

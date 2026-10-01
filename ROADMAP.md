@@ -1552,6 +1552,8 @@ tip while harness reports still keep
   through a Windows junction that is an ancestor of it.
   Saving a scale authority journal does not create its parent directory
   through a Windows junction that is an ancestor of that directory.
+  Opening a snapshot store does not create that store through a Windows
+  junction that is an ancestor of it.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
