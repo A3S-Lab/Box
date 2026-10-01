@@ -1612,6 +1612,8 @@ tip while harness reports still keep
   junction that is an ancestor of the rootfs.
   Preparing an empty rootfs does not create its directory through a Windows
   junction that is an ancestor of the box directory.
+  Restoring a snapshot does not create its box directory through a Windows
+  junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

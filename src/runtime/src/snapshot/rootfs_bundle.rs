@@ -521,6 +521,14 @@ pub(super) fn load_snapshot_metadata(
 }
 
 fn validate_box_directory(box_dir: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in box_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(box_dir).map_err(BoxError::IoError)?;
     let metadata = std::fs::symlink_metadata(box_dir).map_err(BoxError::IoError)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -840,5 +848,46 @@ mod tests {
             .to_string();
         assert!(error.contains("integrity mismatch"), "{error}");
         assert!(!restored_box.join(RAW_EXT4_DIRECTORY_NAME).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_box_directory_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let validated = validate_box_directory(&link.join("box"));
+        assert!(
+            !outside.join("box").exists(),
+            "snapshot restore created a box directory through the junction"
+        );
+        assert!(
+            validated.is_err(),
+            "snapshot restore followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_box_directory_creates_a_real_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let box_dir = temporary.path().join("boxes").join("restored");
+        validate_box_directory(&box_dir).expect("box directory on a real path");
+        assert!(box_dir.is_dir());
     }
 }
