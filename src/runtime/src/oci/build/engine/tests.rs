@@ -2319,6 +2319,56 @@ CMD ["/work/run.sh"]
     }
 
     #[cfg(windows)]
+    #[test]
+    fn copy_layer_blob_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        use crate::oci::build::layer::LayerInfo;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("layer.tar.gz"), b"secret-blob").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let blobs = temp_dir.path().join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let layer = LayerInfo {
+            path: link.join("layer.tar.gz"),
+            digest: "abc".to_string(),
+            size: b"secret-blob".len() as u64,
+        };
+
+        let copied = super::super::copy_layer_blob(&layer, &blobs.join("abc"), "base layer");
+        let adopted = blobs.join("abc");
+        if adopted.is_file() {
+            panic!(
+                "image assembly read a layer through an ancestor junction: {}",
+                String::from_utf8_lossy(&std::fs::read(&adopted).unwrap())
+            );
+        }
+        match copied {
+            Ok(()) => panic!("image assembly copied a layer through an ancestor junction"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("layer.tar.gz")).unwrap(),
+            b"secret-blob"
+        );
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
     async fn assemble_image_creates_blobs_on_a_real_layers_directory() {
         let temp_dir = tempfile::TempDir::new().unwrap();

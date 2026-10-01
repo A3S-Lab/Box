@@ -705,6 +705,8 @@ All notable changes to A3S Box will be documented in this file.
   ancestor of the source path.
   Storing a build-cache layer does not read it through a Windows junction
   that is an ancestor of the layer file.
+  Assembling an image does not read a layer blob through a Windows
+  junction that is an ancestor of the layer file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

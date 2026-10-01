@@ -1894,6 +1894,14 @@ async fn assemble_image(
 }
 
 fn copy_layer_blob(layer: &LayerInfo, blob_path: &Path, label: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in layer.path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     if !layer.path.exists() {
         return Err(BoxError::BuildError(format!(
             "Failed to copy {label}: source layer {} for digest {} does not exist",
