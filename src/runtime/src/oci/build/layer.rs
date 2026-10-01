@@ -350,7 +350,13 @@ pub(super) fn create_layer_from_dir_with_chown(
     use flate2::Compression;
 
     #[cfg(windows)]
-    crate::vm::refuse_directory_reparse(src_dir)?;
+    {
+        let mut source_prefix = PathBuf::new();
+        for component in src_dir.components() {
+            source_prefix.push(component);
+            crate::vm::refuse_directory_reparse(&source_prefix)?;
+        }
+    }
 
     let file = std::fs::File::create(output_path).map_err(|e| {
         BoxError::BuildError(format!(
@@ -953,6 +959,49 @@ mod tests {
             "layer packed a directory junction: {created:?}"
         );
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_layer_from_dir_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("box");
+        fs::create_dir_all(&box_target).unwrap();
+        fs::write(box_target.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let output = tmp.path().join("layer.tar.gz");
+
+        let created = create_layer_from_dir(&link.join("box"), Path::new("app"), &output);
+        let packed = output.exists()
+            && fs::read(&output).ok().is_some_and(|bytes| {
+                bytes
+                    .windows(b"secret.txt".len())
+                    .any(|window| window == b"secret.txt")
+            });
+        assert!(
+            !packed,
+            "layer packed a file through an ancestor junction: {created:?}"
+        );
+        assert!(
+            created
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "layer followed an ancestor junction: {created:?}"
+        );
+        assert_eq!(fs::read(box_target.join("secret.txt")).unwrap(), b"secret");
     }
 
     #[test]
