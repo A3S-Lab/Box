@@ -1523,6 +1523,14 @@ fn publish_manifest(destination: &Path, manifest: VolumePosixManifest) -> Result
         ));
     }
     if let Some(parent) = destination.parent() {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in parent.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
     }
     let tmp = destination.with_file_name(VOLUME_POSIX_METADATA_TEMP_FILE);
@@ -2074,6 +2082,50 @@ mod tests {
         sync_volume_posix(&box_dir, &rootfs, &[("/data".to_string(), source)], &[])
             .expect("sync creates a real box directory");
         assert!(box_dir.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publish_does_not_create_a_parent_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let published = publish_manifest(
+            &link.join("guest").join(VOLUME_POSIX_METADATA_FILE),
+            VolumePosixManifest::new(Vec::new()),
+        );
+        assert!(
+            published.is_err(),
+            "publish followed an ancestor junction: {published:?}"
+        );
+        assert!(
+            !outside.join("guest").exists(),
+            "manifest parent was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn publish_creates_a_missing_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let destination = tmp.path().join("guest").join(VOLUME_POSIX_METADATA_FILE);
+        publish_manifest(&destination, VolumePosixManifest::new(Vec::new()))
+            .expect("publish creates a real parent");
+        assert!(destination.is_file());
     }
 
     fn entry(mode: u32) -> RootfsMetadataEntry {
