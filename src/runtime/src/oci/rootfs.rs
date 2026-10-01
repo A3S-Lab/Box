@@ -627,6 +627,14 @@ pub(crate) fn resolve_guest_directory_path(
 /// absolute symlink as a host-absolute path.
 pub(crate) fn ensure_guest_directory(rootfs_path: &Path, relative_path: &str) -> Result<PathBuf> {
     let path = resolve_guest_directory_path(rootfs_path, relative_path)?;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(&path).map_err(|error| {
         BoxError::BuildError(format!(
             "Failed to create guest directory {}: {error}",
@@ -775,6 +783,38 @@ mod tests {
             "rootfs was created through the junction"
         );
         assert!(built.is_err(), "rootfs build followed an ancestor junction");
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_guest_directory_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = ensure_guest_directory(&link.join("rootfs"), "app");
+        assert!(
+            !outside.join("rootfs").exists(),
+            "guest directory was created through the junction"
+        );
+        assert!(
+            created.is_err(),
+            "guest directory followed an ancestor junction"
+        );
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
