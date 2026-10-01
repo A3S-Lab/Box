@@ -1548,6 +1548,8 @@ tip while harness reports still keep
   Windows junction that is an ancestor of the filemounts directory.
   Staging a managed Secret file does not create its staging directory through
   a Windows junction that is an ancestor of that directory.
+  Creating a guest boot control directory does not create that directory
+  through a Windows junction that is an ancestor of it.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

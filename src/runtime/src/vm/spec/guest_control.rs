@@ -45,6 +45,14 @@ fn secure_guest_control_directory(path: &Path) -> Result<()> {
             });
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(windows)]
+            {
+                let mut prefix = std::path::PathBuf::new();
+                for component in path.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             std::fs::create_dir_all(path).map_err(|error| BoxError::BoxBootError {
                 message: format!(
                     "failed to create guest boot control directory {}: {error}",
@@ -226,6 +234,46 @@ pub(super) fn persist_redacted_staged_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn secure_guest_control_directory_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = secure_guest_control_directory(&link.join("boot-control"));
+        assert!(
+            created.is_err(),
+            "guest control directory followed an ancestor junction: {created:?}"
+        );
+        assert!(
+            !outside.join("boot-control").exists(),
+            "guest control directory was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn secure_guest_control_directory_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("boot-control");
+        secure_guest_control_directory(&path).expect("create a real directory");
+        assert!(path.is_dir());
+    }
 
     #[test]
     fn terminal_control_stages_baseline_only_when_guest_owns_it() {
