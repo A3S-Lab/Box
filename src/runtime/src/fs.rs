@@ -179,7 +179,13 @@ pub(crate) fn remove_file_mount_staging_in(temp_dir: &Path, box_id: &str) -> Res
 
     for path in owned {
         #[cfg(windows)]
-        crate::vm::refuse_directory_reparse(&path)?;
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -231,6 +237,39 @@ mod tests {
         assert!(
             metadata.file_attributes() & 0x400 != 0,
             "file-mount staging cleanup removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_file_mount_staging_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let root = TempDir::new().unwrap();
+        let outside = root.path().join("outside");
+        let staging = outside.join("a3s-fs-mount-box1");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("secret.txt"), b"secret").unwrap();
+        let parent = root.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = remove_file_mount_staging_in(&link, "box1");
+        assert_eq!(
+            std::fs::read(staging.join("secret.txt")).unwrap(),
+            b"secret",
+            "file-mount staging cleanup deleted through an ancestor junction"
+        );
+        assert!(
+            removed.is_err(),
+            "file-mount staging cleanup followed an ancestor junction"
         );
     }
 
