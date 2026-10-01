@@ -801,6 +801,61 @@ fn cleanup_external_socket_dir_does_not_delete_through_a_directory_junction() {
 
 #[cfg(windows)]
 #[test]
+fn cleanup_external_socket_dir_does_not_delete_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    let socket_target = outside.join("sockets");
+    std::fs::create_dir_all(&socket_target).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    std::fs::write(socket_target.join("data.txt"), b"data").unwrap();
+    let parent = home.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let box_dir = home.path().join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+
+    let removed = cleanup_external_socket_dir(&box_dir, &link.join("sockets").join("exec.sock"));
+    assert!(
+        socket_target.join("data.txt").is_file(),
+        "sdk socket cleanup deleted through an ancestor junction"
+    );
+    assert!(
+        removed.is_err(),
+        "sdk socket cleanup followed an ancestor junction"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_external_socket_dir_deletes_a_real_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let box_dir = home.path().join("box");
+    let sockets = home.path().join("sockets");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::create_dir_all(&sockets).unwrap();
+    std::fs::write(sockets.join("data.txt"), b"data").unwrap();
+
+    cleanup_external_socket_dir(&box_dir, &sockets.join("exec.sock"))
+        .expect("real socket directory removal");
+    assert!(!sockets.exists());
+}
+
+#[cfg(windows)]
+#[test]
 fn box_dir_guard_does_not_delete_through_a_directory_junction() {
     use std::os::windows::fs::MetadataExt;
     use std::os::windows::process::CommandExt;

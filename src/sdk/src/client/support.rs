@@ -744,7 +744,13 @@ fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) -> Resul
         return Ok(());
     }
     #[cfg(windows)]
-    a3s_box_runtime::vm::refuse_directory_reparse(socket_dir)?;
+    {
+        let mut prefix = PathBuf::new();
+        for component in socket_dir.components() {
+            prefix.push(component);
+            a3s_box_runtime::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     match std::fs::remove_dir_all(socket_dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
