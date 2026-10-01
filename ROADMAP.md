@@ -1544,6 +1544,8 @@ tip while harness reports still keep
   a Windows junction that is an ancestor of that directory.
   Creating a runtime socket directory does not create that directory through a
   Windows junction that is an ancestor of the box home.
+  Staging a single-file volume mount does not create its directory through a
+  Windows junction that is an ancestor of the filemounts directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

@@ -348,6 +348,14 @@ impl VmManager {
             ))
         })?;
         let stage_dir = filemounts_dir.join(index.to_string());
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in stage_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&stage_dir).map_err(|e| BoxError::BoxBootError {
             message: format!(
                 "Failed to create file-mount staging dir {}: {}",
@@ -450,4 +458,60 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_single_file_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let source = tmp.path().join("source.txt");
+        std::fs::write(&source, b"file").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let staged = VmManager::stage_single_file_mount(
+            &source,
+            "/data/source.txt",
+            0,
+            &link.join("filemounts"),
+        );
+        assert!(
+            staged.is_err(),
+            "single-file stage followed an ancestor junction: {staged:?}"
+        );
+        assert!(
+            !outside.join("filemounts").exists(),
+            "filemount staging directory was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn stage_single_file_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.txt");
+        std::fs::write(&source, b"file").unwrap();
+        let filemounts = tmp.path().join("filemounts");
+        let staged =
+            VmManager::stage_single_file_mount(&source, "/data/source.txt", 0, &filemounts)
+                .expect("stage creates a real directory");
+        assert!(staged.join("source.txt").is_file());
+    }
 }
