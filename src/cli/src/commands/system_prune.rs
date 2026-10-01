@@ -205,7 +205,18 @@ fn referenced_rootfs_cache_keys(state: &StateFile) -> HashSet<String> {
         .records()
         .iter()
         .filter_map(|record| {
-            std::fs::read_to_string(record.box_dir.join(".rootfs-cache-key"))
+            let path = record.box_dir.join(".rootfs-cache-key");
+            #[cfg(windows)]
+            {
+                let mut prefix = std::path::PathBuf::new();
+                for component in path.components() {
+                    prefix.push(component);
+                    if super::commit::refuse_directory_reparse(&prefix).is_err() {
+                        return None;
+                    }
+                }
+            }
+            std::fs::read_to_string(path)
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
@@ -297,6 +308,42 @@ mod tests {
         assert_eq!(
             referenced_rootfs_cache_keys(&state),
             ["live-key".to_string()].into_iter().collect()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn referenced_rootfs_cache_keys_do_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("boxes").join("active");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join(".rootfs-cache-key"), "secret-key\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut record = make_record("id-1", "active", "running", Some(std::process::id()));
+        record.box_dir = link.join("boxes").join("active");
+        let (_state_dir, state) = setup_state(vec![record]);
+
+        let keys = referenced_rootfs_cache_keys(&state);
+        assert!(
+            !keys.contains("secret-key"),
+            "system prune adopted a cache key through an ancestor junction: {keys:?}"
+        );
+        assert_eq!(
+            std::fs::read(box_target.join(".rootfs-cache-key")).unwrap(),
+            b"secret-key\n"
         );
     }
 
