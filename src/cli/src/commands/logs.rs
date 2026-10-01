@@ -141,6 +141,14 @@ async fn stream_logs(
 ) -> Result<(), BoxError> {
     let use_json = log_source.structured;
     let log_path = log_source.path;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in log_path.components() {
+            prefix.push(component);
+            super::commit::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let has_time_filter = since.is_some() || until.is_some();
     let mut follow_start_pos = None;
 
@@ -816,5 +824,71 @@ mod tests {
         let source = resolve_archived_log_source_in(&log_dir).unwrap();
         assert!(source.structured);
         assert_eq!(source.path, json_log);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stream_logs_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let logs = outside.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("console.log"), b"secret\n").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let source = LogSource {
+            path: link.join("logs").join("console.log"),
+            structured: false,
+        };
+        let args = LogsArgs {
+            r#box: "box".to_string(),
+            follow: false,
+            tail: None,
+            since: None,
+            until: None,
+            timestamps: false,
+        };
+        let streamed = stream_logs("box", source, None, args, None, None).await;
+        assert!(
+            streamed.is_err(),
+            "log streaming read through an ancestor junction: {streamed:?}"
+        );
+        assert_eq!(
+            std::fs::read(logs.join("console.log")).unwrap(),
+            b"secret\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_logs_reads_a_real_console_log() {
+        let temporary = tempfile::tempdir().unwrap();
+        let log_path = temporary.path().join("console.log");
+        std::fs::write(&log_path, b"hello\n").unwrap();
+        let source = LogSource {
+            path: log_path,
+            structured: false,
+        };
+        let args = LogsArgs {
+            r#box: "box".to_string(),
+            follow: false,
+            tail: None,
+            since: None,
+            until: None,
+            timestamps: false,
+        };
+        stream_logs("box", source, None, args, None, None)
+            .await
+            .expect("real console log");
     }
 }
