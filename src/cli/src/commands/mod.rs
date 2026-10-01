@@ -387,6 +387,26 @@ pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(windows)]
+fn open_tail_source(
+    path: &Path,
+) -> std::io::Result<(
+    std::fs::File,
+    a3s_box_core::windows_file::WindowsFileIdentity,
+)> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if commit::refuse_directory_reparse(&prefix).is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refusing to read through a directory junction",
+            ));
+        }
+    }
+    a3s_box_core::windows_file::open_regular_file(path, None)
+}
+
 /// Wait for a stream file to exist, then continuously print new data.
 /// `to_stderr` preserves the workload's stdout/stderr identity.
 pub(crate) async fn tail_file_stream_positioned(
@@ -425,7 +445,7 @@ pub(crate) async fn tail_file_stream_positioned(
 
     #[cfg(target_os = "windows")]
     let (mut file, windows_identity) = {
-        let Ok((file, identity)) = a3s_box_core::windows_file::open_regular_file(path, None) else {
+        let Ok((file, identity)) = open_tail_source(path) else {
             return;
         };
         (tokio::fs::File::from_std(file), identity)
@@ -924,6 +944,61 @@ mod image_cache_tests {
             matches!(err, a3s_box_core::error::BoxError::ConfigError(ref message)
                 if message.contains("A3S_IMAGE_CACHE_SIZE") && message.contains("lots")),
             "{err}"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tail_source_tests {
+    use std::io::Read;
+
+    use super::*;
+
+    #[test]
+    fn console_tail_reads_a_real_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("guest-init.stdout.log");
+        std::fs::write(&path, b"hello\n").unwrap();
+        let (mut file, _) = open_tail_source(&path).unwrap();
+        let mut text = String::new();
+        file.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "hello\n");
+    }
+
+    #[test]
+    fn console_tail_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("guest-init.stdout.log"), b"secret-console\n").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let opened = open_tail_source(&link.join("guest-init.stdout.log"));
+        match opened {
+            Ok((mut file, _)) => {
+                let mut text = String::new();
+                file.read_to_string(&mut text).unwrap();
+                panic!("read console tail through a junction: {text}");
+            }
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("guest-init.stdout.log")).unwrap(),
+            b"secret-console\n"
         );
     }
 }

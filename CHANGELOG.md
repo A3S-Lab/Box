@@ -687,6 +687,8 @@ All notable changes to A3S Box will be documented in this file.
   that is an ancestor of the box directory.
   Compose logs do not read a service log through a Windows junction that is
   an ancestor of the log file.
+  A console tail does not read a guest log through a Windows junction that
+  is an ancestor of the log file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
