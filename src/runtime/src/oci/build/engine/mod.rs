@@ -592,6 +592,16 @@ async fn build_in_workspace(
 
         let rootfs_dir = build_dir.join(format!("rootfs_{}", stage_idx));
         let layers_dir = build_dir.join(format!("layers_{}", stage_idx));
+        #[cfg(windows)]
+        {
+            for directory in [&rootfs_dir, &layers_dir] {
+                let mut prefix = PathBuf::new();
+                for component in directory.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
+        }
         std::fs::create_dir_all(&rootfs_dir).map_err(|e| {
             BoxError::BuildError(format!("Failed to create rootfs directory: {}", e))
         })?;

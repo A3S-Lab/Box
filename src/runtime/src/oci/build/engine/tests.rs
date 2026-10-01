@@ -2177,4 +2177,99 @@ CMD ["/work/run.sh"]
             b"secret"
         );
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn build_workspace_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let context = temp_dir.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(context.join("Dockerfile"), "FROM scratch\n").unwrap();
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+
+        let built = super::super::build_in_workspace(
+            BuildConfig {
+                context_dir: context.clone(),
+                dockerfile_path: context.join("Dockerfile"),
+                tag: Some("scratch:latest".to_string()),
+                build_args: HashMap::new(),
+                quiet: true,
+                platforms: vec![],
+                target: None,
+                no_cache: true,
+                network: BuildNetworkPolicy::Outbound,
+                metrics: None,
+                run_pool: None,
+            },
+            store,
+            &link.join("workspace"),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            !outside.join("workspace").exists(),
+            "build workspace was created through the junction"
+        );
+        assert!(built.is_err(), "build followed an ancestor junction");
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn build_workspace_creates_stage_directories() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let context = temp_dir.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(context.join("Dockerfile"), "FROM scratch\n").unwrap();
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+        let workspace = temp_dir.path().join("workspace");
+
+        let built = super::super::build_in_workspace(
+            BuildConfig {
+                context_dir: context.clone(),
+                dockerfile_path: context.join("Dockerfile"),
+                tag: Some("scratch:latest".to_string()),
+                build_args: HashMap::new(),
+                quiet: true,
+                platforms: vec![],
+                target: None,
+                no_cache: true,
+                network: BuildNetworkPolicy::Outbound,
+                metrics: None,
+                run_pool: None,
+            },
+            store,
+            &workspace,
+            None,
+            None,
+        )
+        .await;
+        assert!(workspace.join("rootfs_0").is_dir());
+        assert!(workspace.join("layers_0").is_dir());
+        if let Err(error) = &built {
+            let message = error.to_string();
+            assert!(
+                !message.to_ascii_lowercase().contains("junction"),
+                "{message}"
+            );
+        }
+    }
 }
