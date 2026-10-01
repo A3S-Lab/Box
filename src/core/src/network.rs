@@ -800,6 +800,10 @@ struct NetworksFile {
 /// guest `/etc/hosts`. Corrupt or missing files return `None` (caller forwards
 /// upstream). Does not invent NXDOMAIN for public names.
 pub fn lookup_network_a(networks_path: &Path, network_name: &str, qname: &str) -> Option<Ipv4Addr> {
+    #[cfg(windows)]
+    if crate::fs_atomic::refuse_file_ancestor_reparse(networks_path).is_err() {
+        return None;
+    }
     let data = std::fs::read_to_string(networks_path).ok()?;
     let file: NetworksFile = serde_json::from_str(&data).ok()?;
     let net = file.networks.get(network_name)?;
@@ -830,6 +834,13 @@ pub fn load_network_egress_rules(
     networks_path: &Path,
     network_name: &str,
 ) -> Result<Vec<EgressMatchRule>, String> {
+    #[cfg(windows)]
+    crate::fs_atomic::refuse_file_ancestor_reparse(networks_path).map_err(|error| {
+        format!(
+            "refusing to read network catalog {}: {error}",
+            networks_path.display()
+        )
+    })?;
     let data = match std::fs::read_to_string(networks_path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1633,6 +1644,49 @@ mod tests {
         assert_eq!(lookup_network_a(&path, "other", "db"), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lookup_network_a_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let path = outside.join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        let ep = net
+            .connect_with_aliases("box-db", "proj-db", &["db".to_string()])
+            .unwrap();
+        let file = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-network").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let looked_up = lookup_network_a(&link.join("networks.json"), "mynet", "db");
+        assert_ne!(
+            looked_up,
+            Some(ep.ip_address),
+            "network lookup adopted the outside address {looked_up:?}"
+        );
+        assert!(
+            looked_up.is_none(),
+            "network lookup followed an ancestor junction: {looked_up:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-network"
+        );
+    }
+
     #[test]
     fn egress_rule_parse_rejects_domain_and_matches_first_fields() {
         let err = EgressMatchRule::parse("deny:metadata.google.internal").unwrap_err();
@@ -1663,5 +1717,41 @@ mod tests {
             .is_empty());
         let err = load_network_egress_rules(&dir.path().join("nope.json"), "mynet").unwrap();
         assert!(err.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_network_egress_rules_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let path = outside.join("networks.json");
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.egress
+            .push(EgressMatchRule::parse("deny:1.1.1.1/32").unwrap());
+        let file = serde_json::json!({ "networks": { "mynet": net } });
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = load_network_egress_rules(&link.join("networks.json"), "mynet");
+        let error = match loaded {
+            Ok(rules) => panic!("egress rules followed an ancestor junction: {rules:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("junction"),
+            "egress rules error did not name the junction: {error}"
+        );
     }
 }

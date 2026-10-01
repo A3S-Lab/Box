@@ -727,6 +727,10 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is an ancestor of the artifact path.
   Preparing a managed snapshot lower does not read its snapshot through a
   Windows junction that is the snapshots directory.
+  Resolving a network DNS name does not read networks.json through a Windows
+  junction that is an ancestor of the catalog file.
+  Loading network egress rules does not read networks.json through a Windows
+  junction that is an ancestor of the catalog file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
