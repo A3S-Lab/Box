@@ -133,6 +133,14 @@ pub trait RootfsProvider: Send + Sync {
     /// Prepare an empty writable rootfs for an OCI cache miss.
     fn prepare_empty(&self, box_dir: &Path) -> Result<PathBuf> {
         let rootfs = box_dir.join("rootfs");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&rootfs).map_err(|error| {
             BoxError::BuildError(format!(
                 "Failed to create rootfs {}: {error}",
@@ -475,6 +483,14 @@ fn ensure_empty_rootfs_directory(rootfs: &Path) -> Result<()> {
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in rootfs.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             std::fs::create_dir_all(rootfs).map_err(|error| {
                 BoxError::BuildError(format!(
                     "Failed to create rootfs {}: {error}",
@@ -1264,5 +1280,78 @@ mod tests {
         assert!(!box_dir
             .join(super::super::overlay::WRITABLE_LAYER_DIR_NAME)
             .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_provider_prepare_empty_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let prepared = CopyProvider.prepare_empty(&link.join("box"));
+        assert!(
+            !outside.join("box").exists(),
+            "empty rootfs was created through the junction"
+        );
+        assert!(
+            prepared.is_err(),
+            "empty rootfs followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_rootfs_directory_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = ensure_empty_rootfs_directory(&link.join("box").join("rootfs"));
+        assert!(
+            !outside.join("box").exists(),
+            "empty rootfs directory was created through the junction"
+        );
+        assert!(
+            created.is_err(),
+            "empty rootfs directory followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_rootfs_directory_creates_a_real_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("box").join("rootfs");
+        ensure_empty_rootfs_directory(&rootfs).expect("empty rootfs on a real path");
+        assert!(rootfs.is_dir());
     }
 }
