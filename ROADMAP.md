@@ -1604,6 +1604,8 @@ tip while harness reports still keep
   junction that is an ancestor of the cache.
   Publishing a RUN cache mount does not create its directory through a Windows
   junction that is an ancestor of the cache.
+  Exporting a native build cache does not create its artifact directory through
+  a Windows junction that is an ancestor of the staging path.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

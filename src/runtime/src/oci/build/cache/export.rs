@@ -1,7 +1,7 @@
 //! Portable OCI artifact emitted by the native layer-cache authority.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use a3s_box_core::error::{BoxError, Result};
@@ -113,6 +113,14 @@ impl BuildCache {
             }
         }
         let blob_root = staging.join("blobs").join("sha256");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in blob_root.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&blob_root).map_err(|error| {
             cache_error(format!("failed to create native cache export: {error}"))
         })?;

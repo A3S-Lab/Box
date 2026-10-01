@@ -299,3 +299,66 @@ fn open_in_does_not_create_the_cache_through_an_ancestor_junction() {
     );
     assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
 }
+
+#[cfg(windows)]
+#[test]
+fn stage_export_does_not_create_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    use a3s_box_core::platform::Platform;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), b"keep").unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let cache = open_at(&tmp.path().join("cache"));
+    let identity = BuildCacheExportIdentity::new(
+        format!("sha256:{}", "1".repeat(64)),
+        format!("sha256:{}", "2".repeat(64)),
+        Platform::linux_amd64(),
+    )
+    .unwrap();
+
+    let exported = cache.stage_export(&BuildCacheTrace::default(), &identity, &link.join("export"));
+    assert!(
+        !outside.join("export").exists(),
+        "cache export created a directory through the junction"
+    );
+    assert!(
+        exported.is_err(),
+        "cache export followed an ancestor junction"
+    );
+    assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+}
+
+#[cfg(windows)]
+#[test]
+fn stage_export_creates_a_real_directory() {
+    use a3s_box_core::platform::Platform;
+
+    let tmp = TempDir::new().unwrap();
+    let cache = open_at(&tmp.path().join("cache"));
+    let staging = tmp.path().join("export");
+    let identity = BuildCacheExportIdentity::new(
+        format!("sha256:{}", "1".repeat(64)),
+        format!("sha256:{}", "2".repeat(64)),
+        Platform::linux_amd64(),
+    )
+    .unwrap();
+
+    cache
+        .stage_export(&BuildCacheTrace::default(), &identity, &staging)
+        .expect("export into a real directory");
+    assert!(staging.join("blobs").join("sha256").is_dir());
+    assert!(staging.join("index.json").is_file());
+}
