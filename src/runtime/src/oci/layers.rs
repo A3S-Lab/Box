@@ -65,7 +65,13 @@ fn extract_layer_with_cap(
     }
 
     #[cfg(windows)]
-    crate::vm::refuse_directory_reparse(target_dir)?;
+    {
+        let mut prefix = PathBuf::new();
+        for component in target_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
 
     // Create target directory
     std::fs::create_dir_all(target_dir).map_err(|e| {
@@ -1816,6 +1822,42 @@ mod tests {
             metadata.file_type().is_symlink(),
             "extract replaced the directory junction"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_layer_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let layer = temp_dir.path().join("layer.tar.gz");
+        create_test_layer(&layer, &[("planted.txt", b"planted")]);
+
+        let target = link.join("extracted");
+        let extracted = extract_layer(&layer, &target);
+        assert!(
+            !outside.join("extracted").exists(),
+            "extract created the target through the junction"
+        );
+        assert!(extracted.is_err(), "extract followed an ancestor junction");
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(windows)]
