@@ -69,6 +69,29 @@ pub(crate) fn refuse_file_ancestor_reparse(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn refuse_directory_reparse(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_attributes() & 0x10 != 0
+        && (metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to create through a directory junction: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Per-process sequence used to keep quarantine names unique even when more
 /// than one store is quarantined during the same clock tick.
 static QUARANTINE_SEQ: AtomicU64 = AtomicU64::new(0);
