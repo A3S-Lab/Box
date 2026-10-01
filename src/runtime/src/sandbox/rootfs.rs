@@ -740,6 +740,14 @@ fn load_authoritative_manifest(
     root: &Path,
     prefer_image_manifest: bool,
 ) -> Result<(PathBuf, RootfsMetadataManifest)> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in root.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let previous = root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let image = root.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'));
@@ -1336,6 +1344,51 @@ mod tests {
         assert_eq!(
             std::fs::metadata(private).unwrap().permissions().mode() & 0o7777,
             0o700
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inspect_rootfs_identity_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(41, 41)).unwrap(),
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let inspected = inspect_rootfs_identity_requirements(&link);
+        assert!(
+            !matches!(
+                inspected
+                    .as_ref()
+                    .map(|requirements| requirements.maximum_uid),
+                Ok(41)
+            ),
+            "rootfs identity adopted uid 41 through an ancestor junction: {inspected:?}"
+        );
+        let message = inspected.expect_err("rootfs identity followed an ancestor junction");
+        assert!(
+            message.to_string().contains("junction"),
+            "rootfs identity error omitted the junction refusal: {message}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join(ROOTFS_METADATA_PATH.trim_start_matches('/'))).unwrap(),
+            serde_json::to_vec(&test_manifest(41, 41)).unwrap()
         );
     }
 

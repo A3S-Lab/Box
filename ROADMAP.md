@@ -1740,6 +1740,8 @@ tip while harness reports still keep
   junction that is an ancestor of the layer file.
   Reading a console log does not read it through a Windows junction that is
   an ancestor of the console file.
+  Inspecting Sandbox rootfs identity does not read its manifest through a
+  Windows junction that is an ancestor of the rootfs directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
