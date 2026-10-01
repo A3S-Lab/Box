@@ -354,6 +354,19 @@ fn prepare_marker_paths(spec: &ManagedOciLogWorkerSpec) -> ExecutionManagerResul
 }
 
 fn read_marker(path: &Path) -> ExecutionManagerResult<Option<ManagedOciLogWorkerMarker>> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                ExecutionManagerError::Internal(format!(
+                    "refusing to read projection marker {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -549,5 +562,56 @@ mod tests {
         let directory = temporary.path().join("boxes").join("projection");
         prepare_marker_paths(&spec(&directory)).expect("projection directory on a real path");
         assert!(directory.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_marker_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let projection = outside.join("projection");
+        std::fs::create_dir_all(&projection).unwrap();
+        let marker = ManagedOciLogWorkerMarker {
+            schema: MANAGED_OCI_LOG_WORKER_SCHEMA.to_string(),
+            box_id: "secret-box".to_string(),
+            execution_generation: 1,
+            runtime_container_id: "secret-container".to_string(),
+            runtime_generation: 1,
+            pid: 7,
+            pid_start_time: None,
+        };
+        std::fs::write(
+            projection.join("ready.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let status = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                link.display(),
+                outside.display()
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let read = read_marker(&link.join("projection").join("ready.json"));
+        match read {
+            Ok(Some(marker)) => panic!(
+                "read projection marker through a junction: box_id={}",
+                marker.box_id
+            ),
+            Ok(None) => panic!("projection marker through a junction was treated as missing"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(projection.join("ready.json").is_file());
     }
 }
