@@ -615,7 +615,7 @@ impl VmManager {
             .cleanup(&box_dir, self.config.persistent)?;
         for path in [box_dir.join("sandbox").join("bundle"), self.socket_dir()] {
             #[cfg(windows)]
-            refuse_directory_reparse(&path)?;
+            super::lifecycle::refuse_windows_directory_tree(&path)?;
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1494,6 +1494,47 @@ mod tests {
         assert!(
             metadata.file_attributes() & 0x400 != 0,
             "sandbox cleanup removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_runtime_owned_sandbox_bundle_does_not_delete_through_a_nested_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("outside");
+        let bundle = outside.join("bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("secret.txt"), b"keep").unwrap();
+        let box_id = "nested-junction";
+        let box_dir = home.path().join("boxes").join(box_id);
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let sandbox = box_dir.join("sandbox");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            sandbox.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut manager = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(10),
+            box_id.to_string(),
+        );
+        manager.home_dir = home.path().to_path_buf();
+
+        let removed = manager.cleanup_runtime_owned_sandbox_bundle();
+        assert_eq!(
+            std::fs::read(bundle.join("secret.txt")).unwrap(),
+            b"keep",
+            "sandbox cleanup deleted a bundle through a nested junction"
+        );
+        assert!(
+            removed.is_err(),
+            "sandbox cleanup followed a nested directory junction"
         );
     }
 
