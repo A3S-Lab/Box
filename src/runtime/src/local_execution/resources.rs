@@ -158,10 +158,28 @@ impl ExecutionResourceGuard {
             return Ok(());
         };
         let snapshots_root = self.home_dir.join("snapshots");
+        let snapshot_dir = snapshots_root.join(snapshot_id.as_str());
+        #[cfg(windows)]
+        {
+            let metadata_candidate = snapshot_dir.join("metadata.json");
+            let rootfs_candidate = snapshot_dir.join("rootfs");
+            for path in [
+                snapshots_root.as_path(),
+                snapshot_dir.as_path(),
+                metadata_candidate.as_path(),
+                rootfs_candidate.as_path(),
+            ] {
+                let mut prefix = PathBuf::new();
+                for component in path.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)
+                        .map_err(|error| resource_error(record, "read managed snapshot", error))?;
+                }
+            }
+        }
         let canonical_root = snapshots_root
             .canonicalize()
             .map_err(|error| resource_error(record, "canonicalize managed snapshot root", error))?;
-        let snapshot_dir = snapshots_root.join(snapshot_id.as_str());
         let canonical_snapshot = snapshot_dir
             .canonicalize()
             .map_err(|error| resource_error(record, "resolve managed snapshot", error))?;
@@ -676,6 +694,50 @@ mod tests {
             "managed boxes followed an ancestor junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_lower_does_not_read_through_a_snapshots_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = temporary.path().join("outside");
+        let snapshot_id = "managed-snapshot";
+        let outside_rootfs = create_snapshot(&outside, snapshot_id);
+        std::fs::write(outside.join("secret.txt"), b"secret-snapshot").unwrap();
+        let link = home.join("snapshots");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.join("snapshots").display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let record = snapshot_record(&home, snapshot_id);
+        let prepared = ExecutionResourceGuard::prepare(&home, &record);
+        let marker = record.box_dir.join(".snapshot-lower");
+        let marker_text = std::fs::read_to_string(&marker).unwrap_or_default();
+        let error = match prepared {
+            Ok(_guard) => panic!("snapshot lower followed the snapshots junction: {marker_text}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "snapshot lower error did not name the junction: {error}"
+        );
+        assert!(
+            !marker.exists(),
+            "snapshot lower adopted the outside rootfs {}: {marker_text}",
+            outside_rootfs.display()
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-snapshot"
+        );
     }
 
     #[cfg(unix)]

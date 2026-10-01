@@ -1744,6 +1744,8 @@ tip while harness reports still keep
   Windows junction that is an ancestor of the rootfs directory.
   Certifying Windows WHPX OCI owner artifacts does not read them through a
   Windows junction that is an ancestor of the artifact path.
+  Preparing a managed snapshot lower does not read its snapshot through a
+  Windows junction that is the snapshots directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
