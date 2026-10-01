@@ -152,15 +152,21 @@ impl VmController {
             return;
         };
         #[cfg(windows)]
-        if let Err(error) = crate::vm::refuse_directory_reparse(log_dir) {
-            tracing::warn!(
-                box_id = %spec.box_id,
-                path = %log_dir.display(),
-                error = %error,
-                "Refusing shim log directory"
-            );
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            return;
+        {
+            let mut log_prefix = PathBuf::new();
+            for component in log_dir.components() {
+                log_prefix.push(component);
+                if let Err(error) = crate::vm::refuse_directory_reparse(&log_prefix) {
+                    tracing::warn!(
+                        box_id = %spec.box_id,
+                        path = %log_dir.display(),
+                        error = %error,
+                        "Refusing shim log directory"
+                    );
+                    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                    return;
+                }
+            }
         }
         if let Err(error) = std::fs::create_dir_all(log_dir) {
             tracing::warn!(
@@ -900,6 +906,55 @@ exec /bin/sleep 30
             b"secret"
         );
         assert!(std::fs::symlink_metadata(&logs)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn configure_shim_stdio_does_not_create_logs_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let controller = VmController {
+            shim_path: PathBuf::from("unused"),
+        };
+        let spec = InstanceSpec {
+            box_id: "box-ancestor-stdio".to_string(),
+            console_output: Some(link.join("logs").join("console.log")),
+            ..Default::default()
+        };
+        let mut cmd = Command::new("cmd.exe");
+        controller.configure_shim_stdio(&mut cmd, &spec);
+
+        assert!(
+            !outside.join("logs").join("shim.stdout.log").exists(),
+            "shim stdout was created through an ancestor junction"
+        );
+        assert!(
+            !outside.join("logs").exists(),
+            "shim log directory was created through an ancestor junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
