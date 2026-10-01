@@ -275,6 +275,19 @@ fn ensure_network_connected_with_store(
     })
 }
 
+fn ensure_boot_log_directory(logs_dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in logs_dir.components() {
+            prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
+    std::fs::create_dir_all(logs_dir)
+}
+
 /// Reconstruct a `BoxConfig` from a persisted `BoxRecord` and boot the VM.
 ///
 /// On success, returns the new PID. The caller is responsible for updating
@@ -307,7 +320,7 @@ pub async fn boot_from_record(record: &BoxRecord) -> Result<BootResult, BoxError
 
     // Ensure the log dir exists so the shim's container.json (and console.log)
     // have a home; the shim itself runs the log processor.
-    let _ = std::fs::create_dir_all(record.box_dir.join("logs"));
+    let _ = ensure_boot_log_directory(&record.box_dir.join("logs"));
 
     let pid = vm.pid().await;
     let exec_socket_path = vm.exec_socket_path().map(PathBuf::from);
@@ -408,6 +421,44 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_boot_log_directory_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("box");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = ensure_boot_log_directory(&link.join("logs"));
+        assert!(
+            created.is_err(),
+            "boot created a log directory through a junction: {created:?}"
+        );
+        assert!(!outside.join("logs").exists());
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_boot_log_directory_creates_a_missing_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let logs = tmp.path().join("box").join("logs");
+        ensure_boot_log_directory(&logs).unwrap();
+        assert!(logs.is_dir());
+    }
 
     fn sample_record() -> BoxRecord {
         let id = "test-boot-id".to_string();
