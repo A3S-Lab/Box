@@ -56,6 +56,15 @@ fn extract_layer_with_cap(
     max_layer_bytes: u64,
     track_metadata: bool,
 ) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in layer_path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
+
     // Validate layer exists
     if !layer_path.exists() {
         return Err(BoxError::OciImageError(format!(
@@ -1752,6 +1761,42 @@ mod tests {
             !target.join("dir/.wh.removed.txt").exists(),
             "whiteout marker must not be written to the rootfs"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_layer_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let layer = outside.join("layer.tar.gz");
+        create_test_layer(&layer, &[("planted.txt", b"secret-layer")]);
+        let parent = temp_dir.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let target = temp_dir.path().join("extracted");
+        fs::create_dir_all(&target).unwrap();
+
+        let extracted = extract_layer(&link.join("layer.tar.gz"), &target);
+        assert!(
+            !target.join("planted.txt").exists(),
+            "extract read a layer through an ancestor junction: {extracted:?}"
+        );
+        let message = extracted.expect_err("extract followed an ancestor junction");
+        assert!(
+            message.to_string().contains("junction"),
+            "extract error omitted the junction refusal: {message}"
+        );
+        assert_eq!(fs::read(layer).unwrap().is_empty(), false);
     }
 
     #[cfg(windows)]
