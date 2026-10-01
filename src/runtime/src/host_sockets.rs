@@ -81,8 +81,11 @@ pub fn ensure_runtime_socket_dir(home_dir: &Path, box_id: &str) -> Result<PathBu
 
     #[cfg(not(unix))]
     {
-        let box_dir = home_dir.join("boxes").join(box_id);
-        crate::vm::refuse_directory_reparse(&box_dir)?;
+        let mut prefix = PathBuf::new();
+        for component in socket_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
         std::fs::create_dir_all(&socket_dir).map_err(|error| BoxError::BoxBootError {
             message: format!(
                 "Failed to create socket directory {}: {error}",
@@ -301,6 +304,54 @@ mod tests {
             .is_symlink());
         let _ = fs::remove_dir(&box_dir);
         let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_runtime_socket_dir_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let parent = unique_tmp_subdir("ancestor-parent");
+        let outside = unique_tmp_subdir("ancestor-outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = ensure_runtime_socket_dir(&link, "box1");
+        assert!(
+            created.is_err(),
+            "socket directory followed an ancestor junction: {created:?}"
+        );
+        assert!(
+            !outside.join("boxes").exists(),
+            "socket directory was created through the ancestor junction"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_runtime_socket_dir_creates_a_missing_directory() {
+        let home = unique_tmp_subdir("real-home");
+        fs::create_dir_all(&home).unwrap();
+        let dir = ensure_runtime_socket_dir(&home, "box1").expect("socket directory");
+        assert!(dir.is_dir());
         let _ = fs::remove_dir_all(&home);
     }
 }
