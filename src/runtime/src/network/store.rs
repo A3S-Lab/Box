@@ -35,6 +35,14 @@ impl NetworkStore {
 
     /// Load all networks from disk.
     pub fn load(&self) -> Result<HashMap<String, NetworkConfig>> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in self.path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         if !self.path.exists() {
             return Ok(HashMap::new());
         }
@@ -261,6 +269,43 @@ mod tests {
             "networks.json.tmp was written through the junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let real = NetworkStore::new(outside.join("networks.json"));
+        real.create(NetworkConfig::new("secret-net", "10.88.0.0/24").unwrap())
+            .unwrap();
+        let parent = dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let store = NetworkStore::new(link.join("networks.json"));
+        let loaded = store.load();
+        match loaded {
+            Ok(networks) => panic!(
+                "loaded networks through a junction: {:?}",
+                networks.keys().collect::<Vec<_>>()
+            ),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(outside.join("networks.json").is_file());
     }
 
     #[test]
