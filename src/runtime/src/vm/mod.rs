@@ -10,9 +10,15 @@ mod oci_microvm;
 mod ready;
 pub mod reap;
 mod sandbox;
+#[cfg(windows)]
+pub use sandbox::refuse_directory_reparse;
 mod spec;
 #[cfg(windows)]
+mod volume_posix;
+#[cfg(windows)]
 mod windows_stop;
+#[cfg(windows)]
+pub use volume_posix::harvest_volume_posix_sidecars;
 #[cfg(windows)]
 pub use windows_stop::{
     clear as clear_windows_guest_stop_request, finalize_box_terminal_rootfs_metadata,
@@ -86,6 +92,8 @@ pub enum BoxState {
 enum VmBootMode {
     #[default]
     Workload,
+    // Constructed only by macOS stopped-rootfs maintenance boot.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     RootfsMaintenance,
 }
 
@@ -234,6 +242,7 @@ pub fn collect_windows_guest_result(
     let stderr_source = rootfs.join(WINDOWS_GUEST_STDERR);
 
     if !windows_marker_matches(&marker, b"collected\n") {
+        refuse_directory_reparse(&logs)?;
         std::fs::create_dir_all(&logs)?;
         let runtime_filter = a3s_box_core::log::RuntimeConsoleFilter::new();
 
@@ -341,6 +350,7 @@ pub struct VmManager {
     pub(crate) box_id: String,
 
     /// Internal boot contract. Maintenance never becomes persisted box state.
+    #[cfg_attr(not(unix), allow(dead_code))]
     boot_mode: VmBootMode,
 
     /// Current state
@@ -787,18 +797,39 @@ impl VmManager {
             }
         };
 
-        let socket_clean = match std::fs::remove_dir_all(&socket_dir) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        let socket_directory: Result<()> = {
+            #[cfg(windows)]
+            {
+                sandbox::refuse_directory_reparse(&socket_dir)
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(())
+            }
+        };
+        let socket_clean = match socket_directory {
             Err(error) => {
                 tracing::error!(
                     box_id = %self.box_id,
                     path = %socket_dir.display(),
-                    error = %error,
-                    "Refusing invent-clean boot-failure cleanup while VM socket directory remains"
+                    %error,
+                    "Refusing invent-clean boot-failure cleanup while VM socket directory is a junction"
                 );
                 false
             }
+            Ok(()) => match std::fs::remove_dir_all(&socket_dir) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => {
+                    tracing::error!(
+                        box_id = %self.box_id,
+                        path = %socket_dir.display(),
+                        error = %error,
+                        "Refusing invent-clean boot-failure cleanup while VM socket directory remains"
+                    );
+                    false
+                }
+            },
         };
 
         // A failed restart must never erase a persistent writable rootfs. The
@@ -817,17 +848,37 @@ impl VmManager {
             && provider_clean
             && socket_clean
         {
-            match std::fs::remove_dir_all(&box_dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            let box_directory: Result<()> = {
+                #[cfg(windows)]
+                {
+                    sandbox::refuse_directory_reparse(&box_dir)
+                }
+                #[cfg(not(windows))]
+                {
+                    Ok(())
+                }
+            };
+            match box_directory {
                 Err(error) => {
                     tracing::error!(
                         box_id = %self.box_id,
                         path = %box_dir.display(),
-                        error = %error,
-                        "Refusing invent-clean boot-failure cleanup while box directory remains"
+                        %error,
+                        "Refusing invent-clean boot-failure cleanup while box directory is a junction"
                     );
                 }
+                Ok(()) => match std::fs::remove_dir_all(&box_dir) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        tracing::error!(
+                            box_id = %self.box_id,
+                            path = %box_dir.display(),
+                            error = %error,
+                            "Refusing invent-clean boot-failure cleanup while box directory remains"
+                        );
+                    }
+                },
             }
         }
     }

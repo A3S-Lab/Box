@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{ExecutionGeneration, ExecutionManager, OperationId, RestartExecutionOptions};
 use a3s_box_runtime::ManagedRestartOutcome;
 use clap::Args;
@@ -161,7 +162,7 @@ impl BackoffTracker {
     }
 }
 
-pub async fn execute(args: MonitorArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: MonitorArgs) -> Result<(), BoxError> {
     if let (Some(box_id), Some(generation)) = (args.health_worker.as_ref(), args.health_generation)
     {
         return crate::health::run_detached_health_worker(box_id.clone(), generation).await;
@@ -258,7 +259,7 @@ async fn monitor_shutdown_signal() {
 /// Single poll iteration: observe managed inventory honesty, load state, find
 /// dead boxes, restart eligible ones. Also checks for unhealthy boxes that have
 /// a restart policy.
-async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::error::Error>> {
+async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), BoxError> {
     // Present-tense inventory before restart decisions — same home-scoped
     // observe/resume path as `ps` / `system-prune` (no Running observe).
     let state =
@@ -377,7 +378,8 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
             println!("{}", restart_log_line(&record, RestartReason::Dead));
         }
 
-        let restart_plan = super::restart::restart_plan(&record, DEFAULT_RESTART_TIMEOUT_SECS)?;
+        let restart_plan = super::restart::restart_plan(&record, DEFAULT_RESTART_TIMEOUT_SECS)
+            .map_err(BoxError::StateError)?;
         if let super::restart::RestartPlan::Managed {
             execution_id,
             generation,
@@ -474,10 +476,11 @@ async fn restart_managed_candidate(
     source_generation: ExecutionGeneration,
     operation_id: Option<OperationId>,
     stop_timeout_secs: Option<u64>,
-) -> Result<Option<u32>, Box<dyn std::error::Error>> {
+) -> Result<Option<u32>, BoxError> {
     let operation_id = match operation_id {
         Some(operation_id) => operation_id,
-        None => OperationId::new(format!("monitor-restart-{}", uuid::Uuid::new_v4()))?,
+        None => OperationId::new(format!("monitor-restart-{}", uuid::Uuid::new_v4()))
+            .map_err(super::IntoBoxError::into_box_error)?,
     };
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
@@ -488,13 +491,14 @@ async fn restart_managed_candidate(
             &operation_id,
             RestartExecutionOptions { stop_timeout_secs },
         )
-        .await?;
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     let source_restart_count = record.restart_count;
     let target_generation = lease.generation;
     let restart_count = StateFile::modify(|state| {
         let Some(current) = state.find_by_id_mut(execution_id.as_str()) else {
-            return Ok::<Option<u32>, std::io::Error>(None);
+            return Ok::<Option<u32>, BoxError>(None);
         };
         apply_completed_managed_restart(
             current,
@@ -504,7 +508,7 @@ async fn restart_managed_candidate(
             source_restart_count,
         )
         .map(Some)
-        .map_err(std::io::Error::other)
+        .map_err(BoxError::StateError)
     })?;
 
     if restart_count.is_some() {
@@ -633,7 +637,7 @@ fn format_exit_code(exit_code: Option<i32>) -> String {
 }
 
 #[cfg(not(windows))]
-async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_due_health_checks(state: &StateFile) -> Result<(), BoxError> {
     let now = chrono::Utc::now();
     let probes: Vec<_> = state
         .records()
@@ -732,7 +736,7 @@ where
 }
 
 #[cfg(windows)]
-async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_due_health_checks(state: &StateFile) -> Result<(), BoxError> {
     let unsupported = state
         .records()
         .iter()
@@ -751,17 +755,17 @@ async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::err
     if unsupported.is_empty() {
         Ok(())
     } else {
-        Err(format!(
+        Err(BoxError::ConfigError(format!(
             "container health checks are not supported on Windows; active boxes with unsupported health checks: {}",
             unsupported.join(", ")
-        )
-        .into())
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::error::BoxError;
     use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation};
     use a3s_box_runtime::{ManagedExecutionMetadata, ManagedRestartCompletion};
     use std::collections::BTreeMap;
@@ -999,6 +1003,15 @@ mod tests {
 
         assert!(error.contains("health checks are not supported on Windows"));
         assert!(error.contains("active-health"));
+        match run_due_health_checks(&state).await.unwrap_err() {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("health checks are not supported on Windows"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]

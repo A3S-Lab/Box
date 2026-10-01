@@ -2,10 +2,11 @@
 //!
 //! IPAM stays in [`NetworkStore`]. The container end stays unbridged so OCI
 //! Create can move it; the peer is attached to a Box-owned Linux bridge for L2.
-//! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE. Optional
-//! static TCP and UDP published ports install per-box DNAT (+ localhost OUTPUT).
-//! Networks that store `--egress` rules are refused: this path does not evaluate
-//! them, and attaching would ignore operator deny.
+//! Egress uses host `ip_forward` plus per-subnet iptables MASQUERADE and a
+//! FORWARD filter chain that enforces first-match `--egress` plus the default
+//! untrusted profile (same packet-field contract as MicroVM netproxy /
+//! passt_bridge). Non-Linux hosts still refuse networks that store `--egress`.
+//! Domain match, CNI, and Enterprise GA remain out of scope.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -116,8 +117,9 @@ pub(crate) fn interface_names(box_id: &str) -> ExecutionManagerResult<(String, S
     Ok((format!("bv{hex}c"), format!("bv{hex}p")))
 }
 
-/// Keep-authority Sandbox does not filter `--egress`. A non-empty rule list
-/// must fail closed so operator allow/deny is not silently ignored.
+/// Historical refuse helper retained for call-site clarity in docs/tests.
+/// Linux keep-authority now installs FORWARD filters instead of refusing.
+#[cfg(test)]
 pub(crate) fn refuse_unenforced_sandbox_egress(
     network_name: &str,
     rule_count: usize,
@@ -126,7 +128,7 @@ pub(crate) fn refuse_unenforced_sandbox_egress(
         return Ok(());
     }
     Err(ExecutionManagerError::InvalidRequest(format!(
-        "network '{network_name}' has {rule_count} --egress rule(s) that Sandbox keep-authority does not enforce; refusing Bridge attach. MicroVM netproxy and Linux passt_bridge enforce those rules"
+        "network '{network_name}' has {rule_count} --egress rule(s) that Sandbox keep-authority cannot enforce on this host; refusing Bridge attach. Linux keep-authority installs FORWARD filters; MicroVM netproxy and passt_bridge also enforce those rules"
     )))
 }
 
@@ -176,10 +178,9 @@ pub(crate) fn stage_for_sandbox_bundle(
                 "network '{network_name}' not found for SandboxViaOci host netdevice staging"
             ))
         })?;
-    // Operator rules live on the network object. Keep-authority MASQUERADE does
-    // not evaluate them; attaching would ignore deny. MicroVM netproxy and
-    // passt_bridge do evaluate them. Refuse before any host mutation.
-    refuse_unenforced_sandbox_egress(network_name, config.egress.len())?;
+    // Linux keep-authority installs FORWARD filters (default untrusted profile
+    // + first-match `--egress`). MicroVM netproxy / passt_bridge share the same
+    // packet-field contract.
     let endpoint = config.endpoints.get(box_id).ok_or_else(|| {
         ExecutionManagerError::Unavailable(format!(
             "box '{box_id}' is not connected to network '{network_name}'; resource guard must connect before prepare"
@@ -206,8 +207,36 @@ pub(crate) fn stage_for_sandbox_bundle(
     teardown_lease(home_dir, box_id)?;
 
     stage_veth_pair(&lease, endpoint, prefix_len, config.gateway)?;
-    ensure_published_dnat(&lease)?;
-    persist_lease(home_dir, box_id, &lease)?;
+    // Filter/DNAT/persist can fail after veth is up and before a lease file
+    // exists — roll back the pair so prepare does not leave orphan fabric.
+    let finish = (|| -> ExecutionManagerResult<()> {
+        super::oci_sandbox_bridge_egress::ensure_bridge_egress_filter(
+            &lease.subnet,
+            &lease.bridge_iface,
+            &config.egress,
+        )?;
+        ensure_published_dnat(&lease)?;
+        persist_lease(home_dir, box_id, &lease)?;
+        Ok(())
+    })();
+    if let Err(error) = finish {
+        let mut message = error.to_string();
+        // DNAT may have been installed before persist failed — tear it down even
+        // when no lease file exists yet (teardown_lease would no-op).
+        if let Err(cleanup) = remove_published_dnat(&lease) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        if let Err(cleanup) = delete_link_if_present(&lease.container_iface) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        if let Err(cleanup) = delete_link_if_present(&lease.peer_iface) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        if let Err(cleanup) = try_delete_bridge_if_idle(&lease.bridge_iface, &lease.subnet) {
+            message = format!("{message}; rollback also failed: {cleanup}");
+        }
+        return Err(ExecutionManagerError::Unavailable(message));
+    }
     Ok(Some(lease))
 }
 
@@ -787,6 +816,7 @@ fn link_exists(name: &str) -> ExecutionManagerResult<bool> {
 #[cfg(target_os = "linux")]
 fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) -> ExecutionManagerResult<()> {
     if !link_exists(bridge_iface)? {
+        let _ = super::oci_sandbox_bridge_egress::remove_bridge_egress_filter(subnet, bridge_iface);
         return remove_bridge_egress_nat(subnet, bridge_iface);
     }
     // `ip -o link show master <br>` lists slaves; empty means idle fabric.
@@ -807,6 +837,7 @@ fn try_delete_bridge_if_idle(bridge_iface: &str, subnet: &str) -> ExecutionManag
     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
         return Ok(());
     }
+    super::oci_sandbox_bridge_egress::remove_bridge_egress_filter(subnet, bridge_iface)?;
     remove_bridge_egress_nat(subnet, bridge_iface)?;
     run_ip(&["link", "del", bridge_iface])
 }
@@ -864,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_bridge_refuses_networks_that_carry_egress_rules() {
+    fn historical_refuse_helper_still_fail_closes_non_empty_rules() {
         assert!(refuse_unenforced_sandbox_egress("dev", 0).is_ok());
         let error = refuse_unenforced_sandbox_egress("dev", 2).unwrap_err();
         let message = error.to_string();

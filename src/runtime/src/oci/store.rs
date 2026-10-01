@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
-use a3s_box_core::{ImageStoreBackend, StoredImage};
+use a3s_box_core::StoredImage;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -46,6 +46,14 @@ impl ImageStore {
     /// Creates the store directory if it doesn't exist and loads
     /// any existing index from disk.
     pub fn new(store_dir: &Path, max_size_bytes: u64) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let mut store_prefix = PathBuf::new();
+            for component in store_dir.components() {
+                store_prefix.push(component);
+                crate::vm::refuse_directory_reparse(&store_prefix)?;
+            }
+        }
         std::fs::create_dir_all(store_dir).map_err(|e| {
             BoxError::OciImageError(format!(
                 "Failed to create image store directory {}: {}. {}",
@@ -153,6 +161,12 @@ impl ImageStore {
         // Accept only canonical content digests before either path is built.
         let digest_hex = super::registry::validated_digest_hex(digest)?;
         let digest_root = self.store_dir.join("sha256");
+        refuse_reparse_prefixes(&digest_root).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Unsafe image content directory {}: {error}",
+                digest_root.display()
+            ))
+        })?;
         std::fs::create_dir_all(&digest_root).map_err(|error| {
             BoxError::OciImageError(format!(
                 "Failed to create image content directory {}: {error}",
@@ -487,6 +501,7 @@ impl ImageStore {
         let target = digest_root.join(format!(".content-{digest_hex}"));
         let lock_target = target.clone();
         tokio::task::spawn_blocking(move || {
+            refuse_reparse_prefixes(&digest_root)?;
             std::fs::create_dir_all(&digest_root)?;
             require_real_directory(&digest_root)?;
             crate::file_lock::FileLock::acquire(&lock_target)
@@ -661,37 +676,6 @@ impl ImageStore {
     }
 }
 
-#[async_trait::async_trait]
-impl ImageStoreBackend for ImageStore {
-    async fn get(&self, reference: &str) -> Option<StoredImage> {
-        self.get(reference).await
-    }
-
-    async fn get_by_digest(&self, digest: &str) -> Option<StoredImage> {
-        self.get_by_digest(digest).await
-    }
-
-    async fn put(&self, reference: &str, digest: &str, source_dir: &Path) -> Result<StoredImage> {
-        self.put(reference, digest, source_dir).await
-    }
-
-    async fn remove(&self, reference: &str) -> Result<()> {
-        self.remove(reference).await
-    }
-
-    async fn list(&self) -> Vec<StoredImage> {
-        self.list().await
-    }
-
-    async fn evict(&self) -> Result<Vec<String>> {
-        self.evict().await
-    }
-
-    async fn total_size(&self) -> u64 {
-        self.total_size().await
-    }
-}
-
 #[cfg(windows)]
 fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -706,7 +690,30 @@ fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+fn refuse_reparse_prefixes(path: &Path) -> std::io::Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing symbolic link or reparse-point directory {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn require_real_directory(path: &Path) -> std::io::Result<()> {
+    refuse_reparse_prefixes(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
         return Err(std::io::Error::new(
@@ -1949,5 +1956,137 @@ mod tests {
         store.remove("safe:latest").await.unwrap();
         assert!(!expected.exists());
         assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn put_rejects_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        let source = outside.join("layout");
+        create_test_oci_layout(&source);
+        std::fs::write(source.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let store_dir = temp.path().join("store");
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+
+        let error = store
+            .put(
+                "evil:latest",
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &link.join("layout"),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("reparse") || error.contains("symbolic link"),
+            "ancestor junction admitted the image source: {error}"
+        );
+        assert!(store.list().await.is_empty());
+        assert_eq!(std::fs::read(source.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let store_dir = link.join("store");
+        let created = ImageStore::new(&store_dir, u64::MAX);
+        let created_debug = match &created {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("store").exists(),
+            "image store was created through the ancestor junction: {created_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn put_does_not_create_content_through_a_store_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let source = temp.path().join("source");
+        create_test_oci_layout(&source);
+        let store_dir = temp.path().join("store");
+        let _store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        std::fs::remove_dir_all(&store_dir).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            store_dir.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let store = ImageStore {
+            store_dir: store_dir.clone(),
+            index: Arc::new(RwLock::new(HashMap::new())),
+            max_size_bytes: u64::MAX,
+        };
+
+        let stored = store
+            .put(
+                "nginx:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source,
+            )
+            .await;
+        let stored_debug = match &stored {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("sha256").exists(),
+            "image content was created through the store directory junction: {stored_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&store_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

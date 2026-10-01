@@ -2,6 +2,7 @@
 //!
 //! Displays disk usage for images and boxes, similar to `docker system df`.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::output;
@@ -13,7 +14,7 @@ pub struct DfArgs {
     pub verbose: bool,
 }
 
-pub async fn execute(args: DfArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: DfArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
     // Present-tense reclaimables: drive inventory observe/resume before sizing
     // boxes (same path as `ps` / `prune`).
@@ -109,6 +110,10 @@ pub async fn execute(args: DfArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Calculate total size of a directory recursively.
 fn dir_size(path: &std::path::Path) -> u64 {
+    #[cfg(windows)]
+    if super::commit::refuse_directory_reparse(path).is_err() {
+        return 0;
+    }
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -156,5 +161,58 @@ mod tests {
     fn test_dir_size_nonexistent() {
         let path = std::path::Path::new("/nonexistent/a3s_test_12345");
         assert_eq!(dir_size(path), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dir_size_does_not_follow_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        assert_eq!(
+            dir_size(&link),
+            0,
+            "df counted bytes through a directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dir_size_does_not_follow_a_child_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("local.txt"), b"ok").unwrap();
+        let link = root.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        assert_eq!(
+            dir_size(&root),
+            2,
+            "df counted bytes through a child directory junction"
+        );
     }
 }

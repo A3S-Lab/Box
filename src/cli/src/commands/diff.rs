@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_runtime::rootfs::{RootfsFileInfo, DIFF_BASELINE_FILE};
 use clap::Args;
 
@@ -36,16 +37,19 @@ pub struct DiffArgs {
     pub name: String,
 }
 
-pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: DiffArgs) -> Result<(), BoxError> {
     let initial_state = StateFile::load_default()?;
-    let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
+    let box_id = resolve::resolve(&initial_state, &args.name)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
     let record = state.find_by_id(&box_id).ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Box '{}' was removed while waiting for its lifecycle lock",
             args.name
-        )
+        ))
     })?;
 
     // Snapshot the original image to compare against
@@ -53,9 +57,11 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     ensure_diff_baseline_present(&snapshot_path)?;
 
     let snapshot_data = std::fs::read_to_string(&snapshot_path)
-        .map_err(|e| format!("Failed to read snapshot: {e}"))?;
-    let baseline: HashMap<String, RootfsFileInfo> = serde_json::from_str(&snapshot_data)
-        .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
+        .map_err(|error| super::io_error("Failed to read snapshot", error))?;
+    let baseline: HashMap<String, RootfsFileInfo> =
+        serde_json::from_str(&snapshot_data).map_err(|error| {
+            BoxError::SerializationError(format!("Failed to parse snapshot: {error}"))
+        })?;
 
     // A guest-native block root has no host directory after ownership handoff.
     // Running MicroVMs stream one coherent guest-metadata archive over the exec
@@ -112,17 +118,16 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn current_rootfs(
     record: &crate::state::BoxRecord,
     display_name: &str,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
     if uses_live_sandbox_host_rootfs(record) {
         let live_pid = record.pid.is_some_and(|pid| {
             crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
         });
         if !live_pid {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Cannot diff box '{}' because its host process is not live",
                 record.name
-            )
-            .into());
+            )));
         }
         return current_sandbox_host_rootfs(record).await;
     }
@@ -132,20 +137,18 @@ async fn current_rootfs(
             crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
         });
         if !live_pid {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Cannot diff running box '{}' because its host process is not live",
                 record.name
-            )
-            .into());
+            )));
         }
         #[cfg(unix)]
         {
             if !record.exec_socket_path.exists() {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "Cannot diff running box '{}' because its guest archive endpoint is unavailable",
                     record.name
-                )
-                .into());
+                )));
             }
             let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
             let temporary = tempfile::tempdir()?;
@@ -153,7 +156,9 @@ async fn current_rootfs(
             let mut output = tokio::fs::File::create(&archive_path).await?;
             let written = client.archive_rootfs(&mut output, true).await?;
             if written == 0 {
-                return Err("Guest rootfs archive was empty".into());
+                return Err(BoxError::ExecError(
+                    "Guest rootfs archive was empty".to_string(),
+                ));
             }
             output.sync_all().await?;
             drop(output);
@@ -161,20 +166,18 @@ async fn current_rootfs(
         }
         #[cfg(not(unix))]
         {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "Live filesystem diff is unavailable for box '{}' on this platform",
                 record.name
-            )
-            .into());
+            )));
         }
     }
 
     if record.status == "paused" {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot diff paused MicroVM box '{}'; resume it first, or use a Sandbox",
             record.name
-        )
-        .into());
+        )));
     }
 
     if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
@@ -195,24 +198,25 @@ async fn current_rootfs(
         }
         #[cfg(not(unix))]
         {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "Stopped guest-native rootfs diff is unavailable for box '{}' on this platform",
                 record.name
-            )
-            .into());
+            )));
         }
     }
     let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/)",
             display_name,
             record.box_dir.display()
-        )
+        ))
     })?;
     // Match stopped commit/export: fail closed without guest rootfs metadata so
     // NTFS host mode/ownership is never presented as guest filesystem truth.
-    let rootfs_metadata = super::commit::read_guest_rootfs_metadata(&rootfs_dir)
-        .map_err(|error| format!("Cannot diff stopped box '{display_name}': {error}"))?;
+    let rootfs_metadata =
+        super::commit::read_guest_rootfs_metadata(&rootfs_dir).map_err(|error| {
+            BoxError::StateError(format!("Cannot diff stopped box '{display_name}': {error}"))
+        })?;
     walk_guest_rootfs_metadata(&rootfs_metadata)
 }
 
@@ -224,7 +228,7 @@ fn uses_live_sandbox_host_rootfs(record: &crate::state::BoxRecord) -> bool {
 #[cfg(all(unix, target_os = "linux"))]
 async fn current_sandbox_host_rootfs(
     record: &crate::state::BoxRecord,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
     let temporary = tempfile::tempdir()?;
     let archive_path = temporary.path().join("rootfs.tar");
     super::commit::capture_live_host_rootfs_tar(record, &archive_path, true).await?;
@@ -234,18 +238,17 @@ async fn current_sandbox_host_rootfs(
 #[cfg(not(all(unix, target_os = "linux")))]
 async fn current_sandbox_host_rootfs(
     record: &crate::state::BoxRecord,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Live Sandbox host-rootfs diff is unavailable for box '{}' on this platform",
         record.name
-    )
-    .into())
+    )))
 }
 
 #[cfg(all(unix, target_os = "linux"))]
 async fn current_stopped_sandbox_host_rootfs(
     record: &crate::state::BoxRecord,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
     let temporary = tempfile::tempdir()?;
     let archive_path = temporary.path().join("rootfs.tar");
     super::commit::capture_live_host_rootfs_tar(record, &archive_path, false).await?;
@@ -255,18 +258,17 @@ async fn current_stopped_sandbox_host_rootfs(
 #[cfg(not(all(unix, target_os = "linux")))]
 async fn current_stopped_sandbox_host_rootfs(
     record: &crate::state::BoxRecord,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Stopped Sandbox host-rootfs diff is unavailable for box '{}' on this platform",
         record.name
-    )
-    .into())
+    )))
 }
 
 /// Build a diff map from guest terminal rootfs metadata (not host NTFS mode bits).
 fn walk_guest_rootfs_metadata(
     manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
     use a3s_box_core::rootfs_metadata::RootfsEntryKind;
     use base64::Engine;
 
@@ -278,12 +280,14 @@ fn walk_guest_rootfs_metadata(
     for entry in &manifest.entries {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&entry.path_base64)
-            .map_err(|error| format!("Invalid rootfs metadata path: {error}"))?;
+            .map_err(|error| {
+                BoxError::StateError(format!("Invalid rootfs metadata path: {error}"))
+            })?;
         let path = std::path::PathBuf::from(String::from_utf8_lossy(&bytes).as_ref());
         if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
             continue;
         }
-        let Some(key) = guest_metadata_rootfs_key(&path)? else {
+        let Some(key) = guest_metadata_rootfs_key(&path).map_err(BoxError::StateError)? else {
             continue;
         };
         let permissions = entry.mode & 0o7777;
@@ -329,9 +333,7 @@ fn guest_metadata_rootfs_key(path: &Path) -> Result<Option<String>, String> {
 }
 
 #[cfg(unix)]
-fn walk_tar_archive(
-    archive_path: &Path,
-) -> Result<HashMap<String, RootfsFileInfo>, Box<dyn std::error::Error>> {
+fn walk_tar_archive(archive_path: &Path) -> Result<HashMap<String, RootfsFileInfo>, BoxError> {
     use std::os::unix::ffi::OsStrExt;
 
     // POSIX/ustar file type bits are part of the archive mode contract and do
@@ -346,7 +348,7 @@ fn walk_tar_archive(
     for item in archive.entries()? {
         let item = item?;
         let path = item.path()?.into_owned();
-        let Some(key) = archive_rootfs_key(&path)? else {
+        let Some(key) = archive_rootfs_key(&path).map_err(BoxError::ExecError)? else {
             continue;
         };
         if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
@@ -359,9 +361,12 @@ fn walk_tar_archive(
             let target = item
                 .link_name()?
                 .map(|target| archive_rootfs_key(&target))
-                .transpose()?
+                .transpose()
+                .map_err(BoxError::ExecError)?
                 .flatten()
-                .ok_or_else(|| format!("hard-link target is missing for {key}"))?;
+                .ok_or_else(|| {
+                    BoxError::ExecError(format!("hard-link target is missing for {key}"))
+                })?;
             hard_links.push((key, target));
             continue;
         }
@@ -381,10 +386,11 @@ fn walk_tar_archive(
         entries.insert(key, RootfsFileInfo { size, mode, is_dir });
     }
     for (path, target) in hard_links {
-        let target = entries
-            .get(&target)
-            .cloned()
-            .ok_or_else(|| format!("hard-link target {target} was not archived before {path}"))?;
+        let target = entries.get(&target).cloned().ok_or_else(|| {
+            BoxError::ExecError(format!(
+                "hard-link target {target} was not archived before {path}"
+            ))
+        })?;
         entries.insert(path, target);
     }
     Ok(entries)
@@ -409,16 +415,15 @@ fn archive_rootfs_key(path: &Path) -> Result<Option<String>, String> {
 }
 
 /// Fail closed when `a3s-box diff` has no durable baseline to compare against.
-fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), BoxError> {
     if snapshot_path.exists() {
         return Ok(());
     }
-    Err(format!(
+    Err(BoxError::StateError(format!(
         "No baseline snapshot found at {} — cannot compute diff \
          (baseline is created at box creation/boot; refusing soft success)",
         snapshot_path.display()
-    )
-    .into())
+    )))
 }
 
 /// Create the per-box baseline snapshot used by `a3s-box diff`.
@@ -434,9 +439,7 @@ fn ensure_diff_baseline_present(snapshot_path: &Path) -> Result<(), Box<dyn std:
 /// Tasks may also tear down the ext4 generation before this helper runs, so
 /// accept an already-installed baseline or publish the guest handoff instead
 /// of inventing a host walk that cannot exist.
-pub(crate) fn create_box_baseline_snapshot(
-    box_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn create_box_baseline_snapshot(box_dir: &Path) -> Result<(), BoxError> {
     if !a3s_box_runtime::rootfs::guest_diff_baseline_required(box_dir)? {
         return Ok(());
     }
@@ -459,11 +462,10 @@ pub(crate) fn create_box_baseline_snapshot(
     // present (including after short-lived Tasks remove the ext4 generation).
     match a3s_box_runtime::rootfs::publish_guest_diff_baseline(box_dir) {
         Ok(()) => Ok(()),
-        Err(error) => Err(format!(
+        Err(error) => Err(BoxError::StateError(format!(
             "refusing to invent a rootfs diff baseline without a resolved rootfs under {} ({error})",
             box_dir.display()
-        )
-        .into()),
+        ))),
     }
 }
 
@@ -473,16 +475,13 @@ pub type FileInfo = RootfsFileInfo;
 
 /// Walk a directory tree and collect file metadata, keyed by relative path.
 #[cfg(test)]
-pub fn walk_dir(root: &Path) -> Result<HashMap<String, FileInfo>, Box<dyn std::error::Error>> {
-    Ok(a3s_box_runtime::rootfs::walk_rootfs(root)?)
+pub fn walk_dir(root: &Path) -> Result<HashMap<String, FileInfo>, BoxError> {
+    a3s_box_runtime::rootfs::walk_rootfs(root)
 }
 
 /// Create a standalone baseline snapshot for diff behavior tests.
 #[cfg(test)]
-pub fn create_snapshot(
-    rootfs_dir: &Path,
-    snapshot_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create_snapshot(rootfs_dir: &Path, snapshot_path: &Path) -> Result<(), BoxError> {
     let map = walk_dir(rootfs_dir)?;
     let json = serde_json::to_string(&map)?;
     std::fs::write(snapshot_path, json)?;
@@ -498,15 +497,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join(DIFF_BASELINE_FILE);
         let err = ensure_diff_baseline_present(&missing).unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("No baseline snapshot found"),
-            "unexpected message: {message}"
-        );
-        assert!(
-            message.contains("refusing soft success"),
-            "unexpected message: {message}"
-        );
+        match err {
+            BoxError::StateError(message) => {
+                assert!(
+                    message.contains("No baseline snapshot found"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("refusing soft success"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -558,11 +561,15 @@ mod tests {
     fn create_baseline_still_fails_closed_without_rootfs_or_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let err = create_box_baseline_snapshot(dir.path()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("refusing to invent a rootfs diff baseline"),
-            "unexpected message: {err}"
-        );
+        match err {
+            BoxError::StateError(message) => {
+                assert!(
+                    message.contains("refusing to invent a rootfs diff baseline"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -579,6 +586,23 @@ mod tests {
         assert!(uses_live_sandbox_host_rootfs(&running));
         assert!(uses_live_sandbox_host_rootfs(&paused));
         assert!(!uses_live_sandbox_host_rootfs(&microvm_paused));
+    }
+
+    #[cfg(not(all(unix, target_os = "linux")))]
+    #[tokio::test]
+    async fn live_sandbox_host_rootfs_diff_is_a_configuration_error() {
+        let record = crate::test_helpers::fixtures::make_record("id", "web", "running", Some(1));
+        let error = current_sandbox_host_rootfs(&record).await.unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("Live Sandbox host-rootfs diff is unavailable"),
+                    "{message}"
+                );
+                assert!(message.contains("web"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]

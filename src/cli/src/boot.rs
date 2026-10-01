@@ -4,6 +4,7 @@
 //! the "reconstruct BoxConfig from BoxRecord → VmManager::boot()" pattern.
 
 use a3s_box_core::config::{BoxConfig, ResourceConfig};
+use a3s_box_core::error::BoxError;
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{prom::RuntimeMetrics, NetworkStore, VmManager, VolumeStore};
 use std::path::PathBuf;
@@ -181,7 +182,7 @@ fn select_locked_boot_record(record: Option<&BoxRecord>) -> LockedBootRecord {
 pub async fn boot_and_record(
     record: &BoxRecord,
     count_update: RestartCountUpdate,
-) -> Result<BootOutcome, Box<dyn std::error::Error>> {
+) -> Result<BootOutcome, BoxError> {
     let box_id = record.id.clone();
     let _lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
 
@@ -191,7 +192,7 @@ pub async fn boot_and_record(
     let record = match select_locked_boot_record(fresh_state.find_by_id(&box_id)) {
         LockedBootRecord::Removed => return Ok(BootOutcome::RemovedDuringBoot),
         LockedBootRecord::AlreadyRunning => return Ok(BootOutcome::AlreadyRunning),
-        LockedBootRecord::Conflict(error) => return Err(error.into()),
+        LockedBootRecord::Conflict(error) => return Err(BoxError::StateError(error)),
         LockedBootRecord::Ready(record) => *record,
     };
     drop(fresh_state);
@@ -222,9 +223,7 @@ pub async fn boot_and_record(
     // observes our recorded pid.
 }
 
-fn ensure_boot_resources(
-    record: &BoxRecord,
-) -> Result<BootResourceGuard, Box<dyn std::error::Error>> {
+fn ensure_boot_resources(record: &BoxRecord) -> Result<BootResourceGuard, BoxError> {
     ensure_network_connected(record)?;
     let mut guard = BootResourceGuard::new(record);
 
@@ -243,7 +242,7 @@ fn ensure_boot_resources(
     Ok(guard)
 }
 
-fn ensure_network_connected(record: &BoxRecord) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_network_connected(record: &BoxRecord) -> Result<(), BoxError> {
     let Some(network_name) = boot_network_name(record) else {
         return Ok(());
     };
@@ -256,28 +255,22 @@ fn ensure_network_connected_with_store(
     network_store: &NetworkStore,
     record: &BoxRecord,
     network_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     // Atomic load → validate → idempotency → allocate-IP → save under the
     // network store's cross-process lock, so concurrent boots attaching to the
     // same bridge cannot allocate duplicate IPs/MACs or lose each other's
     // endpoints (the get → connect → update sequence was previously unlocked).
     network_store.with_write_lock(|networks| {
-        let network =
-            networks
-                .get_mut(network_name)
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    format!("network '{}' not found", network_name).into()
-                })?;
-        crate::commands::network::validate_attachable_network(network)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let network = networks.get_mut(network_name).ok_or_else(|| {
+            BoxError::NetworkError(format!("network '{}' not found", network_name))
+        })?;
+        crate::commands::network::validate_attachable_network(network)?;
         if network.endpoints.contains_key(&record.id) {
             return Ok(());
         }
-        network.connect(&record.id, &record.name).map_err(
-            |error| -> Box<dyn std::error::Error> {
-                format!("Failed to connect to network: {error}").into()
-            },
-        )?;
+        network.connect(&record.id, &record.name).map_err(|error| {
+            BoxError::NetworkError(format!("Failed to connect to network: {error}"))
+        })?;
         Ok(())
     })
 }
@@ -286,18 +279,17 @@ fn ensure_network_connected_with_store(
 ///
 /// On success, returns the new PID. The caller is responsible for updating
 /// the `BoxRecord` state (status, pid, started_at, etc.) and saving.
-pub async fn boot_from_record(
-    record: &BoxRecord,
-) -> Result<BootResult, Box<dyn std::error::Error>> {
-    let config =
-        config_from_record(record).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+pub async fn boot_from_record(record: &BoxRecord) -> Result<BootResult, BoxError> {
+    let config = config_from_record(record).map_err(BoxError::ConfigError)?;
     a3s_box_core::resolve_execution(&config)?;
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::with_box_id(config, emitter, record.id.clone());
     vm.set_healthcheck_disabled(record.healthcheck_disabled);
 
     // Activate Prometheus metrics collection
-    vm.set_metrics(RuntimeMetrics::try_new()?);
+    vm.set_metrics(
+        RuntimeMetrics::try_new().map_err(|error| BoxError::StateError(error.to_string()))?,
+    );
     // The shim runs the log processor for the box's lifetime.
     vm.set_log_config(record.log_config.clone());
 
@@ -305,7 +297,7 @@ pub async fn boot_from_record(
     let mut resource_guard = ensure_boot_resources(record)?;
     if let Err(error) = vm.boot().await {
         resource_guard.rollback();
-        return Err(error.into());
+        return Err(error);
     }
     resource_guard.disarm();
 
@@ -779,6 +771,26 @@ mod tests {
         let network = network_store.get("dev").unwrap().unwrap();
         assert_eq!(network.endpoints.len(), 1);
         assert!(network.endpoints.contains_key(&record.id));
+    }
+
+    #[test]
+    fn missing_boot_network_is_a_network_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let network_store = NetworkStore::new(dir.path().join("networks.json"));
+        network_store
+            .create(a3s_box_core::network::NetworkConfig::new("dev", "10.88.0.0/24").unwrap())
+            .unwrap();
+        let record = sample_record();
+
+        let err =
+            ensure_network_connected_with_store(&network_store, &record, "missing").unwrap_err();
+        match err {
+            BoxError::NetworkError(message) => {
+                assert!(message.contains("not found"), "{message}");
+                assert!(message.contains("missing"), "{message}");
+            }
+            other => panic!("expected NetworkError, got {other:?}"),
+        }
     }
 
     fn sample_boot_result() -> BootResult {

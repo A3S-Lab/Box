@@ -41,6 +41,8 @@ pub struct DirSnapshot {
 impl DirSnapshot {
     /// Take a snapshot of a directory, recording all files and their metadata.
     pub fn capture(root: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        crate::vm::refuse_directory_reparse(root)?;
         let mut entries = HashMap::new();
         walk_dir(root, root, &mut entries)?;
         Ok(DirSnapshot { entries })
@@ -341,6 +343,9 @@ pub(super) fn create_layer_from_dir_with_chown(
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
+    #[cfg(windows)]
+    crate::vm::refuse_directory_reparse(src_dir)?;
+
     let file = std::fs::File::create(output_path).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to create layer file {}: {}",
@@ -568,6 +573,44 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let snap = DirSnapshot::capture(tmp.path()).unwrap();
         assert!(snap.entries.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_does_not_follow_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let captured = DirSnapshot::capture(&link);
+        let leaked = captured.as_ref().ok().is_some_and(|snapshot| {
+            snapshot.entries.keys().any(|path| {
+                path.components()
+                    .any(|component| component.as_os_str() == "secret.txt")
+            })
+        });
+        assert!(
+            !leaked,
+            "build snapshot followed a directory junction: {captured:?}"
+        );
+        assert!(
+            captured
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "build snapshot followed a directory junction: {captured:?}"
+        );
     }
 
     #[test]
@@ -834,6 +877,36 @@ mod tests {
     }
 
     // --- create_layer_from_dir ---
+
+    #[cfg(windows)]
+    #[test]
+    fn create_layer_from_dir_does_not_follow_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let output = tmp.path().join("layer.tar.gz");
+
+        let created = create_layer_from_dir(&link, Path::new("app"), &output);
+        assert!(
+            created
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "layer packed a directory junction: {created:?}"
+        );
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+    }
 
     #[test]
     fn test_create_layer_from_dir() {

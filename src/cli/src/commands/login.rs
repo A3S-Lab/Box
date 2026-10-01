@@ -1,5 +1,6 @@
 //! `a3s-box login` command — Store registry credentials.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 const DEFAULT_REGISTRY_SERVER: &str = "index.docker.io";
@@ -22,7 +23,7 @@ pub struct LoginArgs {
     pub password_stdin: bool,
 }
 
-pub async fn execute(args: LoginArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: LoginArgs) -> Result<(), BoxError> {
     let server = registry_server_or_default(args.server);
 
     let username = match args.username {
@@ -51,8 +52,7 @@ pub async fn execute(args: LoginArgs) -> Result<(), Box<dyn std::error::Error>> 
         }
     };
 
-    validate_credentials(&username, &password)
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    validate_credentials(&username, &password)?;
 
     let store = a3s_box_runtime::CredentialStore::default_path()?;
     store.store(&server, &username, &password)?;
@@ -65,9 +65,11 @@ fn registry_server_or_default(server: Option<String>) -> String {
     server.unwrap_or_else(|| DEFAULT_REGISTRY_SERVER.to_string())
 }
 
-fn validate_credentials(username: &str, password: &str) -> Result<(), &'static str> {
+fn validate_credentials(username: &str, password: &str) -> Result<(), BoxError> {
     if username.is_empty() || password.is_empty() {
-        Err("Username and password are required")
+        Err(BoxError::ConfigError(
+            "Username and password are required".to_string(),
+        ))
     } else {
         Ok(())
     }
@@ -97,13 +99,13 @@ mod tests {
 
     #[test]
     fn validate_credentials_rejects_missing_username_or_password() {
-        assert_eq!(
-            validate_credentials("", "secret").unwrap_err(),
-            "Username and password are required"
-        );
-        assert_eq!(
-            validate_credentials("alice", "").unwrap_err(),
-            "Username and password are required"
-        );
+        assert!(matches!(
+            validate_credentials("", "secret"),
+            Err(BoxError::ConfigError(message)) if message == "Username and password are required"
+        ));
+        assert!(matches!(
+            validate_credentials("alice", ""),
+            Err(BoxError::ConfigError(message)) if message == "Username and password are required"
+        ));
     }
 }

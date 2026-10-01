@@ -5,6 +5,8 @@
 
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
+
 #[cfg(not(windows))]
 use super::common;
 #[cfg(not(windows))]
@@ -31,34 +33,39 @@ pub struct ShellArgs {
 }
 
 #[cfg(windows)]
-pub async fn execute(_args: ShellArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "shell",
-        "interactive PTY support",
+pub async fn execute(_args: ShellArgs) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        crate::platform::unsupported_command("shell", "interactive PTY support").to_string(),
     ))
 }
 
 #[cfg(not(windows))]
-pub async fn execute(args: ShellArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ShellArgs) -> Result<(), BoxError> {
     use crate::terminal;
     use a3s_box_core::pty::PtyRequest;
 
-    let user = common::normalize_user_option(args.user.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    common::validate_workdir_option(args.workdir.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let user =
+        common::normalize_user_option(args.user.as_deref()).map_err(BoxError::ConfigError)?;
+    common::validate_workdir_option(args.workdir.as_deref()).map_err(BoxError::ConfigError)?;
 
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = resolve::resolve(&state, &args.r#box)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .clone();
     let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
         Some(record) => record,
-        None => return Err(format!("No such container: {}", args.r#box).into()),
+        None => {
+            return Err(BoxError::StateError(format!(
+                "No such container: {}",
+                args.r#box
+            )))
+        }
     };
     let pty_socket_path = crate::socket_paths::require_runtime_socket(
         &record,
         crate::socket_paths::RuntimeSocket::Pty,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
 
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let mut client =
@@ -118,5 +125,43 @@ mod tests {
         assert_eq!(args.shell, "/bin/bash");
         assert_eq!(args.user.as_deref(), Some("root"));
         assert_eq!(args.workdir.as_deref(), Some("/workspace"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_shell_is_a_configuration_error() {
+        let error = execute(ShellArgs {
+            r#box: "mybox".to_string(),
+            shell: "/bin/sh".to_string(),
+            user: None,
+            workdir: None,
+        })
+        .await
+        .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("'shell' is not supported"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn invalid_shell_user_is_a_configuration_error() {
+        let error = execute(ShellArgs {
+            r#box: "mybox".to_string(),
+            shell: "/bin/sh".to_string(),
+            user: Some(String::new()),
+            workdir: None,
+        })
+        .await
+        .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("--user must not be empty"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

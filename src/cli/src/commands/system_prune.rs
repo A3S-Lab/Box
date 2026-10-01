@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage::{self, ImagePruneMode, ImageReferenceScope};
@@ -22,7 +23,7 @@ pub struct SystemPruneArgs {
     pub force: bool,
 }
 
-pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: SystemPruneArgs) -> Result<(), BoxError> {
     if !args.force {
         println!("WARNING: This will remove:");
         println!("  - all created, stopped, and dead boxes");
@@ -63,10 +64,10 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
         crate::cleanup::cleanup_removed_box(record)
             .map_err(|error| system_prune_box_cleanup_error(&record.id, error))?;
         state.remove(&record.id).map_err(|error| {
-            format!(
+            BoxError::StateError(format!(
                 "Failed to remove system-pruned Box {} from state after host cleanup: {error}",
                 record.id
-            )
+            ))
         })?;
         boxes_removed += 1;
         println!("Removed box: {}", record.name);
@@ -83,8 +84,10 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
     let mut image_errors = Vec::new();
     if images_dir.exists() {
         let store = super::open_image_store().map_err(|error| {
-            format!(
-                "Failed to open image store for system-prune: {error}; refusing system-prune success"
+            super::annotate_box_error(
+                error,
+                "Failed to open image store for system-prune: ",
+                "; refusing system-prune success",
             )
         })?;
         let all_images = store.list().await;
@@ -163,30 +166,26 @@ fn is_prunable_box(record: &crate::state::BoxRecord) -> bool {
     matches!(record.status.as_str(), "stopped" | "dead" | "created")
 }
 
-fn system_prune_box_cleanup_error(
-    box_id: &str,
-    error: impl std::fmt::Display,
-) -> Box<dyn std::error::Error> {
-    format!(
-        "Failed to clean system-pruned Box {box_id}: {error}; preserving its state (refusing system-prune success)"
+fn system_prune_box_cleanup_error(box_id: &str, error: BoxError) -> BoxError {
+    super::annotate_box_error(
+        error,
+        &format!("Failed to clean system-pruned Box {box_id}: "),
+        "; preserving its state (refusing system-prune success)",
     )
-    .into()
 }
 
-fn system_prune_network_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
-    format!(
+fn system_prune_network_errors(errors: Vec<String>) -> BoxError {
+    BoxError::NetworkError(format!(
         "Failed to prune unused network(s): {}; refusing system-prune success",
         errors.join("; ")
-    )
-    .into()
+    ))
 }
 
-fn system_prune_image_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
-    format!(
+fn system_prune_image_errors(errors: Vec<String>) -> BoxError {
+    BoxError::OciImageError(format!(
         "Failed to prune unused image(s): {}; refusing system-prune success",
         errors.join("; ")
-    )
-    .into()
+    ))
 }
 
 fn active_image_references(state: &StateFile) -> std::collections::HashSet<String> {
@@ -217,7 +216,7 @@ fn referenced_rootfs_cache_keys(state: &StateFile) -> HashSet<String> {
 fn prune_rootfs_caches(
     cache_root: &Path,
     protected: &HashSet<String>,
-) -> Result<a3s_box_runtime::cache::RootfsPruneResult, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_runtime::cache::RootfsPruneResult, BoxError> {
     let mut result = a3s_box_runtime::cache::RootfsPruneResult::default();
     let directory_cache = cache_root.join("rootfs");
     if directory_cache.exists() {
@@ -331,11 +330,21 @@ mod tests {
 
     #[test]
     fn system_prune_box_cleanup_error_refuses_invented_success() {
-        let err = system_prune_box_cleanup_error("box-1", "lease teardown refused");
-        let message = err.to_string();
-        assert!(message.contains("box-1"));
-        assert!(message.contains("lease teardown refused"));
-        assert!(message.contains("refusing system-prune success"));
+        let err = system_prune_box_cleanup_error(
+            "box-1",
+            BoxError::Other("lease teardown refused".to_string()),
+        );
+        match err {
+            BoxError::Other(message) => {
+                assert!(message.contains("box-1"), "{message}");
+                assert!(message.contains("lease teardown refused"), "{message}");
+                assert!(
+                    message.contains("refusing system-prune success"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 
     #[test]
@@ -344,10 +353,17 @@ mod tests {
             "orphan: write failed".to_string(),
             "other: locked".to_string(),
         ]);
-        let message = err.to_string();
-        assert!(message.contains("orphan: write failed"));
-        assert!(message.contains("other: locked"));
-        assert!(message.contains("refusing system-prune success"));
+        match err {
+            BoxError::NetworkError(message) => {
+                assert!(message.contains("orphan: write failed"), "{message}");
+                assert!(message.contains("other: locked"), "{message}");
+                assert!(
+                    message.contains("refusing system-prune success"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected NetworkError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -356,9 +372,16 @@ mod tests {
             "alpine:latest: busy".to_string(),
             "redis:latest: io error".to_string(),
         ]);
-        let message = err.to_string();
-        assert!(message.contains("alpine:latest: busy"));
-        assert!(message.contains("redis:latest: io error"));
-        assert!(message.contains("refusing system-prune success"));
+        match err {
+            BoxError::OciImageError(message) => {
+                assert!(message.contains("alpine:latest: busy"), "{message}");
+                assert!(message.contains("redis:latest: io error"), "{message}");
+                assert!(
+                    message.contains("refusing system-prune success"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected OciImageError, got {other:?}"),
+        }
     }
 }

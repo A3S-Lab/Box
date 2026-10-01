@@ -3,6 +3,7 @@
 //! Uses the durable execution manager for managed boxes and SIGCONT only for
 //! legacy state records.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
 use a3s_box_runtime::ManagedExecutionState;
 use clap::Args;
@@ -20,13 +21,13 @@ pub struct UnpauseArgs {
     pub boxes: Vec<String>,
 }
 
-pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: UnpauseArgs) -> Result<(), BoxError> {
     #[cfg(windows)]
     {
         let _ = args;
-        return Err(crate::platform::unsupported_command(
-            "unpause",
-            "MicroVM pause/resume support",
+        return Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("unpause", "MicroVM pause/resume support")
+                .to_string(),
         ));
     }
 
@@ -44,18 +45,24 @@ pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(errors.join("\n").into())
+            Err(super::IntoBoxError::into_box_error(errors.join("\n")))
         }
     }
 }
 
 #[cfg_attr(windows, allow(dead_code))]
-async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn unpause_one(state: &StateFile, query: &str) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let current_state = StateFile::load_default()?;
-    let record = select_unpause_record(&current_state, &box_id)
-        .map_err(|error| format!("Box {query} changed while waiting to unpause: {error}"))?;
+    let record = select_unpause_record(&current_state, &box_id).map_err(|error| {
+        BoxError::StateError(format!(
+            "Box {query} changed while waiting to unpause: {error}"
+        ))
+    })?;
     drop(current_state);
 
     if let UnpausePlan::Managed {
@@ -68,19 +75,23 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
         let manager = super::configured_local_execution_manager(&home).await?;
-        manager.resume(&execution_id, generation).await?;
+        manager
+            .resume(&execution_id, generation)
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         println!("{}", record.name);
         return Ok(());
     }
 
-    let pid = lifecycle::require_live_pid(&record, "unpause")?;
+    let pid = lifecycle::require_live_pid(&record, "unpause")
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     #[cfg(windows)]
     {
         let _ = pid;
-        Err(crate::platform::unsupported_command(
-            "unpause",
-            "host process resume support",
+        Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("unpause", "host process resume support")
+                .to_string(),
         ))
     }
 
@@ -88,8 +99,9 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
     {
         let name = record.name.clone();
 
-        process::send_signal(pid, libc::SIGCONT)
-            .map_err(|err| format!("Failed to unpause box {name} with SIGCONT: {err}"))?;
+        process::send_signal(pid, libc::SIGCONT).map_err(|err| {
+            BoxError::ExecError(format!("Failed to unpause box {name} with SIGCONT: {err}"))
+        })?;
 
         let expected_pid_start_time = record.pid_start_time;
         let persisted = StateFile::modify(|s| {
@@ -105,10 +117,9 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
             Ok::<bool, std::io::Error>(updated)
         })?;
         if !persisted {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Box {name} changed execution while it was unpausing; did not overwrite the replacement state"
-            )
-            .into());
+            )));
         }
 
         println!("{name}");
@@ -118,15 +129,17 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
-        Err("'unpause' requires host process resume support".into())
+        Err(BoxError::ConfigError(
+            "'unpause' requires host process resume support".to_string(),
+        ))
     }
 }
 
 fn select_unpause_record(
     state: &StateFile,
     query: &str,
-) -> Result<crate::state::BoxRecord, Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?;
+) -> Result<crate::state::BoxRecord, BoxError> {
+    let record = resolve::resolve(state, query).map_err(super::IntoBoxError::into_box_error)?;
 
     unpause_plan(record)?;
     Ok(record.clone())
@@ -141,34 +154,34 @@ enum UnpausePlan {
     },
 }
 
-fn unpause_plan(
-    record: &crate::state::BoxRecord,
-) -> Result<UnpausePlan, Box<dyn std::error::Error>> {
+fn unpause_plan(record: &crate::state::BoxRecord) -> Result<UnpausePlan, BoxError> {
     if let Some(metadata) = record.managed_execution.as_ref() {
-        let state = record
-            .managed_state()?
-            .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+        let state = record.managed_state()?.ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {} lost managed lifecycle metadata",
+                record.name
+            ))
+        })?;
         if state != ManagedExecutionState::Paused {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Cannot unpause box {} because it is {state}. Use `a3s-box ps -a` to inspect state.",
                 record.name
-            )
-            .into());
+            )));
         }
         return Ok(UnpausePlan::Managed {
-            execution_id: ExecutionId::new(record.id.clone())?,
+            execution_id: ExecutionId::new(record.id.clone())
+                .map_err(super::IntoBoxError::into_box_error)?,
             generation: metadata.generation,
         });
     }
 
     if record.status != "paused" {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot unpause box {} because it is {}. Use `a3s-box ps -a` to inspect state.",
             record.name, record.status
-        )
-        .into());
+        )));
     }
-    lifecycle::require_live_pid(record, "unpause")?;
+    lifecycle::require_live_pid(record, "unpause").map_err(super::IntoBoxError::into_box_error)?;
     Ok(UnpausePlan::Legacy)
 }
 
@@ -263,10 +276,12 @@ mod tests {
 
     #[test]
     fn managed_unpause_rejects_non_paused_state_without_using_a_host_pid() {
-        let error = unpause_plan(&managed_record(ManagedExecutionState::Running))
-            .unwrap_err()
-            .to_string();
+        let Err(BoxError::StateError(message)) =
+            unpause_plan(&managed_record(ManagedExecutionState::Running))
+        else {
+            panic!("refusing a running box must be a state error");
+        };
 
-        assert!(error.contains("because it is running"));
+        assert!(message.contains("because it is running"));
     }
 }

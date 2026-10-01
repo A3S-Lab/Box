@@ -1,23 +1,18 @@
 //! Core trait abstractions for pluggable backends.
 //!
-//! These traits define the extension points of A3S Box. The runtime provides
-//! default implementations, but consumers can swap in their own backends
-//! (e.g., a different registry client, a Redis-backed cache, etc.).
+//! These traits define the extension points of A3S Box that have more than
+//! one real implementation or active cross-crate consumers today: the
+//! `ExecutionManager` execution seam and the `ExecutionSessionManager`
+//! process-session seam, plus the `CacheBackend` cache seam. Traits with a
+//! single implementation and no consumers are deliberately kept out of this
+//! module; introduce a trait only when a second implementation exists.
 
-pub mod audit;
 pub mod cache;
-pub mod credential;
-pub mod event;
 pub mod execution;
-pub mod metrics;
-pub mod registry;
 pub mod session;
 pub mod store;
 
-pub use audit::AuditSink;
 pub use cache::{CacheBackend, CacheEntry, CacheStats};
-pub use credential::CredentialProvider;
-pub use event::EventBus;
 pub use execution::{
     CreateExecutionRequest, ExecutionCpuStats, ExecutionEventBatch, ExecutionEventKind,
     ExecutionEventsRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
@@ -29,12 +24,8 @@ pub use execution::{
     ExecutionUdpPortIo, KillExecutionOptions, KillOutcome, OperationId, ReconcileOutcome,
     RestartExecutionOptions, MAX_EXECUTION_EVENT_BATCH_ITEMS,
 };
-pub use metrics::{MetricsCollector, NoopMetrics};
-pub use registry::{ImageRegistry, PulledImage};
 pub use session::{
     ExecutionProcess, ExecutionProcessInput, ExecutionProcessSignal, ExecutionProcessStream,
     ExecutionSessionManager,
 };
-pub use store::{
-    ImageStoreBackend, NetworkStoreBackend, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
-};
+pub use store::StoredImage;

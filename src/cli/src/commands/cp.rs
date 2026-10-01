@@ -10,6 +10,7 @@
 
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
 #[cfg(unix)]
 use a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS;
 use a3s_box_core::exec::{
@@ -32,40 +33,42 @@ fn mint_cli_file_request_id() -> String {
     format!("cli-file-{}", uuid::Uuid::new_v4().simple())
 }
 
-fn annotate_cp_unavailable(
-    error: Box<dyn std::error::Error>,
-    request_id: &str,
-) -> Box<dyn std::error::Error> {
-    use a3s_box_core::ExecutionManagerError;
-
+fn annotate_cp_unavailable(error: BoxError, request_id: &str) -> BoxError {
     let unavailable = error
-        .downcast_ref::<ExecutionManagerError>()
-        .is_some_and(|error| matches!(error, ExecutionManagerError::Unavailable(_)))
-        || error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("unavailable");
-    if unavailable {
-        format!("{error} (reuse request_id {request_id} on retry)").into()
-    } else {
-        error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("unavailable");
+    if !unavailable {
+        return error;
+    }
+    let hint = format!(" (reuse request_id {request_id} on retry)");
+    match error {
+        BoxError::StateError(message) => BoxError::StateError(message + &hint),
+        BoxError::ExecError(message) => BoxError::ExecError(message + &hint),
+        BoxError::TimeoutError(message) => BoxError::TimeoutError(message + &hint),
+        BoxError::ConfigError(message) => BoxError::ConfigError(message + &hint),
+        BoxError::Other(message) => BoxError::Other(message + &hint),
+        BoxError::IoError(error) => {
+            BoxError::IoError(std::io::Error::other(format!("{error}{hint}")))
+        }
+        other => BoxError::StateError(format!("{other}{hint}")),
     }
 }
 
 async fn execute_copy_command(
     session: &CopySession,
     mut request: ExecRequest,
-) -> Result<a3s_box_core::exec::ExecOutput, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_core::exec::ExecOutput, BoxError> {
     let request_id = match request.request_id.take() {
         Some(request_id) => {
             if request_id.is_empty()
                 || request_id.len() > MAX_CP_REQUEST_ID_BYTES
                 || request_id.contains('\0')
             {
-                return Err(
+                return Err(BoxError::ConfigError(
                     "copy exec request_id must be a non-empty UTF-8 string of at most 512 bytes without NUL"
-                        .into(),
-                );
+                        .to_string(),
+                ));
             }
             request_id
         }
@@ -108,7 +111,7 @@ fn parse_endpoint(s: &str) -> Endpoint {
     Endpoint::Host(s.to_string())
 }
 
-pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: CpArgs) -> Result<(), BoxError> {
     let src = parse_endpoint(&args.src);
     let dst = parse_endpoint(&args.dst);
 
@@ -119,22 +122,18 @@ pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
         (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
             copy_to_box(&host_path, &name, &path).await
         }
-        (Endpoint::Host(_), Endpoint::Host(_)) => Err(
+        (Endpoint::Host(_), Endpoint::Host(_)) => Err(BoxError::ConfigError(
             "Both source and destination are host paths. One must be a box path (BOX:/path)."
-                .into(),
-        ),
-        (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
-            Err("Copying between two boxes is not supported. Copy to host first.".into())
-        }
+                .to_string(),
+        )),
+        (Endpoint::Box { .. }, Endpoint::Box { .. }) => Err(BoxError::ConfigError(
+            "Copying between two boxes is not supported. Copy to host first.".to_string(),
+        )),
     }
 }
 
 /// Copy a file or directory from a box to the host.
-async fn copy_from_box(
-    box_name: &str,
-    box_path: &str,
-    host_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn copy_from_box(box_name: &str, box_path: &str, host_path: &str) -> Result<(), BoxError> {
     let session = connect_copy_session(box_name).await?;
 
     if is_directory_in_box(&session, box_path).await? {
@@ -145,13 +144,9 @@ async fn copy_from_box(
 }
 
 /// Copy a file or directory from the host to a box.
-async fn copy_to_box(
-    host_path: &str,
-    box_name: &str,
-    box_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let meta =
-        std::fs::metadata(host_path).map_err(|e| format!("Failed to stat {host_path}: {e}"))?;
+async fn copy_to_box(host_path: &str, box_name: &str, box_path: &str) -> Result<(), BoxError> {
+    let meta = std::fs::metadata(host_path)
+        .map_err(|error| super::io_error(format!("Failed to stat {host_path}"), error))?;
 
     let session = connect_copy_session(box_name).await?;
 
@@ -163,10 +158,7 @@ async fn copy_to_box(
 }
 
 /// Check if a path is a directory inside the box.
-async fn is_directory_in_box(
-    session: &CopySession,
-    box_path: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+async fn is_directory_in_box(session: &CopySession, box_path: &str) -> Result<bool, BoxError> {
     let response = session
         .filesystem(FilesystemRequest {
             op: FilesystemOp::Stat,
@@ -178,23 +170,24 @@ async fn is_directory_in_box(
         })
         .await?;
     if !response.success {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Failed to stat {box_path} in box: {}",
             response
                 .error
                 .unwrap_or_else(|| "guest returned an unspecified error".to_string())
-        )
-        .into());
+        )));
     }
-    let entry = response
-        .entry
-        .ok_or_else(|| format!("Guest stat response for {box_path} did not include metadata"))?;
+    let entry = response.entry.ok_or_else(|| {
+        BoxError::ExecError(format!(
+            "Guest stat response for {box_path} did not include metadata"
+        ))
+    })?;
     match entry.kind {
         FilesystemEntryKind::Directory => Ok(true),
         FilesystemEntryKind::File => Ok(false),
-        FilesystemEntryKind::Unspecified => {
-            Err(format!("Unsupported file type in box: {box_path}").into())
-        }
+        FilesystemEntryKind::Unspecified => Err(BoxError::ConfigError(format!(
+            "Unsupported file type in box: {box_path}"
+        ))),
     }
 }
 
@@ -203,7 +196,7 @@ async fn restore_file_mode_in_box(
     session: &CopySession,
     box_path: &str,
     mode: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let request = ExecRequest {
         request_id: None,
         cmd: vec![
@@ -223,11 +216,10 @@ async fn restore_file_mode_in_box(
 
     let output = execute_copy_command(session, request).await?;
     if output.exit_code != 0 {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Failed to set permissions on {box_path} in box: {}",
             String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -242,7 +234,7 @@ async fn copy_file_from_box(
     box_name: &str,
     box_path: &str,
     host_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use base64::Engine;
     let response = session
         .transfer_file(FileRequest {
@@ -255,29 +247,30 @@ async fn copy_file_from_box(
         })
         .await?;
     if !response.success {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Failed to read {box_path} in box: {}",
             response
                 .error
                 .unwrap_or_else(|| "guest returned an unspecified error".to_string())
-        )
-        .into());
+        )));
     }
 
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(response.data.unwrap_or_default())
-        .map_err(|e| format!("Guest returned invalid file content for {box_path}: {e}"))?;
+        .map_err(|error| {
+            BoxError::ExecError(format!(
+                "Guest returned invalid file content for {box_path}: {error}"
+            ))
+        })?;
     if response.size != decoded.len() as u64 {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Guest returned {} bytes for {box_path}, expected {}",
             decoded.len(),
             response.size
-        )
-        .into());
+        )));
     }
 
-    std::fs::write(host_path, &decoded)
-        .map_err(|e| format!("Failed to write to {host_path}: {e}"))?;
+    write_host_copy_destination(host_path, &decoded)?;
 
     println!(
         "{box_name}:{box_path} → {host_path} ({} bytes)",
@@ -292,9 +285,8 @@ async fn copy_file_to_box(
     host_path: &str,
     box_name: &str,
     box_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let content =
-        std::fs::read(host_path).map_err(|e| format!("Failed to read {host_path}: {e}"))?;
+) -> Result<(), BoxError> {
+    let content = read_host_copy_source(host_path)?;
     let len = content.len();
 
     use base64::Engine;
@@ -309,20 +301,18 @@ async fn copy_file_to_box(
         })
         .await?;
     if !response.success {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Failed to write {box_path} in box: {}",
             response
                 .error
                 .unwrap_or_else(|| "guest returned an unspecified error".to_string())
-        )
-        .into());
+        )));
     }
     if response.size != len as u64 {
-        return Err(format!(
+        return Err(BoxError::ExecError(format!(
             "Guest wrote {} bytes to {box_path}, expected {len}",
             response.size
-        )
-        .into());
+        )));
     }
 
     #[cfg(unix)]
@@ -351,7 +341,7 @@ async fn copy_dir_from_box(
     box_name: &str,
     box_path: &str,
     host_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     // Archive the directory inside the box and base64-encode it
     let request = ExecRequest {
         request_id: None,
@@ -380,7 +370,9 @@ async fn copy_dir_from_box(
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to archive {box_path} in box: {stderr}").into());
+        return Err(BoxError::ExecError(format!(
+            "Failed to archive {box_path} in box: {stderr}"
+        )));
     }
 
     // Decode base64 tar archive
@@ -389,11 +381,13 @@ async fn copy_dir_from_box(
     let clean: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let tar_data = base64::engine::general_purpose::STANDARD
         .decode(&clean)
-        .map_err(|e| format!("Failed to decode tar archive: {e}"))?;
+        .map_err(|error| BoxError::ExecError(format!("Failed to decode tar archive: {error}")))?;
 
     // Create destination directory and extract
-    std::fs::create_dir_all(host_path)
-        .map_err(|e| format!("Failed to create directory {host_path}: {e}"))?;
+    super::commit::refuse_archive_ancestor_reparse(std::path::Path::new(host_path))?;
+    std::fs::create_dir_all(host_path).map_err(|error| {
+        super::io_error(format!("Failed to create directory {host_path}"), error)
+    })?;
 
     extract_tar_to_dir(&tar_data, host_path)?;
 
@@ -410,7 +404,7 @@ async fn copy_dir_to_box(
     host_path: &str,
     box_name: &str,
     box_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     // Create tar archive of the host directory
     let tar_data = create_tar_from_dir(host_path)?;
 
@@ -445,7 +439,9 @@ async fn copy_dir_to_box(
 
     if output.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to extract archive in box at {box_path}: {stderr}").into());
+        return Err(BoxError::ExecError(format!(
+            "Failed to extract archive in box at {box_path}: {stderr}"
+        )));
     }
 
     println!(
@@ -455,49 +451,78 @@ async fn copy_dir_to_box(
     Ok(())
 }
 
+/// Read a host file for `cp` into a box.
+fn read_host_copy_source(host_path: &str) -> Result<Vec<u8>, BoxError> {
+    super::commit::refuse_archive_ancestor_reparse(std::path::Path::new(host_path))?;
+    std::fs::read(host_path)
+        .map_err(|error| super::io_error(format!("Failed to read {host_path}"), error))
+}
+
+fn write_host_copy_destination(host_path: &str, bytes: &[u8]) -> Result<(), BoxError> {
+    super::commit::refuse_archive_ancestor_reparse(std::path::Path::new(host_path))?;
+    std::fs::write(host_path, bytes)
+        .map_err(|error| super::io_error(format!("Failed to write to {host_path}"), error))
+}
+
 /// Create a tar archive from a host directory using the `tar` command.
-fn create_tar_from_dir(dir_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn create_tar_from_dir(dir_path: &str) -> Result<Vec<u8>, BoxError> {
+    let path = std::path::Path::new(dir_path);
+    super::commit::refuse_archive_ancestor_reparse(path)?;
+    #[cfg(windows)]
+    {
+        super::commit::refuse_directory_reparse(path)?;
+        super::commit::refuse_nested_directory_reparse(path)?;
+    }
     let output = std::process::Command::new("tar")
         .args(["-cf", "-", "-C", dir_path, "."])
         .output()
-        .map_err(|e| format!("Failed to run tar: {e}"))?;
+        .map_err(|error| super::io_error("Failed to run tar", error))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("tar failed: {stderr}").into());
+        return Err(BoxError::ExecError(format!("tar failed: {stderr}")));
     }
 
     Ok(output.stdout)
 }
 
 /// Extract a tar archive to a host directory using the `tar` command.
-fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), BoxError> {
     use std::io::Write;
     use std::process::Stdio;
 
+    let path = std::path::Path::new(dir_path);
+    super::commit::refuse_archive_ancestor_reparse(path)?;
+    #[cfg(windows)]
+    {
+        super::commit::refuse_directory_reparse(path)?;
+        super::commit::refuse_nested_directory_reparse(path)?;
+    }
     let mut child = std::process::Command::new("tar")
         .args(["-xf", "-", "-C", dir_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to run tar: {e}"))?;
+        .map_err(|error| super::io_error("Failed to run tar", error))?;
 
     if let Some(ref mut stdin) = child.stdin {
         stdin
             .write_all(tar_data)
-            .map_err(|e| format!("Failed to write tar data: {e}"))?;
+            .map_err(|error| super::io_error("Failed to write tar data", error))?;
     }
     // Close stdin by dropping it
     drop(child.stdin.take());
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to wait for tar: {e}"))?;
+        .map_err(|error| super::io_error("Failed to wait for tar", error))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("tar extraction failed: {stderr}").into());
+        return Err(BoxError::ExecError(format!(
+            "tar extraction failed: {stderr}"
+        )));
     }
 
     Ok(())
@@ -525,6 +550,276 @@ mod tests {
 
     use super::session::{resolve_copy_route, CopyRoute};
     use crate::state::BoxRecord;
+
+    #[cfg(windows)]
+    #[test]
+    fn create_tar_from_dir_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let data = outside.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = create_tar_from_dir(link.join("data").to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "host directory was archived through an ancestor junction: {error}"
+        );
+        assert_eq!(std::fs::read(data.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_tar_from_dir_does_not_follow_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let archived = create_tar_from_dir(link.to_str().expect("utf-8"));
+        let error = archived.as_ref().err().map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("junction")),
+            "host directory junction was archived: {archived:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_tar_from_dir_does_not_follow_a_child_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("local.txt"), b"ok").unwrap();
+        let link = root.join("nested");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let archived = create_tar_from_dir(root.to_str().expect("utf-8"));
+        let contains_secret = archived
+            .as_ref()
+            .ok()
+            .is_some_and(|bytes| bytes.windows(6).any(|window| window == b"secret"));
+        assert!(
+            !contains_secret,
+            "host directory archive followed a child directory junction: {archived:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dir_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("planted.txt"), b"planted").unwrap();
+        let tar_data = create_tar_from_dir(source.to_str().expect("utf-8")).unwrap();
+        let outside = tmp.path().join("outside");
+        let dest = outside.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = extract_tar_to_dir(&tar_data, link.join("dest").to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "archive was extracted through an ancestor junction: {error}"
+        );
+        assert!(!dest.join("planted.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dir_does_not_extract_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("planted.txt"), b"planted").unwrap();
+        let tar_data = create_tar_from_dir(source.to_str().expect("utf-8")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = extract_tar_to_dir(&tar_data, link.to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "archive was extracted through a directory junction: {error}"
+        );
+        assert!(!outside.join("planted.txt").exists());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dir_does_not_extract_through_a_child_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let nested = source.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("planted.txt"), b"planted").unwrap();
+        let tar_data = create_tar_from_dir(source.to_str().expect("utf-8")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let link = dest.join("nested");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let extracted = extract_tar_to_dir(&tar_data, dest.to_str().expect("utf-8"));
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "archive extract wrote through a child directory junction: {extracted:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_host_copy_source_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = read_host_copy_source(link.join("secret.txt").to_str().expect("utf-8"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "host file was read through an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_host_copy_destination_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = write_host_copy_destination(
+            link.join("planted.txt").to_str().expect("utf-8"),
+            b"planted",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("junction"),
+            "host file was written through an ancestor junction: {error}"
+        );
+        assert!(!outside.join("planted.txt").exists());
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum SessionCall {
@@ -715,10 +1010,14 @@ mod tests {
     fn stopped_oci_copy_route_does_not_fall_back_to_a_socket() {
         let record = oci_record("stopped", ExecutionGeneration::new(3).unwrap());
 
-        let error = resolve_copy_route(&record).unwrap_err().to_string();
-
-        assert_eq!(error, "Box managed-copy is neither running nor paused");
-        assert!(!error.contains("socket"));
+        let error = resolve_copy_route(&record).unwrap_err();
+        match error {
+            BoxError::StateError(message) => {
+                assert_eq!(message, "Box managed-copy is neither running nor paused");
+                assert!(!message.contains("socket"));
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -875,12 +1174,58 @@ mod tests {
 
     #[test]
     fn annotate_cp_unavailable_surfaces_request_id() {
-        let error: Box<dyn std::error::Error> =
-            a3s_box_core::ExecutionManagerError::Unavailable("response lost".to_string()).into();
+        let error = super::super::execution_error(
+            a3s_box_core::ExecutionManagerError::Unavailable("response lost".to_string()),
+        );
         let annotated = annotate_cp_unavailable(error, "cli-cp-abc");
-        let message = annotated.to_string();
-        assert!(message.contains("unavailable"), "{message}");
-        assert!(message.contains("reuse request_id cli-cp-abc"), "{message}");
+        match annotated {
+            BoxError::StateError(message) => {
+                assert!(
+                    message.to_ascii_lowercase().contains("unavailable"),
+                    "{message}"
+                );
+                assert!(message.contains("reuse request_id cli-cp-abc"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn both_host_paths_are_a_configuration_error() {
+        let error = execute(CpArgs {
+            src: "/tmp/a".to_string(),
+            dst: "/tmp/b".to_string(),
+        })
+        .await
+        .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("Both source and destination are host paths"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn copying_between_boxes_is_a_configuration_error() {
+        let error = execute(CpArgs {
+            src: "one:/tmp/a".to_string(),
+            dst: "two:/tmp/b".to_string(),
+        })
+        .await
+        .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("Copying between two boxes is not supported"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     // --- Endpoint parsing tests ---

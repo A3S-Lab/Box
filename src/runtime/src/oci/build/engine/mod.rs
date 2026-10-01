@@ -524,11 +524,14 @@ async fn build_in_workspace(
     control: Option<BuildExecutionControl>,
     cache_identity: Option<BuildCacheExportIdentity>,
 ) -> Result<SupervisedBuildResult> {
+    #[cfg(windows)]
+    crate::oci::build::engine::utils::refuse_build_context_junction(&config.context_dir)?;
+
     // Parse Dockerfile
     let dockerfile = Dockerfile::from_file(&config.dockerfile_path)?;
 
     // Load the context's .dockerignore once; applied to every context COPY/ADD.
-    let dockerignore = DockerIgnore::load(&config.context_dir);
+    let dockerignore = DockerIgnore::load(&config.context_dir)?;
 
     if !config.quiet {
         println!("Building from {}", config.dockerfile_path.display());

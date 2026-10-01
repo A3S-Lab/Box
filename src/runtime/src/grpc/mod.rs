@@ -15,6 +15,7 @@ pub use attestation::{
     AttestationClient, RaTlsAttestationClient, SealClient, SealResult, SecretEntry,
     SecretInjectionResult, SecretInjector, UnsealResult,
 };
+#[cfg(unix)]
 pub(crate) use exec::{
     should_retry_guest_file_transfer, should_retry_guest_filesystem, should_retry_keyed_guest_exec,
 };

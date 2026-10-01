@@ -1063,6 +1063,8 @@ struct RotatingWriter {
 
 impl RotatingWriter {
     fn new(path: &Path, max_size: u64, max_file: u32) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        crate::fs_atomic::refuse_file_ancestor_reparse(path)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1103,6 +1105,8 @@ impl RotatingWriter {
         let rotated = rotated_path(&self.path, 1);
         compress_file(&self.path, &rotated)?;
         std::fs::remove_file(&self.path)?;
+        #[cfg(windows)]
+        crate::fs_atomic::refuse_file_ancestor_reparse(&self.path)?;
         self.file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1118,6 +1122,8 @@ fn compress_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     use flate2::Compression;
     use std::io::Read;
 
+    #[cfg(windows)]
+    crate::fs_atomic::refuse_file_ancestor_reparse(dst)?;
     let mut input = std::fs::File::open(src)?;
     let output = std::fs::File::create(dst)?;
     let mut encoder = GzEncoder::new(output, Compression::fast());
@@ -1736,5 +1742,45 @@ mod tests {
             rotated_path(&path, 1).exists(),
             "expected a rotated .1.gz file"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rotating_writer_does_not_create_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let path = link.join("container.json");
+        let created = RotatingWriter::new(&path, 20, 3);
+        let created_debug = match &created {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("container.json").exists(),
+            "rotating log was created through the directory junction: {created_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

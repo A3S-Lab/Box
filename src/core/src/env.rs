@@ -37,9 +37,42 @@ pub fn parse_runtime_env_vars(vars: &[String]) -> Vec<(String, String)> {
 /// Load environment variables from a Docker-style env file.
 pub fn parse_env_file(path: impl AsRef<Path>) -> Result<Vec<(String, String)>, String> {
     let path = path.as_ref();
+    #[cfg(windows)]
+    refuse_env_file_ancestor_junction(path)?;
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read env file '{}': {}", path.display(), e))?;
     Ok(parse_env_file_content(&content))
+}
+
+#[cfg(windows)]
+fn refuse_env_file_ancestor_junction(path: &Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect env file '{}': {error}",
+                    path.display()
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(format!(
+                "refusing to read an env file through a directory junction: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse Docker-style env file content.
@@ -158,6 +191,37 @@ WITH_EQUALS=a=b
                 ("EMPTY".to_string(), String::new()),
                 ("WITH_EQUALS".to_string(), "a=b".to_string())
             ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_env_file_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.env"), "SECRET=outside\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = parse_env_file(link.join("secret.env")).unwrap_err();
+        assert!(
+            error.contains("junction"),
+            "env file was read through an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.env")).unwrap(),
+            b"SECRET=outside\n"
         );
     }
 

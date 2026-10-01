@@ -19,6 +19,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The caller supplies `tmp_path` so it can pick a collision-free name (e.g. a
 /// per-process/per-call unique suffix) when concurrent writers are possible.
 pub fn write_durable(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        refuse_file_ancestor_reparse(tmp_path)?;
+        refuse_file_ancestor_reparse(final_path)?;
+    }
     {
         let mut f = std::fs::File::create(tmp_path)?;
         f.write_all(bytes)?;
@@ -30,6 +35,35 @@ pub fn write_durable(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> std::i
     if let Some(dir) = final_path.parent() {
         if let Ok(d) = std::fs::File::open(dir) {
             let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn refuse_file_ancestor_reparse(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    let mut prefix = PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to write through a directory junction: {}",
+                    path.display()
+                ),
+            ));
         }
     }
     Ok(())
@@ -76,6 +110,8 @@ fn quarantine_candidate(path: &Path) -> Option<PathBuf> {
 /// Copy a regular file to a fresh quarantine sibling without replacing an
 /// existing path.  The source remains untouched.
 pub fn quarantine_copy(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    refuse_file_ancestor_reparse(path).ok()?;
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file() {
         return None;
@@ -103,6 +139,8 @@ pub fn quarantine_copy(path: &Path) -> Option<PathBuf> {
 /// durable copy is retained instead and the source is left in place.  In
 /// either case an existing quarantine file is never replaced.
 pub fn quarantine_corrupt(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    refuse_file_ancestor_reparse(path).ok()?;
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.file_type().is_file() {
         return None;
@@ -172,5 +210,99 @@ mod tests {
         let directory = dir.path().join("directory.json");
         std::fs::create_dir(&directory).unwrap();
         assert!(quarantine_corrupt(&directory).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_durable_does_not_write_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let written = write_durable(
+            &link.join("state.json.tmp"),
+            &link.join("state.json"),
+            b"payload",
+        );
+        let written_debug = match &written {
+            Ok(()) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("state.json").exists(),
+            "durable write created state through the directory junction: {written_debug}"
+        );
+        assert!(
+            !outside.join("state.json.tmp").exists(),
+            "durable write created the temp file through the directory junction: {written_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quarantine_corrupt_does_not_create_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::fs::write(outside.join("state.json"), b"corrupt").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let source = link.join("state.json");
+        let quarantined = quarantine_corrupt(&source);
+        let names = std::fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            names.iter().all(|name| {
+                name == "secret.txt" || name == "state.json"
+            }),
+            "quarantine created a file through the directory junction: {quarantined:?} names={names:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("state.json")).unwrap(),
+            b"corrupt"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

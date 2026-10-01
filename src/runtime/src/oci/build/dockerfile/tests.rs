@@ -5,6 +5,39 @@
 mod tests {
     use super::super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn from_file_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Dockerfile"), "FROM scratch\n").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = Dockerfile::from_file(&link.join("Dockerfile"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "Dockerfile was read through an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("Dockerfile")).unwrap(),
+            b"FROM scratch\n"
+        );
+    }
+
     // --- join_continuation_lines ---
 
     #[test]

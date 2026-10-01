@@ -84,23 +84,7 @@ impl VmManager {
         } else {
             PathBuf::from(&self.config.workspace)
         };
-        if !workspace_path.exists() {
-            std::fs::create_dir_all(&workspace_path).map_err(|e| BoxError::BoxBootError {
-                message: format!("Failed to create workspace directory: {}", e),
-                hint: None,
-            })?;
-        }
-        // Canonicalize to absolute path (libkrun requires absolute paths for virtiofs)
-        let workspace_path = workspace_path
-            .canonicalize()
-            .map_err(|e| BoxError::BoxBootError {
-                message: format!(
-                    "Failed to resolve workspace path {}: {}",
-                    workspace_path.display(),
-                    e
-                ),
-                hint: None,
-            })?;
+        let workspace_path = resolve_workspace_directory(&workspace_path)?;
 
         let snapshot_requested = super::rootfs_snapshot_requested(&self.config);
         let rootfs_prepare_options = crate::rootfs::RootfsPrepareOptions {
@@ -1167,6 +1151,28 @@ impl VmManager {
         }
         true
     }
+}
+
+/// Resolve the host workspace directory. A missing path is created. Callers
+/// share the canonical directory with virtio-fs, which requires an absolute path.
+fn resolve_workspace_directory(workspace_path: &Path) -> Result<PathBuf> {
+    super::spec::refuse_existing_symlink_or_reparse_prefixes(workspace_path, "Workspace path")?;
+    if !workspace_path.exists() {
+        std::fs::create_dir_all(workspace_path).map_err(|e| BoxError::BoxBootError {
+            message: format!("Failed to create workspace directory: {}", e),
+            hint: None,
+        })?;
+    }
+    workspace_path
+        .canonicalize()
+        .map_err(|e| BoxError::BoxBootError {
+            message: format!(
+                "Failed to resolve workspace path {}: {}",
+                workspace_path.display(),
+                e
+            ),
+            hint: None,
+        })
 }
 
 mod cache;

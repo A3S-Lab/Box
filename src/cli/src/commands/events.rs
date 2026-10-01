@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use a3s_box_core::error::BoxError;
 use chrono::{DateTime, Utc};
 use clap::Args;
 
@@ -145,7 +146,7 @@ fn status_to_action(old: Option<&str>, new: &str) -> Option<&'static str> {
     }
 }
 
-pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: EventsArgs) -> Result<(), BoxError> {
     let filters = parse_filters(&args.filter);
 
     // Parse --since/--until (RFC3339 or relative like "30s"/"5m"/"1h").

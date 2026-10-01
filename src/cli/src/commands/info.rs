@@ -1,5 +1,6 @@
 //! `a3s-box info` command.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
 #[derive(Args)]
 pub struct InfoArgs;
 
-pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(_args: InfoArgs) -> Result<(), BoxError> {
     println!("a3s-box version {}", a3s_box_core::VERSION);
     let capabilities = a3s_box_core::PlatformCapabilities::current();
 
@@ -48,11 +49,7 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     // we cannot invent an empty inventory when observation/store load fails.
     let state = super::observe_inventory::refresh_default_home_after_inventory_observation()
         .await
-        .map_err(|error| {
-            format!(
-                "Failed to refresh box inventory for info: {error}; refusing to invent empty box inventory"
-            )
-        })?;
+        .map_err(info_inventory_error)?;
     let counts = box_counts(&state);
     println!(
         "Boxes: {} total, {} active ({} running, {} paused)",
@@ -62,11 +59,7 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     // Image cache stats — absent cache dir is honest zero; open failure is not.
     let images_dir = images_dir();
     if images_dir.exists() {
-        let store = super::open_image_store().map_err(|error| {
-            format!(
-                "Failed to open image store for info: {error}; refusing to invent empty image inventory"
-            )
-        })?;
+        let store = super::open_image_store().map_err(info_image_store_error)?;
         let images = store.list().await;
         // Tags and digest-pinned aliases share one content directory;
         // use the store's content-level total instead of summing index
@@ -208,6 +201,13 @@ enum WindowsSymlinkProbe {
 
 #[cfg(windows)]
 fn probe_windows_symlink_support(home: &Path) -> WindowsSymlinkProbe {
+    let mut home_prefix = std::path::PathBuf::new();
+    for component in home.components() {
+        home_prefix.push(component);
+        if let Err(error) = crate::commands::commit::refuse_directory_reparse(&home_prefix) {
+            return WindowsSymlinkProbe::Failed(std::io::Error::other(error.to_string()));
+        }
+    }
     if let Err(error) = std::fs::create_dir_all(home) {
         return WindowsSymlinkProbe::Failed(error);
     }
@@ -383,6 +383,22 @@ fn box_counts(state: &StateFile) -> BoxCounts {
     box_counts_from_records(state.list(true))
 }
 
+fn info_inventory_error(error: BoxError) -> BoxError {
+    super::annotate_box_error(
+        error,
+        "Failed to refresh box inventory for info: ",
+        "; refusing to invent empty box inventory",
+    )
+}
+
+fn info_image_store_error(error: BoxError) -> BoxError {
+    super::annotate_box_error(
+        error,
+        "Failed to open image store for info: ",
+        "; refusing to invent empty image inventory",
+    )
+}
+
 fn box_counts_from_records(records: Vec<&BoxRecord>) -> BoxCounts {
     let total = records.len();
     let running = records
@@ -487,18 +503,78 @@ mod tests {
 
     #[test]
     fn info_inventory_error_messages_refuse_invented_empty_counts() {
-        let boxes = format!(
-            "Failed to refresh box inventory for info: {}; refusing to invent empty box inventory",
-            "observe failed"
-        );
-        assert!(boxes.contains("observe failed"));
-        assert!(boxes.contains("refusing to invent empty box inventory"));
+        match info_inventory_error(BoxError::StateError("observe failed".to_string())) {
+            BoxError::StateError(message) => {
+                assert!(message.contains("observe failed"), "{message}");
+                assert!(
+                    message.contains("refusing to invent empty box inventory"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
 
-        let images = format!(
-            "Failed to open image store for info: {}; refusing to invent empty image inventory",
-            "permission denied"
+        match info_image_store_error(BoxError::OciImageError("permission denied".to_string())) {
+            BoxError::OciImageError(message) => {
+                assert!(message.contains("permission denied"), "{message}");
+                assert!(
+                    message.contains("refusing to invent empty image inventory"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected OciImageError, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_probe_does_not_create_home_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let home = link.join("home");
+        let probed = probe_windows_symlink_support(&home);
+        let probed_debug = match probed {
+            WindowsSymlinkProbe::Available => "Available".to_string(),
+            WindowsSymlinkProbe::Denied { .. } => "Denied".to_string(),
+            WindowsSymlinkProbe::Failed(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("home").exists(),
+            "symlink probe created home through the ancestor junction: {probed_debug}"
         );
-        assert!(images.contains("permission denied"));
-        assert!(images.contains("refusing to invent empty image inventory"));
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_probe_creates_a_missing_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let _probed = probe_windows_symlink_support(&home);
+        let metadata = std::fs::symlink_metadata(&home).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
     }
 }

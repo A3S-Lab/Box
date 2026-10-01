@@ -3,6 +3,7 @@
 //! Provides create/ls/rm/inspect/prune for persistent named volumes
 //! that can be shared across box instances.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::volume::VolumeConfig;
 use a3s_box_runtime::VolumeStore;
 use clap::{Args, Subcommand};
@@ -74,7 +75,7 @@ pub struct PruneArgs {
 }
 
 /// Dispatch volume subcommands.
-pub async fn execute(args: VolumeArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: VolumeArgs) -> Result<(), BoxError> {
     match args.command {
         VolumeCommand::Create(a) => execute_create(a).await,
         VolumeCommand::Ls(a) => execute_ls(a).await,
@@ -84,7 +85,7 @@ pub async fn execute(args: VolumeArgs) -> Result<(), Box<dyn std::error::Error>>
     }
 }
 
-async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_create(args: CreateArgs) -> Result<(), BoxError> {
     let store = VolumeStore::default_path()?;
 
     let mut config = VolumeConfig::new(&args.name, "");
@@ -92,9 +93,9 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
 
     // Parse labels
     for label in &args.labels {
-        let (key, value) = label
-            .split_once('=')
-            .ok_or_else(|| format!("Invalid label (expected KEY=VALUE): {label}"))?;
+        let (key, value) = label.split_once('=').ok_or_else(|| {
+            BoxError::ConfigError(format!("Invalid label (expected KEY=VALUE): {label}"))
+        })?;
         config.labels.insert(key.to_string(), value.to_string());
     }
 
@@ -103,7 +104,7 @@ async fn execute_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-async fn execute_ls(args: LsArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_ls(args: LsArgs) -> Result<(), BoxError> {
     let store = VolumeStore::default_path()?;
     let mut volumes = store.list()?;
     volumes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -137,9 +138,11 @@ async fn execute_ls(args: LsArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn execute_rm(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_rm(args: RmArgs) -> Result<(), BoxError> {
     if args.names.is_empty() {
-        return Err("requires at least 1 argument".into());
+        return Err(BoxError::ConfigError(
+            "requires at least 1 argument".to_string(),
+        ));
     }
 
     let store = VolumeStore::default_path()?;
@@ -156,16 +159,16 @@ async fn execute_rm(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         // A failed removal (e.g. volume in use) must be a non-zero exit, like Docker.
-        Err(errors.join("\n").into())
+        Err(BoxError::ConfigError(errors.join("\n")))
     }
 }
 
-async fn execute_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_inspect(args: InspectArgs) -> Result<(), BoxError> {
     let store = VolumeStore::default_path()?;
 
     let config = store
         .get(&args.name)?
-        .ok_or_else(|| format!("volume '{}' not found", args.name))?;
+        .ok_or_else(|| missing_volume(args.name.as_str()))?;
 
     // Match `docker volume inspect`: a top-level JSON array of PascalCase objects
     // (Mountpoint, Scope, etc.), not the raw snake_case VolumeConfig.
@@ -182,7 +185,7 @@ async fn execute_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_prune(args: PruneArgs) -> Result<(), BoxError> {
     if !args.force {
         println!("WARNING! This will remove all local volumes not used by at least one box.");
         print!("Are you sure you want to continue? [y/N] ");
@@ -219,9 +222,7 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
 ///
 /// Returns the resolved volume spec (with named volume replaced by host path)
 /// and optionally the named volume name if it was a named volume.
-pub fn resolve_named_volume(
-    volume_spec: &str,
-) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+pub fn resolve_named_volume(volume_spec: &str) -> Result<(String, Option<String>), BoxError> {
     if named_volume_name(volume_spec).is_none() {
         return Ok((volume_spec.to_string(), None));
     }
@@ -236,7 +237,7 @@ pub fn resolve_named_volume(
 pub(crate) fn resolve_named_volume_with_store(
     store: &VolumeStore,
     volume_spec: &str,
-) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+) -> Result<(String, Option<String>), BoxError> {
     let Some(volume_name) = named_volume_name(volume_spec) else {
         return Ok((volume_spec.to_string(), None));
     };
@@ -265,9 +266,8 @@ pub(crate) fn resolve_volume_specs_after_health_gate(
     store: &VolumeStore,
     volume_specs: &[String],
     health_check: Option<&crate::state::HealthCheck>,
-) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
-    super::common::validate_health_check_support(health_check)
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+) -> Result<(Vec<String>, Vec<String>), BoxError> {
+    super::common::validate_health_check_support(health_check).map_err(BoxError::ConfigError)?;
     let mut resolved = Vec::new();
     let mut names = Vec::new();
     for spec in volume_specs {
@@ -302,11 +302,12 @@ fn named_volume_name(volume_spec: &str) -> Option<&str> {
     Some(host_part)
 }
 
+fn missing_volume(name: &str) -> BoxError {
+    BoxError::ConfigError(format!("volume '{name}' not found"))
+}
+
 /// Attach named volumes to a box in the VolumeStore.
-pub fn attach_volumes(
-    volume_names: &[String],
-    box_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn attach_volumes(volume_names: &[String], box_id: &str) -> Result<(), BoxError> {
     if volume_names.is_empty() {
         return Ok(());
     }
@@ -319,7 +320,7 @@ pub(crate) fn attach_volumes_with_store(
     store: &VolumeStore,
     volume_names: &[String],
     box_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for name in volume_names {
         // modify() re-reads in_use_by under the lock, so concurrent attaches to
         // the same volume accumulate instead of clobbering each other.
@@ -526,6 +527,14 @@ mod tests {
         let (resolved, name) = resolve_named_volume("justname").unwrap();
         assert_eq!(resolved, "justname");
         assert!(name.is_none());
+    }
+
+    #[test]
+    fn missing_volume_is_a_config_error() {
+        assert!(matches!(
+            missing_volume("data"),
+            BoxError::ConfigError(message) if message == "volume 'data' not found"
+        ));
     }
 
     #[test]

@@ -131,11 +131,8 @@ pub(crate) fn cleanup_transient_secret_identity(
     let Some(identity) = identity else {
         return Ok(());
     };
-    crate::commands::compose::secrets::cleanup_persisted(identity).map_err(|error| {
-        a3s_box_core::error::BoxError::Other(format!(
-            "Failed to clean Compose transient Secret material: {error}"
-        ))
-    })
+    crate::commands::compose::secrets::cleanup_persisted(identity)?;
+    Ok(())
 }
 
 /// Remove the host-side socket directory when it lives outside the box dir.
@@ -155,6 +152,13 @@ pub fn cleanup_external_socket_dir(
     a3s_box_runtime::network::terminate_passt(socket_dir)?;
     if socket_dir.starts_with(box_dir) {
         return Ok(());
+    }
+    #[cfg(windows)]
+    if let Err(error) = crate::commands::commit::refuse_directory_reparse(socket_dir) {
+        return Err(a3s_box_core::error::BoxError::Other(format!(
+            "refusing to remove external socket directory {}: {error}",
+            socket_dir.display()
+        )));
     }
     match std::fs::remove_dir_all(socket_dir) {
         Ok(()) => Ok(()),
@@ -206,6 +210,14 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
                 ))
             },
         )?;
+
+        #[cfg(windows)]
+        if let Err(error) = crate::commands::commit::refuse_directory_reparse(&record.box_dir) {
+            return Err(a3s_box_core::error::BoxError::Other(format!(
+                "refusing to remove box directory {}: {error}",
+                record.box_dir.display()
+            )));
+        }
 
         // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe.
         a3s_box_runtime::cleanup_microvm_virtiofs_ro_shares(&record.box_dir).map_err(|error| {
@@ -295,9 +307,14 @@ impl BoxDirGuard {
 
 impl Drop for BoxDirGuard {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if !self.armed {
+            return;
         }
+        #[cfg(windows)]
+        if crate::commands::commit::refuse_directory_reparse(&self.path).is_err() {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -331,6 +348,115 @@ mod tests {
         assert!(
             registered.exists(),
             "a disarmed guard must keep the registered box dir"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn box_dir_guard_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("boxes").join("failed-box");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        {
+            let _guard = BoxDirGuard::new(link.clone());
+        }
+
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "box dir guard removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_removed_box_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = tmp.path().join("box-dir");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut record = make_record("junction-box", "junction_box", "created", None);
+        record.auto_remove = false;
+        record.box_dir = link.clone();
+        record.exec_socket_path = link.join("sockets").join("exec.sock");
+
+        let removed = cleanup_removed_box(&record);
+        assert!(
+            removed.is_err(),
+            "box cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "box cleanup removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_external_socket_dir_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let link = tmp.path().join("sockets");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = cleanup_external_socket_dir(&box_dir, &link.join("exec.sock"));
+        assert!(
+            removed.is_err(),
+            "socket cleanup deleted through a directory junction: {removed:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "socket cleanup removed the directory junction"
         );
     }
 

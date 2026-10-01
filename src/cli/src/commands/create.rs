@@ -1,5 +1,6 @@
 //! `a3s-box create` command — Create without starting.
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionManager, ExecutionRecordPolicy,
     ExecutionRestartPolicy, OperationId, ResourceConfig,
@@ -20,27 +21,27 @@ pub struct CreateArgs {
     pub cmd: Vec<String>,
 }
 
-pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    common::validate_runtime_options(&args.common)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+pub async fn execute(args: CreateArgs) -> Result<(), BoxError> {
+    common::validate_runtime_options(&args.common).map_err(BoxError::ConfigError)?;
 
     // Validate restart policy
     let (restart_policy, max_restart_count) =
-        crate::state::parse_restart_policy(&args.common.restart)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let restart_policy = execution_restart_policy(&restart_policy)?;
+        crate::state::parse_restart_policy(&args.common.restart).map_err(BoxError::ConfigError)?;
+    let restart_policy =
+        execution_restart_policy(&restart_policy).map_err(BoxError::ConfigError)?;
 
-    let memory_mb =
-        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+    let memory_mb = parse_memory(&args.common.memory)
+        .map_err(|error| BoxError::ConfigError(format!("Invalid --memory: {error}")))?;
 
     // Build resource limits before any partial moves of args
     let resource_limits = common::build_resource_limits(&args.common)?;
 
-    let port_map = common::normalize_port_maps(&args.common.publish)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let port_map =
+        common::normalize_port_maps(&args.common.publish).map_err(BoxError::ConfigError)?;
     let env = common::build_env_map(&args.common)?;
     let labels = common::parse_env_vars(&args.common.labels)
-        .map_err(|e| e.replace("environment variable", "label"))?
+        .map_err(|error| error.replace("environment variable", "label"))
+        .map_err(BoxError::ConfigError)?
         .into_iter()
         .collect();
     let network_mode = common::resolve_network(args.common.network.as_deref());
@@ -50,9 +51,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Parse --shm-size
     let shm_size = match &args.common.shm_size {
-        Some(s) => {
-            Some(common::parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?)
-        }
+        Some(s) => Some(
+            common::parse_memory_bytes(s)
+                .map_err(|error| BoxError::ConfigError(format!("Invalid --shm-size: {error}")))?,
+        ),
         None => None,
     };
 
@@ -105,7 +107,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
 
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
-    manager.preflight_isolation(isolation).await?;
+    manager
+        .preflight_isolation(isolation)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
 
     // Cached image metadata is read after preflight and before named-volume
     // creation so an image HEALTHCHECK is rejected without creating the volume.
@@ -151,7 +156,8 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         oom_score_adj: args.common.oom_score_adj,
         managed_secret_root: None,
     };
-    let operation_id = OperationId::new(format!("cli-create-{}", uuid::Uuid::new_v4()))?;
+    let operation_id = OperationId::new(format!("cli-create-{}", uuid::Uuid::new_v4()))
+        .map_err(super::IntoBoxError::into_box_error)?;
     let request = CreateExecutionRequest {
         external_sandbox_id: operation_id.as_str().to_string(),
         config,
@@ -159,7 +165,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         policy,
         rootfs_snapshot_id: None,
     };
-    let reservation = manager.create(request, &operation_id).await?;
+    let reservation = manager
+        .create(request, &operation_id)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     let box_id = reservation.execution_id.to_string();
 
     // Attach named volumes to this box
@@ -191,13 +200,12 @@ fn execution_restart_policy(value: &str) -> Result<ExecutionRestartPolicy, Strin
     }
 }
 
-fn ensure_network_exists(network: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_network_exists(network: &str) -> Result<(), BoxError> {
     let store = a3s_box_runtime::NetworkStore::default_path()?;
     let config = store
         .get(network)?
-        .ok_or_else(|| format!("network '{}' not found", network))?;
-    super::network::validate_attachable_network(&config)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .ok_or_else(|| BoxError::NetworkError(format!("network '{}' not found", network)))?;
+    super::network::validate_attachable_network(&config)?;
     Ok(())
 }
 
@@ -224,5 +232,21 @@ mod tests {
             ExecutionRestartPolicy::UnlessStopped
         );
         assert!(execution_restart_policy("on-failure:3").is_err());
+    }
+
+    #[test]
+    fn invalid_normalized_restart_policy_is_a_configuration_error() {
+        let err = execution_restart_policy("on-failure:3")
+            .map_err(BoxError::ConfigError)
+            .unwrap_err();
+        match err {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("Invalid normalized restart policy"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

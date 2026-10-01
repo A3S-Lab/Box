@@ -4,6 +4,7 @@
 //! then encrypts data using a key derived from the TEE's measurement and chip_id.
 //! The sealed blob can only be decrypted by the same TEE.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[cfg(not(windows))]
@@ -51,34 +52,32 @@ struct SealOutput {
 }
 
 #[cfg(windows)]
-pub async fn execute(_args: SealArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "seal",
-        "TEE sealed-storage channel support",
+pub async fn execute(_args: SealArgs) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        crate::platform::unsupported_command("seal", "TEE sealed-storage channel support")
+            .to_string(),
     ))
 }
 
 #[cfg(not(windows))]
-pub async fn execute(args: SealArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: SealArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
+    let record =
+        resolve::resolve(&state, &args.r#box).map_err(super::IntoBoxError::into_box_error)?;
     let attest_socket_path = crate::socket_paths::require_runtime_socket(
         record,
         crate::socket_paths::RuntimeSocket::Attest,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
     let socket_path = &attest_socket_path;
 
-    // Read data from file or --data
     let data = match &args.file {
-        Some(path) => {
-            std::fs::read(path).map_err(|e| format!("Failed to read file '{}': {}", path, e))?
-        }
+        Some(path) => std::fs::read(path)
+            .map_err(|error| super::io_error(format!("Failed to read file '{path}'"), error))?,
         None => args.data.as_bytes().to_vec(),
     };
 
-    // Normalize policy name
-    let policy = normalize_policy(&args.policy)?;
+    let policy = require_sealing_policy(&args.policy)?;
 
     let client = SealClient::new(socket_path);
     let result = client
@@ -100,6 +99,11 @@ pub async fn execute(args: SealArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+#[cfg(any(not(windows), test))]
+fn require_sealing_policy(policy: &str) -> Result<String, BoxError> {
+    normalize_policy(policy).map_err(BoxError::ConfigError)
 }
 
 /// Normalize CLI-friendly policy names to internal format.
@@ -154,5 +158,38 @@ mod tests {
     fn test_normalize_policy_invalid() {
         assert!(normalize_policy("invalid").is_err());
         assert!(normalize_policy("").is_err());
+    }
+
+    #[test]
+    fn invalid_sealing_policy_is_a_configuration_error() {
+        match require_sealing_policy("invalid") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("Invalid sealing policy"), "{message}");
+                assert!(message.contains("invalid"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_seal_is_a_configuration_error() {
+        let error = execute(SealArgs {
+            r#box: "box".into(),
+            data: String::new(),
+            context: "default".into(),
+            policy: "measurement-and-chip".into(),
+            allow_simulated: false,
+            file: None,
+        })
+        .await
+        .expect_err("Windows seal is unsupported");
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("not supported"), "{message}");
+                assert!(message.contains("seal"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

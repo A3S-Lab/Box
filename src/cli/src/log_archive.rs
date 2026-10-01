@@ -64,7 +64,19 @@ fn archive_removed_logs_in(
 ) -> std::io::Result<Option<PathBuf>> {
     let source_log_dir = record.box_dir.join("logs");
     let archive_dir = archive_dir(archive_root, &record.id);
+    #[cfg(windows)]
+    {
+        let mut archive_prefix = PathBuf::new();
+        for component in archive_dir.components() {
+            archive_prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&archive_prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
     if archive_dir.exists() {
+        #[cfg(windows)]
+        crate::commands::commit::refuse_directory_reparse(&archive_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         std::fs::remove_dir_all(&archive_dir)?;
     }
     std::fs::create_dir_all(&archive_dir)?;
@@ -86,6 +98,9 @@ fn archive_removed_logs_in(
     let mut archived_logs = false;
     if record.log_config.driver != a3s_box_core::log::LogDriver::None {
         let archived_log_dir = archive_dir.join("logs");
+        #[cfg(windows)]
+        crate::commands::commit::refuse_directory_reparse(&source_log_dir)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         if source_log_dir.is_dir() {
             archived_logs = copy_dir_contents(&source_log_dir, &archived_log_dir)?;
         }
@@ -168,6 +183,10 @@ fn load_archive_entries(archive_root: &Path) -> std::io::Result<Vec<ArchiveEntry
     let mut archives = Vec::new();
     for entry in std::fs::read_dir(archive_root)? {
         let entry = entry?;
+        #[cfg(windows)]
+        if crate::commands::commit::refuse_directory_reparse(&entry.path()).is_err() {
+            continue;
+        }
         let path = entry.path().join(METADATA_FILE);
         if !path.exists() {
             continue;
@@ -234,6 +253,9 @@ fn prune_archives(archive_root: &Path, retention: LogArchiveRetention) -> std::i
 }
 
 fn remove_archive_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    crate::commands::commit::refuse_directory_reparse(path)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     if path.exists() {
         std::fs::remove_dir_all(path)?;
     }
@@ -316,6 +338,138 @@ mod tests {
             .join("logs")
             .join("container.json")
             .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_removed_logs_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let id = "550e8400-e29b-41d4-a716-446655440099";
+        let link = archive_dir(&archive_root, id);
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut record = crate::test_helpers::fixtures::make_record(id, "web", "dead", None);
+        record.auto_remove = true;
+        record.log_config.driver = a3s_box_core::log::LogDriver::None;
+        record.box_dir = tmp.path().join("box");
+        record.console_log = record.box_dir.join("logs").join("console.log");
+
+        let archived = archive_removed_logs_in(&record, &archive_root);
+        assert!(
+            archived.is_err(),
+            "log archive replaced a directory junction: {archived:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(!outside.join(METADATA_FILE).exists());
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "log archive removed the directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_removed_logs_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let id = "550e8400-e29b-41d4-a716-446655440097";
+        let mut record = crate::test_helpers::fixtures::make_record(id, "web", "dead", None);
+        record.auto_remove = true;
+        record.log_config.driver = a3s_box_core::log::LogDriver::None;
+        record.box_dir = tmp.path().join("box");
+        record.console_log = record.box_dir.join("logs").join("console.log");
+
+        let archived = archive_removed_logs_in(&record, &link);
+        let archived_debug = match &archived {
+            Ok(value) => format!("{value:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join(id).exists(),
+            "log archive was created through the ancestor junction: {archived_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_removed_logs_does_not_copy_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let link = box_dir.join("logs");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let id = "550e8400-e29b-41d4-a716-446655440098";
+        let mut record = crate::test_helpers::fixtures::make_record(id, "web", "dead", None);
+        record.auto_remove = true;
+        record.box_dir = box_dir;
+        record.console_log = record.box_dir.join("logs").join("console.log");
+
+        let archived = archive_removed_logs_in(&record, &archive_root);
+        assert!(
+            archived.as_ref().err().is_some(),
+            "log archive copied through a directory junction: {archived:?}"
+        );
+        assert!(!archive_dir(&archive_root, id)
+            .join("logs")
+            .join("secret.txt")
+            .exists());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
     }
 
     #[test]
@@ -455,6 +609,57 @@ mod tests {
         assert!(resolve_archive_in("large-3", &archive_root)
             .unwrap()
             .is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_archives_does_not_delete_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let id = "junction-archive";
+        let removed_at = Utc::now() - chrono::Duration::days(30);
+        let metadata = RemovedLogArchive {
+            id: id.to_string(),
+            short_id: id.to_string(),
+            name: id.to_string(),
+            image: "alpine:latest".to_string(),
+            removed_at,
+            created_at: removed_at,
+            started_at: Some(removed_at),
+            exit_code: Some(1),
+            log_config: a3s_box_core::log::LogConfig::default(),
+        };
+        std::fs::write(
+            outside.join(METADATA_FILE),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let link = archive_dir(&archive_root, id);
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let pruned = prune_archives(&archive_root, LogArchiveRetention::default()).unwrap();
+        assert_eq!(pruned, 0, "log prune deleted through a directory junction");
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            crate::commands::commit::metadata_is_reparse_point(&metadata),
+            "log prune removed the directory junction"
+        );
     }
 
     fn write_archive(

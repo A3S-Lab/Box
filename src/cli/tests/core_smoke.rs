@@ -261,14 +261,59 @@ impl CoreSmoke {
         let result = self
             .try_output(args, timeout)
             .unwrap_or_else(|error| panic!("{error}"));
-        assert!(
-            result.success,
-            "`a3s-box {}` failed\nstdout:\n{}\nstderr:\n{}",
-            args.join(" "),
-            result.stdout,
-            result.stderr
-        );
+        if !result.success {
+            let retained = Self::read_retained_removed_log_tails(&result.stderr, 80);
+            panic!(
+                "`a3s-box {}` failed (exit_code={:?})\nstdout:\n{}\nstderr:\n{}\n{retained}",
+                args.join(" "),
+                result.code,
+                result.stdout,
+                result.stderr
+            );
+        }
         result.stdout
+    }
+
+    /// `--rm` failures keep host logs under a temp removed-logs tree; soak
+    /// flakes are otherwise exit-code-only with empty guest stdout.
+    fn read_retained_removed_log_tails(stderr: &str, max_lines: usize) -> String {
+        let marker = "Retained logs for removed box";
+        let Some(line) = stderr.lines().find(|l| l.contains(marker)) else {
+            return String::new();
+        };
+        let Some(idx) = line.find(" at ") else {
+            return String::new();
+        };
+        let path_part = line[idx + 4..].trim();
+        let path = path_part
+            .split(". View with:")
+            .next()
+            .unwrap_or(path_part)
+            .trim();
+        let root = std::path::Path::new(path);
+        if !root.exists() {
+            return format!("retained logs missing: {path}\n");
+        }
+        let mut out = format!("retained logs ({path}):\n");
+        for name in ["console.log", "console.err.log", "shim.stderr.log"] {
+            let file = root.join(name);
+            out.push_str(&format!(
+                "{name} tail:\n{}\n",
+                Self::read_path_tail(&file, max_lines)
+            ));
+        }
+        out
+    }
+
+    fn read_path_tail(path: &std::path::Path, max_lines: usize) -> String {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let lines: Vec<&str> = text.lines().collect();
+                let start = lines.len().saturating_sub(max_lines);
+                lines[start..].join("\n")
+            }
+            Err(error) => format!("<{error}>"),
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -485,20 +530,102 @@ impl CoreSmoke {
             if result.success && combined.contains(name) && combined.contains("running") {
                 return;
             }
-            assert!(
-                !(result.success && combined.contains(name) && combined.contains("dead")),
-                "box {name} died during boot\n{}",
-                combined
-            );
+            if result.success {
+                if let Some(line) = combined.lines().find(|line| line.contains(name)) {
+                    // WHPX/Windows reports terminal guests as "stopped (Exit N)";
+                    // Linux may still show "dead". Either way, do not burn the
+                    // full smoke timeout waiting for a guest that already exited.
+                    let terminal = line.contains("dead")
+                        || line.contains("stopped")
+                        || line.contains("exited");
+                    if terminal {
+                        let inspect = self.output(&["inspect", name]);
+                        let logs = self.output(&["logs", "--tail", "80", name]);
+                        let boot_diag = Self::read_box_boot_diag_tails(&inspect.stdout, 120);
+                        panic!(
+                            "box {name} left boot in a terminal state\nps line: {line}\nlast ps:\n{combined}\ninspect stdout:\n{}\ninspect stderr:\n{}\nlogs stdout:\n{}\nlogs stderr:\n{}\n{boot_diag}",
+                            inspect.stdout,
+                            inspect.stderr,
+                            logs.stdout,
+                            logs.stderr
+                        );
+                    }
+                }
+            }
 
             std::thread::sleep(Duration::from_millis(500));
         }
 
         let inspect = self.output(&["inspect", name]);
+        let logs = self.output(&["logs", "--tail", "80", name]);
+        let boot_diag = Self::read_box_boot_diag_tails(&inspect.stdout, 120);
         panic!(
-            "timeout waiting for {name} to become running\nlast ps:\n{}\ninspect stdout:\n{}\ninspect stderr:\n{}",
-            last_ps, inspect.stdout, inspect.stderr
+            "timeout waiting for {name} to become running\nlast ps:\n{}\ninspect stdout:\n{}\ninspect stderr:\n{}\nlogs stdout:\n{}\nlogs stderr:\n{}\n{boot_diag}",
+            last_ps, inspect.stdout, inspect.stderr, logs.stdout, logs.stderr
         );
+    }
+
+    /// Host-side boot flakes often leave product `logs` empty; shim stderr is
+    /// where WHPX CreatePartition / krun_start_enter failures land.
+    fn read_box_boot_diag_tails(inspect_stdout: &str, max_lines: usize) -> String {
+        let mut out = String::new();
+        for (label, relative) in [
+            ("console.log", "logs/console.log"),
+            ("console.err.log", "logs/console.err.log"),
+            ("shim.stderr.log", "logs/shim.stderr.log"),
+        ] {
+            out.push_str(&format!(
+                "{label} tail:\n{}\n",
+                Self::read_box_relative_log_tail(inspect_stdout, relative, max_lines)
+            ));
+        }
+        out
+    }
+
+    fn read_box_relative_log_tail(
+        inspect_stdout: &str,
+        relative: &str,
+        max_lines: usize,
+    ) -> String {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inspect_stdout) else {
+            return "<inspect JSON unparseable>".into();
+        };
+        let entry = if let Some(arr) = parsed.as_array() {
+            arr.first()
+        } else {
+            Some(&parsed)
+        };
+        let Some(entry) = entry else {
+            return "<inspect empty>".into();
+        };
+        let path = if relative == "logs/console.log" {
+            if let Some(p) = entry.get("console_log").and_then(|v| v.as_str()) {
+                p.to_string()
+            } else if let Some(dir) = entry.get("box_dir").and_then(|v| v.as_str()) {
+                std::path::Path::new(dir)
+                    .join(relative)
+                    .display()
+                    .to_string()
+            } else {
+                return "<no console_log or box_dir>".into();
+            }
+        } else if let Some(dir) = entry.get("box_dir").and_then(|v| v.as_str()) {
+            std::path::Path::new(dir)
+                .join(relative)
+                .display()
+                .to_string()
+        } else {
+            return "<no box_dir>".into();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) if text.is_empty() => format!("<empty {path}>"),
+            Ok(text) => {
+                let lines: Vec<&str> = text.lines().collect();
+                let start = lines.len().saturating_sub(max_lines);
+                lines[start..].join("\n")
+            }
+            Err(e) => format!("<failed to read {path}: {e}>"),
+        }
     }
 
     fn wait_for_logs(&self, expected: &str) -> String {
@@ -673,9 +800,28 @@ impl CoreSmoke {
             std::thread::sleep(Duration::from_millis(500));
         }
 
+        let host_listen = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(_) => format!(
+                "127.0.0.1:{port} is free on host (no listener — TSI publish likely never bound)"
+            ),
+            Err(error) => {
+                format!("127.0.0.1:{port} still occupied on host (listener or conflict): {error}")
+            }
+        };
+        let inspect = self.output(&["inspect", &self.name]);
+        let logs = self.output(&["logs", "--tail", "80", &self.name]);
+        let boot_diag = Self::read_box_boot_diag_tails(&inspect.stdout, 80);
         panic!(
-            "timeout waiting for TCP response {:?} on 127.0.0.1:{}\nlast response:\n{}\nlast error:\n{}",
-            expected, port, last_response, last_error
+            "timeout waiting for TCP response {:?} on 127.0.0.1:{}\nlast response:\n{}\nlast error:\n{}\nhost listen probe:\n{}\ninspect stdout:\n{}\ninspect stderr:\n{}\nlogs stdout:\n{}\nlogs stderr:\n{}\n{boot_diag}",
+            expected,
+            port,
+            last_response,
+            last_error,
+            host_listen,
+            inspect.stdout,
+            inspect.stderr,
+            logs.stdout,
+            logs.stderr
         );
     }
 }
@@ -870,12 +1016,19 @@ fn read_command_output(stdout_path: &Path, stderr_path: &Path) -> Result<(String
 }
 
 fn unused_tcp_port() -> u16 {
-    let listener =
-        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral loopback TCP port");
+    // Bind `0.0.0.0` so the probe matches Windows published-port workers
+    // (`windows_port_forward::bind_published_port`) and does not pick a port
+    // that is only free on loopback.
+    let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral TCP port");
     listener
         .local_addr()
         .expect("read ephemeral TCP port")
         .port()
+}
+
+fn host_tcp_port_occupied(port: u16) -> bool {
+    // Windows published-port worker binds `0.0.0.0:host`.
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
 }
 
 fn read_tcp_text(port: u16) -> std::io::Result<String> {
@@ -1351,6 +1504,27 @@ fn real_core_published_port_http_smoke() {
         "port output",
     );
 
+    // Host publish listener must appear before the long HTTP wait. A free port
+    // here means the Windows port-forward worker never bound (or exited).
+    {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            if host_tcp_port_occupied(host_port) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !host_tcp_port_occupied(host_port) {
+            let inspect = smoke.output(&["inspect", &smoke.name]);
+            let logs = smoke.output(&["logs", "--tail", "80", &smoke.name]);
+            let boot_diag = CoreSmoke::read_box_boot_diag_tails(&inspect.stdout, 80);
+            panic!(
+                "published host port {host_port} never became occupied after guest listen marker\ninspect stdout:\n{}\ninspect stderr:\n{}\nlogs stdout:\n{}\nlogs stderr:\n{}\n{boot_diag}",
+                inspect.stdout, inspect.stderr, logs.stdout, logs.stderr
+            );
+        }
+    }
+
     for request in 1..=2 {
         let response = smoke.wait_for_tcp_text(host_port, "core-smoke-port-ok");
         assert_contains(
@@ -1602,6 +1776,12 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
         "directory bind output",
     );
 
+    // WHPX can still hold BindFlt / partition state after a `--rm` :ro dir
+    // bind; the single-file case stages a fresh alias and raced under R24
+    // (iter 15 fail after 14 clean passes). Settle before the file bind.
+    #[cfg(target_os = "windows")]
+    std::thread::sleep(Duration::from_millis(2000));
+
     let single_file_mount = format!("{}:/etc/a3s-bind-test.txt:ro", single_file.display());
     let single_file_result = smoke.ok(&[
         "run",
@@ -1656,7 +1836,8 @@ fn real_core_writable_bind_mount_truncates_on_overwrite() {
         "writable-bind-trunc-ok",
         "writable bind trunc output",
     );
-    let host_after = std::fs::read_to_string(&marker).expect("read host marker after guest overwrite");
+    let host_after =
+        std::fs::read_to_string(&marker).expect("read host marker after guest overwrite");
     assert_eq!(
         host_after, "changed",
         "host bind must truncate on guest overwrite (ATOMIC_O_TRUNC); got {host_after:?}"

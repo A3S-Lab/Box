@@ -3,6 +3,7 @@
 //! Optionally signs the image after push using a cosign-compatible
 //! ECDSA P-256 private key (`--sign-key`).
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage;
@@ -29,17 +30,19 @@ pub struct PushArgs {
     pub sign_key: Option<String>,
 }
 
-pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: PushArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
     let images = store.list().await;
 
     // Look up the image in the local store
-    let stored = image_usage::resolve_stored_image(&images, &args.image)?.ok_or_else(|| {
-        format!(
-            "Image '{}' not found locally. Pull or build it first.",
-            args.image
-        )
-    })?;
+    let stored = image_usage::resolve_stored_image(&images, &args.image)
+        .map_err(BoxError::OciImageError)?
+        .ok_or_else(|| {
+            BoxError::OciImageError(format!(
+                "Image '{}' not found locally. Pull or build it first.",
+                args.image
+            ))
+        })?;
     let push_reference = push_reference_for_query(&args.image, &stored.reference)?;
     let reference = a3s_box_runtime::ImageReference::parse(&push_reference)?;
 
@@ -84,14 +87,14 @@ pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn push_reference_for_query(query: &str, resolved_reference: &str) -> Result<String, String> {
+fn push_reference_for_query(query: &str, resolved_reference: &str) -> Result<String, BoxError> {
     let query = query.trim();
     if image_usage::is_dangling_reference(query) {
         if image_usage::is_dangling_reference(resolved_reference) {
-            return Err(
+            return Err(BoxError::OciImageError(
                 "Cannot push a digest-only image reference. Tag it first with `a3s-box tag`."
                     .to_string(),
-            );
+            ));
         }
         return Ok(resolved_reference.to_string());
     }
@@ -159,9 +162,10 @@ mod tests {
 
     #[test]
     fn test_push_reference_rejects_digest_only_resolved_reference() {
-        let error = push_reference_for_query("sha256:abc", "sha256:abc").unwrap_err();
-
-        assert!(error.contains("Tag it first"));
+        assert!(matches!(
+            push_reference_for_query("sha256:abc", "sha256:abc"),
+            Err(BoxError::OciImageError(message)) if message.contains("Tag it first")
+        ));
     }
 
     #[test]

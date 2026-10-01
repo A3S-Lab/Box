@@ -89,6 +89,7 @@ impl FileLock {
 
         let lock_path = lock_path(target);
         if let Some(parent) = lock_path.parent() {
+            refuse_lock_parent(parent)?;
             std::fs::create_dir_all(parent)?;
         }
 
@@ -125,6 +126,7 @@ impl FileLock {
 
         let lock_path = lock_path(target);
         if let Some(parent) = lock_path.parent() {
+            refuse_lock_parent(parent)?;
             std::fs::create_dir_all(parent)?;
         }
         match std::fs::OpenOptions::new()
@@ -158,6 +160,17 @@ impl FileLock {
     pub(crate) fn try_acquire(_target: &Path) -> std::io::Result<Option<Self>> {
         Ok(Some(Self {}))
     }
+}
+
+#[cfg(windows)]
+fn refuse_lock_parent(parent: &Path) -> std::io::Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component);
+        crate::vm::refuse_directory_reparse(&prefix)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn lock_path(target: &Path) -> PathBuf {
@@ -218,5 +231,45 @@ mod tests {
         assert!(FileLock::try_acquire(&target).unwrap().is_none());
         drop(guard);
         assert!(FileLock::try_acquire(&target).unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn acquire_does_not_create_a_lock_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let target = link.join("networks.json");
+        let acquired = FileLock::acquire(&target);
+        let acquired_debug = match &acquired {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("networks.json.lock").exists(),
+            "file lock was created through the directory junction: {acquired_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

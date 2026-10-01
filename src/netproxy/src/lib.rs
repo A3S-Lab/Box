@@ -59,7 +59,7 @@ use device::{BridgePort, EgressGate, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
 pub use dns_local::NetworkDnsConfig;
-pub use egress::UntrustedEgressScope;
+pub use egress::{untrusted_egress_denied, UntrustedEgressScope};
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 pub use passt_bridge::spawn_inherited_passt_bridge;
 
@@ -91,9 +91,9 @@ const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Idle TCP state is eventually reclaimed even if one endpoint disappears.
 const TCP_IDLE_TIMEOUT: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(300);
 /// Idle UDP NAT associations are reclaimed when neither side has traffic.
-const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const UDP_IDLE_TIMEOUT: Duration = a3s_box_core::port::PUBLISHED_UDP_IDLE_TIMEOUT;
 /// Bound per published UDP port memory and host NAT slots.
-const MAX_UDP_ASSOCIATIONS: usize = 256;
+const MAX_UDP_ASSOCIATIONS: usize = a3s_box_core::port::PUBLISHED_UDP_MAX_ASSOCIATIONS;
 /// How often the proxy refreshes its stats file.
 const STATS_WRITE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -536,8 +536,9 @@ impl ProxyEngine {
             )));
         }
 
-        let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
-        let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 65536]);
+        let queue = a3s_box_core::port::PUBLISHED_UDP_ASSOCIATION_QUEUE;
+        let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; queue], vec![0u8; 65536]);
+        let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; queue], vec![0u8; 65536]);
         let mut socket = udp::Socket::new(rx, tx);
         let local_port = self.next_ephemeral_port();
         socket

@@ -138,7 +138,7 @@ pub async fn serve(
     addr: String,
     last_poll: std::sync::Arc<std::sync::atomic::AtomicU64>,
     stale_after_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), a3s_box_core::error::BoxError> {
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

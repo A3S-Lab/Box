@@ -288,6 +288,17 @@ pub async fn graceful_stop_via_guest(
 
     if let Some(box_dir) = socket_dir.parent() {
         let _ = a3s_box_runtime::finalize_box_terminal_rootfs_metadata(box_dir);
+        if let Some(volumes_dir) = box_dir.parent().and_then(|boxes| boxes.parent()) {
+            if let Err(error) = a3s_box_runtime::harvest_volume_posix_sidecars(
+                box_dir,
+                &volumes_dir.join("volumes"),
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to harvest Windows volume posix metadata after shim stop"
+                );
+            }
+        }
     }
     if let Err(error) = a3s_box_runtime::clear_windows_guest_stop_request(socket_dir) {
         tracing::warn!(

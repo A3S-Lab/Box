@@ -55,6 +55,8 @@ impl BoxLifecycleLock {
         const ERROR_SHARING_VIOLATION: i32 = 32;
         const ERROR_LOCK_VIOLATION: i32 = 33;
 
+        a3s_box_runtime::vm::refuse_directory_reparse(directory)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         std::fs::create_dir_all(directory)?;
         let path = directory.join(format!("{box_id}.lifecycle.lock"));
         loop {
@@ -102,7 +104,7 @@ pub async fn acquire_box_lifecycle_lock(box_id: &str) -> std::io::Result<BoxLife
 /// stop or metadata-write failure still fails closed.
 pub fn stage_box_terminal_rootfs_metadata(
     box_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), a3s_box_core::error::BoxError> {
     a3s_box_runtime::rootfs::stage_box_terminal_rootfs_metadata(box_dir)?;
     Ok(())
 }
@@ -249,5 +251,45 @@ mod tests {
         drop(first);
         acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         waiter.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_lock_does_not_create_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let locks = parent.join("locks");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            locks.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let acquired = BoxLifecycleLock::acquire_in(&locks, "box1");
+        let acquired_debug = acquired
+            .as_ref()
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "Ok".to_string());
+        assert!(
+            !outside.join("box1.lifecycle.lock").exists(),
+            "lifecycle lock was created through the directory junction: {acquired_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&locks)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }

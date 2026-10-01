@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use a3s_box_core::compose::ComposeConfig;
+use a3s_box_core::error::BoxError;
 use a3s_box_runtime::ComposeRuntimePlan;
 
 use super::{
@@ -19,7 +20,7 @@ pub(super) async fn execute_ps(
     project_name: &str,
     config: &ComposeConfig,
     args: ProjectServicesArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     // Present-tense service rows: same home-scoped observe/resume as `a3s-box ps`.
     let state =
         super::super::observe_inventory::refresh_default_home_after_inventory_observation().await?;
@@ -37,9 +38,9 @@ pub(super) async fn execute_ps(
 
     for service in &args.services {
         if !config.services.contains_key(service) {
-            return Err(
-                format!("Service '{service}' is not defined in project '{project_name}'.").into(),
-            );
+            return Err(BoxError::ConfigError(format!(
+                "Service '{service}' is not defined in project '{project_name}'."
+            )));
         }
     }
 
@@ -78,12 +79,8 @@ pub(super) async fn execute_ps(
 // ============================================================================
 
 /// `compose config` — Validate and display the parsed compose configuration.
-pub(super) fn execute_config(
-    project_name: &str,
-    config: ComposeConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_compose_restart_policies(&config)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+pub(super) fn execute_config(project_name: &str, config: ComposeConfig) -> Result<(), BoxError> {
+    validate_compose_restart_policies(&config)?;
     let project = ComposeRuntimePlan::new(project_name, config)?;
 
     println!("Project: {}", project_name);
@@ -131,7 +128,7 @@ pub(super) async fn execute_logs(
     project_name: &str,
     config: &ComposeConfig,
     logs_args: ComposeLogsArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     if !logs_args.services.is_empty() {
         super::operations::selected_service_names(config, &logs_args.services)?;
     }
@@ -161,12 +158,11 @@ pub(super) async fn execute_logs(
     };
 
     if targets.is_empty() && !logs_args.services.is_empty() {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Services '{}' were not found in project '{}'.",
             logs_args.services.join(", "),
             project_name
-        )
-        .into());
+        )));
     }
 
     for record in &targets {
@@ -182,8 +178,9 @@ pub(super) async fn execute_logs(
             continue;
         }
 
-        let content = std::fs::read_to_string(&log_path)
-            .map_err(|e| format!("Failed to read logs for {}: {}", svc_name, e))?;
+        let content = std::fs::read_to_string(&log_path).map_err(|error| {
+            super::super::io_error(format!("Failed to read logs for {svc_name}"), error)
+        })?;
 
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(logs_args.tail);

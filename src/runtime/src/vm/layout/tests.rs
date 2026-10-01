@@ -821,3 +821,37 @@ fn test_try_and_store_roundtrip() {
         "config_data"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn workspace_directory_rejects_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let outside = temp.path().join("outside");
+    let child = outside.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(child.join("secret.txt"), b"secret").unwrap();
+    let parent = temp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let host = link.join("child").join("new");
+
+    let error = resolve_workspace_directory(&host).unwrap_err().to_string();
+    assert!(
+        error.contains("symlink/reparse"),
+        "ancestor junction widened the workspace: {error}"
+    );
+    assert!(
+        !outside.join("child").join("new").exists(),
+        "workspace creation wrote through the ancestor junction"
+    );
+    assert_eq!(std::fs::read(child.join("secret.txt")).unwrap(), b"secret");
+}

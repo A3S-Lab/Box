@@ -344,7 +344,10 @@ pub(crate) fn hash_context_sources(context_dir: &Path, src_patterns: &[String]) 
         if !src_path.exists() {
             return None;
         }
-        if src_path.is_dir() {
+        let metadata = std::fs::symlink_metadata(&src_path).ok()?;
+        if metadata.file_type().is_symlink() {
+            files.push((PathBuf::from(src), src_path));
+        } else if metadata.is_dir() {
             collect_files(&src_path, &src_path, &mut files)?;
         } else {
             let rel = PathBuf::from(src);
@@ -357,7 +360,15 @@ pub(crate) fn hash_context_sources(context_dir: &Path, src_patterns: &[String]) 
 
     let mut hasher = Sha256::new();
     for (rel, full) in &files {
-        let bytes = std::fs::read(full).ok()?;
+        let metadata = std::fs::symlink_metadata(full).ok()?;
+        let bytes = if metadata.file_type().is_symlink() {
+            std::fs::read_link(full)
+                .ok()?
+                .into_os_string()
+                .into_encoded_bytes()
+        } else {
+            std::fs::read(full).ok()?
+        };
         hasher.update(rel.to_string_lossy().as_bytes());
         hasher.update(b"\0");
         hasher.update((bytes.len() as u64).to_le_bytes());
@@ -371,7 +382,10 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<(PathBuf, PathBuf)>)
     for entry in std::fs::read_dir(current).ok()? {
         let entry = entry.ok()?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        // A directory junction is both a directory and a symlink. Hash the link,
+        // not the files it points at.
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
             collect_files(root, &path, out)?;
         } else {
             let rel = path.strip_prefix(root).ok()?.to_path_buf();

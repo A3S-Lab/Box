@@ -2,12 +2,13 @@
 
 use std::io::Read;
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[derive(Args)]
 pub struct SdkBridgeArgs {}
 
-pub async fn execute(_args: SdkBridgeArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(_args: SdkBridgeArgs) -> Result<(), BoxError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let response = a3s_box_sdk::bridge::dispatch_json(&input).await;

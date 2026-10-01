@@ -23,6 +23,8 @@ pub fn guest_diff_baseline_required(box_dir: &Path) -> Result<bool> {
 
 /// Capture a rootfs tree while excluding runtime-owned control files.
 pub fn walk_rootfs(root: &Path) -> Result<HashMap<String, RootfsFileInfo>> {
+    #[cfg(windows)]
+    crate::vm::refuse_directory_reparse(root)?;
     let mut entries = HashMap::new();
     walk_recursive(root, root, &mut entries)?;
     Ok(entries)
@@ -566,5 +568,33 @@ mod tests {
         let entries = walk_rootfs(&rootfs).unwrap();
         assert!(entries.contains_key("/escape"));
         assert!(!entries.contains_key("/escape/secret"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn walk_rootfs_does_not_follow_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let link = directory.path().join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let walked = walk_rootfs(&link);
+        assert!(
+            walked
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "diff baseline followed a directory junction: {walked:?}"
+        );
     }
 }

@@ -120,6 +120,199 @@ pub fn remove_path_no_follow(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Recreate a directory junction without copying the target.
+///
+/// `Ok(false)` means `source` is not a mount-point junction. A junction does
+/// not need `SeCreateSymbolicLinkPrivilege`, so snapshot and rootfs copies
+/// keep the link instead of failing closed or walking into the target.
+pub fn recreate_directory_junction(source: &Path, destination: &Path) -> io::Result<bool> {
+    if !is_mount_point_junction(source)? {
+        return Ok(false);
+    }
+    let target = std::fs::read_link(source)?;
+    remove_directory_junction(destination)?;
+    create_mount_point_junction(destination, &target)?;
+    Ok(true)
+}
+
+/// Remove a destination mount-point junction without deleting its target.
+///
+/// `Ok(false)` means `path` is missing or is not a mount-point junction.
+/// Directory copies call this before `create_dir_all`, which otherwise follows
+/// the junction and writes into the target.
+pub fn remove_directory_junction(path: &Path) -> io::Result<bool> {
+    match is_mount_point_junction(path) {
+        Ok(false) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(true) => {
+            std::fs::remove_dir(path)?;
+            Ok(true)
+        }
+    }
+}
+
+fn is_mount_point_junction(path: &Path) -> io::Result<bool> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS,
+    };
+
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path)?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileAttributeTagInfo,
+            &mut info as *mut FILE_ATTRIBUTE_TAG_INFO as *mut _,
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+}
+
+fn create_mount_point_junction(link: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    const FSCTL_SET_REPARSE_POINT: u32 = 589988;
+
+    let wide = target.as_os_str().encode_wide().collect::<Vec<_>>();
+    let print = strip_verbatim_prefix(&wide);
+    if print.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory junction target is empty",
+        ));
+    }
+    let mut substitute = vec![
+        u16::from(b'\\'),
+        u16::from(b'?'),
+        u16::from(b'?'),
+        u16::from(b'\\'),
+    ];
+    if print.len() >= 2 && print[0] == u16::from(b'\\') && print[1] == u16::from(b'\\') {
+        substitute.extend([
+            u16::from(b'U'),
+            u16::from(b'N'),
+            u16::from(b'C'),
+            u16::from(b'\\'),
+        ]);
+        substitute.extend_from_slice(&print[2..]);
+    } else {
+        substitute.extend_from_slice(print);
+    }
+    let mut print_name = print.to_vec();
+    substitute.push(0);
+    print_name.push(0);
+    let substitute_len = u16::try_from((substitute.len() - 1) * 2).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory junction target is too long",
+        )
+    })?;
+    let print_len = u16::try_from((print_name.len() - 1) * 2).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory junction target is too long",
+        )
+    })?;
+    let print_offset = u16::try_from(substitute.len() * 2).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory junction target is too long",
+        )
+    })?;
+    let data_len = print_offset
+        .checked_add(u16::try_from(print_name.len() * 2).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory junction target is too long",
+            )
+        })?)
+        .and_then(|len| len.checked_add(8))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory junction target is too long",
+            )
+        })?;
+
+    let mut buffer = Vec::with_capacity(8 + usize::from(data_len));
+    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&data_len.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&substitute_len.to_le_bytes());
+    buffer.extend_from_slice(&print_offset.to_le_bytes());
+    buffer.extend_from_slice(&print_len.to_le_bytes());
+    for unit in substitute.into_iter().chain(print_name) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    std::fs::create_dir(link)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = match options.open(link) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = std::fs::remove_dir(link);
+            return Err(error);
+        }
+    };
+    let mut returned = 0u32;
+    let set = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr() as *const _,
+            buffer.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    drop(file);
+    if set == 0 {
+        let error = io::Error::last_os_error();
+        let _ = std::fs::remove_dir(link);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn strip_verbatim_prefix(wide: &[u16]) -> &[u16] {
+    if wide.len() >= 4
+        && wide[0] == u16::from(b'\\')
+        && wide[1] == u16::from(b'\\')
+        && wide[2] == u16::from(b'?')
+        && wide[3] == u16::from(b'\\')
+    {
+        &wide[4..]
+    } else {
+        wide
+    }
+}
+
 /// Replace an untrusted marker/stream path with a new regular file.
 ///
 /// Removal never follows a reparse point and `create_new` makes the final create

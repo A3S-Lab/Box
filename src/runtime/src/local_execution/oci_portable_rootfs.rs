@@ -35,6 +35,11 @@ const RUNTIME_INTERNAL_ROOT_ENTRIES: &[&[u8]] = &[
     b".a3s_rootfs_metadata_v1.json",
     b".a3s_rootfs_metadata_v1.json.tmp",
     b".a3s_rootfs_metadata_v1.previous.json",
+    b".a3s_volume_metadata_v1.json",
+    b".a3s_volume_metadata_v1.json.tmp",
+    b".a3s_volume_metadata_v1.pending.json",
+    b".a3s_volume_metadata_v1.pending.json.tmp",
+    b".a3s_volume_metadata_v1.publish.json.tmp",
     b".a3s-oci-rootfs-metadata.v1.json",
     b".a3s-oci-rootfs-metadata.v1.json.tmp",
     b"guest-init.stderr.log",
@@ -298,6 +303,21 @@ fn validate_link_target(kind: PortableRootfsEntryKind, encoded: Option<&str>) ->
 }
 
 fn validate_plain_directory(path: &Path, label: &str) -> Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if metadata_is_reparse_point(&metadata) {
+            return Err(metadata_error(format!(
+                "{label} is not a plain directory: {}",
+                path.display()
+            )));
+        }
+    }
     let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
     if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
         return Err(metadata_error(format!(
@@ -751,5 +771,41 @@ mod tests {
             .join("rootfs")
             .join(PORTABLE_ROOTFS_METADATA_FILE)
             .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_rootfs_rejects_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let rootfs = outside.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        write_source(&rootfs, vec![entry(b".", RootfsEntryKind::Directory)]);
+        std::fs::write(rootfs.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = publish_portable_rootfs_metadata(&link.join("rootfs"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("plain directory"),
+            "ancestor junction admitted the portable rootfs: {error}"
+        );
+        assert!(rootfs
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .is_file());
+        assert!(!rootfs.join(PORTABLE_ROOTFS_METADATA_FILE).exists());
+        assert_eq!(std::fs::read(rootfs.join("secret.txt")).unwrap(), b"secret");
     }
 }

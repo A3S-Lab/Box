@@ -151,6 +151,17 @@ impl VmController {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
             return;
         };
+        #[cfg(windows)]
+        if let Err(error) = crate::vm::refuse_directory_reparse(log_dir) {
+            tracing::warn!(
+                box_id = %spec.box_id,
+                path = %log_dir.display(),
+                error = %error,
+                "Refusing shim log directory"
+            );
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            return;
+        }
         if let Err(error) = std::fs::create_dir_all(log_dir) {
             tracing::warn!(
                 box_id = %spec.box_id,
@@ -531,6 +542,19 @@ impl VmmProvider for VmController {
             }
             #[cfg(not(unix))]
             {
+                let mut socket_prefix = PathBuf::new();
+                for component in socket_dir.components() {
+                    socket_prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&socket_prefix).map_err(|error| {
+                        BoxError::BoxBootError {
+                            message: format!(
+                                "Refusing socket directory {}: {error}",
+                                socket_dir.display()
+                            ),
+                            hint: None,
+                        }
+                    })?;
+                }
                 std::fs::create_dir_all(socket_dir).map_err(|e| BoxError::BoxBootError {
                     message: format!(
                         "Failed to create socket directory {}: {}",
@@ -830,6 +854,123 @@ exec /bin/sleep 30
                 .trim(),
             "fresh-stderr"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn configure_shim_stdio_does_not_write_through_a_log_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let logs = parent.join("logs");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            logs.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let controller = VmController {
+            shim_path: PathBuf::from("unused"),
+        };
+        let spec = InstanceSpec {
+            box_id: "box-junction-stdio".to_string(),
+            console_output: Some(logs.join("console.log")),
+            ..Default::default()
+        };
+        let mut cmd = Command::new("cmd.exe");
+        controller.configure_shim_stdio(&mut cmd, &spec);
+
+        assert!(
+            !outside.join("shim.stdout.log").exists(),
+            "shim stdout was created through the log directory junction"
+        );
+        assert!(
+            !outside.join("shim.stderr.log").exists(),
+            "shim stderr was created through the log directory junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&logs)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn start_does_not_create_a_socket_directory_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let controller = VmController {
+            shim_path: temp.path().join("missing-shim.exe"),
+        };
+        let socket_dir = link.join("sockets");
+        let spec = InstanceSpec {
+            box_id: "box-socket-junction".to_string(),
+            exec_socket_path: socket_dir.join("exec.sock"),
+            ..Default::default()
+        };
+        let started = controller.start(&spec).await;
+        let started_debug = match &started {
+            Ok(_) => "Ok".to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !outside.join("sockets").exists(),
+            "socket directory was created through the ancestor junction: {started_debug}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn start_creates_a_missing_socket_directory_before_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = VmController {
+            shim_path: temp.path().join("missing-shim.exe"),
+        };
+        let socket_dir = temp.path().join("sockets");
+        let spec = InstanceSpec {
+            box_id: "box-socket-create".to_string(),
+            exec_socket_path: socket_dir.join("exec.sock"),
+            ..Default::default()
+        };
+        let started = controller.start(&spec).await;
+        assert!(started.is_err());
+        let metadata = std::fs::symlink_metadata(&socket_dir).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
     }
 
     #[cfg(unix)]

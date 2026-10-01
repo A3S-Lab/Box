@@ -3,6 +3,8 @@
 use clap::Args;
 use serde::Serialize;
 
+use a3s_box_core::error::BoxError;
+
 use crate::resolve::{self, ResolveError};
 use crate::state::{BoxRecord, StateFile};
 use crate::status;
@@ -15,7 +17,7 @@ pub struct InspectArgs {
     pub r#box: String,
 }
 
-pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: InspectArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
 
     // `docker inspect` is polymorphic: try a container first, then fall back to
@@ -38,7 +40,10 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
                     println!("{}", inspect_json(&record)?);
                     Ok(())
                 }
-                None => Err(format!("No such container: {}", args.r#box).into()),
+                None => Err(BoxError::StateError(format!(
+                    "No such container: {}",
+                    args.r#box
+                ))),
             }
         }
         Err(ResolveError::NotFound(_)) => {
@@ -47,10 +52,13 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
                     println!("{json}");
                     Ok(())
                 }
-                None => Err(format!("No such container or image: {}", args.r#box).into()),
+                None => Err(BoxError::StateError(format!(
+                    "No such container or image: {}",
+                    args.r#box
+                ))),
             }
         }
-        Err(other) => Err(other.into()),
+        Err(other) => Err(super::IntoBoxError::into_box_error(other)),
     }
 }
 
@@ -149,5 +157,20 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&inspect_json(&failed).unwrap()).unwrap();
         assert!(parsed[0]["State"]["ExitCode"].is_null());
+    }
+
+    #[test]
+    fn ambiguous_inspect_target_is_a_state_error() {
+        let error = super::super::IntoBoxError::into_box_error(ResolveError::Ambiguous {
+            query: "ab".to_string(),
+            count: 2,
+        });
+        match error {
+            BoxError::StateError(message) => {
+                assert!(message.contains("Ambiguous"), "{message}");
+                assert!(message.contains("ab"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 }

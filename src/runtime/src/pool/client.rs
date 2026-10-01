@@ -593,4 +593,229 @@ mod tests {
 
         server.join().unwrap();
     }
+
+    use super::*;
+
+    #[test]
+    fn test_run_request_response_roundtrip() {
+        let req = PoolRunRequest {
+            image: Some("alpine:latest".into()),
+            user: Some("1000".into()),
+            workdir: Some("/tmp".into()),
+            rootfs: None,
+            env: vec!["FOO=bar".into()],
+            volumes: vec!["/host:/work:ro".into()],
+            vcpus: Some(4),
+            memory_mb: Some(2048),
+            exec: false,
+            timeout_ns: None,
+            cmd: vec!["echo".into(), "hi".into()],
+        };
+        let bytes = serde_json::to_vec(&req).unwrap();
+        let parsed: PoolRunRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.cmd, vec!["echo", "hi"]);
+        assert_eq!(parsed.image.as_deref(), Some("alpine:latest"));
+        assert_eq!(parsed.user.as_deref(), Some("1000"));
+        assert_eq!(parsed.workdir.as_deref(), Some("/tmp"));
+        assert_eq!(parsed.env, vec!["FOO=bar"]);
+        assert_eq!(parsed.volumes, vec!["/host:/work:ro"]);
+        assert_eq!(parsed.vcpus, Some(4));
+        assert_eq!(parsed.memory_mb, Some(2048));
+
+        // image/user/workdir/env are optional on the wire (older clients).
+        let no_img: PoolRunRequest = serde_json::from_slice(br#"{"cmd":["ls"]}"#).unwrap();
+        assert!(no_img.image.is_none());
+        assert!(no_img.user.is_none() && no_img.workdir.is_none() && no_img.env.is_empty());
+        assert!(no_img.volumes.is_empty());
+        assert!(no_img.vcpus.is_none());
+        assert!(no_img.memory_mb.is_none());
+
+        let resp = PoolRunResponse {
+            stdout: b"hi\n".to_vec(),
+            stderr: vec![],
+            exit_code: 0,
+            error: None,
+        };
+        let rb = serde_json::to_vec(&resp).unwrap();
+        let rp: PoolRunResponse = serde_json::from_slice(&rb).unwrap();
+        assert_eq!(rp.stdout, b"hi\n");
+        assert_eq!(rp.exit_code, 0);
+        assert!(rp.error.is_none());
+    }
+
+    #[test]
+    fn test_request_envelope_tagging() {
+        // Run carries an op tag + the flattened PoolRunRequest; Status is a bare tag.
+        let run = serde_json::to_string(&PoolRequest::Run(PoolRunRequest {
+            image: Some("alpine".into()),
+            user: None,
+            workdir: None,
+            rootfs: None,
+            env: vec![],
+            volumes: vec![],
+            vcpus: None,
+            memory_mb: None,
+            exec: false,
+            timeout_ns: None,
+            cmd: vec!["echo".into(), "hi".into()],
+        }))
+        .unwrap();
+        assert!(run.contains(r#""op":"run""#));
+        assert!(run.contains(r#""cmd":["echo","hi"]"#));
+
+        let status = serde_json::to_string(&PoolRequest::Status).unwrap();
+        assert_eq!(status, r#"{"op":"status"}"#);
+
+        let stop = serde_json::to_string(&PoolRequest::Stop).unwrap();
+        assert_eq!(stop, r#"{"op":"stop"}"#);
+
+        let lease = serde_json::to_string(&PoolRequest::Lease(PoolLeaseRequest {
+            image: Some("alpine".into()),
+            volumes: vec!["/host/rootfs:/run/a3s/build-rootfs:rw".into()],
+            vcpus: Some(2),
+            memory_mb: Some(512),
+        }))
+        .unwrap();
+        assert!(lease.contains(r#""op":"lease""#));
+        assert!(lease.contains("/run/a3s/build-rootfs"));
+
+        let exec = serde_json::to_string(&PoolRequest::Exec(PoolLeaseExecRequest {
+            lease_id: "lease-1".into(),
+            cmd: vec!["/bin/sh".into(), "-c".into(), "echo hi".into()],
+            timeout_ns: Some(5_000_000_000),
+            env: vec!["FOO=bar".into()],
+            working_dir: Some("/".into()),
+            rootfs: Some("/run/a3s/build-rootfs".into()),
+            stdin: None,
+            user: None,
+            request_id: Some("cli-pool-stable-1".into()),
+        }))
+        .unwrap();
+        assert!(exec.contains(r#""op":"exec""#));
+        assert!(exec.contains(r#""lease_id":"lease-1""#));
+        assert!(exec.contains(r#""rootfs":"/run/a3s/build-rootfs""#));
+        assert!(exec.contains(r#""request_id":"cli-pool-stable-1""#));
+
+        let exec_omit: PoolLeaseExecRequest =
+            serde_json::from_str(r#"{"lease_id":"lease-1","cmd":["true"]}"#).unwrap();
+        assert!(exec_omit.request_id.is_none());
+
+        // PoolStatusResponse round-trips.
+        let sr = PoolStatusResponse {
+            images: vec![PoolImageStat {
+                image: "alpine".into(),
+                pool: "alpine".into(),
+                max: 4,
+                idle: 2,
+                active: 1,
+                leased: 1,
+                total_created: 5,
+                total_acquired: 3,
+                total_evicted: 1,
+            }],
+        };
+        let parsed: PoolStatusResponse =
+            serde_json::from_slice(&serde_json::to_vec(&sr).unwrap()).unwrap();
+        assert_eq!(parsed.images[0].image, "alpine");
+        assert_eq!(parsed.images[0].idle, 2);
+        assert_eq!(parsed.images[0].max, 4);
+        assert_eq!(parsed.images[0].active, 1);
+        assert_eq!(parsed.images[0].leased, 1);
+
+        let legacy: PoolStatusResponse = serde_json::from_str(
+            r#"{"images":[{"image":"alpine","pool":"alpine","idle":2,"total_created":5,"total_acquired":3,"total_evicted":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.images[0].max, 0);
+        assert_eq!(legacy.images[0].active, 0);
+        assert_eq!(legacy.images[0].leased, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_frame_roundtrip() {
+        // write_frame then read_frame must return the exact bytes.
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let payload = serde_json::to_vec(&PoolRunRequest {
+            image: None,
+            user: None,
+            workdir: None,
+            rootfs: None,
+            env: vec![],
+            volumes: vec![],
+            vcpus: None,
+            memory_mb: None,
+            exec: false,
+            timeout_ns: None,
+            cmd: vec!["echo".into(), "hi there".into()],
+        })
+        .unwrap();
+        write_frame(&mut a, &payload).await.unwrap();
+        let got = read_frame(&mut b).await.unwrap();
+        let parsed: PoolRunRequest = serde_json::from_slice(&got).unwrap();
+        assert_eq!(parsed.cmd, vec!["echo", "hi there"]);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_socket_request_response_protocol() {
+        // Exercise the full client/server wire protocol over a real Unix socket
+        // (the exact framing `serve` and `pool run` use), with a stub server
+        // standing in for the VM pool's acquire+exec.
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pool.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let req: PoolRequest =
+                serde_json::from_slice(&read_frame(&mut s).await.unwrap()).unwrap();
+            let PoolRequest::Run(req) = req else {
+                panic!("expected run request");
+            };
+            let resp = PoolRunResponse {
+                stdout: format!("ran {:?}", req.cmd).into_bytes(),
+                stderr: vec![],
+                exit_code: 0,
+                error: None,
+            };
+            write_frame(&mut s, &serde_json::to_vec(&resp).unwrap())
+                .await
+                .unwrap();
+        });
+
+        let output = run_client(PoolClientRun {
+            socket: sock.display().to_string(),
+            image: Some("alpine:latest".into()),
+            user: None,
+            workdir: None,
+            rootfs: None,
+            env: vec![],
+            volumes: vec![],
+            vcpus: 2,
+            memory_mb: 512,
+            exec: false,
+            timeout_ns: None,
+            cmd: vec!["ls".into(), "-la".into()],
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("ls"));
+        server.await.unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn test_read_frame_truncated_errors() {
+        // A truncated stream must error, not hang or panic.
+        use tokio::io::AsyncWriteExt;
+        let (mut a, mut b) = tokio::io::duplex(64);
+        a.write_all(&[1u8, 0]).await.unwrap(); // partial 4-byte length prefix
+        drop(a);
+        assert!(read_frame(&mut b).await.is_err());
+    }
 }

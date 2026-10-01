@@ -20,7 +20,6 @@ use a3s_box_core::rootfs_metadata::{
     IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
 };
 use a3s_box_core::snapshot::SnapshotMetadata;
-use a3s_box_core::SnapshotStoreBackend;
 
 use crate::file_lock::FileLock;
 
@@ -411,36 +410,6 @@ impl SnapshotStore {
 
 fn normalize_snapshot_reference(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
-}
-
-impl SnapshotStoreBackend for SnapshotStore {
-    fn save(&self, metadata: SnapshotMetadata, rootfs_source: &Path) -> Result<SnapshotMetadata> {
-        self.save(metadata, rootfs_source)
-    }
-
-    fn get(&self, id: &str) -> Result<Option<SnapshotMetadata>> {
-        self.get(id)
-    }
-
-    fn list(&self) -> Result<Vec<SnapshotMetadata>> {
-        self.list()
-    }
-
-    fn delete(&self, id: &str) -> Result<bool> {
-        self.delete(id)
-    }
-
-    fn count(&self) -> Result<usize> {
-        self.count()
-    }
-
-    fn total_size(&self) -> Result<u64> {
-        self.total_size()
-    }
-
-    fn prune(&self, max_count: usize, max_bytes: u64) -> Result<Vec<String>> {
-        self.prune(max_count, max_bytes)
-    }
 }
 
 #[cfg(test)]

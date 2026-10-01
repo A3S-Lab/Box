@@ -164,6 +164,7 @@ impl VmManager {
         box_id: &str,
     ) -> Result<FsMount> {
         let host_path = volume.host_path.clone();
+        refuse_existing_symlink_or_reparse_prefixes(&host_path, "Volume host path")?;
         let managed_secret_root = managed_secret_root.filter(|root| host_path.starts_with(root));
         if !host_path.exists() {
             if managed_secret_root.is_some() {
@@ -195,7 +196,8 @@ impl VmManager {
         } else {
             // Fail closed on symlink/reparse host sources before canonicalize
             // follows them. Windows junctions and reparse points must not widen
-            // a bind or named-volume share outside the operator-stated path;
+            // a bind or named-volume share outside the operator-stated path, including
+            // when the junction is an ancestor of that path;
             // inventing POSIX ownership/mode on virtio-fs remains out of scope.
             refuse_symlink_or_reparse_volume_source(&host_path)?;
         }
@@ -391,10 +393,11 @@ impl VmManager {
     }
 }
 
-/// Reject symlink / Windows reparse host sources for ordinary bind and named
-/// volume shares. Callers must inspect the leaf with `symlink_metadata` before
-/// `canonicalize` follows it.
-fn refuse_symlink_or_reparse_volume_source(host_path: &Path) -> Result<()> {
+/// Reject symlink / Windows reparse host sources, including an ancestor of the
+/// path, for ordinary bind and named volume shares. Callers must inspect every
+/// existing component with `symlink_metadata` before `canonicalize` follows it.
+pub(crate) fn refuse_symlink_or_reparse_volume_source(host_path: &Path) -> Result<()> {
+    refuse_existing_symlink_or_reparse_prefixes(host_path, "Volume host path")?;
     let metadata = std::fs::symlink_metadata(host_path).map_err(BoxError::IoError)?;
     if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
         return Err(BoxError::ConfigError(format!(
@@ -407,6 +410,31 @@ fn refuse_symlink_or_reparse_volume_source(host_path: &Path) -> Result<()> {
             "Volume host path {} must be a plain file or directory",
             host_path.display()
         )));
+    }
+    Ok(())
+}
+
+/// Refuse a symlink or reparse point on any component that already exists.
+/// A missing leaf is left for the caller, so directory creation cannot follow
+/// an ancestor junction.
+pub(crate) fn refuse_existing_symlink_or_reparse_prefixes(
+    host_path: &Path,
+    label: &str,
+) -> Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    for component in host_path.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(BoxError::ConfigError(format!(
+                "{label} {} must be a plain file or directory (symlink/reparse sources are refused)",
+                host_path.display()
+            )));
+        }
     }
     Ok(())
 }

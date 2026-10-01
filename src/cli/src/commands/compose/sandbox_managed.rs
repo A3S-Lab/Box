@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use a3s_box_core::config::BoxConfig;
+use a3s_box_core::error::BoxError;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
     parse_port_mapping, sandbox_named_bridge_opt_in_enabled, CreateExecutionRequest, ExecutionId,
@@ -23,32 +24,29 @@ use super::lifecycle::ServiceBox;
 use super::secrets::ComposeSecretLease;
 
 /// Reject Compose features that SandboxViaOci cannot honor yet.
-pub(super) fn preflight_sandbox_compose(
-    project: &ComposeRuntimePlan,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn preflight_sandbox_compose(project: &ComposeRuntimePlan) -> Result<(), BoxError> {
     let bridge_opt_in = sandbox_named_bridge_opt_in_enabled();
     if !project.config.networks.is_empty() && !bridge_opt_in {
-        return Err(format!(
+        return Err(BoxError::ConfigError(format!(
             "Compose --isolation sandbox named bridge networks require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root)"
-        )
-        .into());
+        )));
     }
     for service_name in &project.service_order {
         let service = project.config.services.get(service_name).ok_or_else(|| {
-            format!("Service '{service_name}' disappeared from the resolved Compose project")
+            BoxError::StateError(format!(
+                "Service '{service_name}' disappeared from the resolved Compose project"
+            ))
         })?;
         if !service.networks.names().is_empty() && !bridge_opt_in {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "Compose --isolation sandbox named networks on service '{service_name}' require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root)"
-            )
-            .into());
+            )));
         }
         if !service.ports.is_empty() {
             if !bridge_opt_in {
-                return Err(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Compose --isolation sandbox published ports on service '{service_name}' require {OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV}=1 (matched root) with Bridge"
-                )
-                .into());
+                )));
             }
             validate_sandbox_compose_published_ports(service_name, &service.ports)?;
         }
@@ -59,18 +57,17 @@ pub(super) fn preflight_sandbox_compose(
 fn validate_sandbox_compose_published_ports(
     service_name: &str,
     ports: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     for entry in ports {
         let mapping = parse_port_mapping(entry).map_err(|error| {
-            format!(
+            BoxError::ConfigError(format!(
                 "Compose --isolation sandbox published port on service '{service_name}': {error}"
-            )
+            ))
         })?;
         if mapping.host_port == 0 {
-            return Err(format!(
+            return Err(BoxError::ConfigError(format!(
                 "Compose --isolation sandbox published ports on service '{service_name}' reject host_port=0 auto-assign in '{entry}'"
-            )
-            .into());
+            )));
         }
     }
     Ok(())
@@ -112,7 +109,7 @@ pub(super) struct SandboxServiceBootRequest<'a> {
 /// Create and start one Compose service through the configured local execution manager.
 pub(super) async fn boot_sandbox_service(
     request: SandboxServiceBootRequest<'_>,
-) -> Result<BoxRecord, Box<dyn std::error::Error>> {
+) -> Result<BoxRecord, BoxError> {
     let SandboxServiceBootRequest {
         project_name,
         svc_name,
@@ -127,10 +124,14 @@ pub(super) async fn boot_sandbox_service(
     } = request;
     let home = a3s_box_core::dirs_home();
     let manager = super::super::configured_local_execution_manager(&home).await?;
-    manager.preflight_isolation(box_config.isolation).await?;
+    manager
+        .preflight_isolation(box_config.isolation)
+        .await
+        .map_err(super::super::IntoBoxError::into_box_error)?;
 
     let box_name = format!("{project_name}-{svc_name}");
-    let operation_id = OperationId::new(format!("compose-sandbox-{}", uuid::Uuid::new_v4()))?;
+    let operation_id = OperationId::new(format!("compose-sandbox-{}", uuid::Uuid::new_v4()))
+        .map_err(super::super::IntoBoxError::into_box_error)?;
     let create_request = CreateExecutionRequest {
         external_sandbox_id: operation_id.as_str().to_string(),
         config: box_config,
@@ -158,7 +159,10 @@ pub(super) async fn boot_sandbox_service(
         rootfs_snapshot_id: None,
     };
 
-    let reservation = manager.create(create_request, &operation_id).await?;
+    let reservation = manager
+        .create(create_request, &operation_id)
+        .await
+        .map_err(super::super::IntoBoxError::into_box_error)?;
     let execution_id = reservation.execution_id.clone();
     if let Err(error) = manager.start(&execution_id, reservation.generation).await {
         // Prefer surfacing remove failure when start already failed — a partial
@@ -167,13 +171,12 @@ pub(super) async fn boot_sandbox_service(
             .remove_execution(&execution_id, reservation.generation)
             .await
         {
-            Ok(_) => {
-                format!("Failed to start Compose sandbox service '{svc_name}': {error}").into()
-            }
-            Err(cleanup) => format!(
+            Ok(_) => BoxError::StateError(format!(
+                "Failed to start Compose sandbox service '{svc_name}': {error}"
+            )),
+            Err(cleanup) => BoxError::StateError(format!(
                 "Failed to start Compose sandbox service '{svc_name}': {error}; cleanup also failed: {cleanup}"
-            )
-            .into(),
+            )),
         });
     }
 
@@ -182,14 +185,14 @@ pub(super) async fn boot_sandbox_service(
         .find_by_id(&box_id)
         .cloned()
         .ok_or_else(|| {
-            format!("managed Compose sandbox service {box_id} disappeared after startup").into()
+            BoxError::StateError(format!(
+                "managed Compose sandbox service {box_id} disappeared after startup"
+            ))
         })
 }
 
 /// Tear down a managed Compose service through LocalExecutionManager when possible.
-pub(super) async fn teardown_managed_service(
-    service: &ServiceBox,
-) -> Result<bool, Box<dyn std::error::Error>> {
+pub(super) async fn teardown_managed_service(service: &ServiceBox) -> Result<bool, BoxError> {
     let Some(record) = StateFile::load_readonly()?
         .find_by_id(&service.box_id)
         .cloned()
@@ -200,12 +203,16 @@ pub(super) async fn teardown_managed_service(
         return Ok(false);
     };
     let generation = metadata.generation;
-    let state = record
-        .managed_state()?
-        .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+    let state = record.managed_state()?.ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed lifecycle metadata",
+            record.name
+        ))
+    })?;
     let home = a3s_box_core::dirs_home();
     let manager = super::super::configured_local_execution_manager(&home).await?;
-    let execution_id = ExecutionId::new(record.id.clone())?;
+    let execution_id =
+        ExecutionId::new(record.id.clone()).map_err(super::super::IntoBoxError::into_box_error)?;
     let terminate = matches!(
         state,
         ManagedExecutionState::Running
@@ -224,21 +231,25 @@ pub(super) async fn teardown_managed_service(
                     timeout_secs: Some(0),
                 },
             )
-            .await?;
+            .await
+            .map_err(super::super::IntoBoxError::into_box_error)?;
     }
-    manager.remove_execution(&execution_id, generation).await?;
+    manager
+        .remove_execution(&execution_id, generation)
+        .await
+        .map_err(super::super::IntoBoxError::into_box_error)?;
     Ok(true)
 }
 
-pub(super) fn execution_restart_policy(
-    policy: &str,
-) -> Result<ExecutionRestartPolicy, Box<dyn std::error::Error>> {
+pub(super) fn execution_restart_policy(policy: &str) -> Result<ExecutionRestartPolicy, BoxError> {
     match policy {
         "no" => Ok(ExecutionRestartPolicy::No),
         "always" => Ok(ExecutionRestartPolicy::Always),
         "on-failure" => Ok(ExecutionRestartPolicy::OnFailure),
         "unless-stopped" => Ok(ExecutionRestartPolicy::UnlessStopped),
-        other => Err(format!("Invalid normalized restart policy: {other}").into()),
+        other => Err(BoxError::ConfigError(format!(
+            "Invalid normalized restart policy: {other}"
+        ))),
     }
 }
 
@@ -336,8 +347,10 @@ mod tests {
             networks: HashMap::new(),
         };
         let project = ComposeRuntimePlan::new("demo", config).unwrap();
-        let error = preflight_sandbox_compose(&project).unwrap_err();
-        assert!(error.to_string().contains("host_port=0"), "{error}");
+        let Err(BoxError::ConfigError(message)) = preflight_sandbox_compose(&project) else {
+            panic!("host_port=0 must be a configuration error");
+        };
+        assert!(message.contains("host_port=0"), "{message}");
         std::env::remove_var(OCI_NATIVE_KEEP_NETWORK_DEVICE_AUTHORITY_ENV);
     }
 

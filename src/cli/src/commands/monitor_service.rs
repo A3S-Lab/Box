@@ -7,6 +7,8 @@
 //! service (systemd `--user` on Linux, a launchd LaunchAgent on macOS) that the
 //! OS keeps running and restarts on crash — no root required.
 
+use a3s_box_core::error::BoxError;
+
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::path::{Path, PathBuf};
 
@@ -100,17 +102,17 @@ fn launchd_plist_path() -> PathBuf {
 }
 
 /// Install and enable the monitor as a supervised per-user service.
-pub fn install(interval: u64) -> Result<(), Box<dyn std::error::Error>> {
+pub fn install(interval: u64) -> Result<(), BoxError> {
     install_impl(interval)
 }
 
 /// Disable and remove the installed monitor service.
-pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
+pub fn uninstall() -> Result<(), BoxError> {
     uninstall_impl()
 }
 
 #[cfg(target_os = "linux")]
-fn install_impl(interval: u64) -> Result<(), Box<dyn std::error::Error>> {
+fn install_impl(interval: u64) -> Result<(), BoxError> {
     let exe = std::env::current_exe()?;
     let path = systemd_unit_path();
     if let Some(parent) = path.parent() {
@@ -137,7 +139,7 @@ fn install_impl(interval: u64) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_impl(interval: u64) -> Result<(), Box<dyn std::error::Error>> {
+fn install_impl(interval: u64) -> Result<(), BoxError> {
     let exe = std::env::current_exe()?;
     let path = launchd_plist_path();
     if let Some(parent) = path.parent() {
@@ -166,12 +168,14 @@ fn install_impl(interval: u64) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn install_impl(_interval: u64) -> Result<(), Box<dyn std::error::Error>> {
-    Err("monitor --install is only supported on Linux (systemd) and macOS (launchd)".into())
+fn install_impl(_interval: u64) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        "monitor --install is only supported on Linux (systemd) and macOS (launchd)".to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
-fn uninstall_impl() -> Result<(), Box<dyn std::error::Error>> {
+fn uninstall_impl() -> Result<(), BoxError> {
     let _ = run_quiet("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]);
     let path = systemd_unit_path();
     if path.exists() {
@@ -183,7 +187,7 @@ fn uninstall_impl() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "macos")]
-fn uninstall_impl() -> Result<(), Box<dyn std::error::Error>> {
+fn uninstall_impl() -> Result<(), BoxError> {
     let path = launchd_plist_path();
     let _ = run_quiet("launchctl", &["unload", &path.to_string_lossy()]);
     if path.exists() {
@@ -194,8 +198,10 @@ fn uninstall_impl() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn uninstall_impl() -> Result<(), Box<dyn std::error::Error>> {
-    Err("monitor --uninstall is only supported on Linux and macOS".into())
+fn uninstall_impl() -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        "monitor --uninstall is only supported on Linux and macOS".to_string(),
+    ))
 }
 
 /// Run a command, returning true on success. Output is suppressed; failures are
@@ -214,6 +220,18 @@ fn run_quiet(cmd: &str, args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::error::BoxError;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_monitor_install_is_a_configuration_error() {
+        match install(5).unwrap_err() {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("only supported"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
 
     #[test]
     fn systemd_unit_has_execstart_and_restart() {

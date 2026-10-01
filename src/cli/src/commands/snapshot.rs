@@ -2,6 +2,7 @@
 //!
 //! Provides `a3s-box snapshot create/restore/ls/rm/inspect` commands.
 
+use a3s_box_core::error::BoxError;
 use clap::{Parser, Subcommand};
 
 /// Manage VM snapshots.
@@ -91,7 +92,7 @@ pub struct SnapshotPruneArgs {
 }
 
 /// Execute a snapshot command.
-pub async fn execute(args: SnapshotArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: SnapshotArgs) -> Result<(), BoxError> {
     match args.action {
         SnapshotAction::Create(a) => execute_create(a).await,
         SnapshotAction::Restore(a) => execute_restore(a).await,
@@ -107,11 +108,13 @@ pub async fn execute(args: SnapshotArgs) -> Result<(), Box<dyn std::error::Error
 /// implemented and unit-tested but had no caller, so `max_snapshots`/
 /// `max_total_bytes` were inert and scheduled/per-CI snapshots grew the host
 /// disk unbounded with only manual `snapshot rm` as recourse.
-async fn execute_prune(args: SnapshotPruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_prune(args: SnapshotPruneArgs) -> Result<(), BoxError> {
     use a3s_box_runtime::SnapshotStore;
 
     if args.keep == 0 && args.max_bytes == 0 {
-        return Err("specify --keep <N> and/or --max-bytes <BYTES> to prune".into());
+        return Err(BoxError::ConfigError(
+            "specify --keep <N> and/or --max-bytes <BYTES> to prune".to_string(),
+        ));
     }
 
     let store = SnapshotStore::default_path()?;
@@ -128,7 +131,7 @@ async fn execute_prune(args: SnapshotPruneArgs) -> Result<(), Box<dyn std::error
 }
 
 /// Create a snapshot from a box.
-async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_create(args: SnapshotCreateArgs) -> Result<(), BoxError> {
     use crate::state::StateFile;
     use a3s_box_core::snapshot::SnapshotMetadata;
     use a3s_box_core::{ExecutionId, ExecutionManager, ExecutionSnapshotId};
@@ -141,32 +144,36 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     let box_id = resolve_box(&initial_state, &args.box_id)?.id.clone();
     let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
-    let record = state
-        .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box '{box_id}' was removed while waiting to snapshot it"))?;
-    validate_snapshot_source_state(record)
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let record = state.find_by_id(&box_id).ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box '{box_id}' was removed while waiting to snapshot it"
+        ))
+    })?;
+    validate_snapshot_source_state(record).map_err(BoxError::StateError)?;
 
     // Running managed Sandbox uses LocalExecutionManager quiesce + save_managed
     // (same host-rootfs path as commit). Release the CLI lock first so fencing
     // stays single-owner.
     if record.is_active() {
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "Cannot snapshot running Sandbox box '{}' because managed lifecycle metadata is missing",
                 record.name
-            )
+            ))
         })?;
-        let execution_id = ExecutionId::new(record.id.clone())?;
+        let execution_id =
+            ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?;
         let generation = metadata.generation;
         let snap_id = snapshot_create_id(args.name.as_deref())?;
-        let snapshot_id = ExecutionSnapshotId::new(snap_id.clone())?;
+        let snapshot_id = ExecutionSnapshotId::new(snap_id.clone())
+            .map_err(super::IntoBoxError::into_box_error)?;
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
         let manager = super::configured_local_execution_manager(&home).await?;
         let created = manager
             .create_filesystem_snapshot(&execution_id, generation, &snapshot_id)
-            .await?;
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         if args.description.is_some() {
             eprintln!(
                 "warning: --description is ignored for live Sandbox snapshots; managed create stores the snapshot id as the name"
@@ -201,11 +208,10 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     meta.healthcheck_disabled = record.healthcheck_disabled;
     meta.image_config = a3s_box_runtime::load_resolved_image_config(&record.box_dir)?;
     if meta.image_config.is_none() {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "resolved image configuration is missing for box '{}'; restart it before creating a filesystem snapshot",
             record.name
-        )
-        .into());
+        )));
     }
     if let Some(ref desc) = args.description {
         meta.description = desc.clone();
@@ -223,12 +229,12 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
         // while their historical directory snapshot is copied.
         let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
         let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
                  snapshot a stopped box",
                 record.name,
                 record.box_dir.display()
-            )
+            ))
         })?;
         store.save(meta, &rootfs_path)?
     };
@@ -239,22 +245,22 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
             let (rootfs_path, rootfs_metadata) =
                 a3s_box_runtime::capture_sandbox_host_rootfs_for_commit(record).map_err(
                     |error| {
-                        format!(
+                        BoxError::StateError(format!(
                             "Cannot capture Sandbox host rootfs for stopped snapshot of '{}': {error}",
                             record.name
-                        )
+                        ))
                     },
                 )?;
             meta.mark_managed_sandbox_oci_capture();
             store.save_managed(meta, &rootfs_path, &rootfs_metadata)?
         } else {
             let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-                format!(
+                BoxError::StateError(format!(
                     "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
                      snapshot a stopped box",
                     record.name,
                     record.box_dir.display()
-                )
+                ))
             })?;
             store.save(meta, &rootfs_path)?
         }
@@ -263,21 +269,21 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     let saved = {
         let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
         let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-            format!(
+            BoxError::StateError(format!(
                 "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
                  snapshot a stopped box",
                 record.name,
                 record.box_dir.display()
-            )
+            ))
         })?;
         // Match stopped Windows commit: fail closed without guest rootfs metadata
         // so restored snapshots retain Linux ownership/mode/symlink truth.
         let rootfs_metadata =
             super::commit::read_guest_rootfs_metadata(&rootfs_path).map_err(|error| {
-                format!(
+                BoxError::StateError(format!(
                     "Cannot create stopped snapshot of '{}': {error}",
                     record.name
-                )
+                ))
             })?;
         store.save_managed(meta, &rootfs_path, &rootfs_metadata)?
     };
@@ -329,11 +335,11 @@ fn stopped_sandbox_uses_managed_metadata(record: &crate::state::BoxRecord) -> bo
     super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record)
 }
 
-fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, BoxError> {
     if let Some(name) = requested_name {
         // Live managed create uses the product id as ExecutionSnapshotId.
         a3s_box_core::ExecutionSnapshotId::new(name.to_string()).map_err(|error| {
-            Box::<dyn std::error::Error>::from(format!(
+            BoxError::ConfigError(format!(
                 "Invalid --name '{name}' for a live Sandbox snapshot: {error}"
             ))
         })?;
@@ -346,7 +352,7 @@ fn snapshot_create_id(requested_name: Option<&str>) -> Result<String, Box<dyn st
 }
 
 /// Restore a box from a snapshot.
-async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), BoxError> {
     use crate::state::{generate_name, BoxRecord, StateFile};
     use a3s_box_runtime::SnapshotStore;
 
@@ -358,10 +364,10 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     meta.require_restorable_via_cli_or_sdk()?;
     #[cfg(windows)]
     if meta.has_effective_health_check() {
-        return Err(
+        return Err(BoxError::ConfigError(
             "container health checks are not supported on Windows; the snapshot defines an effective health check"
-                .into(),
-        );
+                .to_string(),
+        ));
     }
 
     // Create a new box record from snapshot metadata
@@ -393,10 +399,10 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     meta.require_restorable_via_cli_or_sdk()?;
     #[cfg(windows)]
     if meta.has_effective_health_check() {
-        return Err(
+        return Err(BoxError::ConfigError(
             "container health checks are not supported on Windows; the snapshot defines an effective health check"
-                .into(),
-        );
+                .to_string(),
+        ));
     }
 
     let record = BoxRecord {
@@ -471,7 +477,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
 }
 
 /// List all snapshots.
-async fn execute_ls(args: SnapshotLsArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_ls(args: SnapshotLsArgs) -> Result<(), BoxError> {
     use a3s_box_runtime::SnapshotStore;
 
     let store = SnapshotStore::default_path()?;
@@ -519,7 +525,7 @@ async fn execute_ls(args: SnapshotLsArgs) -> Result<(), Box<dyn std::error::Erro
 /// copy-on-write overlay lower (`.snapshot-lower`): the snapshot's rootfs is
 /// shared read-only into every fork, so deleting it would break a live overlay
 /// (ESTALE) or stop a restored box from re-starting. Pass `--force` to override.
-async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_rm(args: SnapshotRmArgs) -> Result<(), BoxError> {
     use crate::state::StateFile;
     use a3s_box_runtime::SnapshotStore;
 
@@ -566,10 +572,14 @@ async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Erro
     }
 
     if refused {
-        return Err("one or more snapshots are still in use (not removed)".into());
+        return Err(BoxError::StateError(
+            "one or more snapshots are still in use (not removed)".to_string(),
+        ));
     }
     if missing {
-        return Err("one or more snapshots were not found".into());
+        return Err(BoxError::StateError(
+            "one or more snapshots were not found".to_string(),
+        ));
     }
     Ok(())
 }
@@ -607,7 +617,7 @@ fn box_references_lower(box_dir: &std::path::Path, snap_rootfs: &std::path::Path
 }
 
 /// Inspect a snapshot.
-async fn execute_inspect(args: SnapshotInspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_inspect(args: SnapshotInspectArgs) -> Result<(), BoxError> {
     use a3s_box_runtime::SnapshotStore;
 
     let store = SnapshotStore::default_path()?;
@@ -621,7 +631,7 @@ async fn execute_inspect(args: SnapshotInspectArgs) -> Result<(), Box<dyn std::e
 fn resolve_box<'a>(
     state: &'a crate::state::StateFile,
     id_or_name: &str,
-) -> Result<&'a crate::state::BoxRecord, Box<dyn std::error::Error>> {
+) -> Result<&'a crate::state::BoxRecord, BoxError> {
     // Try exact ID
     if let Some(record) = state.find_by_id(id_or_name) {
         return Ok(record);
@@ -633,13 +643,15 @@ fn resolve_box<'a>(
     // Try prefix
     let matches = state.find_by_id_prefix(id_or_name);
     match matches.len() {
-        0 => Err(format!("No box found matching '{}'", id_or_name).into()),
+        0 => Err(BoxError::StateError(format!(
+            "No box found matching '{}'",
+            id_or_name
+        ))),
         1 => Ok(matches[0]),
-        n => Err(format!(
+        n => Err(BoxError::StateError(format!(
             "Ambiguous box reference '{}': matches {} boxes",
             id_or_name, n
-        )
-        .into()),
+        ))),
     }
 }
 
@@ -647,7 +659,7 @@ fn resolve_box<'a>(
 fn resolve_snapshot(
     store: &a3s_box_runtime::SnapshotStore,
     id_or_name: &str,
-) -> Result<a3s_box_core::snapshot::SnapshotMetadata, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_core::snapshot::SnapshotMetadata, BoxError> {
     // Try exact ID
     if let Some(meta) = store.get(id_or_name)? {
         return Ok(meta);
@@ -662,10 +674,9 @@ fn resolve_snapshot(
     match by_name.len() {
         1 => return Ok(by_name.into_iter().next().expect("len checked")),
         n if n > 1 => {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Ambiguous snapshot reference '{id_or_name}': matches {n} snapshots by name"
-            )
-            .into());
+            )));
         }
         0 => {}
         _ => unreachable!(),
@@ -676,12 +687,13 @@ fn resolve_snapshot(
         .filter(|s| s.id.starts_with(id_or_name))
         .collect();
     match by_prefix.len() {
-        0 => Err(format!("No snapshot found matching '{id_or_name}'").into()),
+        0 => Err(BoxError::StateError(format!(
+            "No snapshot found matching '{id_or_name}'"
+        ))),
         1 => Ok(by_prefix.into_iter().next().expect("len checked")),
-        n => Err(format!(
+        n => Err(BoxError::StateError(format!(
             "Ambiguous snapshot reference '{id_or_name}': matches {n} snapshots by ID prefix"
-        )
-        .into()),
+        ))),
     }
 }
 
@@ -710,6 +722,50 @@ mod tests {
             let error = validate_snapshot_source_state(&record).unwrap_err();
             assert!(error.contains("stop it first"), "{error}");
             assert!(error.contains("filesystem traversal"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_prune_without_limits_is_a_configuration_error() {
+        let error = execute_prune(SnapshotPruneArgs {
+            keep: 0,
+            max_bytes: 0,
+        })
+        .await
+        .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("--keep"), "{message}");
+                assert!(message.contains("--max-bytes"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_live_snapshot_name_is_a_configuration_error() {
+        let error = snapshot_create_id(Some("bad name")).unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("Invalid --name 'bad name'"), "{message}");
+                assert!(message.contains("[A-Za-z0-9_-]"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_microvm_snapshot_is_a_state_error() {
+        let record = make_record("id", "box", "running", Some(std::process::id()));
+        let error = validate_snapshot_source_state(&record)
+            .map_err(BoxError::StateError)
+            .unwrap_err();
+        match error {
+            BoxError::StateError(message) => {
+                assert!(message.contains("stop it first"), "{message}");
+                assert!(message.contains("filesystem traversal"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
         }
     }
 

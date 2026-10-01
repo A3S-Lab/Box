@@ -7,6 +7,8 @@ use clap::Args;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
+
 use crate::resolve;
 use crate::state::{BoxRecord, StateFile};
 
@@ -30,29 +32,38 @@ pub struct AttachArgs {
     pub tty: bool,
 }
 
-pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: AttachArgs) -> Result<(), BoxError> {
     #[cfg(windows)]
     if args.tty {
-        return Err(crate::platform::unsupported_command(
-            "attach -it",
-            "interactive PTY support",
+        return Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("attach -it", "interactive PTY support")
+                .to_string(),
         ));
     }
 
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = resolve::resolve(&state, &args.r#box)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .clone();
     let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
         Some(record) => record,
-        None => return Err(format!("No such container: {}", args.r#box).into()),
+        None => {
+            return Err(BoxError::StateError(format!(
+                "No such container: {}",
+                args.r#box
+            )))
+        }
     };
     let route = resolve_attach_route(&record, args.tty);
     if route.is_managed() {
         if record.status != "running" {
-            return Err(format!("Box {} is not running", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Box {} is not running",
+                record.name
+            )));
         }
     } else {
-        crate::socket_paths::require_running(&record, "attach to")
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        crate::socket_paths::require_running(&record, "attach to").map_err(BoxError::StateError)?;
     }
 
     // Interactive PTY mode. Windows rejected `-t` before any state load.
@@ -76,7 +87,10 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
         route == AttachRoute::ManagedLogs,
     );
     if !streams.stdout.exists() {
-        return Err(missing_console_log_message(&record.name, &streams.stdout).into());
+        return Err(BoxError::StateError(missing_console_log_message(
+            &record.name,
+            &streams.stdout,
+        )));
     }
 
     println!("Attached to box {}. Press Ctrl-C to detach.", record.name);
@@ -202,27 +216,30 @@ struct ManagedAttachTarget {
     generation: a3s_box_core::ExecutionGeneration,
 }
 
-async fn prepare_managed_attach(
-    record: &BoxRecord,
-) -> Result<ManagedAttachTarget, Box<dyn std::error::Error>> {
+async fn prepare_managed_attach(record: &BoxRecord) -> Result<ManagedAttachTarget, BoxError> {
     use a3s_box_core::{ExecutionManager, ExecutionState};
 
-    let metadata = record
-        .managed_execution
-        .as_ref()
-        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
-    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed execution metadata",
+            record.name
+        ))
+    })?;
+    let execution_id = a3s_box_core::ExecutionId::new(record.id.clone())
+        .map_err(super::IntoBoxError::into_box_error)?;
     let generation = metadata.generation;
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
-    let status = manager.inspect(&execution_id).await?;
+    let status = manager
+        .inspect(&execution_id)
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     if status.generation != generation || status.state != ExecutionState::Running {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Box {} is not running at managed generation {}",
             record.name,
             generation.get()
-        )
-        .into());
+        )));
     }
     Ok(ManagedAttachTarget {
         manager,
@@ -388,9 +405,7 @@ fn missing_console_log_message(name: &str, console_log: &std::path::Path) -> Str
 
 /// Attach to a running box with an interactive PTY session.
 #[cfg(not(windows))]
-async fn execute_pty_attach(
-    record: &crate::state::BoxRecord,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_pty_attach(record: &crate::state::BoxRecord) -> Result<(), BoxError> {
     use crate::terminal;
     use a3s_box_core::pty::PtyRequest;
 
@@ -398,7 +413,7 @@ async fn execute_pty_attach(
         record,
         crate::socket_paths::RuntimeSocket::Pty,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
 
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
@@ -433,22 +448,22 @@ async fn execute_pty_attach(
 
 /// Open the compatibility attach shell through the exact managed OCI session.
 #[cfg(not(windows))]
-async fn execute_managed_pty_attach(
-    record: &crate::state::BoxRecord,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_managed_pty_attach(record: &crate::state::BoxRecord) -> Result<(), BoxError> {
     use a3s_box_core::pty::PtyRequest;
     use a3s_box_core::{ExecutionId, ExecutionSessionManager};
 
-    let metadata = record
-        .managed_execution
-        .as_ref()
-        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed execution metadata",
+            record.name
+        ))
+    })?;
     let (cols, rows) = crate::terminal::size().unwrap_or((80, 24));
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
     let process = manager
         .start_pty(
-            &ExecutionId::new(record.id.clone())?,
+            &ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?,
             metadata.generation,
             PtyRequest {
                 cmd: vec!["/bin/sh".to_string()],
@@ -460,7 +475,8 @@ async fn execute_managed_pty_attach(
                 rows,
             },
         )
-        .await?;
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     let exit_code = {
         let _raw_mode = crate::terminal::raw_mode()?;
         super::exec::run_managed_pty_session(process).await
@@ -567,6 +583,21 @@ mod tests {
         assert!(message.contains("/tmp/a3s/web/console.log"));
         assert!(message.contains("a3s-box logs -f web"));
         assert!(message.contains("a3s-box ps"));
+    }
+
+    #[test]
+    fn missing_console_log_is_a_state_error() {
+        let error = BoxError::StateError(missing_console_log_message(
+            "web",
+            Path::new("/tmp/a3s/web/console.log"),
+        ));
+        match error {
+            BoxError::StateError(message) => {
+                assert!(message.contains("running box web"), "{message}");
+                assert!(message.contains("a3s-box logs -f web"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]

@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, System};
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
 use a3s_box_runtime::ExecClient;
-use a3s_box_sdk::{A3sBoxClient, A3sBoxPaths, BoxStatsSummary};
+use a3s_box_sdk::{A3sBoxClient, A3sBoxPaths, BoxStatsSummary, ClientError};
 
 use crate::output;
 use crate::resolve;
@@ -206,14 +207,10 @@ fn format_io_usage(read_bytes: u64, write_bytes: u64) -> String {
     )
 }
 
-fn select_targets(
-    state: &StateFile,
-    query: Option<&str>,
-) -> Result<Vec<BoxRecord>, Box<dyn std::error::Error>> {
+fn select_targets(state: &StateFile, query: Option<&str>) -> Result<Vec<BoxRecord>, BoxError> {
     if let Some(name) = query {
-        let record = resolve::resolve(state, name)?;
-        status::require_active(record, "show stats for")
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let record = resolve::resolve(state, name).map_err(super::IntoBoxError::into_box_error)?;
+        status::require_active(record, "show stats for").map_err(BoxError::StateError)?;
         return Ok(vec![record.clone()]);
     }
 
@@ -409,7 +406,7 @@ impl PcapEndian {
     }
 }
 
-pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: StatsArgs) -> Result<(), BoxError> {
     let mut sys = System::new();
     let mut runtime_client = None;
 
@@ -439,7 +436,10 @@ pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> 
                 .is_some_and(a3s_box_runtime::ManagedExecutionMetadata::is_oci_routed)
             {
                 let metadata = record.managed_execution.as_ref().ok_or_else(|| {
-                    format!("Box {} lost managed execution metadata", record.name)
+                    BoxError::StateError(format!(
+                        "Box {} lost managed execution metadata",
+                        record.name
+                    ))
                 })?;
                 if runtime_client.is_none() {
                     let home = a3s_box_core::dirs_home();
@@ -450,14 +450,19 @@ pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> 
                     ));
                 }
                 let client = runtime_client.as_ref().ok_or_else(|| {
-                    format!("failed to initialize runtime stats for {}", record.name)
+                    BoxError::StateError(format!(
+                        "failed to initialize runtime stats for {}",
+                        record.name
+                    ))
                 })?;
                 if let Some(summary) = client
                     .get_sandbox_stats(
-                        &a3s_box_core::ExecutionId::new(record.id.clone())?,
+                        &a3s_box_core::ExecutionId::new(record.id.clone())
+                            .map_err(super::IntoBoxError::into_box_error)?,
                         metadata.generation,
                     )
-                    .await?
+                    .await
+                    .map_err(stats_client_error)?
                 {
                     stats.push(summary.into());
                 }
@@ -494,6 +499,25 @@ pub async fn execute(args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+fn stats_client_error(error: ClientError) -> BoxError {
+    match error {
+        ClientError::State(error) => BoxError::IoError(error),
+        ClientError::Runtime(error) => error,
+        ClientError::Execution(error) => super::IntoBoxError::into_box_error(error),
+        ClientError::CommandUnavailable { message, .. } => BoxError::StateError(message),
+        ClientError::Validation(message) => {
+            BoxError::ConfigError(format!("validation error: {message}"))
+        }
+        ClientError::Guest(message) => {
+            BoxError::ExecError(format!("guest operation failed: {message}"))
+        }
+        ClientError::BoxNotFound(id) => BoxError::StateError(format!("box not found: {id}")),
+        ClientError::AmbiguousBoxQuery { query, matches } => BoxError::StateError(format!(
+            "box query {query:?} matched multiple boxes: {matches:?}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,9 +552,34 @@ mod tests {
         let (_tmp, state) = setup_state(vec![make_record("id-1", "stopped_box", "stopped", None)]);
 
         let error = select_targets(&state, Some("stopped_box")).unwrap_err();
+        match error {
+            BoxError::StateError(message) => {
+                assert!(message.contains("Cannot show stats for"), "{message}");
+                assert!(message.contains("a3s-box start stopped_box"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
+    }
 
-        assert!(error.to_string().contains("Cannot show stats for"));
-        assert!(error.to_string().contains("a3s-box start stopped_box"));
+    #[test]
+    fn sandbox_stats_missing_box_is_a_state_error() {
+        match stats_client_error(ClientError::BoxNotFound("box-1".to_string())) {
+            BoxError::StateError(message) => {
+                assert!(message.contains("box not found: box-1"), "{message}");
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_stats_guest_failure_is_an_exec_error() {
+        match stats_client_error(ClientError::Guest("cgroup read failed".to_string())) {
+            BoxError::ExecError(message) => {
+                assert!(message.contains("guest operation failed"), "{message}");
+                assert!(message.contains("cgroup read failed"), "{message}");
+            }
+            other => panic!("expected ExecError, got {other:?}"),
+        }
     }
 
     #[test]

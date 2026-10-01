@@ -524,40 +524,6 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-#[async_trait::async_trait]
-impl a3s_box_core::traits::ImageRegistry for ImagePuller {
-    async fn pull(&self, reference: &str) -> Result<a3s_box_core::traits::PulledImage> {
-        let (image, resolved_reference) = self.pull_resolved(reference).await?;
-        Ok(a3s_box_core::traits::PulledImage {
-            path: image.root_dir().to_path_buf(),
-            digest: image.manifest_digest().to_string(),
-            reference: resolved_reference,
-        })
-    }
-
-    async fn force_pull(&self, reference: &str) -> Result<a3s_box_core::traits::PulledImage> {
-        let image = self.force_pull(reference).await?;
-        let parsed = ImageReference::parse(reference)?;
-        Ok(a3s_box_core::traits::PulledImage {
-            path: image.root_dir().to_path_buf(),
-            digest: image.manifest_digest().to_string(),
-            reference: parsed.full_reference(),
-        })
-    }
-
-    async fn is_cached(&self, reference: &str) -> bool {
-        self.is_cached(reference).await
-    }
-
-    async fn remove(&self, reference: &str) -> Result<bool> {
-        self.remove_cached(reference).await
-    }
-
-    async fn list_cached(&self) -> Result<Vec<String>> {
-        self.list_cached().await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

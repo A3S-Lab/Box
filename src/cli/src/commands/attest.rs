@@ -4,6 +4,7 @@
 //! SNP attestation report, optionally verifies it against a policy, and
 //! outputs the result as JSON.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 use std::path::PathBuf;
 
@@ -72,17 +73,18 @@ struct AttestOutput {
 }
 
 #[cfg(windows)]
-pub async fn execute(_args: AttestArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "attest",
-        "TEE attestation channel support",
+pub async fn execute(_args: AttestArgs) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        crate::platform::unsupported_command("attest", "TEE attestation channel support")
+            .to_string(),
     ))
 }
 
 #[cfg(not(windows))]
-pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: AttestArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
+    let record =
+        resolve::resolve(&state, &args.r#box).map_err(super::IntoBoxError::into_box_error)?;
 
     // Generate or parse nonce
     let nonce_bytes = match &args.nonce {
@@ -94,18 +96,13 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
         record,
         crate::socket_paths::RuntimeSocket::Attest,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
     let socket_path = &attest_socket_path;
 
     // RA-TLS mode: verify attestation via TLS handshake
     if args.ratls {
         let policy = match &args.policy {
-            Some(path) => {
-                let data = std::fs::read_to_string(path)
-                    .map_err(|e| format!("Failed to read policy file {}: {}", path.display(), e))?;
-                serde_json::from_str::<AttestationPolicy>(&data)
-                    .map_err(|e| format!("Failed to parse policy file {}: {}", path.display(), e))?
-            }
+            Some(path) => load_attestation_policy(path)?,
             None => AttestationPolicy::default(),
         };
 
@@ -173,12 +170,7 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Load or create verification policy
     let policy = match &args.policy {
-        Some(path) => {
-            let data = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read policy file {}: {}", path.display(), e))?;
-            serde_json::from_str::<AttestationPolicy>(&data)
-                .map_err(|e| format!("Failed to parse policy file {}: {}", path.display(), e))?
-        }
+        Some(path) => load_attestation_policy(path)?,
         None => AttestationPolicy::default(),
     };
 
@@ -230,18 +222,45 @@ fn generate_random_nonce() -> Vec<u8> {
 
 /// Decode a hex string to bytes.
 #[cfg(any(not(windows), test))]
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, BoxError> {
     let hex = hex.trim().trim_start_matches("0x");
     if !hex.len().is_multiple_of(2) {
-        return Err("Hex string must have even length".into());
+        return Err(BoxError::ConfigError(
+            "Hex string must have even length".into(),
+        ));
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-            .map_err(|e| format!("Invalid hex at position {}: {}", i, e))?;
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|error| {
+            BoxError::ConfigError(format!("Invalid hex at position {i}: {error}"))
+        })?;
         bytes.push(byte);
     }
     Ok(bytes)
+}
+
+#[cfg(not(windows))]
+fn load_attestation_policy(path: &std::path::Path) -> Result<AttestationPolicy, BoxError> {
+    let data = std::fs::read_to_string(path).map_err(|error| {
+        super::io_error(
+            format!("Failed to read policy file {}", path.display()),
+            error,
+        )
+    })?;
+    parse_attestation_policy(path, &data)
+}
+
+#[cfg(not(windows))]
+fn parse_attestation_policy(
+    path: &std::path::Path,
+    data: &str,
+) -> Result<a3s_box_runtime::AttestationPolicy, BoxError> {
+    serde_json::from_str(data).map_err(|error| {
+        BoxError::ConfigError(format!(
+            "Failed to parse policy file {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Encode bytes as a hex string.
@@ -265,6 +284,61 @@ mod tests {
     fn test_hex_to_bytes_invalid() {
         assert!(hex_to_bytes("0g").is_err());
         assert!(hex_to_bytes("abc").is_err()); // odd length
+    }
+
+    #[test]
+    fn odd_nonce_hex_is_a_configuration_error() {
+        match hex_to_bytes("abc") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("even length"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_nonce_hex_is_a_configuration_error() {
+        match hex_to_bytes("0g") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("Invalid hex"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn invalid_attestation_policy_is_a_configuration_error() {
+        match parse_attestation_policy(std::path::Path::new("policy.json"), "not-json") {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("Failed to parse policy file"), "{message}");
+                assert!(message.contains("policy.json"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_attest_is_a_configuration_error() {
+        let error = execute(AttestArgs {
+            r#box: "box".into(),
+            policy: None,
+            nonce: None,
+            raw: false,
+            allow_simulated: false,
+            ratls: false,
+            quiet: false,
+        })
+        .await
+        .expect_err("Windows attest is unsupported");
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("not supported"), "{message}");
+                assert!(message.contains("attest"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]

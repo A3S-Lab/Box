@@ -205,17 +205,79 @@ if ($qualificationProcess.ExitCode -ne 0) {
 
 $verifier = Join-Path $PSScriptRoot 'verify-windows-whpx-live-session-report.py'
 $verifierOk = $false
-foreach ($py in @('python', 'py')) {
-    $cmd = Get-Command $py -ErrorAction SilentlyContinue
+# Prefer `py -3` and refuse the WindowsApps Store stub (`...\WindowsApps\python.exe`),
+# which hangs waiting for an install instead of exiting. Broken PYTHONHOME installs
+# fall through to the PowerShell honesty mirror below.
+$pythonCandidates = @()
+$pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+if ($null -ne $pyLauncher) {
+    $pythonCandidates += @{ Exe = $pyLauncher.Source; Args = @('-3', $verifier, $reportPath) }
+}
+foreach ($name in @('python3', 'python')) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
     if ($null -eq $cmd) { continue }
-    if ($py -eq 'py') {
-        & $cmd.Source -3 $verifier $reportPath
-    } else {
-        & $cmd.Source $verifier $reportPath
-    }
+    $src = [string]$cmd.Source
+    if ($src -match '(?i)\\WindowsApps\\') { continue }
+    $pythonCandidates += @{ Exe = $src; Args = @($verifier, $reportPath) }
+}
+foreach ($candidate in $pythonCandidates) {
+    & $candidate.Exe @($candidate.Args)
     if ($LASTEXITCODE -eq 0) {
         $verifierOk = $true
         break
+    }
+}
+if (-not $verifierOk) {
+    # Mirror scripts/verify-windows-whpx-live-session-report.py when Python is
+    # unavailable or broken so tip-prove hosts do not hang or skip honesty.
+    $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+    $failures = New-Object System.Collections.Generic.List[string]
+    if ($report.schema_version -ne 'a3s.box.windows-whpx-live-session.v1') {
+        [void]$failures.Add("schema_version=$($report.schema_version)")
+    }
+    if ($report.status -ne 'passed') {
+        [void]$failures.Add("status=$($report.status)")
+    }
+    foreach ($required in @(
+            'retained_stream_handle_proven',
+            'whpx_microvm_live_claimed',
+            'mkdir_before_kill',
+            'move_before_kill',
+            'remove_before_kill',
+            'list_dir_after_reattach',
+            'file_upload_before_kill',
+            'file_download_after_reattach',
+            'retained_filesystem_proven'
+        )) {
+        if ($report.$required -ne $true) {
+            [void]$failures.Add("$required is not true")
+        }
+    }
+    if ($report.whpx_microvm_live_claimed -ne $report.retained_stream_handle_proven) {
+        [void]$failures.Add('whpx_microvm_live_claimed must match retained_stream_handle_proven')
+    }
+    if ($report.file_upload_request_id -ne 'a3s.box.live-session.keyed-file.before-owner-kill') {
+        [void]$failures.Add("file_upload_request_id=$($report.file_upload_request_id)")
+    }
+    if ($report.mkdir_request_id -ne 'a3s.box.live-session.keyed-mkdir.before-owner-kill') {
+        [void]$failures.Add("mkdir_request_id=$($report.mkdir_request_id)")
+    }
+    if ($report.move_request_id -ne 'a3s.box.live-session.keyed-move.before-owner-kill') {
+        [void]$failures.Add("move_request_id=$($report.move_request_id)")
+    }
+    if ($report.remove_request_id -ne 'a3s.box.live-session.keyed-remove.before-owner-kill') {
+        [void]$failures.Add("remove_request_id=$($report.remove_request_id)")
+    }
+    foreach ($forbidden in @('fixture_stream_continuity_claimed', 'b2_process_session_recovery_closed')) {
+        if ($report.$forbidden) {
+            [void]$failures.Add("$forbidden must stay false")
+        }
+    }
+    if ($failures.Count -eq 0) {
+        Write-Host 'whpx live-session report honesty check passed (PowerShell mirror)'
+        $verifierOk = $true
+    } else {
+        Write-Warning "Report honesty verifier failed: $($failures -join '; ')"
     }
 }
 if (-not $verifierOk) {

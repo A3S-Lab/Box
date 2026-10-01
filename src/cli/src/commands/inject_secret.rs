@@ -4,6 +4,7 @@
 //! then injects secrets over the encrypted channel. Secrets are stored in
 //! `/run/secrets/<name>` inside the guest (tmpfs, mode 0600).
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[cfg(not(windows))]
@@ -46,48 +47,48 @@ struct InjectOutput {
 }
 
 #[cfg(windows)]
-pub async fn execute(_args: InjectSecretArgs) -> Result<(), Box<dyn std::error::Error>> {
-    Err(crate::platform::unsupported_command(
-        "inject-secret",
-        "RA-TLS secret injection channel support",
+pub async fn execute(_args: InjectSecretArgs) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(
+        crate::platform::unsupported_command(
+            "inject-secret",
+            "RA-TLS secret injection channel support",
+        )
+        .to_string(),
     ))
 }
 
 #[cfg(not(windows))]
-pub async fn execute(args: InjectSecretArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: InjectSecretArgs) -> Result<(), BoxError> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
+    let record =
+        resolve::resolve(&state, &args.r#box).map_err(super::IntoBoxError::into_box_error)?;
     let attest_socket_path = crate::socket_paths::require_runtime_socket(
         record,
         crate::socket_paths::RuntimeSocket::Attest,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
     let socket_path = &attest_socket_path;
 
-    // Collect secrets from --secret and --file
     let mut entries = Vec::new();
 
     for secret_str in &args.secrets {
-        let entry = parse_secret(secret_str, args.set_env)?;
-        entries.push(entry);
+        entries.push(require_secret(secret_str, args.set_env)?);
     }
 
     if let Some(path) = &args.file {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read secrets file '{}': {}", path, e))?;
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            super::io_error(format!("Failed to read secrets file '{path}'"), error)
+        })?;
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let entry = parse_secret(trimmed, args.set_env)?;
-            entries.push(entry);
+            entries.push(require_secret(trimmed, args.set_env)?);
         }
     }
 
-    if entries.is_empty() {
-        return Err("No secrets provided. Use --secret NAME=VALUE or --file PATH".into());
-    }
+    require_secret_entries(entries.len())?;
 
     let injector = SecretInjector::new(socket_path);
     let result = injector
@@ -104,6 +105,20 @@ pub async fn execute(args: InjectSecretArgs) -> Result<(), Box<dyn std::error::E
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn require_secret_entries(count: usize) -> Result<(), BoxError> {
+    if count == 0 {
+        return Err(BoxError::ConfigError(
+            "No secrets provided. Use --secret NAME=VALUE or --file PATH".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn require_secret(secret: &str, set_env: bool) -> Result<SecretEntry, BoxError> {
+    parse_secret(secret, set_env).map_err(BoxError::ConfigError)
 }
 
 /// Parse a "NAME=VALUE" string into a SecretEntry.
@@ -167,5 +182,51 @@ mod tests {
     #[test]
     fn test_parse_secret_empty_name() {
         assert!(parse_secret("=value", false).is_err());
+    }
+
+    #[test]
+    fn invalid_secret_format_is_a_configuration_error() {
+        match require_secret("INVALID", false) {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("NAME=VALUE"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn missing_secrets_are_a_configuration_error() {
+        match require_secret_entries(0) {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("No secrets provided"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_inject_secret_is_a_configuration_error() {
+        let error = execute(InjectSecretArgs {
+            r#box: "box".into(),
+            secrets: Vec::new(),
+            set_env: false,
+            allow_simulated: false,
+            file: None,
+        })
+        .await
+        .expect_err("Windows inject-secret is unsupported");
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("not supported"), "{message}");
+                assert!(message.contains("inject-secret"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

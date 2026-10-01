@@ -21,11 +21,52 @@ pub(super) fn is_tar_archive(name: &str) -> bool {
         || lower.ends_with(".txz")
 }
 
+/// Extract every archive entry inside `dst`.
+///
+/// On Windows, a directory junction already at an entry path is removed first.
+/// `unpack_in` otherwise refuses the entry because the junction resolves
+/// outside `dst`, and following it would write into that other directory.
+fn unpack_archive<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    dst: &Path,
+) -> std::io::Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        #[cfg(windows)]
+        {
+            let path = entry.path()?;
+            if !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            }) {
+                let mut cursor = dst.to_path_buf();
+                for component in path.components() {
+                    let std::path::Component::Normal(name) = component else {
+                        continue;
+                    };
+                    cursor.push(name);
+                    a3s_box_core::windows_file::remove_directory_junction(&cursor)?;
+                }
+            }
+        }
+        entry.unpack_in(dst)?;
+    }
+    Ok(())
+}
+
 /// Extract a tar archive to a destination directory.
 pub(super) fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> {
     use crate::oci::limited_reader::LimitedReader;
     use flate2::read::GzDecoder;
     use std::io::BufReader;
+
+    #[cfg(windows)]
+    {
+        refuse_build_context_junction(archive_path)?;
+        refuse_build_context_junction(dst)?;
+    }
 
     std::fs::create_dir_all(dst).map_err(|e| {
         BoxError::BuildError(format!(
@@ -57,7 +98,7 @@ pub(super) fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> 
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         let decoder = LimitedReader::new(GzDecoder::new(BufReader::new(file)), max_bytes);
         let mut archive = tar::Archive::new(decoder);
-        archive.unpack(dst).map_err(|e| {
+        unpack_archive(&mut archive, dst).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to extract tar.gz {}: {}",
                 archive_path.display(),
@@ -77,7 +118,7 @@ pub(super) fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> 
 
             let decoder = LimitedReader::new(BzDecoder::new(BufReader::new(file)), max_bytes);
             let mut archive = tar::Archive::new(decoder);
-            archive.unpack(dst).map_err(|e| {
+            unpack_archive(&mut archive, dst).map_err(|e| {
                 BoxError::BuildError(format!(
                     "Failed to extract tar.bz2 {}: {}",
                     archive_path.display(),
@@ -98,7 +139,7 @@ pub(super) fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> 
 
             let decoder = LimitedReader::new(XzDecoder::new(BufReader::new(file)), max_bytes);
             let mut archive = tar::Archive::new(decoder);
-            archive.unpack(dst).map_err(|e| {
+            unpack_archive(&mut archive, dst).map_err(|e| {
                 BoxError::BuildError(format!(
                     "Failed to extract tar.xz {}: {}",
                     archive_path.display(),
@@ -108,7 +149,7 @@ pub(super) fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> 
         }
     } else if name.ends_with(".tar") {
         let mut archive = tar::Archive::new(LimitedReader::new(BufReader::new(file), max_bytes));
-        archive.unpack(dst).map_err(|e| {
+        unpack_archive(&mut archive, dst).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to extract tar {}: {}",
                 archive_path.display(),
@@ -271,6 +312,101 @@ pub(super) fn compute_diff_id(layer_path: &Path) -> Result<String> {
     }
 }
 
+/// Recreate `dst` as the same Windows mount-point junction as `src`.
+///
+/// `read_dir` follows a junction, so a source that is itself a junction must be
+/// recreated before the recursive copy. A child junction is handled later.
+#[cfg(windows)]
+pub(super) fn recreate_copied_source_junction(src: &Path, dst: &Path) -> Result<bool> {
+    refuse_copy_through_ancestor_junction(src)?;
+    refuse_copy_through_ancestor_junction(dst)?;
+    if let Some(parent) = dst.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    a3s_box_core::windows_file::recreate_directory_junction(src, dst).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to recreate directory junction {}: {error}",
+            dst.display()
+        ))
+    })
+}
+
+/// Refuse a copy reached through a directory junction above the leaf.
+/// The leaf may itself be a junction; that case is recreated by the caller.
+#[cfg(windows)]
+pub(super) fn refuse_copy_through_ancestor_junction(path: &Path) -> Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BoxError::BuildError(format!(
+                    "Failed to inspect copy path {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        if metadata.file_type().is_symlink() || windows_reparse_point(&metadata) {
+            return Err(BoxError::BuildError(format!(
+                "refusing to copy through a directory junction: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a build context that is a directory junction or sits under one.
+#[cfg(windows)]
+pub(super) fn refuse_build_context_junction(context_dir: &Path) -> Result<()> {
+    let mut prefix = std::path::PathBuf::new();
+    for component in context_dir.components() {
+        prefix.push(component);
+        let metadata = match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        if metadata.file_type().is_symlink() || windows_reparse_point(&metadata) {
+            return Err(BoxError::BuildError(format!(
+                "refusing to build through a directory junction: {}",
+                context_dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
+/// Remove a destination junction before copying so `create_dir_all` does not
+/// follow it into the target directory.
+#[cfg(windows)]
+pub(super) fn remove_copied_destination_junction(dst: &Path) -> Result<()> {
+    a3s_box_core::windows_file::remove_directory_junction(dst).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to remove destination directory junction {}: {error}",
+            dst.display()
+        ))
+    })?;
+    Ok(())
+}
+
 /// Recursively copy a directory.
 /// Recursively copy `src` to `dst`, tracking each entry's path relative to the
 /// build context (`rel_base`) and skipping entries excluded by `.dockerignore`.
@@ -282,6 +418,16 @@ pub(super) fn copy_dir_filtered(
     rel_base: &Path,
     ignore: Option<&DockerIgnore>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    remove_copied_destination_junction(dst)?;
+    #[cfg(windows)]
+    if recreate_copied_source_junction(src, dst)? {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(src)?;
+    #[cfg(windows)]
+    refuse_copy_through_ancestor_junction(dst)?;
     std::fs::create_dir_all(dst).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to create directory {}: {}",
@@ -323,10 +469,24 @@ pub(super) fn copy_dir_filtered(
                 ))
             })?;
             let _ = std::fs::remove_file(&dst_path);
+            #[cfg(windows)]
+            if a3s_box_core::windows_file::recreate_directory_junction(&src_path, &dst_path)
+                .map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to recreate directory junction {} -> {}: {error}",
+                        dst_path.display(),
+                        target.display()
+                    ))
+                })?
+            {
+                continue;
+            }
             symlink_to(&target, &dst_path)?;
         } else if file_type.is_dir() {
             copy_dir_filtered(&src_path, &dst_path, &entry_rel, ignore)?;
         } else {
+            #[cfg(windows)]
+            remove_copied_destination_junction(&dst_path)?;
             std::fs::copy(&src_path, &dst_path).map_err(|e| {
                 BoxError::BuildError(format!(
                     "Failed to copy {} to {}: {}",
@@ -451,6 +611,69 @@ pub(super) fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn refuse_build_context_junction_rejects_the_context_directory() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = refuse_build_context_junction(&link)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "build context directory was admitted through a junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuse_build_context_junction_rejects_a_child_directory() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let nested = tmp.path().join("outside").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            tmp.path().join("outside").display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = refuse_build_context_junction(&link.join("nested"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "build context child was admitted through a junction: {error}"
+        );
+        assert_eq!(std::fs::read(nested.join("secret.txt")).unwrap(), b"secret");
+    }
 
     #[test]
     fn compute_diff_id_accepts_an_uncompressed_oci_layer() {
@@ -627,6 +850,117 @@ mod tests {
         let dst = tmp.path().join("out");
         extract_tar_to_dst(&tar_path, &dst).unwrap();
         assert!(dst.join("test.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dst_does_not_write_through_a_child_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let dst = tmp.path().join("out");
+        std::fs::create_dir_all(&dst).unwrap();
+        let child = dst.join("child");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            child.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let tar_path = tmp.path().join("layer.tar");
+        let file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        let content = b"planted";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "child/planted.txt", &content[..])
+            .unwrap();
+        builder.finish().unwrap();
+
+        extract_tar_to_dst(&tar_path, &dst).unwrap();
+
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "archive extract wrote through the child junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert_eq!(
+            std::fs::read(dst.join("child/planted.txt")).unwrap(),
+            b"planted"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dst_does_not_open_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let tar_path = create_test_tar(&outside, "app.tar", b"secret");
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let dst = tmp.path().join("out");
+
+        let error = extract_tar_to_dst(&link.join("app.tar"), &dst)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "archive was opened through an ancestor junction: {error}"
+        );
+        assert!(!dst.join("test.txt").exists());
+        assert_eq!(std::fs::read(&tar_path).unwrap().is_empty(), false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_tar_to_dst_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_path = create_test_tar(tmp.path(), "app.tar", b"secret");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = extract_tar_to_dst(&tar_path, &link.join("out"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("junction"),
+            "extract created a destination through an ancestor junction: {error}"
+        );
+        assert!(!outside.join("out").exists());
     }
 
     #[test]

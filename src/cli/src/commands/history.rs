@@ -1,5 +1,6 @@
 //! `a3s-box history` command — Show image layer history.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 use oci_spec::image::{History, ImageConfiguration};
 
@@ -15,10 +16,11 @@ pub struct HistoryArgs {
     pub no_trunc: bool,
 }
 
-pub async fn execute(args: HistoryArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: HistoryArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
     let images = store.list().await;
-    let stored = image_usage::resolve_required_stored_image(&images, &args.image)?;
+    let stored = image_usage::resolve_required_stored_image(&images, &args.image)
+        .map_err(BoxError::OciImageError)?;
     let oci_config = load_image_configuration(&stored.path)?;
     let history: &[History] = oci_config.history().as_deref().unwrap_or_default();
 
@@ -72,36 +74,34 @@ pub async fn execute(args: HistoryArgs) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn load_image_configuration(
-    image_dir: &std::path::Path,
-) -> Result<ImageConfiguration, Box<dyn std::error::Error>> {
+fn load_image_configuration(image_dir: &std::path::Path) -> Result<ImageConfiguration, BoxError> {
     let index_content = std::fs::read_to_string(image_dir.join("index.json"))
-        .map_err(|e| format!("Failed to read index.json: {e}"))?;
+        .map_err(|e| BoxError::OciImageError(format!("Failed to read index.json: {e}")))?;
     let index: serde_json::Value = serde_json::from_str(&index_content)?;
     let manifest_digest = index["manifests"][0]["digest"]
         .as_str()
-        .ok_or("No manifest digest in index.json")?;
+        .ok_or_else(|| BoxError::OciImageError("No manifest digest in index.json".to_string()))?;
     let manifest_path = blob_path(image_dir, manifest_digest);
     let manifest_content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("Failed to read manifest: {e}"))?;
+        .map_err(|e| BoxError::OciImageError(format!("Failed to read manifest: {e}")))?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest_content)?;
     let config_digest = manifest["config"]["digest"]
         .as_str()
-        .ok_or("No config digest in manifest")?;
+        .ok_or_else(|| BoxError::OciImageError("No config digest in manifest".to_string()))?;
     let config_path = blob_path(image_dir, config_digest);
-    let config_content =
-        std::fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {e}"))?;
+    let config_content = std::fs::read_to_string(&config_path)
+        .map_err(|e| BoxError::OciImageError(format!("Failed to read config: {e}")))?;
     let config: ImageConfiguration = serde_json::from_str(&config_content)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
+        .map_err(|e| BoxError::SerializationError(format!("Failed to parse config: {e}")))?;
     Ok(config)
 }
 
-fn get_layer_sizes(image_dir: &std::path::Path) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+fn get_layer_sizes(image_dir: &std::path::Path) -> Result<Vec<u64>, BoxError> {
     let index_content = std::fs::read_to_string(image_dir.join("index.json"))?;
     let index: serde_json::Value = serde_json::from_str(&index_content)?;
     let manifest_digest = index["manifests"][0]["digest"]
         .as_str()
-        .ok_or("No manifest digest")?;
+        .ok_or_else(|| BoxError::OciImageError("No manifest digest".to_string()))?;
     let manifest_path = blob_path(image_dir, manifest_digest);
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest_content)?;
@@ -204,5 +204,15 @@ mod tests {
     #[test]
     fn test_format_timestamp_invalid() {
         assert_eq!(format_timestamp("not-a-date"), "not-a-date");
+    }
+
+    #[test]
+    fn missing_index_is_an_oci_image_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_image_configuration(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, BoxError::OciImageError(ref message) if message.contains("index.json")),
+            "{err}"
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager, KillExecutionOptions};
 use a3s_box_runtime::ManagedExecutionState;
 
@@ -21,7 +22,7 @@ pub struct RmArgs {
     pub force: bool,
 }
 
-pub async fn execute(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: RmArgs) -> Result<(), BoxError> {
     let mut state = StateFile::load_default()?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -34,16 +35,15 @@ pub async fn execute(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("\n").into())
+        Err(super::IntoBoxError::into_box_error(errors.join("\n")))
     }
 }
 
-async fn rm_one(
-    state: &mut StateFile,
-    query: &str,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let box_id = resolve::resolve(state, query)?.id.clone();
+async fn rm_one(state: &mut StateFile, query: &str, force: bool) -> Result<(), BoxError> {
+    let box_id = resolve::resolve(state, query)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     // Re-resolve after waiting for start/restart/commit. Legacy removal keeps
     // this guard through cleanup; managed removal hands ownership to the
@@ -51,7 +51,11 @@ async fn rm_one(
     let current_state = StateFile::load_default()?;
     let record = current_state
         .find_by_id(&box_id)
-        .ok_or_else(|| format!("Box {query} was removed while waiting to remove it"))?
+        .ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {query} was removed while waiting to remove it"
+            ))
+        })?
         .clone();
     drop(current_state);
 
@@ -75,9 +79,13 @@ async fn rm_one(
                         timeout_secs: Some(0),
                     },
                 )
-                .await?;
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
         }
-        manager.remove_execution(&execution_id, generation).await?;
+        manager
+            .remove_execution(&execution_id, generation)
+            .await
+            .map_err(super::IntoBoxError::into_box_error)?;
         state.forget(&box_id);
         crate::audit::record(
             a3s_box_core::audit::AuditAction::BoxDestroy,
@@ -132,16 +140,16 @@ enum RmPlan {
     },
 }
 
-fn rm_plan(
-    record: &crate::state::BoxRecord,
-    force: bool,
-) -> Result<RmPlan, Box<dyn std::error::Error>> {
+fn rm_plan(record: &crate::state::BoxRecord, force: bool) -> Result<RmPlan, BoxError> {
     let Some(metadata) = record.managed_execution.as_ref() else {
         return Ok(RmPlan::Legacy);
     };
-    let state = record
-        .managed_state()?
-        .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+    let state = record.managed_state()?.ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed lifecycle metadata",
+            record.name
+        ))
+    })?;
     let terminate = match state {
         ManagedExecutionState::Created
         | ManagedExecutionState::Stopped
@@ -158,39 +166,34 @@ fn rm_plan(
             // remove. Without --force, refuse so operators do not race an active
             // create/start claim.
             if !force {
-                return Err(format!(
+                return Err(BoxError::StateError(format!(
                     "Box {} is {state}. Use --force to remove an active box.",
                     record.name
-                )
-                .into());
+                )));
             }
             true
         }
         other => {
-            return Err(format!(
+            return Err(BoxError::StateError(format!(
                 "Cannot remove box {} while its managed lifecycle is {other}",
                 record.name
-            )
-            .into());
+            )));
         }
     };
     Ok(RmPlan::Managed {
-        execution_id: ExecutionId::new(record.id.clone())?,
+        execution_id: ExecutionId::new(record.id.clone())
+            .map_err(super::IntoBoxError::into_box_error)?,
         generation: metadata.generation,
         terminate,
     })
 }
 
-fn validate_remove_request(
-    record: &crate::state::BoxRecord,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_remove_request(record: &crate::state::BoxRecord, force: bool) -> Result<(), BoxError> {
     if status::is_active(record) && !force {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Box {} is {}. Use --force to remove an active box.",
             record.name, record.status
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -269,11 +272,13 @@ mod tests {
 
     #[test]
     fn managed_rm_rejects_active_records_without_force() {
-        let error = rm_plan(&managed_record(ManagedExecutionState::Running), false)
-            .unwrap_err()
-            .to_string();
+        let Err(BoxError::StateError(message)) =
+            rm_plan(&managed_record(ManagedExecutionState::Running), false)
+        else {
+            panic!("refusing an active box must be a state error");
+        };
 
-        assert!(error.contains("--force"));
+        assert!(message.contains("--force"));
     }
 
     #[test]

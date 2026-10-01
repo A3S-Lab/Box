@@ -148,13 +148,12 @@ pub(super) fn stage_virtiofs_ro_share(
         )));
     }
 
+    crate::vm::refuse_directory_reparse(filemounts_dir)?;
+
     let root = ro_alias_root(filemounts_dir);
     std::fs::create_dir_all(&root).map_err(BoxError::IoError)?;
     let target = root.join(index.to_string());
-    detach_bindflt_mapping(&target)?;
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(BoxError::IoError)?;
-    }
+    remove_ro_alias_directory(&target)?;
     std::fs::create_dir(&target).map_err(BoxError::IoError)?;
 
     if let Err(error) = setup_bindflt_read_only(&target, source) {
@@ -271,10 +270,7 @@ pub(crate) fn cleanup_virtiofs_ro_shares(box_dir: &Path) -> Result<()> {
         .map_err(BoxError::IoError)?;
     aliases.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for alias in aliases {
-        detach_bindflt_mapping(&alias)?;
-        if alias.exists() {
-            std::fs::remove_dir_all(&alias).map_err(BoxError::IoError)?;
-        }
+        remove_ro_alias_directory(&alias)?;
     }
     if root.exists() {
         std::fs::remove_dir_all(&root).map_err(BoxError::IoError)?;
@@ -394,6 +390,27 @@ fn setup_bindflt_read_only(virtual_path: &Path, backing_path: &Path) -> Result<(
                 "Windows BindFlt (bindfltapi.dll) is required for :ro virtio-fs write denial".into(),
             ),
         });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn remove_ro_alias_directory(path: &Path) -> Result<()> {
+    // BindFlt returns access denied for a junction. Unlink that node first so
+    // cleanup does not follow it into the directory outside the alias.
+    let unlinked =
+        a3s_box_core::windows_file::remove_directory_junction(path).map_err(BoxError::IoError)?;
+    if unlinked {
+        if let Err(error) = detach_bindflt_mapping(path) {
+            if path.exists() {
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
+    detach_bindflt_mapping(path)?;
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(BoxError::IoError)?;
     }
     Ok(())
 }
@@ -546,7 +563,9 @@ mod tests {
 
         let error = stage_virtiofs_ro_share(&source, &filemounts, 0).unwrap_err();
         match error {
-            BoxError::BoxBootError { hint: Some(hint), .. } => {
+            BoxError::BoxBootError {
+                hint: Some(hint), ..
+            } => {
                 assert!(
                     hint.contains("CAP_SYS_ADMIN"),
                     "unprivileged :ro staging must hint CAP_SYS_ADMIN, got: {hint}"
@@ -626,5 +645,68 @@ mod tests {
         assert!(!ro_alias_root(&filemounts).exists());
         assert_eq!(std::fs::read(source.join("x")).unwrap(), b"data");
         assert!(std::fs::write(source.join("after"), b"ok").is_ok());
+    }
+
+    #[test]
+    fn cleanup_does_not_delete_through_an_alias_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let filemounts = fixture.path().join(".filemounts");
+        let aliases = filemounts.join("ro-aliases");
+        std::fs::create_dir_all(&aliases).unwrap();
+        let alias = aliases.join("0");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            alias.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        cleanup_virtiofs_ro_shares(fixture.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(!alias.exists(), "cleanup left the alias junction in place");
+    }
+
+    #[test]
+    fn stage_does_not_create_an_alias_through_a_filemounts_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let filemounts = fixture.path().join(".filemounts");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            filemounts.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let source = fixture.path().join("vol");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("x"), b"data").unwrap();
+
+        let staged = stage_virtiofs_ro_share(&source, &filemounts, 0);
+        assert!(
+            !outside.join("ro-aliases").exists(),
+            "stage created an alias through the filemounts junction: {staged:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert_eq!(std::fs::read(source.join("x")).unwrap(), b"data");
+        let metadata = std::fs::symlink_metadata(&filemounts).unwrap();
+        assert!(metadata.file_type().is_symlink());
     }
 }

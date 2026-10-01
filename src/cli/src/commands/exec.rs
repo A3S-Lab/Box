@@ -9,6 +9,8 @@
 
 use clap::Args;
 
+use a3s_box_core::error::BoxError;
+
 use super::common;
 use crate::resolve;
 use crate::state::StateFile;
@@ -60,7 +62,7 @@ pub struct ExecArgs {
 pub(crate) async fn connect_pty_with_retry(
     socket_path: &std::path::Path,
     timeout: std::time::Duration,
-) -> Result<a3s_box_runtime::PtyClient, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_runtime::PtyClient, BoxError> {
     let deadline = std::time::Instant::now() + timeout;
 
     loop {
@@ -69,13 +71,12 @@ pub(crate) async fn connect_pty_with_retry(
             Err(error) => {
                 let last_error = error.to_string();
                 if std::time::Instant::now() >= deadline {
-                    return Err(format!(
+                    return Err(BoxError::TimeoutError(format!(
                         "Failed to connect to PTY server at {} after {:?}: {}",
                         socket_path.display(),
                         timeout,
                         last_error
-                    )
-                    .into());
+                    )));
                 }
             }
         }
@@ -84,36 +85,44 @@ pub(crate) async fn connect_pty_with_retry(
     }
 }
 
-pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ExecArgs) -> Result<(), BoxError> {
     use a3s_box_core::exec::ExecRequest;
 
     #[cfg(windows)]
     if args.tty {
-        return Err(crate::platform::unsupported_command(
-            "exec --tty",
-            "interactive PTY support",
+        return Err(BoxError::ConfigError(
+            crate::platform::unsupported_command("exec --tty", "interactive PTY support")
+                .to_string(),
         ));
     }
 
-    let user = common::normalize_user_option(args.user.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    common::validate_workdir_option(args.workdir.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let user =
+        common::normalize_user_option(args.user.as_deref()).map_err(BoxError::ConfigError)?;
+    common::validate_workdir_option(args.workdir.as_deref()).map_err(BoxError::ConfigError)?;
 
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?.clone();
+    let record = resolve::resolve(&state, &args.r#box)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .clone();
     let record = match super::observe_inventory::refresh_managed_inventory_record(record).await? {
         Some(record) => record,
-        None => return Err(format!("No such container: {}", args.r#box).into()),
+        None => {
+            return Err(BoxError::StateError(format!(
+                "No such container: {}",
+                args.r#box
+            )))
+        }
     };
     let oci_session = uses_oci_session(&record);
     if oci_session {
         if record.status != "running" {
-            return Err(format!("Box {} is not running", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Box {} is not running",
+                record.name
+            )));
         }
     } else {
-        crate::socket_paths::require_running(&record, "exec")
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        crate::socket_paths::require_running(&record, "exec").map_err(BoxError::StateError)?;
     }
 
     // If -t is specified, use interactive PTY mode. Windows rejected `-t`
@@ -121,7 +130,9 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(windows))]
     if args.tty {
         if args.request_id.is_some() {
-            return Err("Cannot use --request-id with -t/--tty".into());
+            return Err(BoxError::ConfigError(
+                "Cannot use --request-id with -t/--tty".to_string(),
+            ));
         }
 
         return if oci_session {
@@ -132,8 +143,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let timeout_ns = timeout_secs_to_ns(args.timeout);
-    let request_id = resolve_exec_request_id(args.request_id)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let request_id = resolve_exec_request_id(args.request_id).map_err(BoxError::ConfigError)?;
 
     // Read stdin if interactive mode
     let stdin_data = if args.interactive {
@@ -196,38 +206,41 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 pub(crate) async fn execute_captured(
     record: &crate::state::BoxRecord,
     request: a3s_box_core::exec::ExecRequest,
-) -> Result<a3s_box_core::exec::ExecOutput, Box<dyn std::error::Error>> {
+) -> Result<a3s_box_core::exec::ExecOutput, BoxError> {
     use a3s_box_core::{ExecutionId, ExecutionSessionManager};
 
     if uses_oci_session(record) {
         if record.status != "running" {
-            return Err(format!("Box {} is not running", record.name).into());
+            return Err(BoxError::StateError(format!(
+                "Box {} is not running",
+                record.name
+            )));
         }
-        let metadata = record
-            .managed_execution
-            .as_ref()
-            .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+        let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+            BoxError::StateError(format!(
+                "Box {} lost managed execution metadata",
+                record.name
+            ))
+        })?;
         let home = a3s_box_core::dirs_home();
         let manager = super::configured_local_execution_manager(&home).await?;
         manager
             .execute(
-                &ExecutionId::new(record.id.clone())?,
+                &ExecutionId::new(record.id.clone())
+                    .map_err(super::IntoBoxError::into_box_error)?,
                 metadata.generation,
                 request,
             )
             .await
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+            .map_err(super::IntoBoxError::into_box_error)
     } else {
         let exec_socket_path = crate::socket_paths::require_runtime_socket(
             record,
             crate::socket_paths::RuntimeSocket::Exec,
         )
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .map_err(BoxError::StateError)?;
         let client = a3s_box_runtime::ExecClient::connect(&exec_socket_path).await?;
-        client
-            .exec_command(&request)
-            .await
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+        client.exec_command(&request).await
     }
 }
 
@@ -271,23 +284,25 @@ fn resolve_exec_request_id(request_id: Option<String>) -> Result<String, String>
     }
 }
 
-fn annotate_unavailable_with_request_id(
-    error: Box<dyn std::error::Error>,
-    request_id: &str,
-) -> Box<dyn std::error::Error> {
-    use a3s_box_core::ExecutionManagerError;
-
+fn annotate_unavailable_with_request_id(error: BoxError, request_id: &str) -> BoxError {
     let unavailable = error
-        .downcast_ref::<ExecutionManagerError>()
-        .is_some_and(|error| matches!(error, ExecutionManagerError::Unavailable(_)))
-        || error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("unavailable");
-    if unavailable {
-        format!("{error} (reuse --request-id {request_id})").into()
-    } else {
-        error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("unavailable");
+    if !unavailable {
+        return error;
+    }
+    let hint = format!(" (reuse --request-id {request_id})");
+    match error {
+        BoxError::StateError(message) => BoxError::StateError(message + &hint),
+        BoxError::ExecError(message) => BoxError::ExecError(message + &hint),
+        BoxError::TimeoutError(message) => BoxError::TimeoutError(message + &hint),
+        BoxError::ConfigError(message) => BoxError::ConfigError(message + &hint),
+        BoxError::Other(message) => BoxError::Other(message + &hint),
+        BoxError::IoError(error) => {
+            BoxError::IoError(std::io::Error::other(format!("{error}{hint}")))
+        }
+        other => BoxError::StateError(format!("{other}{hint}")),
     }
 }
 
@@ -296,20 +311,22 @@ async fn execute_managed_pty(
     args: ExecArgs,
     record: &crate::state::BoxRecord,
     user: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use a3s_box_core::pty::PtyRequest;
     use a3s_box_core::{ExecutionId, ExecutionSessionManager};
 
-    let metadata = record
-        .managed_execution
-        .as_ref()
-        .ok_or_else(|| format!("Box {} lost managed execution metadata", record.name))?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        BoxError::StateError(format!(
+            "Box {} lost managed execution metadata",
+            record.name
+        ))
+    })?;
     let (cols, rows) = crate::terminal::size().unwrap_or((80, 24));
     let home = a3s_box_core::dirs_home();
     let manager = super::configured_local_execution_manager(&home).await?;
     let process = manager
         .start_pty(
-            &ExecutionId::new(record.id.clone())?,
+            &ExecutionId::new(record.id.clone()).map_err(super::IntoBoxError::into_box_error)?,
             metadata.generation,
             PtyRequest {
                 cmd: args.cmd,
@@ -321,7 +338,8 @@ async fn execute_managed_pty(
                 rows,
             },
         )
-        .await?;
+        .await
+        .map_err(super::IntoBoxError::into_box_error)?;
     crate::audit::record(
         a3s_box_core::audit::AuditAction::ExecCommand,
         a3s_box_core::audit::AuditOutcome::Success,
@@ -428,7 +446,7 @@ async fn execute_pty(
     args: ExecArgs,
     record: &crate::state::BoxRecord,
     user: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use crate::terminal;
     use a3s_box_core::pty::PtyRequest;
 
@@ -436,7 +454,7 @@ async fn execute_pty(
         record,
         crate::socket_paths::RuntimeSocket::Pty,
     )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    .map_err(BoxError::StateError)?;
 
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -606,6 +624,7 @@ pub(crate) async fn run_pty_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::error::BoxError;
     use a3s_box_core::ExecutionManagerError;
     use clap::Parser;
 
@@ -656,25 +675,49 @@ mod tests {
 
     #[test]
     fn annotate_unavailable_surfaces_request_id_for_retry() {
-        let error: Box<dyn std::error::Error> =
-            ExecutionManagerError::Unavailable("response lost".to_string()).into();
+        let error = super::super::execution_error(ExecutionManagerError::Unavailable(
+            "response lost".to_string(),
+        ));
         let annotated = annotate_unavailable_with_request_id(error, "cli-exec-abc");
-        let message = annotated.to_string();
-        assert!(message.contains("unavailable"), "{message}");
-        assert!(
-            message.contains("reuse --request-id cli-exec-abc"),
-            "{message}"
-        );
+        match annotated {
+            BoxError::StateError(message) => {
+                assert!(
+                    message.to_ascii_lowercase().contains("unavailable"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("reuse --request-id cli-exec-abc"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected StateError, got {other:?}"),
+        }
     }
 
     #[test]
     fn annotate_non_unavailable_keeps_original_error() {
-        let error: Box<dyn std::error::Error> =
-            ExecutionManagerError::InvalidRequest("bad argv".to_string()).into();
+        let error = super::super::execution_error(ExecutionManagerError::InvalidRequest(
+            "bad argv".to_string(),
+        ));
         let annotated = annotate_unavailable_with_request_id(error, "cli-exec-abc");
-        let message = annotated.to_string();
-        assert!(message.contains("bad argv"), "{message}");
-        assert!(!message.contains("reuse --request-id"), "{message}");
+        match annotated {
+            BoxError::ConfigError(message) => {
+                assert!(message.contains("bad argv"), "{message}");
+                assert!(!message.contains("reuse --request-id"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_exec_request_id_is_a_configuration_error() {
+        let error = resolve_exec_request_id(Some(String::new())).map_err(BoxError::ConfigError);
+        match error {
+            Err(BoxError::ConfigError(message)) => {
+                assert!(message.contains("--request-id must be"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 
     #[test]

@@ -99,13 +99,14 @@ impl VmManager {
             .join("boxes")
             .join(&self.box_id)
             .join(".filemounts");
-        let named_volume_paths: std::collections::HashSet<PathBuf> =
-            crate::volume::VolumeStore::new(
-                self.home_dir.join("volumes.json"),
-                self.home_dir.join("volumes"),
-            )
+        let volume_store = crate::volume::VolumeStore::new(
+            self.home_dir.join("volumes.json"),
+            self.home_dir.join("volumes"),
+        );
+        let named_volume_paths: std::collections::HashSet<PathBuf> = volume_store
             .load()?
             .into_values()
+            .filter(|volume| volume_store.mount_point_is_managed(&volume.name, &volume.mount_point))
             .map(|volume| PathBuf::from(volume.mount_point))
             .collect();
         let parsed_volumes = self
@@ -118,7 +119,17 @@ impl VmManager {
                 Ok(parsed)
             })
             .collect::<Result<Vec<_>>>()?;
+        let volumes_dir = self.home_dir.join("volumes");
         for (i, volume) in parsed_volumes.iter().enumerate() {
+            if a3s_box_core::volume_posix::managed_volume_directory(&volumes_dir, &volume.host_path)
+                .is_some()
+                && crate::volume::managed_volume_ancestor_is_link(&volume.host_path)
+            {
+                return Err(BoxError::ConfigError(format!(
+                    "managed volume path {} is not a directory",
+                    volume.host_path.display()
+                )));
+            }
             let mount = Self::prepare_volume_mount(
                 volume,
                 i,
@@ -217,6 +228,70 @@ impl VmManager {
                 }
             }
         }
+
+        #[cfg(target_os = "windows")]
+        let managed_volume_mounts = {
+            let volumes_dir = self.home_dir.join("volumes");
+            let mut managed_volume_mounts = Vec::new();
+            for volume in &parsed_volumes {
+                if a3s_box_core::volume_posix::managed_volume_directory(
+                    &volumes_dir,
+                    &volume.host_path,
+                )
+                .is_some()
+                    && crate::volume::managed_path_can_be_a_volume_directory(&volume.host_path)
+                {
+                    managed_volume_mounts
+                        .push((volume.guest_path.clone(), volume.host_path.clone()));
+                }
+            }
+            let anonymous_mount_start = 1 + parsed_volumes.len();
+            for (offset, guest_path) in materialized_anonymous_destinations.iter().enumerate() {
+                let Some(mount) = fs_mounts.get(anonymous_mount_start + offset) else {
+                    continue;
+                };
+                if a3s_box_core::volume_posix::managed_volume_directory(
+                    &volumes_dir,
+                    &mount.host_path,
+                )
+                .is_some()
+                    && crate::volume::managed_path_can_be_a_volume_directory(&mount.host_path)
+                {
+                    managed_volume_mounts.push((guest_path.clone(), mount.host_path.clone()));
+                }
+            }
+            let mut replay_mounts = Vec::new();
+            for volume in &parsed_volumes {
+                if a3s_box_core::volume_posix::managed_volume_directory(
+                    &volumes_dir,
+                    &volume.host_path,
+                )
+                .is_none()
+                {
+                    replay_mounts.push((volume.guest_path.clone(), volume.host_path.clone()));
+                }
+            }
+            for (offset, guest_path) in materialized_anonymous_destinations.iter().enumerate() {
+                let Some(mount) = fs_mounts.get(anonymous_mount_start + offset) else {
+                    continue;
+                };
+                if a3s_box_core::volume_posix::managed_volume_directory(
+                    &volumes_dir,
+                    &mount.host_path,
+                )
+                .is_none()
+                {
+                    replay_mounts.push((guest_path.clone(), mount.host_path.clone()));
+                }
+            }
+            super::volume_posix::sync_volume_posix(
+                &self.home_dir.join("boxes").join(&self.box_id),
+                &layout.rootfs_path,
+                &managed_volume_mounts,
+                &replay_mounts,
+            )?;
+            managed_volume_mounts
+        };
 
         // Determine whether guest init is installed (it becomes PID 1 and
         // launches the container entrypoint from runtime control data).
@@ -579,6 +654,17 @@ impl VmManager {
                 entrypoint
                     .env
                     .push(("BOX_PERSIST_ROOTFS_METADATA".to_string(), "1".to_string()));
+            }
+            // Windows virtio-fs drops uid/gid/mode when the VM exits. Capture
+            // them for a persistent rootfs and for any managed volume, including
+            // a non-persistent box whose rootfs will be deleted. Linux binds
+            // already persist ownership on the host filesystem.
+            #[cfg(target_os = "windows")]
+            if self.config.persistent || !managed_volume_mounts.is_empty() {
+                entrypoint.env.push((
+                    a3s_box_core::volume_posix::VOLUME_POSIX_METADATA_ENV.to_string(),
+                    "1".to_string(),
+                ));
             }
 
             // Inject sidecar configuration so guest-init can launch the sidecar process.
@@ -950,6 +1036,9 @@ mod virtiofs_ro;
 mod volumes;
 
 pub(crate) use virtiofs_ro::cleanup_virtiofs_ro_shares;
+pub(crate) use volumes::{
+    refuse_existing_symlink_or_reparse_prefixes, refuse_symlink_or_reparse_volume_source,
+};
 
 #[cfg(test)]
 #[path = "spec/tests.rs"]

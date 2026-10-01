@@ -1,5 +1,6 @@
 //! `a3s-box export` command — Export a box's filesystem to a tar archive.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::resolve;
@@ -15,16 +16,19 @@ pub struct ExportArgs {
     pub output: String,
 }
 
-pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ExportArgs) -> Result<(), BoxError> {
     let initial_state = StateFile::load_default()?;
-    let box_id = resolve::resolve(&initial_state, &args.name)?.id.clone();
+    let box_id = resolve::resolve(&initial_state, &args.name)
+        .map_err(super::IntoBoxError::into_box_error)?
+        .id
+        .clone();
     let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
     let record = state.find_by_id(&box_id).ok_or_else(|| {
-        format!(
+        BoxError::StateError(format!(
             "Box '{}' was removed while waiting for its lifecycle lock",
             args.name
-        )
+        ))
     })?;
 
     if uses_live_sandbox_host_rootfs(record) {
@@ -36,29 +40,36 @@ pub async fn execute(args: ExportArgs) -> Result<(), Box<dyn std::error::Error>>
         export_live_guest(record, &args.output).await?;
         drop(lifecycle_lock);
     } else if record.status == "paused" {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot export paused MicroVM box '{}'; resume it first, or use a Sandbox",
             record.name
-        )
-        .into());
+        )));
     } else {
         if super::rootfs_capture::stopped_sandbox_uses_managed_host_rootfs(record) {
             drop(lifecycle_lock);
             export_stopped_sandbox_host(record, &args.output).await?;
         } else if a3s_box_runtime::rootfs::guest_native_ext4_generation_exists(&record.box_dir)? {
-            let mut file = tokio::fs::File::create(&args.output)
-                .await
-                .map_err(|error| format!("Failed to create {}: {error}", args.output))?;
+            let output = std::path::Path::new(&args.output);
+            super::commit::refuse_archive_ancestor_reparse(output)?;
+            let mut file = tokio::fs::File::create(output).await.map_err(|error| {
+                super::io_error(format!("Failed to create {}", args.output), error)
+            })?;
             super::rootfs_capture::archive_stopped_guest_native_rootfs(record, &mut file).await?;
             file.sync_all().await?;
             drop(lifecycle_lock);
         } else {
-            let rootfs_dir = super::resolve_box_rootfs(&record.box_dir)
-                .ok_or_else(|| rootfs_not_found_message(&args.name, &record.box_dir))?;
+            let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+                BoxError::StateError(rootfs_not_found_message(&args.name, &record.box_dir))
+            })?;
             // Match stopped commit: fail closed without guest rootfs metadata so
             // NTFS host mode/ownership is never archived as guest filesystem truth.
-            let rootfs_metadata = super::commit::read_guest_rootfs_metadata(&rootfs_dir)
-                .map_err(|error| format!("Cannot export stopped box '{}': {error}", record.name))?;
+            let rootfs_metadata =
+                super::commit::read_guest_rootfs_metadata(&rootfs_dir).map_err(|error| {
+                    BoxError::StateError(format!(
+                        "Cannot export stopped box '{}': {error}",
+                        record.name
+                    ))
+                })?;
             super::commit::create_tar_from_guest_metadata(
                 &rootfs_dir,
                 &rootfs_metadata,
@@ -87,16 +98,15 @@ fn uses_live_sandbox_host_rootfs(record: &crate::state::BoxRecord) -> bool {
 async fn export_live_sandbox_host(
     record: &crate::state::BoxRecord,
     output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     let live_pid = record.pid.is_some_and(|pid| {
         crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
     });
     if !live_pid {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot export box '{}' because its host process is not live",
             record.name
-        )
-        .into());
+        )));
     }
     // Quiesce via managed pause when Running; already-Paused captures in place.
     super::commit::capture_live_host_rootfs_tar(record, std::path::Path::new(output), true).await
@@ -106,19 +116,18 @@ async fn export_live_sandbox_host(
 async fn export_live_sandbox_host(
     record: &crate::state::BoxRecord,
     _output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Live Sandbox host-rootfs export is unavailable for box '{}' on this platform",
         record.name
-    )
-    .into())
+    )))
 }
 
 #[cfg(all(unix, target_os = "linux"))]
 async fn export_stopped_sandbox_host(
     record: &crate::state::BoxRecord,
     output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     super::rootfs_capture::ensure_stopped_rootfs_is_unowned(record)?;
     // Already stopped: capture OCI-mapped host rootfs without pause/resume.
     super::commit::capture_live_host_rootfs_tar(record, std::path::Path::new(output), false).await
@@ -128,43 +137,41 @@ async fn export_stopped_sandbox_host(
 async fn export_stopped_sandbox_host(
     record: &crate::state::BoxRecord,
     _output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Stopped Sandbox host-rootfs export is unavailable for box '{}' on this platform",
         record.name
-    )
-    .into())
+    )))
 }
 
 #[cfg(unix)]
-async fn export_live_guest(
-    record: &crate::state::BoxRecord,
-    output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn export_live_guest(record: &crate::state::BoxRecord, output: &str) -> Result<(), BoxError> {
     let live_pid = record.pid.is_some_and(|pid| {
         crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
     });
     if !live_pid {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot export running box '{}' because its host process is not live",
             record.name
-        )
-        .into());
+        )));
     }
     if !record.exec_socket_path.exists() {
-        return Err(format!(
+        return Err(BoxError::StateError(format!(
             "Cannot export running box '{}' because its guest archive endpoint is unavailable",
             record.name
-        )
-        .into());
+        )));
     }
+    let output = std::path::Path::new(output);
+    super::commit::refuse_archive_ancestor_reparse(output)?;
     let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
     let mut file = tokio::fs::File::create(output)
         .await
-        .map_err(|error| format!("Failed to create {output}: {error}"))?;
+        .map_err(|error| super::io_error(format!("Failed to create {output}"), error))?;
     let written = client.archive_rootfs(&mut file, true).await?;
     if written == 0 {
-        return Err("Guest rootfs archive was empty".into());
+        return Err(BoxError::ExecError(
+            "Guest rootfs archive was empty".to_string(),
+        ));
     }
     file.sync_all().await?;
     Ok(())
@@ -174,12 +181,11 @@ async fn export_live_guest(
 async fn export_live_guest(
     record: &crate::state::BoxRecord,
     _output: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!(
+) -> Result<(), BoxError> {
+    Err(BoxError::ConfigError(format!(
         "Live filesystem export is unavailable for box '{}' on this platform",
         record.name
-    )
-    .into())
+    )))
 }
 
 fn rootfs_not_found_message(name: &str, box_dir: &std::path::Path) -> String {
@@ -241,5 +247,24 @@ mod tests {
         assert!(uses_live_sandbox_host_rootfs(&paused));
         assert!(!uses_live_sandbox_host_rootfs(&stopped));
         assert!(!uses_live_sandbox_host_rootfs(&microvm_paused));
+    }
+
+    #[cfg(not(all(unix, target_os = "linux")))]
+    #[tokio::test]
+    async fn live_sandbox_host_export_is_a_configuration_error() {
+        let record = crate::test_helpers::fixtures::make_record("id", "web", "running", Some(1));
+        let error = export_live_sandbox_host(&record, "web.tar")
+            .await
+            .unwrap_err();
+        match error {
+            BoxError::ConfigError(message) => {
+                assert!(
+                    message.contains("Live Sandbox host-rootfs export is unavailable"),
+                    "{message}"
+                );
+                assert!(message.contains("web"), "{message}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }

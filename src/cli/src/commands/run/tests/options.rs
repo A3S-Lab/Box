@@ -102,6 +102,23 @@ fn test_validate_run_mode_rejects_detached_tty_before_boot() {
     assert!(err.contains("Cannot use -t"));
 }
 
+#[test]
+fn detached_tty_is_a_configuration_error() {
+    let mut args = default_run_args();
+    args.detach = true;
+    args.tty = true;
+
+    let err = validate_run_mode(&args, true)
+        .map_err(a3s_box_core::error::BoxError::ConfigError)
+        .unwrap_err();
+    match err {
+        a3s_box_core::error::BoxError::ConfigError(message) => {
+            assert!(message.contains("Cannot use -t"), "{message}");
+        }
+        other => panic!("expected ConfigError, got {other:?}"),
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn test_validate_run_mode_rejects_tty_without_terminal_before_boot() {

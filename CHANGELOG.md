@@ -4,8 +4,594 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Windows MicroVMs that are persistent, or that mount a managed volume,
+  record workspace and volume uid/gid/mode in `/.a3s_volume_metadata_v1.json`
+  and replay that manifest after the shares are mounted. Managed VolumeStore
+  directories keep a sibling sidecar, `volumes/{name}.a3s-volume-posix.v1.json`,
+  harvested on Windows stop and staged onto the next box at its current guest
+  path. Caller binds and `/workspace` stay on the box rootfs. Replay stays in
+  the virtio-fs inode table.   Linux hosts do not enable it. A crash before
+  clean shutdown leaves the previous sidecar. A newer sidecar for the same
+  guest path replaces that mount on the next boot. A volume path this boot
+  no longer mounts is dropped from the rootfs manifest. Entries follow the
+  host volume when its guest path changes, including when another volume
+  takes the previous path. A parent share does not capture or replay paths
+  that belong to a nested volume. Two guest paths of one host volume share
+  one entry set, so the second path does not take an older sidecar. Harvest
+  leaves the previous sidecar in place when those captures disagree. Entries
+  inside a nested volume are removed before stage and harvest publish them.
+  An entry whose path leaves its share is dropped, and guest replay skips
+  that entry instead of failing the boot.   A manifest that then has no
+  entries does not replace the previous sidecar. An older guest manifest
+  does not replace a newer sidecar. An unreadable manifest in one root
+  does not hide a valid manifest in another. A guest path this boot does
+  not mount, other than `/workspace`, is dropped before replay. A caller
+  bind mounted this boot stays on the rootfs manifest and is not copied
+  into a VolumeStore sidecar. A managed volume later mounted at that
+  guest path does not inherit the caller bind's uid/gid. Guest
+  replay skips a missing path, a kind mismatch, a symlink parent, a path
+  whose parent is not a directory, or an owner/mode restore it cannot
+  apply, and still applies the other entries.
+  That unapplied entry is recorded beside the manifest. The published
+  manifest stays until the next capture, so a stop before that capture
+  does not shrink the sidecar. The next capture keeps its uid, gid, and
+  mode. A share that cannot be listed keeps its previous capture for
+  replay. Harvest does not write that retained capture over the sidecar.
+  The next boot keeps that mark, including a second guest path of the
+  same volume. A partial capture on another guest path of that volume
+  does not replace the retained entries or the sidecar. Two fresh captures
+  of one volume that disagree are not collapsed on the next boot; that
+  boot replays the previous sidecar. Two retained captures that disagree
+  are not collapsed either; that boot also replays the previous sidecar.
+  A fresh listing that matches the retained capture is written to the
+  sidecar. The next boot reads the newest valid manifest across the box
+  roots, so a capture in another root is not replaced by an older rootfs
+  copy. After that boot publishes the staged manifest, copies in the
+  other box roots are removed, so the guest replays the staged file.
+  A capture that already lives in another root is still published onto
+  the guest root when this boot does not change it. An older copy in
+  another root is removed even when the guest root already has that
+  capture. A pending replay left beside a retired manifest is removed,
+  including a copy in another root, so the next capture does not overlay
+  those entries. A newer durable temp capture, whose rename did not
+  finish, is published onto the guest root and then removed. The guest
+  replays that newer temp capture itself, and does not apply an older
+  temp over the manifest. That newer temp stays in place so a stop before
+  the next capture does not lose it. A partial replay records the entries
+  it could not apply without replacing that newer temp capture. The
+  scratch used for that record is runtime-internal and is removed with
+  the pending file, so a crash during the write does not enter an image.
+  If the next capture cannot replace the committed manifest, that newer
+  temp is left unchanged. The same holds when the host publishes the next
+  boot's manifest. A synced publish whose rename did not finish is
+  harvested ahead of the older durable temp. The pending replay scratch
+  is not that capture. Replacing the committed manifest leaves that
+  publish capture unchanged when the replace does not finish. A
+  successful replay removes an older publish capture before the
+  committed manifest, so the next harvest does not replace the replayed
+  mode with that older capture. Stage leaves a newer temp or publish
+  capture in place when that file already holds the bytes the guest
+  reads, so replay can retire the older manifest and harvest still
+  reads that capture. A newer capture from another root is copied
+  beside the committed manifest, so replay can retire that manifest
+  and harvest still reads the copy. An invalid committed manifest
+  does not hide that other-root capture. A newer sidecar for one
+  volume does not fold another volume's unharvested capture into the
+  committed manifest. That holds for a remaining rootfs temp or publish
+  capture as well as a capture in another root. A caller path that
+  lives only on the manifest is copied beside the committed manifest
+  when another mount is replaced, so replay can retire that manifest
+  and the caller path remains. An oversized temp or publish scratch
+  does not hide a valid manifest beside it. An oversized manifest in
+  another root does not hide a valid manifest either. The size error
+  remains when nothing valid is left. An oversized committed manifest
+  is removed once another root already holds a valid capture, so the
+  guest does not stop on that file. Guest replay skips an oversized
+  committed manifest when a valid temp or publish capture remains, and
+  still returns the size error when nothing valid is left. A directory
+  at a capture name does not hide a valid manifest, and it is removed
+  once another root already holds a valid capture.   The non-regular error
+  remains when nothing valid is left.   Guest replay skips a directory at
+  the committed name when a valid capture remains. Guest persist does
+  not follow a symlink pending capture. A directory or link at a
+  volume sidecar path does not hide the rootfs manifest and is not
+  followed. An oversized sidecar is not read and does not hide that
+  manifest. The size error remains when the sidecar is the only capture.
+  Harvest replaces that oversized sidecar when a valid manifest remains,
+  so its mtime does not keep the unreadable file. Harvest skips a
+  directory or link at one sidecar and still writes the other volumes.
+  An empty directory at the bindings path is replaced. A nonempty
+  directory stays, and boot keeps the rootfs manifest. An oversized
+  bindings file is not read. This boot replaces it from the mounts it
+  was given. Bindings that are not a mount map, including a wrong
+  schema, are replaced the same way. An empty bindings scratch directory
+  is removed before the write. A nonempty scratch directory stays, and
+  boot keeps the rootfs manifest. Harvest removes an empty sidecar
+  scratch directory before writing. A nonempty sidecar scratch stays,
+  and the other volumes are still written. An empty metadata scratch
+  directory is removed before the manifest is published. A nonempty
+  metadata scratch stays, and the publish uses another scratch. An empty
+  publish scratch directory is removed before another root is copied.
+  A nonempty publish scratch stays, and the copy uses another scratch.
+  Guest persist removes an empty metadata scratch directory before
+  writing. A nonempty scratch stays, and the capture uses another scratch.
+  After that capture lands, an empty pending scratch directory is removed.
+  A nonempty pending scratch stays, and the capture is kept. Replay does
+  the same: an empty pending scratch is removed, and a nonempty one stays
+  while the restored mode is applied. Replay also removes an empty metadata
+  scratch directory. A nonempty metadata scratch stays, and the restored
+  mode is still applied. Replay also removes an empty publish scratch
+  directory. A nonempty publish scratch stays, and the restored mode is
+  still applied. The next boot removes an empty publish scratch on the
+  guest root. A nonempty one stays, and the staged mode is kept. An empty
+  pending capture directory on the guest root is removed. A nonempty one
+  stays, and the staged mode is kept. An empty pending capture directory
+  in another root is removed. A nonempty one stays, and the staged mode
+  is kept. An empty pending scratch directory in another root is removed.
+  A nonempty one stays, and the staged mode is kept. An empty publish
+  scratch directory in another root is removed. A nonempty one stays,
+  and the staged mode is kept. An empty metadata scratch directory in
+  another root is removed. A nonempty one stays, and the staged mode
+  is kept. A nonempty directory at the committed manifest name stays,
+  and the capture is published beside it. An empty directory at that
+  name is still removed. A nonempty directory at that name in another
+  root stays, and the capture is published beside the guest-root file.
+  An empty directory there is still removed. Replay leaves a nonempty
+  directory at the committed manifest name, and the restored mode is
+  still applied. An empty directory at that name is still removed. The
+  next capture leaves a nonempty directory at that name and writes beside
+  it. A newer temp capture stays. An empty directory there is removed,
+  and the capture is written at that name. The next boot publishes a
+  newer sidecar beside that directory and keeps the previous temp capture.
+  When every metadata scratch directory already has contents, that boot
+  fails and the previous manifest stays. Harvest still writes the other
+  volumes when one sidecar scratch directory already has contents, then
+  fails. That sidecar stays, and its directory stays. When this boot
+  retires the manifest and the committed name is a nonempty directory,
+  that directory stays and the boot still completes. Shadow copies of
+  the retired manifest are removed. A newer temp capture is written to
+  the volume sidecar before those copies are removed. A newer temp
+  that still names a guest path this boot does not mount is removed.
+  The mounted volume's mode stays in the capture the guest reads. A
+  committed manifest that still names that path is removed even when
+  its timestamp is newer than the staged capture. When `/workspace`
+  stays and a volume is no longer mounted, that volume's newer mode is
+  written to its sidecar before the guest path is dropped. When the
+  newest capture already omits that volume, the mode is taken from an
+  older capture before the guest path is dropped. A parent volume
+  recovered that way drops entries that fall inside a nested volume.
+  When the newest capture lists the parent and omits the nested volume,
+  those nested entries are still dropped from the parent sidecar.
+  A newer caller capture that still lists a file inside that nested
+  volume is removed, and the guest reads the capture without it.
+  The same drop happens when this boot mounts that nested volume for
+  the first time and no binding exists yet.
+  Guest replay skips a parent entry that falls inside a share this
+  boot mounts even when the manifest omits that share.
+  When a dropped parent is recovered and this boot mounts a nested
+  volume that has no previous binding, the parent sidecar drops entries
+  inside that nested path. When that parent is still the newest capture,
+  the sidecar harvest drops those nested entries before the guest path
+  is removed.
+  A retained parent capture does not replace sidecar modes. Harvest
+  still removes entries that fall inside a nested volume from that
+  sidecar. A newer parent sidecar keeps its modes, and harvest still
+  removes those nested entries from it.
+  When the parent capture only lists files inside a nested volume,
+  harvest still removes those entries from the parent sidecar and keeps
+  the sidecar's other modes.
+  When one host volume is mounted at two guest paths, a newer sidecar
+  that still lists a file inside a nested volume does not leave that
+  file on the other guest path. Both paths keep the volume's other
+  entries.
+  When the guest capture lists that nested file only on the other guest
+  path, harvest writes the volume's other entries to the parent sidecar
+  and leaves the nested file out. The nested volume keeps its own mode.
+  When both guest paths list entries, a newer parent sidecar keeps its
+  modes, and harvest still removes that nested file. The nested volume
+  keeps its own mode.
+  When those guest paths disagree, harvest still refuses to replace the
+  parent sidecar's modes and still removes that nested file. The nested
+  volume keeps its own mode.
+  When a dropped alias is recovered from an older capture, the parent
+  sidecar keeps that volume's other entries and leaves out the nested
+  file. The nested volume keeps its own mode.
+  When a newer temp lists that nested file only on an alias, stage keeps
+  the volume's other entries on every guest path and drops that temp.
+  The nested volume keeps its own mode.
+  When that alias is a replay mount of the same host, stage keeps both
+  guest paths, leaves the volume's other entries, and drops the nested
+  file. The nested volume keeps its own mode.
+  When no binding file exists yet, a newer temp that lists that nested
+  file only on an alias is still dropped. Both guest paths keep the
+  volume's other entries. The nested volume keeps its own mode.
+  When two mounts of one volume differ only by ASCII case in the host
+  path, stage still drops a nested file listed on only one guest path.
+  Both paths keep the volume's other entries. The nested volume keeps
+  its own mode.
+  When two guest paths of one volume differ only by ASCII case in the
+  host path, both paths share the newer rootfs entries. An older sidecar
+  is not applied to the case-different path.
+  When a volume moves to a new guest path and the host path differs only
+  by ASCII case, the new path keeps the captured entries. The previous
+  guest path is not replayed.
+  When two guest paths of one volume differ only by ASCII case and their
+  fresh captures disagree, both paths take the older sidecar.
+  When those host paths differ only by ASCII case, harvest still refuses
+  the disagreeing captures and leaves the sidecar bytes unchanged.
+  When the volume store directory itself differs only by ASCII case,
+  harvest still refuses those captures and leaves the sidecar bytes
+  unchanged.
+  A verbatim `\\?\` host path keeps the captured entries of that same
+  directory. An older sidecar is not applied in its place.
+  When one host path uses that prefix, harvest still refuses disagreeing
+  captures and leaves the sidecar bytes unchanged.
+  A host path containing `..` that still names that directory keeps the
+  captured entries. An older sidecar is not applied in its place.
+  Harvest still refuses disagreeing captures for that path and leaves the
+  sidecar bytes unchanged.
+  A non-verbatim host path with a trailing dot names that same directory
+  and keeps the captured entries. An older sidecar is not applied in its
+  place. Harvest still refuses disagreeing captures for that path and
+  leaves the sidecar bytes unchanged.
+  A non-verbatim host path with a trailing space names that same directory
+  and keeps the captured entries. An older sidecar is not applied in its
+  place. Harvest still refuses disagreeing captures for that path and
+  leaves the sidecar bytes unchanged.
+  A `\\.\` drive host path names that same directory and keeps the captured
+  entries. An older sidecar is not applied in its place. Harvest still
+  refuses disagreeing captures for that path and leaves the sidecar bytes
+  unchanged. A `\\.\` name that is not a drive letter stays distinct.
+  A non-verbatim host path with a trailing dot or space reads and writes
+  that volume's sidecar. The staged `/data` entries are the sidecar's
+  `0o640`.   A verbatim path keeps those characters in the sidecar name.
+  A host path that steps out of a child with `..` and lands on the volume
+  reads and writes that volume's sidecar. The staged `/data` entries are
+  the sidecar's `0o640`. Harvest still refuses disagreeing captures for
+  that path and leaves the sidecar bytes unchanged.
+  Unmounting that path still copies the newer capture into the volume
+  sidecar. `/workspace` stays on the guest manifest. The sidecar mode is
+  the capture's `0o640`.
+  A `\\?\` path that contains `..` does not name that volume. The sidecar is
+  not staged onto `/data`, because that prefix does not step through `..`.
+  A `\\.\UNC\server\share` host path names the same directory as
+  `\\server\share`. Harvest still refuses disagreeing captures for that
+  path and leaves the sidecar bytes unchanged. A `\\.\` name that is not a
+  drive letter or `UNC` stays distinct.
+  A generated 8.3 short name such as `LONGVO~1` names `LongVolumeName`.
+  Mounting only the short name stages that volume's sidecar onto `/data`
+  as `0o640`, including when the short name is under `\\?\`. Harvest still
+  refuses disagreeing captures for the short name and leaves the sidecar
+  bytes unchanged.
+  A non-verbatim short name with a trailing dot or space, such as
+  `LONGVO~1.` or `LONGVO~1 `, still names `LongVolumeName`. Mounting only
+  that path stages the sidecar onto `/data` as `0o640`. Harvest still
+  refuses disagreeing captures and leaves the sidecar bytes unchanged. A
+  `\\?\` short name keeps a trailing dot, so that path is not staged onto
+  `/data`.
+  A generated short name may keep non-ASCII characters. The short name of
+  `项目数据目录名` is `项目数~1`. Mounting only that short name stages the
+  sidecar onto `/data` as `0o640`. Harvest still refuses disagreeing
+  captures for that path and leaves the sidecar bytes unchanged.
+  `Größe` and `GrÖße` name one directory. Harvest still refuses disagreeing
+  captures for that path and leaves the sidecar bytes unchanged. `ß` does
+  not become `SS`.
+  Creating a named volume whose directory is an existing volume, including a
+  name that differs only by case or a generated 8.3 short name, is rejected.
+  The existing volume and its directory stay in place.
+  Removing an anonymous volume through a name that differs only by case is
+  rejected. The existing volume and its directory stay in place.
+  A volume name that is not a single directory name is rejected, so the
+  store does not create a directory outside its volume root.
+  On Windows, a name ending in `.` or a space is rejected, because that
+  directory is created without those characters. A Windows reserved device
+  name, including one with an extension such as `NUL.txt`, is rejected
+  before a directory is created. A name containing a control character, or
+  a Windows filename character such as `?` or `*`, is rejected before a
+  directory is created. A name that is a volume POSIX sidecar filename,
+  including a Windows name that differs only by case, is rejected before a
+  directory is created. A stored volume whose name is a POSIX sidecar
+  filename is not used for a new mount or for named-volume copy-up.
+  Pruning that record drops the catalog entry and leaves the other volume's
+  sidecar file in place. Updating or modifying that record cannot mark it
+  in use. A volume record cannot be renamed. A stored name that is a POSIX
+  sidecar filename does not remove copy-up from that volume's managed
+  directory.
+  On Windows, a stored record that names another volume's directory is
+  not used for a new mount. Pruning or removing that record drops the
+  catalog entry and leaves the other volume's directory and sidecar in
+  place. Updating or modifying that record cannot mark it in use.
+  A stored anonymous record that names another volume's directory is not
+  claimed. Removing that anonymous record drops the catalog entry and
+  leaves the other volume's directory and sidecar in place.
+  Pruning or removing a stored name that leaves the volume directory
+  drops the catalog entry and leaves the outside directory in place.
+  A named volume whose managed path is a file is not used for a new mount
+  or for named-volume copy-up, and updating or modifying it cannot mark it
+  in use. Windows does not capture POSIX metadata for that path.
+  Creating a named volume is rejected when the volume store directory is a
+  symlink or reparse point. That path is not mounted and is not used for
+  named-volume copy-up. The directory outside the link stays in place.
+  Removing a stored volume in that state drops the catalog entry and leaves
+  the outside directory and its sidecar in place.
+  A volume store reached through a symlink or reparse point above its
+  directory is not created, mounted, or used for copy-up. Removing a stored
+  volume in that state drops the catalog entry and leaves the outside
+  directory and its sidecar in place. Harvest does not write a POSIX
+  sidecar through that path. Copying a directory recreates a Windows
+  junction inside it and leaves the directory outside the link in place.
+  When the copied directory is itself a Windows junction, the copy is
+  that junction.
+  A build context copy recreates a Windows junction instead of replacing
+  it with an empty file. When that context directory is itself a Windows
+  junction, the copy is that junction and leaves the directory outside
+  the link in place.
+  Copying a directory or a build context onto a Windows junction
+  replaces that junction and leaves the directory outside the link
+  unchanged. A file copied onto a child junction does the same.
+  Replacing an existing child junction recreates the source junction
+  and leaves the previous target unchanged.
+  Extracting an OCI layer replaces a Windows junction inside the
+  destination and leaves the directory outside the link unchanged.
+  Extracting a build archive replaces a Windows junction inside the
+  destination and leaves the directory outside the link unchanged.
+  A layer whiteout of a Windows junction removes that junction and
+  leaves the directory outside the link in place.
+  A build-context hash records a Windows junction as a link and does not
+  absorb files outside that link.
+  Removing a RUN cache mount target unlinks a Windows junction and leaves
+  the directory outside that link in place.
+  Cleaning a MicroVM read-only alias unlinks a Windows junction and leaves
+  the directory outside that link in place.
+  A volume host path is refused when a Windows junction is the path or an
+  ancestor of the path.
+  A Sandbox volume source is refused when a Windows junction is the path
+  or an ancestor of the path, and a missing source is not created through
+  that junction.
+  A workspace path is refused when a Windows junction is the path or an
+  ancestor of the path, and a missing workspace is not created through
+  that junction.
+  Creating a missing volume host directory does not follow a Windows
+  junction that is the path or an ancestor of the path.
+  An OCI layout directory is refused when a Windows junction is the path
+  or an ancestor of the path.
+  Publishing portable rootfs metadata is refused when a Windows junction
+  is the path or an ancestor of the path, and the directory outside that
+  link is left unchanged.
+  Storing an OCI image is refused when a Windows junction is the source
+  path or an ancestor of that path, and the directory outside that link
+  is left unchanged.
+  A recursive directory copy does not follow a Windows junction that is
+  an ancestor of the source, and the directory outside that link is left
+  unchanged.
+  A recursive directory copy does not create its destination through a
+  Windows junction that is an ancestor of that destination.
+  A build-context directory copy does not follow a Windows junction that
+  is an ancestor of the source or the destination.
+  A snapshot directory copy does not follow a Windows junction that is an
+  ancestor of the source or the destination.
+  A commit or export archive is refused when a Windows junction is an
+  ancestor of the rootfs, and the directory outside that link is left
+  unchanged.
+  A commit or export archive is not created through a Windows junction
+  that is an ancestor of the archive path.
+  An image save archive is not created through a Windows junction that
+  is an ancestor of the archive path.
+  Saving an image does not copy its layout through a Windows junction
+  that is an ancestor of the source or the staging directory.
+  Loading an image does not open an archive through a Windows junction
+  that is an ancestor of the archive path.
+  Copying a host directory into a box does not archive it through a
+  Windows junction that is an ancestor of that directory.
+  Copying a directory out of a box does not extract it through a Windows
+  junction that is an ancestor of the destination.
+  Copying a host file into a box does not read it through a Windows
+  junction that is an ancestor of that file.
+  Copying a file out of a box does not write it through a Windows
+  junction that is an ancestor of the destination.
+  Importing an image does not read the source archive through a Windows
+  junction that is an ancestor of that archive.
+  Loading a Compose file does not read it, or its sibling environment
+  file, through a Windows junction that is an ancestor of that file.
+  Resolving a build context does not follow a Windows junction that is
+  that directory or an ancestor of it.
+  A Dockerfile is not read through a Windows junction that is an ancestor
+  of that file.
+  A build does not read `.dockerignore` through a Windows junction that
+  is an ancestor of the build context.
+  An env file is not read through a Windows junction that is an ancestor
+  of that file.
+  The build engine refuses a context directory that is a Windows junction
+  or that sits under one.
+  A Dockerfile RUN cache directory is not created through a Windows
+  junction that is that directory or an ancestor of it.
+  A build does not open an ADD archive through a Windows junction that
+  is an ancestor of that archive.
+  A build does not create an ADD destination through a Windows junction
+  that is an ancestor of that destination.
+  A build copy does not create a destination parent through a Windows
+  junction that is an ancestor of that destination.
+  A layer-cache copy does not recreate a source junction through a
+  Windows junction that is an ancestor of the destination.
+  A snapshot copy does not recreate a source junction through a Windows
+  junction that is an ancestor of the destination.
+  A RUN bind mount does not read or write a file through a Windows
+  junction that is an ancestor of that file.
+  Copying a host directory into or out of a box does not follow a
+  Windows junction that is that directory.
+  Saving an image does not copy its layout through a Windows junction
+  that is that directory.
+  Archiving removed logs does not delete or copy through a Windows
+  junction that is the archive directory or the log directory.
+  Pruning removed logs does not delete an archive through a Windows
+  junction that is that archive directory.
+  Removing a box directory does not follow a Windows junction that is
+  that directory.
+  Compose cleanup does not delete a service directory through a Windows
+  junction that is that directory.
+  Removing an external socket directory does not follow a Windows
+  junction that is that directory.
+  Auto-remove does not delete a box directory through a Windows junction
+  that is that directory.
+  Sandbox bundle cleanup does not delete its socket directory through a
+  Windows junction that is that directory.
+  Destroying a VM does not delete its socket directory or box directory
+  through a Windows junction that is that directory.
+  Boot-failure cleanup does not delete its socket directory or box
+  directory through a Windows junction that is that directory.
+  MicroVM bundle cleanup does not delete its socket directory through a
+  Windows junction that is that directory.
+  File-mount staging cleanup does not delete a staging directory through
+  a Windows junction that is that directory.
+  Managed execution removal does not delete an execution directory
+  through a Windows junction that is that directory.
+  SDK removal does not delete a box directory through a Windows junction
+  that is that directory.
+  SDK socket cleanup does not delete an external socket directory through
+  a Windows junction that is that directory.
+  An SDK box directory guard does not delete a box directory through a
+  Windows junction that is that directory.
+  Disk usage does not count bytes through a Windows junction that is a
+  directory or a child of that directory.
+  Copying a host directory into or out of a box does not follow a Windows
+  junction that is a child of that directory.
+  Saving an image does not archive a Windows junction that is a child of
+  that image layout.
+  A diff baseline does not record files through a Windows junction that is
+  the rootfs directory.
+  A build snapshot does not record files through a Windows junction that is
+  the build rootfs.
+  Extracting a layer does not write through a Windows junction that is
+  the destination directory.
+  Creating a layer from a directory does not archive files through a
+  Windows junction that is that directory.
+  Staging a MicroVM read-only virtio-fs alias does not create that alias
+  through a Windows junction that is the filemounts directory.
+  Collecting a Windows guest result does not write logs through a Windows
+  junction that is the logs directory.
+  Creating a runtime socket directory does not create that directory
+  through a Windows junction that is the box directory.
+  Acquiring a lifecycle lock does not create the lock file through a
+  Windows junction that is the lock directory.
+  Writing an audit log does not create that log through a Windows
+  junction that is the audit directory.
+  Redirecting shim standard streams does not create those logs through a
+  Windows junction that is the log directory.
+  Opening a Windows WHPX OCI owner log does not create that log through a
+  Windows junction that is the service directory.
+  Preparing a Windows WHPX OCI service root does not create that directory
+  through a Windows junction that is an ancestor of it.
+  Spawning a Windows WHPX OCI owner does not create its state root through
+  a Windows junction that is an ancestor of that state root.
+  Starting a VM does not create its socket directory through a Windows
+  junction that is an ancestor of that socket directory.
+  Archiving removed logs does not create an archive through a Windows
+  junction that is an ancestor of that archive directory.
+  Building an OCI image does not create its blobs through a Windows
+  junction that is an ancestor of that image directory.
+  Probing Windows symlink support does not create its home directory
+  through a Windows junction that is an ancestor of that home.
+  Opening an image store does not create that store through a Windows
+  junction that is an ancestor of that store directory.
+  Storing an image does not create its content directory through a Windows
+  junction that is that store directory.
+  Acquiring a file lock does not create that lock through a Windows junction
+  that is the lock directory.
+  A durable file write does not create that file through a Windows junction
+  that is its parent directory.
+  A rotating log does not create that log through a Windows junction that is
+  its parent directory.
+  Quarantining a corrupt store file does not create or remove that file
+  through a Windows junction that is its parent directory.
+  Updating a volume cannot point its mount
+  path outside that volume's managed directory. A stored mount point
+  outside that directory is not used for a new mount or for named-volume
+  copy-up.
+  A share with no previous capture is left out, so one unreadable
+  directory does not discard the other shares or replace that share's
+  sidecar with a partial tree.
+
+### Removed
+
+- Dead `BoxAutoscaler` operator subsystem (`a3s-box-core::operator` and the
+  feature-gated `a3s-box-runtime::operator` module plus its `operator`
+  feature): no callers exist in the CLI, SDK, CRI server, protos, manifests,
+  or packaging. Its unit tests were removed with the code.
+- Unused core trait abstractions that had exactly one implementation and no
+  consumers: `traits::AuditSink`, `traits::CredentialProvider`,
+  `traits::EventBus`, `traits::ImageRegistry` (with `PulledImage`),
+  `traits::MetricsCollector` (with `NoopMetrics`), and the
+  `traits::store` backend traits `ImageStoreBackend`, `NetworkStoreBackend`,
+  `SnapshotStoreBackend`, `VolumeStoreBackend`. The concrete types behind
+  them (`AuditLog`, `CredentialStore`, `ImagePuller`, `RuntimeMetrics`,
+  `ImageStore`, `NetworkStore`, `SnapshotStore`, `VolumeStore`) keep their
+  inherent APIs, so behavior is unchanged. This shrinks the public API of
+  `a3s-box-core` and `a3s-box-runtime`; out-of-tree consumers of the removed
+  items should pin the previous minor release. `ExecutionManager`,
+  `ExecutionSessionManager`, `CacheBackend` (two real implementations), and
+  the `StoredImage` type are unchanged.
+- Stray tracked macOS test binaries `check_spawn_sig` and `move_test` at the
+  repository root (zero references anywhere). CI now runs
+  `scripts/check_no_tracked_artifacts.py` to block tracked archives and
+  root-level tracked executables. The vendored `libkrun-source.tar` and
+  `krun-windows-x64.tar.xz` stay for now: they are build-time inputs
+  extracted by `libkrun-sys/build.rs`, and their removal belongs to the
+  libkrun-sys source-convergence work.
+
+### Changed
+
+- Workspace-internal dependency requirements for `a3s-box-core`,
+  `a3s-box-netproxy`, and `a3s-box-runtime` aligned from `3.2` to `3.3` to
+  match the workspace version (cosmetic; the requirement resolved
+  identically before).
+
 ### Fixed
 
+- Windows WHPX soak settle margin: the default inter-test delay goes from
+  3000 ms to 8000 ms, and the harness sets `A3S_EXEC_READY_TIMEOUT_MS=60000`
+  for smoke children unless the caller already set it. The product default
+  stays at 15 s. Two R24 runs on the C: `O_TRUNC` pin failed after 1.5–2 h.
+  In `…otrunc-20260926T204429`, single-file `:ro` failed with exit code 101 at
+  iteration 15; a 30× solo stress of the same test passed every time. In
+  `…otrunc-settle-20260926T225353`, volume-backed init hit the 15 s
+  exec-ready timeout and was force-killed at iteration 13. core_smoke now
+  prints `--rm` retained-log tails and exit codes on `ok()` failures, and
+  waits 2 s between the directory and single-file `:ro` binds on Windows.
+  Does **not** claim R24 tip-proven or Enterprise GA.
+- Windows WHPX soak harness: retry `Process.Start` on core_smoke image sharing
+  violations (AV / lingering image map) with short backoff instead of failing a
+  multi-hour soak. Prior R24 13-test attempt
+  `win01-r24-13test-otrunc-retry-20260926T012300` reached 17 clean iterations
+  (224 tests) then died mid-iter-18 on
+  `being used by another process` at Start — not a guest/test assertion failure.
+  Does **not** claim R24 tip-proven or Enterprise GA.
+- Windows WHPX soak evidence writer recreates a missing parent directory before
+  `WriteAllText` (D: tip-prove tree vanished mid-`…tcpdiag…` after ~25 green
+  iters / ~3.2 h while writing `inventory-final.json`). Prefer a stable local
+  volume for `-OutputDirectory` when the repo disk drops directories under
+  multi-hour WHPX pressure. Does **not** claim storage root cause fixed or
+  Enterprise GA.
+- Windows WHPX soak `published_port`: probe ephemeral ports on `0.0.0.0` (same
+  bind family as the Windows port-forward worker) and fail closed early when
+  the host publish listener never occupies the mapped port after the guest
+  listen marker — separates “worker never bound” from TCP 10060 blackholes.
+  Does **not** claim TSI/pipe-bridge root cause fixed or Enterprise GA.
+- Windows WHPX soak / core_smoke: `wait_for_running` fail-closes immediately when
+  `ps` shows a terminal guest (`stopped` / `exited` / `dead`) instead of only
+  matching Linux `dead` and burning the full smoke timeout. Surfaces
+  `inspect` + product logs + `console.log` / `console.err.log` /
+  `shim.stderr.log` tails (pre-Ready WHPX failures land in shim stderr, not
+  guest console). Default soak inter-test partition-release delay raised
+  1000→3000 ms after repeated R24 Exit 1 flakes with `started_at=null`
+  (startretry iter 80 `published_port` ~9.9 h; inspect iter 16 `utility`
+  ~1.9 h; solo re-runs pass). `wait_for_tcp_text` timeout now also probes
+  whether `127.0.0.1:port` is still free vs occupied and dumps inspect/logs/
+  shim tails — `…part3s-20260926T160303` died iter 10 on published-port TCP
+  10060 after guest listen marker + `port` mapping succeeded (solo re-run
+  pass). Does **not** claim WHPX TSI publish or partition root causes are
+  fixed or close Enterprise GA.
 - Windows MicroVM virtio-fs writable binds: honor FUSE `ATOMIC_O_TRUNC` on
   `open` (`set_len(0)` when Linux `O_TRUNC` is set). Guest shell redirects such
   as `printf short > file` no longer leave long-file remnants on the host
@@ -35,6 +621,35 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- Keep-authority Sandbox Bridge FORWARD egress: install a per-bridge iptables
+  filter chain that mirrors MicroVM `untrusted_egress_denied` (first-match
+  `--egress` CIDR/protocol/port, then default untrusted profile). Module
+  `oci_sandbox_bridge_egress` (unit-proven compile order + netproxy verdict
+  alignment). Linux no longer refuses networks that store `--egress` on this
+  path. Staging rolls back DNAT + the veth pair (and idle bridge filter/NAT)
+  if filter/DNAT/persist fails before a lease is published — including the
+  case where DNAT succeeded and persist failed (no lease file yet). WSL
+  tip-prove still needs interactive sudo (`sudo -n`
+  unavailable on this host). Does **not** claim Sandbox≈MicroVM, CNI, domain
+  match, or Enterprise GA.
+- WHPX mid-run Live (gate 9) re-tipped on Box `cfae3a02` / OCI `b26155b1` with
+  Alpine minirootfs + writable-bind `O_TRUNC` krun tip
+  (`box-windows-otrunc-fix`): report SHA-256
+  `4a3024d7dc66ced13ca53032fe718ead7876d6cbf554f4a61f9184355ee8db6c`
+  (`status=passed`, retained stream+FS, `b2_process_session_recovery_closed=false`).
+  Honesty verifier rules matched (PowerShell mirror when host Python is broken).
+  Does **not** claim Enterprise GA.
+- `windows-whpx-live-session-qualification.ps1`: skip the WindowsApps Store
+  `python.exe` stub (it hangs awaiting install), prefer `py -3`, and fall back
+  to a PowerShell honesty mirror of
+  `verify-windows-whpx-live-session-report.py` when Python is missing or
+  broken so Live tip-prove cannot wedge after a passed qualification report.
+- WIN-01 G2 (7200s) on 13-test `O_TRUNC` matrix tip-proven (solo, idle WHPX):
+  summary SHA-256
+  `6222d0b003126bce412f476318200a32cdd0baae0fb6c547fd566bbce0c962d8`
+  (`result=pass`, `verification=pass`, 16 iterations × 13 tests = 208,
+  ~126.8 min wall, Box `cfae3a02`, final inventory 0). Does **not** claim
+  Enterprise GA or close B3/B4/B5/B6 / R24-with-13.
 - WIN-01 R24 (86400s) WHPX soak tip-proven: summary SHA-256
   `9b5e1f3c5a1ccf31496f5f253605f044b293f1d816ec95ff1372f1042da86a1d`
   (`result=pass`, `verification=pass`, 188 iterations × 12 tests = 2256,

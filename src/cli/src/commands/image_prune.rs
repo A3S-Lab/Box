@@ -1,5 +1,6 @@
 //! `a3s-box image-prune` command — remove dangling or unused images.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::image_usage::{self, ImagePruneMode, ImageReferenceScope};
@@ -17,14 +18,16 @@ pub struct ImagePruneArgs {
     pub force: bool,
 }
 
-pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ImagePruneArgs) -> Result<(), BoxError> {
     let store = super::open_image_store()?;
 
     // `image-prune` never removes images referenced by any existing box.
     // Fail closed on state load so we cannot invent an empty protect set and
     // delete in-use images (system-prune image-phase parity).
     let state = StateFile::load_default().map_err(|error| {
-        format!("Failed to load box state for image-prune: {error}; refusing image-prune success")
+        BoxError::StateError(format!(
+            "Failed to load box state for image-prune: {error}; refusing image-prune success"
+        ))
     })?;
     let protected_images = image_usage::referenced_images(&state, ImageReferenceScope::AllBoxes);
     let prune_mode = prune_mode(args.all);
@@ -110,12 +113,11 @@ fn empty_message(mode: ImagePruneMode) -> &'static str {
     }
 }
 
-fn image_prune_errors(errors: Vec<String>) -> Box<dyn std::error::Error> {
-    format!(
+fn image_prune_errors(errors: Vec<String>) -> BoxError {
+    BoxError::OciImageError(format!(
         "Failed to prune image(s): {}; refusing image-prune success",
         errors.join("; ")
-    )
-    .into()
+    ))
 }
 
 #[cfg(test)]
@@ -147,6 +149,7 @@ mod tests {
             "redis:latest: io error".to_string(),
         ]);
         let message = err.to_string();
+        assert!(matches!(err, BoxError::OciImageError(_)));
         assert!(message.contains("alpine:latest: busy"));
         assert!(message.contains("redis:latest: io error"));
         assert!(message.contains("refusing image-prune success"));

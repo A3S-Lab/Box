@@ -1,5 +1,6 @@
 //! `a3s-box images` command.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::output;
@@ -30,10 +31,10 @@ enum ImageFilter {
 }
 
 impl ImageFilter {
-    fn parse(spec: &str) -> Result<Self, String> {
-        let (key, value) = spec
-            .split_once('=')
-            .ok_or_else(|| format!("Invalid --filter (expected key=value): {spec}"))?;
+    fn parse(spec: &str) -> Result<Self, BoxError> {
+        let (key, value) = spec.split_once('=').ok_or_else(|| {
+            BoxError::ConfigError(format!("Invalid --filter (expected key=value): {spec}"))
+        })?;
         match key {
             "reference" => Ok(ImageFilter::Reference(value.to_string())),
             "label" => {
@@ -43,9 +44,9 @@ impl ImageFilter {
                 };
                 Ok(ImageFilter::Label(lk, lv))
             }
-            other => Err(format!(
+            other => Err(BoxError::ConfigError(format!(
                 "Unsupported image filter '{other}' (supported: reference, label)"
-            )),
+            ))),
         }
     }
 }
@@ -77,7 +78,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     p == pat.len()
 }
 
-pub async fn execute(args: ImagesArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: ImagesArgs) -> Result<(), BoxError> {
     let images_dir = images_dir();
     if !images_dir.exists() {
         if !args.quiet && args.format.is_none() {
@@ -272,8 +273,14 @@ mod tests {
             ImageFilter::parse("label=tier").unwrap(),
             ImageFilter::Label(k, None) if k == "tier"
         ));
-        assert!(ImageFilter::parse("nocolon").is_err());
-        assert!(ImageFilter::parse("dangling=true").is_err());
+        assert!(matches!(
+            ImageFilter::parse("nocolon"),
+            Err(BoxError::ConfigError(message)) if message.contains("expected key=value")
+        ));
+        assert!(matches!(
+            ImageFilter::parse("dangling=true"),
+            Err(BoxError::ConfigError(message)) if message.contains("Unsupported image filter")
+        ));
     }
 
     #[test]

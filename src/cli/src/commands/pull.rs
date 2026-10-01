@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 #[derive(Args)]
@@ -30,7 +31,7 @@ pub struct PullArgs {
     pub verify_identity: Option<String>,
 }
 
-pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute(args: PullArgs) -> Result<(), BoxError> {
     let store = Arc::new(super::open_image_store()?);
 
     // Parse reference to determine registry for credential lookup

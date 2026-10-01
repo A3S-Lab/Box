@@ -1,5 +1,6 @@
 //! `a3s-box wait` command — Block until one or more boxes stop, then print exit codes.
 
+use a3s_box_core::error::BoxError;
 use clap::Args;
 
 use crate::process;
@@ -28,11 +29,11 @@ pub struct WaitArgs {
     pub timeout: Option<u64>,
 }
 
-pub async fn execute(args: WaitArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let timeout = wait_timeout(&args)?;
+pub async fn execute(args: WaitArgs) -> Result<(), BoxError> {
+    let timeout = wait_timeout(&args).map_err(|error| BoxError::ConfigError(error.to_string()))?;
     let deadline = timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
     if timeout.is_some() && deadline.is_none() {
-        return Err("--timeout is too large".into());
+        return Err(BoxError::ConfigError("--timeout is too large".to_string()));
     }
     let heartbeat_interval = wait_heartbeat_interval(&args);
     for query in &args.boxes {
@@ -41,10 +42,10 @@ pub async fn execute(args: WaitArgs) -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::timeout_at(deadline, wait_one(query, heartbeat_interval))
                     .await
                     .map_err(|_| {
-                        format!(
+                        BoxError::TimeoutError(format!(
                             "timed out after {}s while waiting for {query}; the box was not stopped",
                             args.timeout.expect("validated timeout")
-                        )
+                        ))
                     })??;
             }
             None => wait_one(query, heartbeat_interval).await?,
@@ -56,7 +57,7 @@ pub async fn execute(args: WaitArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn wait_one(
     query: &str,
     heartbeat_interval: Option<std::time::Duration>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BoxError> {
     use a3s_box_core::{ExecutionId, ExecutionManager, ExecutionState};
 
     let mut heartbeat = WaitHeartbeat::new(heartbeat_interval);
@@ -66,23 +67,25 @@ async fn wait_one(
         let record = match resolve::resolve(&state, query) {
             Ok(record) => record,
             Err(error @ resolve::ResolveError::NotFound(_)) => {
-                match archived_wait_exit_code(query)? {
+                match archived_wait_exit_code(query).map_err(BoxError::StateError)? {
                     Some(exit_code) => {
                         println!("{exit_code}");
                         return Ok(());
                     }
                     None => {
-                        if crate::log_archive::resolve_archive(query)?.is_some() {
-                            return Err(format!(
+                        if crate::log_archive::resolve_archive(query)
+                            .map_err(BoxError::StateError)?
+                            .is_some()
+                        {
+                            return Err(BoxError::StateError(format!(
                                 "box {query} was removed without a recorded exit code"
-                            )
-                            .into());
+                            )));
                         }
-                        return Err(error.into());
+                        return Err(super::IntoBoxError::into_box_error(error));
                     }
                 }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(super::IntoBoxError::into_box_error(error)),
         };
 
         if uses_managed_execution(record) {
@@ -96,27 +99,33 @@ async fn wait_one(
             // Abandoned Removing must resume finish_remove — inspect returns
             // Conflict and would hard-fail wait forever.
             if record.status == "removing" {
-                let execution_id = ExecutionId::new(record.id.clone())?;
+                let execution_id = ExecutionId::new(record.id.clone())
+                    .map_err(super::IntoBoxError::into_box_error)?;
                 let generation = record
                     .managed_execution
                     .as_ref()
                     .map(|metadata| metadata.generation)
                     .ok_or_else(|| {
-                        format!("box {} lost managed generation while waiting", record.id)
+                        BoxError::StateError(format!(
+                            "box {} lost managed generation while waiting",
+                            record.id
+                        ))
                     })?;
-                let _ = manager.remove(&execution_id, generation).await?;
+                let _ = manager
+                    .remove(&execution_id, generation)
+                    .await
+                    .map_err(super::IntoBoxError::into_box_error)?;
                 // Remove forgets the row; only finish when archive recorded an
                 // exit — never invent success (0) for an unknown code.
-                match archived_wait_exit_code(query)? {
+                match archived_wait_exit_code(query).map_err(BoxError::StateError)? {
                     Some(exit_code) => {
                         println!("{exit_code}");
                         return Ok(());
                     }
                     None => {
-                        return Err(format!(
+                        return Err(BoxError::StateError(format!(
                             "box {query} was removed without a recorded exit code"
-                        )
-                        .into());
+                        )));
                     }
                 }
             }
@@ -136,15 +145,20 @@ async fn wait_one(
                 continue;
             }
             let status = manager
-                .inspect(&ExecutionId::new(record.id.clone())?)
-                .await?;
+                .inspect(
+                    &ExecutionId::new(record.id.clone())
+                        .map_err(super::IntoBoxError::into_box_error)?,
+                )
+                .await
+                .map_err(super::IntoBoxError::into_box_error)?;
             match status.state {
                 ExecutionState::Stopped | ExecutionState::Failed => {
                     // inspect persisted the terminal result (and may retire
                     // abandoned Starting via #385/#386 without inventing exit).
                     // Reuse the legacy poll gate so missing exit keeps waiting.
                     let refreshed = StateFile::load_default()?;
-                    let refreshed = resolve::resolve(&refreshed, query)?;
+                    let refreshed = resolve::resolve(&refreshed, query)
+                        .map_err(super::IntoBoxError::into_box_error)?;
                     if let WaitPollAction::Finish(exit_code) =
                         managed_terminal_wait_action(refreshed)
                     {
@@ -431,6 +445,10 @@ mod tests {
             wait_timeout(&args),
             Err("--timeout must be greater than zero")
         );
+        assert!(matches!(
+            wait_timeout(&args).map_err(|error| BoxError::ConfigError(error.to_string())),
+            Err(BoxError::ConfigError(message)) if message.contains("greater than zero")
+        ));
         args.timeout = Some(7);
         assert_eq!(
             wait_timeout(&args),

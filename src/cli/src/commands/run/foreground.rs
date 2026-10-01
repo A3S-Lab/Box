@@ -1,6 +1,7 @@
 //! Foreground run lifecycle, signal handling, and terminal log draining.
 
 use super::*;
+use a3s_box_core::error::BoxError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -72,10 +73,7 @@ async fn recv_foreground_terminate(_signal: &mut ForegroundTerminateSignal) {
     std::future::pending::<()>().await;
 }
 
-pub(super) async fn run_foreground(
-    mut ctx: RunContext,
-    args: &RunArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn run_foreground(mut ctx: RunContext, args: &RunArgs) -> Result<(), BoxError> {
     let foreground_start = std::time::Instant::now();
     println!(
         "Box {} ({}) started. Press Ctrl-C to stop.",
@@ -272,9 +270,7 @@ pub(super) async fn run_foreground(
     Ok(())
 }
 
-async fn wait_for_sandbox_structured_log_drain(
-    ctx: &RunContext,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn wait_for_sandbox_structured_log_drain(ctx: &RunContext) -> Result<(), BoxError> {
     if !ctx.record.isolation.is_sandbox() || run_context_uses_oci(ctx) {
         return Ok(());
     }
@@ -288,13 +284,17 @@ async fn wait_for_sandbox_structured_log_drain(
         )
     })
     .await
-    .map_err(|error| format!("Sandbox log drain task failed for {}: {error}", ctx.box_id))??;
+    .map_err(|error| {
+        BoxError::StateError(format!(
+            "Sandbox log drain task failed for {}: {error}",
+            ctx.box_id
+        ))
+    })??;
     if !drained {
-        return Err(format!(
+        return Err(BoxError::TimeoutError(format!(
             "Sandbox logs did not finish draining for {}; state was preserved for recovery",
             ctx.box_id
-        )
-        .into());
+        )));
     }
     Ok(())
 }
