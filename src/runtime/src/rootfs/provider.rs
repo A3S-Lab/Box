@@ -473,6 +473,14 @@ impl RootfsProvider for OverlayProvider {
 }
 
 fn remove_overlay_dir_if_present(dir: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     if super::overlay::is_mountpoint(dir) {
         return Err(BoxError::StateError(format!(
             "Refusing invent-clean overlay cleanup while {} remains mounted",
@@ -941,6 +949,39 @@ mod tests {
         assert!(
             box_dir.join("merged").exists(),
             "failed overlay claim must remain for a later fail-closed retry"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_provider_cleanup_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let upper = outside.join("box").join("upper");
+        std::fs::create_dir_all(&upper).unwrap();
+        std::fs::write(upper.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let cleaned = OverlayProvider.cleanup(&link.join("box"), false);
+        assert_eq!(
+            std::fs::read(upper.join("secret.txt")).unwrap(),
+            b"keep",
+            "overlay cleanup deleted a directory through the junction"
+        );
+        assert!(
+            cleaned.is_err(),
+            "overlay cleanup followed an ancestor junction"
         );
     }
 
