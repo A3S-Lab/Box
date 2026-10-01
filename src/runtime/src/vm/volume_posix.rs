@@ -71,6 +71,14 @@ pub(crate) fn sync_volume_posix(
     }
     let bindings = VolumePosixBindings::new(binding_mounts);
     bindings.validate().map_err(BoxError::ConfigError)?;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in box_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(box_dir).map_err(BoxError::IoError)?;
     // An empty directory is removed and replaced. A nonempty directory stays,
     // so this boot does not delete its contents or follow a link.
@@ -2012,6 +2020,61 @@ mod tests {
         volume_posix_sidecar_path, write_volume_posix_sidecar, VolumePosixSidecar,
         VOLUME_POSIX_METADATA_SCHEMA,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn sync_does_not_create_a_box_directory_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let source = tmp.path().join("volume");
+        std::fs::create_dir_all(&source).unwrap();
+        let rootfs = tmp.path().join("guest");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let synced = sync_volume_posix(
+            &link.join("box"),
+            &rootfs,
+            &[("/data".to_string(), source)],
+            &[],
+        );
+        assert!(
+            synced.is_err(),
+            "sync followed an ancestor junction: {synced:?}"
+        );
+        assert!(
+            !outside.join("box").exists(),
+            "box directory was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sync_creates_a_missing_box_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("volume");
+        std::fs::create_dir_all(&source).unwrap();
+        let rootfs = tmp.path().join("guest");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let box_dir = tmp.path().join("box");
+        sync_volume_posix(&box_dir, &rootfs, &[("/data".to_string(), source)], &[])
+            .expect("sync creates a real box directory");
+        assert!(box_dir.is_dir());
+    }
 
     fn entry(mode: u32) -> RootfsMetadataEntry {
         RootfsMetadataEntry {

@@ -517,6 +517,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of that directory.
   Staging a MicroVM read-only virtio-fs alias does not create that alias
   through a Windows junction that is an ancestor of the filemounts directory.
+  Syncing volume POSIX bindings does not create the box directory through a
+  Windows junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
