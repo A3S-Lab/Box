@@ -537,6 +537,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of it.
   Opening a rootfs cache does not create that cache through a Windows
   junction that is an ancestor of it.
+  Opening a layer cache does not create that cache through a Windows
+  junction that is an ancestor of it.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
