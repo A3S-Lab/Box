@@ -1530,6 +1530,14 @@ fn create_run_overlay_staging_dir(rootfs_dir: &Path, kind: &str) -> Result<PathB
         ".a3s-box-run-{kind}-overlay-{}",
         uuid::Uuid::new_v4()
     ));
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in staging_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir(&staging_dir).map_err(|error| {
         BoxError::BuildError(format!(
             "Failed to create RUN {kind} mount staging dir {}: {error}",
@@ -5200,5 +5208,53 @@ mod tests {
         super::ensure_run_cache_mount_targets(&rootfs, &[mount])
             .expect("cache target on a real rootfs");
         assert!(rootfs.join("cache").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_overlay_staging_does_not_create_through_a_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = super::create_run_overlay_staging_dir(&link, "cache");
+        let leaked = std::fs::read_dir(&outside).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".a3s-box-run-")
+        });
+        assert!(!leaked, "RUN overlay staging created through the junction");
+        assert!(
+            created.is_err(),
+            "RUN overlay staging followed a directory junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_overlay_staging_creates_a_real_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let created = super::create_run_overlay_staging_dir(&rootfs, "cache")
+            .expect("overlay staging on a real rootfs");
+        assert!(created.is_dir());
+        assert!(created.starts_with(&rootfs));
     }
 }

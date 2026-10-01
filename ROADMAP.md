@@ -1598,6 +1598,8 @@ tip while harness reports still keep
   Windows junction that is an ancestor of the rootfs.
   Preparing a RUN cache mount does not create its target through a Windows
   junction that is an ancestor of the rootfs.
+  Creating a RUN overlay staging directory does not create it through a
+  Windows directory junction.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
