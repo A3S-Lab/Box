@@ -43,6 +43,14 @@ impl RootfsBuilder {
         );
 
         // Create base directory
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in self.rootfs_path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         fs::create_dir_all(&self.rootfs_path).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create rootfs directory {}: {}",
@@ -228,5 +236,37 @@ mod tests {
         // Verify everything still exists
         assert!(rootfs_path.join("etc/passwd").exists());
         assert!(rootfs_path.join("dev").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rootfs_builder_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let built = RootfsBuilder::new(link.join("rootfs")).build();
+        assert!(
+            !outside.join("rootfs").exists(),
+            "rootfs builder created a directory through the junction"
+        );
+        assert!(
+            built.is_err(),
+            "rootfs builder followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 }

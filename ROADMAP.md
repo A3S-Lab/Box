@@ -1608,6 +1608,8 @@ tip while harness reports still keep
   a Windows junction that is an ancestor of the staging path.
   Publishing a portable OCI bundle does not create its operation directory
   through a Windows junction that is an ancestor of the bundle.
+  Building a guest rootfs does not create its directory through a Windows
+  junction that is an ancestor of the rootfs.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
