@@ -308,6 +308,14 @@ impl VmManager {
             .join(".mounts")
             .join(owner)
             .join(index.to_string());
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in stage_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&stage_dir).map_err(BoxError::IoError)?;
         #[cfg(unix)]
         std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o700))
@@ -513,5 +521,73 @@ mod tests {
             VmManager::stage_single_file_mount(&source, "/data/source.txt", 0, &filemounts)
                 .expect("stage creates a real directory");
         assert!(staged.join("source.txt").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_managed_secret_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let identity = "a".repeat(64);
+        let identity_dir = outside.join(&identity);
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        std::fs::write(identity_dir.join("payload"), b"secret").unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let staged = VmManager::stage_managed_secret_file_mount(
+            &link.join(&identity).join("payload"),
+            "/run/secrets/payload",
+            0,
+            &link,
+            "box1",
+        );
+        assert!(
+            staged.is_err(),
+            "managed secret stage followed an ancestor junction: {staged:?}"
+        );
+        assert!(
+            !identity_dir.join(".mounts").exists(),
+            "managed secret staging directory was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(identity_dir.join("payload")).unwrap(),
+            b"secret"
+        );
+    }
+
+    #[test]
+    fn stage_managed_secret_creates_a_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = "b".repeat(64);
+        let identity_dir = tmp.path().join(&identity);
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        std::fs::write(identity_dir.join("payload"), b"secret").unwrap();
+        let staged = VmManager::stage_managed_secret_file_mount(
+            &identity_dir.join("payload"),
+            "/run/secrets/payload",
+            0,
+            tmp.path(),
+            "box1",
+        );
+        assert!(
+            identity_dir.join(".mounts").is_dir(),
+            "real staging directory was not created: {staged:?}"
+        );
+        if let Ok(staged) = staged {
+            assert!(staged.join("payload").is_file());
+        }
     }
 }
