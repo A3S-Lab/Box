@@ -129,6 +129,14 @@ pub(crate) fn load_snapshot_oci_config(
 }
 
 fn read_regular_json<T: DeserializeOwned>(path: &Path, description: &str) -> Result<T> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let file = std::fs::symlink_metadata(path).map_err(|error| {
         BoxError::ConfigError(format!(
             "Failed to inspect {description} {}: {error}",
@@ -349,5 +357,54 @@ mod tests {
             std::fs::read(box_target.join(RESOLVED_IMAGE_CONFIG_FILE)).unwrap(),
             b"{\"user\":\"secret-user\"}\n"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_snapshot_oci_config_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let snapshot = outside.join("snap-id");
+        std::fs::create_dir_all(snapshot.join("rootfs")).unwrap();
+        let mut metadata = SnapshotMetadata::new(
+            "snap-id".to_string(),
+            "snap-id".to_string(),
+            "source".to_string(),
+            "secret:image".to_string(),
+        );
+        metadata.image_config = Some(SnapshotImageConfig {
+            user: Some("secret-user".to_string()),
+            ..SnapshotImageConfig::default()
+        });
+        std::fs::write(
+            snapshot.join("metadata.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = load_snapshot_oci_config(&link.join("snap-id").join("rootfs"), "secret:image");
+        match loaded {
+            Ok(config) => panic!(
+                "loaded snapshot image config through a junction: user={:?}",
+                config.user
+            ),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(snapshot.join("metadata.json").is_file());
     }
 }
