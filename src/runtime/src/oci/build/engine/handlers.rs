@@ -1085,6 +1085,14 @@ fn configure_run_command_env(cmd: &mut std::process::Command, env: &[(String, St
 fn ensure_run_cache_mount_targets(rootfs_dir: &Path, cache_mounts: &[RunCacheMount]) -> Result<()> {
     for mount in cache_mounts {
         let target = run_cache_mount_target(rootfs_dir, mount)?;
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in target.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&target).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create RUN cache mount target {}: {}",
@@ -5128,5 +5136,69 @@ mod tests {
             std::fs::read(rootfs.join("app").join("input.txt")).unwrap(),
             b"guest"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_cache_mount_target_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mount = super::RunCacheMount {
+            raw: String::new(),
+            id: None,
+            from: None,
+            source: "/".to_string(),
+            sharing: crate::oci::build::dockerfile::RunCacheSharing::Shared,
+            mode: None,
+            uid: None,
+            gid: None,
+            target: "/cache".to_string(),
+        };
+        let created = super::ensure_run_cache_mount_targets(&link.join("rootfs"), &[mount]);
+        assert!(
+            !outside.join("rootfs").exists(),
+            "RUN cache mount created the target through the junction"
+        );
+        assert!(
+            created.is_err(),
+            "RUN cache mount followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_cache_mount_target_creates_a_real_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        let mount = super::RunCacheMount {
+            raw: String::new(),
+            id: None,
+            from: None,
+            source: "/".to_string(),
+            sharing: crate::oci::build::dockerfile::RunCacheSharing::Shared,
+            mode: None,
+            uid: None,
+            gid: None,
+            target: "/cache".to_string(),
+        };
+        super::ensure_run_cache_mount_targets(&rootfs, &[mount])
+            .expect("cache target on a real rootfs");
+        assert!(rootfs.join("cache").is_dir());
     }
 }

@@ -577,6 +577,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is an ancestor of the rootfs.
   Adding into a guest rootfs does not create the destination through a
   Windows junction that is an ancestor of the rootfs.
+  Preparing a RUN cache mount does not create its target through a Windows
+  junction that is an ancestor of the rootfs.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
