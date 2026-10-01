@@ -70,6 +70,14 @@ impl NetworkStore {
     pub fn save(&self, networks: &HashMap<String, NetworkConfig>) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in parent.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             std::fs::create_dir_all(parent).map_err(|e| {
                 BoxError::NetworkError(format!(
                     "failed to create directory {}: {}",
@@ -219,6 +227,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = NetworkStore::new(dir.path().join("networks.json"));
         (dir, store)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn save_does_not_write_through_a_directory_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = dir.path().join("catalog");
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            parent.display(),
+            outside.display()
+        ));
+        let status = command.status().expect("mklink");
+        assert!(status.success(), "mklink /J failed: {status}");
+        let store = NetworkStore::new(parent.join("networks.json"));
+        let saved = store.save(&HashMap::new());
+        assert!(
+            saved.is_err(),
+            "save followed a directory junction: {saved:?}"
+        );
+        assert!(
+            !outside.join("networks.json").exists(),
+            "networks.json was written through the junction"
+        );
+        assert!(
+            !outside.join("networks.json.tmp").exists(),
+            "networks.json.tmp was written through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[test]
