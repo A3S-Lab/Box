@@ -1676,6 +1676,8 @@ tip while harness reports still keep
   that is an ancestor of the box directory.
   Image history does not read an image layout through a Windows junction
   that is an ancestor of the image directory.
+  Box stats does not read network counters through a Windows junction
+  that is an ancestor of the stats file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

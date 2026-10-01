@@ -309,6 +309,14 @@ fn collect_network_stats(record: &BoxRecord) -> NetworkStats {
 }
 
 fn read_network_stats_file(path: &Path) -> Option<NetworkStats> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            super::commit::refuse_directory_reparse(&prefix).ok()?;
+        }
+    }
     let data = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&data).ok()?;
     Some(NetworkStats {
@@ -763,5 +771,55 @@ mod tests {
         frame[6..12].copy_from_slice(&src);
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
         frame
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_network_stats_file_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let sockets = outside.join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::write(
+            sockets.join("net.stats.json"),
+            br#"{"rx_bytes":6,"tx_bytes":7}"#,
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let stats = read_network_stats_file(&link.join("sockets").join("net.stats.json"));
+        assert!(
+            stats.is_none(),
+            "network stats were read through an ancestor junction: {stats:?}"
+        );
+        assert_eq!(
+            std::fs::read(sockets.join("net.stats.json")).unwrap(),
+            br#"{"rx_bytes":6,"tx_bytes":7}"#
+        );
+    }
+
+    #[test]
+    fn read_network_stats_file_reads_a_real_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("net.stats.json");
+        std::fs::write(&path, br#"{"rx_bytes":4,"tx_bytes":5}"#).unwrap();
+        assert_eq!(
+            read_network_stats_file(&path),
+            Some(NetworkStats {
+                rx_bytes: 4,
+                tx_bytes: 5
+            })
+        );
     }
 }
