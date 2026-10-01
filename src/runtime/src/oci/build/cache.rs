@@ -86,6 +86,18 @@ impl BuildCache {
 
     /// Open a build cache rooted at an explicit directory.
     fn open_in(dir: PathBuf) -> Option<Self> {
+        #[cfg(windows)]
+        {
+            for path in [dir.join("blobs"), dir.join("keys")] {
+                let mut prefix = PathBuf::new();
+                for component in path.components() {
+                    prefix.push(component);
+                    if crate::vm::refuse_directory_reparse(&prefix).is_err() {
+                        return None;
+                    }
+                }
+            }
+        }
         std::fs::create_dir_all(dir.join("blobs")).ok()?;
         std::fs::create_dir_all(dir.join("keys")).ok()?;
         Some(Self { dir })

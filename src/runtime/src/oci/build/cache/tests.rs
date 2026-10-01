@@ -267,3 +267,35 @@ fn hash_context_sources_does_not_follow_a_junction() {
         "context hash followed a junction and absorbed the outside file"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn open_in_does_not_create_the_cache_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), b"keep").unwrap();
+    let parent = tmp.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let opened = BuildCache::open_in(link.join("buildcache"));
+    assert!(
+        !outside.join("buildcache").exists(),
+        "build cache was created through the junction"
+    );
+    assert!(
+        opened.is_none(),
+        "build cache followed an ancestor junction"
+    );
+    assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+}
