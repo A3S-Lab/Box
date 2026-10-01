@@ -247,6 +247,12 @@ pub fn collect_windows_guest_result(
     let live_logs_drained = rootfs.join(WINDOWS_LIVE_LOGS_DRAINED_MARKER);
     let stdout_source = rootfs.join(WINDOWS_GUEST_STDOUT);
     let stderr_source = rootfs.join(WINDOWS_GUEST_STDERR);
+    let exit_path = rootfs.join(WINDOWS_GUEST_EXIT_CODE);
+    let mut exit_prefix = PathBuf::new();
+    for component in exit_path.components() {
+        exit_prefix.push(component);
+        refuse_directory_reparse(&exit_prefix)?;
+    }
 
     if !windows_marker_matches(&marker, b"collected\n") {
         let mut logs_prefix = PathBuf::new();
@@ -300,7 +306,6 @@ pub fn collect_windows_guest_result(
         )?;
     }
 
-    let exit_path = rootfs.join(WINDOWS_GUEST_EXIT_CODE);
     let contents = match a3s_box_core::windows_file::open_regular_file(&exit_path, None) {
         Ok((file, _)) => {
             use std::io::Read;

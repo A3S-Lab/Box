@@ -78,6 +78,48 @@ fn windows_guest_exit_code_does_not_read_through_an_ancestor_junction() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn collect_windows_guest_result_does_not_read_exit_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = temporary.path().join("outside");
+    let rootfs = outside.join("box").join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join(".a3s_host_result_collected"), b"collected\n").unwrap();
+    std::fs::write(rootfs.join(".a3s_exit_code"), b"41\n").unwrap();
+    let parent = temporary.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let collected = collect_windows_guest_result(
+        &link.join("box"),
+        &a3s_box_core::log::LogConfig::default(),
+        0,
+    );
+    assert!(
+        !matches!(collected, Ok(41)),
+        "guest result adopted exit code 41 through an ancestor junction: {collected:?}"
+    );
+    let message = collected.expect_err("guest result followed an ancestor junction");
+    assert!(
+        message.to_string().contains("junction"),
+        "guest result error omitted the junction refusal: {message}"
+    );
+    assert_eq!(
+        std::fs::read(rootfs.join(".a3s_exit_code")).unwrap(),
+        b"41\n"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn collect_windows_guest_result_does_not_create_logs_through_an_ancestor_junction() {
     use std::os::windows::process::CommandExt;
 

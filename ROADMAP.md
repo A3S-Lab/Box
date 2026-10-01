@@ -1734,6 +1734,8 @@ tip while harness reports still keep
   through a Windows junction that is an ancestor of the seed directory.
   Reading a Windows guest exit code does not read it through a Windows
   junction that is an ancestor of the exit-code file.
+  Collecting a Windows guest result does not read its exit code through a
+  Windows junction that is an ancestor of the exit-code file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
