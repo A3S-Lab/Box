@@ -2272,4 +2272,79 @@ CMD ["/work/run.sh"]
             );
         }
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn assemble_image_does_not_create_blobs_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+
+        let assembled = super::super::assemble_image(
+            "scratch:latest",
+            &super::super::BuildState::new(HashMap::new()),
+            &[],
+            &[],
+            &link.join("layers"),
+            &store,
+            &Platform::host(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            !outside.join("layers").exists(),
+            "image assembly created blobs through the junction"
+        );
+        assert!(
+            assembled.is_err(),
+            "image assembly followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn assemble_image_creates_blobs_on_a_real_layers_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let layers = temp_dir.path().join("layers");
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+
+        let assembled = super::super::assemble_image(
+            "scratch:latest",
+            &super::super::BuildState::new(HashMap::new()),
+            &[],
+            &[],
+            &layers,
+            &store,
+            &Platform::host(),
+            None,
+            None,
+        )
+        .await;
+        assert!(layers.join("_output").join("blobs").join("sha256").is_dir());
+        if let Err(error) = &assembled {
+            let message = error.to_string();
+            assert!(
+                !message.to_ascii_lowercase().contains("junction"),
+                "{message}"
+            );
+        }
+    }
 }

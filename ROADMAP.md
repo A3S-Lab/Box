@@ -1588,6 +1588,8 @@ tip while harness reports still keep
   Windows junction that is an ancestor of it.
   Pulling an image does not create its blob directory through a Windows
   junction that is an ancestor of the target.
+  Assembling an image does not create its blob directory through a Windows
+  junction that is an ancestor of the layers directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

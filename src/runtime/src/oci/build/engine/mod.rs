@@ -1666,6 +1666,14 @@ async fn assemble_image(
     // Create output directory
     let output_dir = layers_dir.join("_output");
     let blobs_dir = output_dir.join("blobs").join("sha256");
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in blobs_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(&blobs_dir)
         .map_err(|e| BoxError::BuildError(format!("Failed to create output blobs dir: {}", e)))?;
 
