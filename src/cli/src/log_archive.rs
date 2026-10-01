@@ -111,6 +111,15 @@ fn archive_removed_logs_in(
             archived_logs = copy_dir_contents(&source_log_dir, &archived_log_dir)?;
         }
         if !archived_logs && record.console_log.is_file() {
+            #[cfg(windows)]
+            {
+                let mut console_prefix = PathBuf::new();
+                for component in record.console_log.components() {
+                    console_prefix.push(component);
+                    crate::commands::commit::refuse_directory_reparse(&console_prefix)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                }
+            }
             std::fs::create_dir_all(&archived_log_dir)?;
             std::fs::copy(&record.console_log, archived_log_dir.join("console.log"))?;
             archived_logs = true;
@@ -534,6 +543,52 @@ mod tests {
             "log archive followed an ancestor junction: {archived:?}"
         );
         assert_eq!(std::fs::read(logs.join("secret.txt")).unwrap(), b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_removed_logs_does_not_copy_console_log_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("console.log"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let id = "550e8400-e29b-41d4-a716-446655440096";
+        let mut record = crate::test_helpers::fixtures::make_record(id, "web", "dead", None);
+        record.auto_remove = true;
+        record.box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&record.box_dir).unwrap();
+        record.console_log = link.join("console.log");
+
+        let archived = archive_removed_logs_in(&record, &archive_root);
+        let copied = archive_dir(&archive_root, id)
+            .join("logs")
+            .join("console.log");
+        assert!(
+            std::fs::read(&copied).ok().as_deref() != Some(b"secret".as_slice()),
+            "log archive copied console.log through an ancestor junction"
+        );
+        assert!(
+            archived.as_ref().err().is_some(),
+            "log archive followed a console log ancestor junction: {archived:?}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("console.log")).unwrap(),
+            b"secret"
+        );
     }
 
     #[test]
