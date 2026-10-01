@@ -1646,6 +1646,8 @@ tip while harness reports still keep
   junction that is an ancestor of that directory.
   Dropping an unregistered box directory guard does not delete that directory
   through a Windows junction that is an ancestor of it.
+  Archiving removed logs does not copy them through a Windows junction that
+  is an ancestor of the log directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

@@ -99,8 +99,14 @@ fn archive_removed_logs_in(
     if record.log_config.driver != a3s_box_core::log::LogDriver::None {
         let archived_log_dir = archive_dir.join("logs");
         #[cfg(windows)]
-        crate::commands::commit::refuse_directory_reparse(&source_log_dir)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        {
+            let mut source_prefix = PathBuf::new();
+            for component in source_log_dir.components() {
+                source_prefix.push(component);
+                crate::commands::commit::refuse_directory_reparse(&source_prefix)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+        }
         if source_log_dir.is_dir() {
             archived_logs = copy_dir_contents(&source_log_dir, &archived_log_dir)?;
         }
@@ -470,6 +476,49 @@ mod tests {
             std::fs::read(outside.join("secret.txt")).unwrap(),
             b"secret"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_removed_logs_does_not_copy_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+        let outside = tmp.path().join("outside");
+        let logs = outside.join("box").join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let id = "550e8400-e29b-41d4-a716-446655440099";
+        let mut record = crate::test_helpers::fixtures::make_record(id, "web", "dead", None);
+        record.auto_remove = true;
+        record.box_dir = link.join("box");
+        record.console_log = record.box_dir.join("logs").join("console.log");
+
+        let archived = archive_removed_logs_in(&record, &archive_root);
+        assert!(
+            !archive_dir(&archive_root, id)
+                .join("logs")
+                .join("secret.txt")
+                .exists(),
+            "log archive copied a file through an ancestor junction"
+        );
+        assert!(
+            archived.as_ref().err().is_some(),
+            "log archive followed an ancestor junction: {archived:?}"
+        );
+        assert_eq!(std::fs::read(logs.join("secret.txt")).unwrap(), b"secret");
     }
 
     #[test]
