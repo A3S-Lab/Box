@@ -74,7 +74,22 @@ pub async fn execute(args: HistoryArgs) -> Result<(), BoxError> {
     Ok(())
 }
 
+fn refuse_image_directory(image_dir: &std::path::Path) -> Result<(), BoxError> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in image_dir.components() {
+            prefix.push(component);
+            super::commit::refuse_directory_reparse(&prefix)?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = image_dir;
+    Ok(())
+}
+
 fn load_image_configuration(image_dir: &std::path::Path) -> Result<ImageConfiguration, BoxError> {
+    refuse_image_directory(image_dir)?;
     let index_content = std::fs::read_to_string(image_dir.join("index.json"))
         .map_err(|e| BoxError::OciImageError(format!("Failed to read index.json: {e}")))?;
     let index: serde_json::Value = serde_json::from_str(&index_content)?;
@@ -97,6 +112,7 @@ fn load_image_configuration(image_dir: &std::path::Path) -> Result<ImageConfigur
 }
 
 fn get_layer_sizes(image_dir: &std::path::Path) -> Result<Vec<u64>, BoxError> {
+    refuse_image_directory(image_dir)?;
     let index_content = std::fs::read_to_string(image_dir.join("index.json"))?;
     let index: serde_json::Value = serde_json::from_str(&index_content)?;
     let manifest_digest = index["manifests"][0]["digest"]
@@ -213,6 +229,37 @@ mod tests {
         assert!(
             matches!(err, BoxError::OciImageError(ref message) if message.contains("index.json")),
             "{err}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_image_configuration_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("index.json"), b"{\"secret\":true}\n").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let error = load_image_configuration(&link).unwrap_err().to_string();
+        assert!(
+            error.contains("junction"),
+            "image history read through an ancestor junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("index.json")).unwrap(),
+            b"{\"secret\":true}\n"
         );
     }
 }
