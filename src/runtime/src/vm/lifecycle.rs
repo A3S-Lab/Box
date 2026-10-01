@@ -28,7 +28,7 @@ async fn wait_for_provider_exit(
 }
 
 #[cfg(windows)]
-fn refuse_windows_directory_tree(path: &Path) -> Result<()> {
+pub(super) fn refuse_windows_directory_tree(path: &Path) -> Result<()> {
     let mut prefix = PathBuf::new();
     for component in path.components() {
         prefix.push(component);

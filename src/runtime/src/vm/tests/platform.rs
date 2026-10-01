@@ -144,6 +144,41 @@ async fn destroy_removes_a_real_box_directory() {
 }
 
 #[cfg(target_os = "windows")]
+#[tokio::test]
+async fn boot_failure_cleanup_does_not_delete_sockets_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    let box_id = "junction-boot";
+    let sockets = outside.join(box_id).join("sockets");
+    std::fs::create_dir_all(&sockets).unwrap();
+    std::fs::write(sockets.join("secret.txt"), b"keep").unwrap();
+    let boxes = home.path().join("boxes");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        boxes.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let mut manager = VmManager::with_box_id(
+        BoxConfig::default(),
+        EventEmitter::new(10),
+        box_id.to_string(),
+    );
+    manager.home_dir = home.path().to_path_buf();
+
+    manager.cleanup_boot_failure().await;
+    assert_eq!(
+        std::fs::read(sockets.join("secret.txt")).unwrap(),
+        b"keep",
+        "boot-failure cleanup deleted sockets through the junction"
+    );
+}
+
+#[cfg(target_os = "windows")]
 #[test]
 fn test_collect_windows_guest_result_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();

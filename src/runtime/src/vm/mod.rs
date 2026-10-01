@@ -804,7 +804,7 @@ impl VmManager {
         let socket_directory: Result<()> = {
             #[cfg(windows)]
             {
-                sandbox::refuse_directory_reparse(&socket_dir)
+                lifecycle::refuse_windows_directory_tree(&socket_dir)
             }
             #[cfg(not(windows))]
             {
@@ -855,7 +855,7 @@ impl VmManager {
             let box_directory: Result<()> = {
                 #[cfg(windows)]
                 {
-                    sandbox::refuse_directory_reparse(&box_dir)
+                    lifecycle::refuse_windows_directory_tree(&box_dir)
                 }
                 #[cfg(not(windows))]
                 {
