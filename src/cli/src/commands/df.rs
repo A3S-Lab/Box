@@ -111,8 +111,14 @@ pub async fn execute(args: DfArgs) -> Result<(), BoxError> {
 /// Calculate total size of a directory recursively.
 fn dir_size(path: &std::path::Path) -> u64 {
     #[cfg(windows)]
-    if super::commit::refuse_directory_reparse(path).is_err() {
-        return 0;
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            if super::commit::refuse_directory_reparse(&prefix).is_err() {
+                return 0;
+            }
+        }
     }
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -213,6 +219,34 @@ mod tests {
             dir_size(&root),
             2,
             "df counted bytes through a child directory junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dir_size_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("box");
+        fs::create_dir_all(&box_target).unwrap();
+        fs::write(box_target.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        assert_eq!(
+            dir_size(&link.join("box")),
+            0,
+            "df counted bytes through an ancestor junction"
         );
     }
 }
