@@ -55,8 +55,12 @@ impl BoxLifecycleLock {
         const ERROR_SHARING_VIOLATION: i32 = 32;
         const ERROR_LOCK_VIOLATION: i32 = 33;
 
-        a3s_box_runtime::vm::refuse_directory_reparse(directory)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut prefix = std::path::PathBuf::new();
+        for component in directory.components() {
+            prefix.push(component);
+            a3s_box_runtime::vm::refuse_directory_reparse(&prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
         std::fs::create_dir_all(directory)?;
         let path = directory.join(format!("{box_id}.lifecycle.lock"));
         loop {
@@ -288,6 +292,46 @@ mod tests {
             b"secret"
         );
         assert!(std::fs::symlink_metadata(&locks)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_lock_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let locks = link.join("locks");
+        let acquired = BoxLifecycleLock::acquire_in(&locks, "box1");
+        assert!(
+            !outside.join("locks").exists(),
+            "lifecycle lock directory was created through the junction"
+        );
+        assert!(
+            acquired.is_err(),
+            "lifecycle lock followed an ancestor junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret"
+        );
+        assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
