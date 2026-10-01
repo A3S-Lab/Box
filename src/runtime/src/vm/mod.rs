@@ -217,6 +217,13 @@ fn windows_guest_persisted_exit_code(box_dir: &Path) -> Option<i32> {
     use std::io::Read;
 
     let exit_path = box_dir.join("rootfs").join(WINDOWS_GUEST_EXIT_CODE);
+    let mut prefix = PathBuf::new();
+    for component in exit_path.components() {
+        prefix.push(component);
+        if refuse_directory_reparse(&prefix).is_err() {
+            return None;
+        }
+    }
     let (file, _) = a3s_box_core::windows_file::open_regular_file(&exit_path, None).ok()?;
     let mut contents = String::new();
     file.take(64).read_to_string(&mut contents).ok()?;

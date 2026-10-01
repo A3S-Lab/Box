@@ -42,6 +42,42 @@ fn test_append_windows_guest_stream_uses_shared_phase_and_keeps_partial_lines() 
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_guest_exit_code_does_not_read_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = temporary.path().join("outside");
+    let rootfs = outside.join("box").join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join(".a3s_exit_code"), b"41\n").unwrap();
+    let parent = temporary.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    assert_eq!(
+        super::super::windows_guest_persisted_exit_code(&outside.join("box")),
+        Some(41)
+    );
+    assert_eq!(
+        super::super::windows_guest_persisted_exit_code(&link.join("box")),
+        None,
+        "WHPX exit code was adopted through an ancestor junction"
+    );
+    assert_eq!(
+        std::fs::read(rootfs.join(".a3s_exit_code")).unwrap(),
+        b"41\n"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn collect_windows_guest_result_does_not_create_logs_through_an_ancestor_junction() {
     use std::os::windows::process::CommandExt;
 

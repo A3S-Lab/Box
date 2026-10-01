@@ -713,6 +713,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of the source file.
   Materializing a Windows WHPX service bootstrap does not read its seed
   through a Windows junction that is an ancestor of the seed directory.
+  Reading a Windows guest exit code does not read it through a Windows
+  junction that is an ancestor of the exit-code file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
