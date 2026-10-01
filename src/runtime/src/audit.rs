@@ -38,7 +38,13 @@ impl AuditLog {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             #[cfg(windows)]
-            crate::vm::refuse_directory_reparse(parent)?;
+            {
+                let mut prefix = PathBuf::new();
+                for component in parent.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             fs::create_dir_all(parent).map_err(|e| {
                 BoxError::AuditError(format!(
                     "Failed to create audit log directory {}: {}",
@@ -515,6 +521,40 @@ mod tests {
         );
         assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
         assert!(fs::symlink_metadata(&audit_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn audit_log_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let path = link.join("audit").join("audit.jsonl");
+        let created = AuditLog::new(&path, AuditConfig::default());
+        assert!(
+            !outside.join("audit").exists(),
+            "audit log directory was created through the junction"
+        );
+        assert!(created.is_err(), "audit log followed an ancestor junction");
+        assert_eq!(fs::read(outside.join("secret.txt")).unwrap(), b"secret");
+        assert!(fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
