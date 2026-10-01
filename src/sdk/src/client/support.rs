@@ -1121,8 +1121,14 @@ impl Drop for BoxDirGuard {
     fn drop(&mut self) {
         if self.armed {
             #[cfg(windows)]
-            if a3s_box_runtime::vm::refuse_directory_reparse(&self.path).is_err() {
-                return;
+            {
+                let mut prefix = PathBuf::new();
+                for component in self.path.components() {
+                    prefix.push(component);
+                    if a3s_box_runtime::vm::refuse_directory_reparse(&prefix).is_err() {
+                        return;
+                    }
+                }
             }
             let _ = std::fs::remove_dir_all(&self.path);
         }

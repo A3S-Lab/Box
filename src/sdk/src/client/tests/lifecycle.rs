@@ -887,3 +887,56 @@ fn box_dir_guard_does_not_delete_through_a_directory_junction() {
         "sdk box dir guard removed the directory junction"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn box_dir_guard_does_not_delete_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("outside");
+    let box_target = outside.join("box");
+    std::fs::create_dir_all(&box_target).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    std::fs::write(box_target.join("data.txt"), b"data").unwrap();
+    let parent = home.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let box_dir = link.join("box");
+
+    {
+        let _guard = BoxDirGuard::new(box_dir);
+    }
+
+    assert!(
+        box_target.join("data.txt").is_file(),
+        "sdk box dir guard deleted through an ancestor junction"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret"
+    );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+}
+
+#[cfg(windows)]
+#[test]
+fn box_dir_guard_deletes_a_real_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let box_dir = home.path().join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::write(box_dir.join("data.txt"), b"data").unwrap();
+
+    {
+        let _guard = BoxDirGuard::new(box_dir.clone());
+    }
+
+    assert!(!box_dir.exists());
+}
