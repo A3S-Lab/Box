@@ -212,11 +212,17 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
         )?;
 
         #[cfg(windows)]
-        if let Err(error) = crate::commands::commit::refuse_directory_reparse(&record.box_dir) {
-            return Err(a3s_box_core::error::BoxError::Other(format!(
-                "refusing to remove box directory {}: {error}",
-                record.box_dir.display()
-            )));
+        {
+            let mut box_prefix = std::path::PathBuf::new();
+            for component in record.box_dir.components() {
+                box_prefix.push(component);
+                if let Err(error) = crate::commands::commit::refuse_directory_reparse(&box_prefix) {
+                    return Err(a3s_box_core::error::BoxError::Other(format!(
+                        "refusing to remove box directory {}: {error}",
+                        record.box_dir.display()
+                    )));
+                }
+            }
         }
 
         // MicroVM :ro virtio-fs RO-bind aliases must be detached before wipe.
@@ -422,6 +428,70 @@ mod tests {
             crate::commands::commit::metadata_is_reparse_point(&metadata),
             "box cleanup removed the directory junction"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_removed_box_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let mut record = make_record("ancestor-box", "ancestor_box", "created", None);
+        record.auto_remove = false;
+        record.box_dir = link.join("box");
+        record.exec_socket_path = record.box_dir.join("sockets").join("exec.sock");
+
+        let removed = cleanup_removed_box(&record);
+        assert_eq!(
+            std::fs::read(box_target.join("secret.txt")).unwrap(),
+            b"keep",
+            "box cleanup deleted a directory through an ancestor junction"
+        );
+        assert!(
+            removed.is_err(),
+            "box cleanup followed an ancestor junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_removed_box_removes_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(box_dir.join("secret.txt"), b"gone").unwrap();
+
+        let mut record = make_record("real-box", "real_box", "created", None);
+        record.auto_remove = false;
+        record.box_dir = box_dir.clone();
+        record.exec_socket_path = box_dir.join("sockets").join("exec.sock");
+
+        let removed = cleanup_removed_box(&record);
+        assert!(
+            !box_dir.exists(),
+            "box cleanup left a real directory in place"
+        );
+        if let Err(error) = removed {
+            assert!(
+                !error.to_string().contains("junction"),
+                "real box cleanup was refused as a junction: {error}"
+            );
+        }
     }
 
     #[cfg(windows)]
