@@ -115,6 +115,16 @@ impl BoxStateStore {
         corruption_policy: CorruptionPolicy,
         create_parent: bool,
     ) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in path.components() {
+                prefix.push(component);
+                if let Err(error) = crate::vm::refuse_directory_reparse(&prefix) {
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
+        }
         if !path.exists() {
             if create_parent {
                 if let Some(parent) = path.parent() {
@@ -539,5 +549,51 @@ mod tests {
 
         let store = BoxStateStore::load(&path).unwrap();
         assert_eq!(store.records().len(), 8);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_load_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let home = outside.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("boxes.json");
+        BoxStateStore::from_records(path, vec![record("secret")])
+            .save()
+            .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let loaded = BoxStateStore::load_readonly(link.join("home").join("boxes.json"));
+        match loaded {
+            Ok(store) => {
+                let names: Vec<_> = store
+                    .records()
+                    .iter()
+                    .map(|record| record.name.clone())
+                    .collect();
+                panic!("loaded box state through a junction: {names:?}");
+            }
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        let persisted = std::fs::read_to_string(home.join("boxes.json")).unwrap();
+        assert!(
+            persisted.contains("box-secret"),
+            "outside state was rewritten: {persisted}"
+        );
     }
 }

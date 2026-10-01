@@ -1710,6 +1710,8 @@ tip while harness reports still keep
   is an ancestor of the log file.
   Resolving a box rootfs does not adopt a directory through a Windows
   junction that is an ancestor of the box directory.
+  Loading box state does not read it through a Windows junction that is an
+  ancestor of the state file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
