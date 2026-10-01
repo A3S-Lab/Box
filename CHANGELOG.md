@@ -607,6 +607,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is an ancestor of that directory.
   Restoring a snapshot does not create its sockets or logs directory through a
   Windows junction that is an ancestor of those directories.
+  Cleaning up a copied rootfs does not delete it through a Windows junction
+  that is an ancestor of the box directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

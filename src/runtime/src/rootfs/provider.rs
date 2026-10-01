@@ -264,6 +264,14 @@ impl RootfsProvider for CopyProvider {
             return Ok(());
         }
         let rootfs = box_dir.join("rootfs");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         if rootfs.exists() {
             std::fs::remove_dir_all(&rootfs).map_err(|e| {
                 BoxError::BuildError(format!(
@@ -797,6 +805,39 @@ mod tests {
         let provider = CopyProvider;
         // Should not error on missing dir
         provider.cleanup(tmp.path(), false).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_provider_cleanup_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let rootfs = outside.join("box").join("rootfs");
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(rootfs.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let cleaned = CopyProvider.cleanup(&link.join("box"), false);
+        assert_eq!(
+            std::fs::read(rootfs.join("secret.txt")).unwrap(),
+            b"keep",
+            "copy provider cleanup deleted a rootfs through the junction"
+        );
+        assert!(
+            cleaned.is_err(),
+            "copy provider cleanup followed an ancestor junction"
+        );
     }
 
     #[test]
