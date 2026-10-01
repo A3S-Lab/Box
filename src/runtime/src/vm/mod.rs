@@ -242,7 +242,11 @@ pub fn collect_windows_guest_result(
     let stderr_source = rootfs.join(WINDOWS_GUEST_STDERR);
 
     if !windows_marker_matches(&marker, b"collected\n") {
-        refuse_directory_reparse(&logs)?;
+        let mut logs_prefix = PathBuf::new();
+        for component in logs.components() {
+            logs_prefix.push(component);
+            refuse_directory_reparse(&logs_prefix)?;
+        }
         std::fs::create_dir_all(&logs)?;
         let runtime_filter = a3s_box_core::log::RuntimeConsoleFilter::new();
 

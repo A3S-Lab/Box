@@ -42,6 +42,41 @@ fn test_append_windows_guest_stream_uses_shared_phase_and_keeps_partial_lines() 
 
 #[cfg(target_os = "windows")]
 #[test]
+fn collect_windows_guest_result_does_not_create_logs_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let outside = temp_dir.path().join("outside");
+    let box_target = outside.join("box");
+    std::fs::create_dir_all(box_target.join("rootfs")).unwrap();
+    let parent = temp_dir.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let collected = collect_windows_guest_result(
+        &link.join("box"),
+        &a3s_box_core::log::LogConfig::default(),
+        0,
+    );
+    assert!(
+        !box_target.join("logs").exists(),
+        "guest result collection created logs through the junction"
+    );
+    assert!(
+        collected.is_err(),
+        "guest result collection followed an ancestor junction"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn test_collect_windows_guest_result_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let box_dir = tmp.path().join("box");
