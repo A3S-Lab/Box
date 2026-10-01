@@ -342,6 +342,14 @@ impl RegistryPuller {
 
         // Create target directory structure
         let blobs_dir = target_dir.join("blobs").join("sha256");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in blobs_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&blobs_dir).map_err(|e| BoxError::RegistryError {
             registry: reference.registry.clone(),
             message: format!("Failed to create blobs directory: {}", e),
@@ -2247,6 +2255,78 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("plain directory"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pull_does_not_create_blobs_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let puller = RegistryPuller::with_auth_arch_and_protocol(
+            RegistryAuth::anonymous(),
+            resolve_target_arch(None),
+            RegistryProtocol::Http,
+        );
+        let reference = ImageReference {
+            registry: "127.0.0.1:1".into(),
+            repository: "a3s/app".into(),
+            tag: Some("latest".into()),
+            digest: None,
+        };
+        let pulled = puller
+            .pull_with_store(&reference, &link.join("image"), None)
+            .await;
+        assert!(
+            !outside.join("image").exists(),
+            "registry pull created blobs through the junction"
+        );
+        assert!(
+            pulled.is_err(),
+            "registry pull followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pull_creates_blobs_directory_on_a_real_target() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("image");
+        let puller = RegistryPuller::with_auth_arch_and_protocol(
+            RegistryAuth::anonymous(),
+            resolve_target_arch(None),
+            RegistryProtocol::Http,
+        );
+        let reference = ImageReference {
+            registry: "127.0.0.1:1".into(),
+            repository: "a3s/app".into(),
+            tag: Some("latest".into()),
+            digest: None,
+        };
+        let pulled = puller.pull_with_store(&reference, &target, None).await;
+        assert!(target.join("blobs").join("sha256").is_dir());
+        if let Err(error) = &pulled {
+            let message = error.to_string();
+            assert!(
+                !message.to_ascii_lowercase().contains("junction"),
+                "{message}"
+            );
+        }
     }
 }
 
