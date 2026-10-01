@@ -48,7 +48,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -304,7 +304,7 @@ pub struct FileCache {
 impl FileCache {
     pub fn new(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        ensure_cache_dir(&dir)?;
         Ok(Self { dir })
     }
     fn has(&self, k: &str) -> bool {
@@ -313,9 +313,22 @@ impl FileCache {
     fn put(&self, k: &str) {
         // Recreate the dir if it vanished after construction, so a marker is
         // never silently dropped (a dropped marker = a missed cache hit).
-        let _ = std::fs::create_dir_all(&self.dir);
+        let _ = ensure_cache_dir(&self.dir);
         let _ = std::fs::File::create(self.dir.join(k));
     }
+}
+
+fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in dir.components() {
+            prefix.push(component);
+            a3s_box_runtime::vm::refuse_directory_reparse(&prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
+    std::fs::create_dir_all(dir)
 }
 
 /// Spec for warming a base box (clone + install deps once).
@@ -1190,5 +1203,43 @@ esac
             .input("x")
             .env("K", "V")
             .allow_failure();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_cache_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = FileCache::new(link.join("cache"));
+        assert!(
+            !outside.join("cache").exists(),
+            "file cache created a directory through the junction"
+        );
+        assert!(created.is_err(), "file cache followed an ancestor junction");
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_cache_creates_a_real_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().join("cache");
+        FileCache::new(&dir).expect("file cache on a real path");
+        assert!(dir.is_dir());
     }
 }
