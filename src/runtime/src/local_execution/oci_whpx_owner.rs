@@ -68,6 +68,23 @@ impl WindowsWhpxOwnerArtifacts {
                 )));
             }
         }
+        for (label, path) in [
+            ("runtime", runtime_path.as_path()),
+            ("shim", shim_path.as_path()),
+            ("vm-rootfs", vm_rootfs.as_path()),
+            ("system-image manifest", system_image_manifest.as_path()),
+        ] {
+            let mut prefix = PathBuf::new();
+            for component in path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                    ExecutionManagerError::InvalidRequest(format!(
+                        "refusing to read Windows WHPX OCI owner {label} {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
         if !vm_rootfs.is_dir() {
             return Err(ExecutionManagerError::InvalidRequest(format!(
                 "Windows WHPX OCI owner vm-rootfs must be a directory: {}",
@@ -782,6 +799,55 @@ mod tests {
             system_image_manifest: PathBuf::from(r"C:\opt\a3s\system-image.json"),
             system_image_manifest_sha256: "c".repeat(64),
         }
+    }
+
+    #[test]
+    fn certify_does_not_read_artifacts_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(outside.join("vm-rootfs")).unwrap();
+        std::fs::write(outside.join("runtime.exe"), b"secret-runtime").unwrap();
+        std::fs::write(outside.join("shim.exe"), b"secret-shim").unwrap();
+        std::fs::write(outside.join("system-image.json"), b"secret-manifest").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let real = WindowsWhpxOwnerArtifacts::certify(
+            outside.join("runtime.exe"),
+            outside.join("shim.exe"),
+            outside.join("vm-rootfs"),
+            outside.join("system-image.json"),
+        );
+        assert!(
+            real.is_ok(),
+            "real WHPX owner artifacts were refused: {real:?}"
+        );
+
+        let certified = WindowsWhpxOwnerArtifacts::certify(
+            link.join("runtime.exe"),
+            link.join("shim.exe"),
+            link.join("vm-rootfs"),
+            link.join("system-image.json"),
+        );
+        let message = certified.expect_err("WHPX owner certify followed an ancestor junction");
+        assert!(
+            message.to_string().contains("junction"),
+            "WHPX owner certify error omitted the junction refusal: {message}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("runtime.exe")).unwrap(),
+            b"secret-runtime"
+        );
     }
 
     #[test]
