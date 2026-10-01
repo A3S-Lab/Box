@@ -1550,6 +1550,14 @@ async fn resolve_external_from_rootfs(
     }
 
     let dir = build_dir.join(format!("copyfrom_{}", cache.len()));
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(&dir).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to create {operation} image rootfs {}: {}",

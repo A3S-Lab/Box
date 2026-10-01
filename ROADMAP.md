@@ -1590,6 +1590,8 @@ tip while harness reports still keep
   junction that is an ancestor of the target.
   Assembling an image does not create its blob directory through a Windows
   junction that is an ancestor of the layers directory.
+  Resolving an external build image does not create its rootfs through a
+  Windows junction that is an ancestor of the build directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

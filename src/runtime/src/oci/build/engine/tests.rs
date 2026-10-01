@@ -2347,4 +2347,74 @@ CMD ["/work/run.sh"]
             );
         }
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn external_from_rootfs_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+        let build_dir = link.join("build");
+        let mut cache = HashMap::new();
+
+        let resolved = super::super::resolve_external_from_rootfs(
+            "127.0.0.1:1/a3s/app:latest",
+            "COPY",
+            &store,
+            &build_dir,
+            &mut cache,
+        )
+        .await;
+        assert!(
+            !outside.join("build").exists(),
+            "external image rootfs was created through the junction"
+        );
+        assert!(
+            resolved.is_err(),
+            "external image rootfs followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn external_from_rootfs_creates_a_real_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let build_dir = temp_dir.path().join("build");
+        let store_dir = temp_dir.path().join("images");
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024).unwrap());
+        let mut cache = HashMap::new();
+
+        let resolved = super::super::resolve_external_from_rootfs(
+            "127.0.0.1:1/a3s/app:latest",
+            "COPY",
+            &store,
+            &build_dir,
+            &mut cache,
+        )
+        .await;
+        assert!(build_dir.join("copyfrom_0").is_dir());
+        if let Err(error) = &resolved {
+            let message = error.to_string();
+            assert!(
+                !message.to_ascii_lowercase().contains("junction"),
+                "{message}"
+            );
+        }
+    }
 }
