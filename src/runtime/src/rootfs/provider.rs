@@ -348,6 +348,14 @@ impl RootfsProvider for OverlayProvider {
         let merged = box_dir.join("merged");
 
         for dir in [&upper, &work, &merged] {
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in dir.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             std::fs::create_dir_all(dir).map_err(|e| {
                 BoxError::BuildError(format!(
                     "Failed to create overlay dir {}: {}",
@@ -1353,5 +1361,58 @@ mod tests {
         let rootfs = temp_dir.path().join("box").join("rootfs");
         ensure_empty_rootfs_directory(&rootfs).expect("empty rootfs on a real path");
         assert!(rootfs.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_prepare_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let cache = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let prepared = OverlayProvider.prepare(&link.join("box"), &cache);
+        assert!(
+            !outside.join("box").exists(),
+            "overlay prepare created a directory through the junction"
+        );
+        assert!(
+            prepared.is_err(),
+            "overlay prepare followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_prepare_creates_real_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = temp_dir.path().join("cache");
+        let box_dir = temp_dir.path().join("box");
+        std::fs::create_dir_all(&cache).unwrap();
+        let prepared = OverlayProvider.prepare(&box_dir, &cache);
+        assert!(box_dir.join("upper").is_dir());
+        assert!(box_dir.join("work").is_dir());
+        assert!(box_dir.join("merged").is_dir());
+        if let Err(error) = prepared {
+            assert!(
+                !error.to_string().contains("junction"),
+                "real overlay prepare was refused as a junction: {error}"
+            );
+        }
     }
 }
