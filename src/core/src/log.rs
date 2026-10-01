@@ -681,6 +681,15 @@ fn open_console(
     console_log: &Path,
     stop: &AtomicBool,
 ) -> Option<(std::fs::File, ConsoleFileIdentity)> {
+    #[cfg(target_os = "windows")]
+    if let Err(error) = refuse_console_ancestor_junction(console_log) {
+        tracing::warn!(
+            path = %console_log.display(),
+            %error,
+            "Refusing to read a Windows console through a directory junction"
+        );
+        return None;
+    }
     for _ in 0..300 {
         #[cfg(target_os = "windows")]
         match crate::windows_file::open_regular_file(console_log, None) {
@@ -706,11 +715,22 @@ fn open_console(
 }
 
 #[cfg(target_os = "windows")]
+fn refuse_console_ancestor_junction(path: &Path) -> std::io::Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        crate::fs_atomic::refuse_directory_reparse(&prefix)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn reopen_console(
     console_log: &Path,
     position: u64,
     expected_identity: ConsoleFileIdentity,
 ) -> Option<(BufReader<std::fs::File>, u64)> {
+    refuse_console_ancestor_junction(console_log).ok()?;
     let (mut file, _) =
         crate::windows_file::open_regular_file(console_log, Some(expected_identity)).ok()?;
     let visible_len = file.seek(std::io::SeekFrom::End(0)).ok()?;
@@ -1741,6 +1761,54 @@ mod tests {
         assert!(
             rotated_path(&path, 1).exists(),
             "expected a rotated .1.gz file"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn log_processor_does_not_read_console_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let logs = outside.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("console.log"), b"secret-console\n").unwrap();
+        std::fs::write(logs.join("console.err.log"), b"").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let output = temporary.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+
+        let stop = AtomicBool::new(true);
+        run_log_processor_streams(
+            &link.join("logs").join("console.log"),
+            &link.join("logs").join("console.err.log"),
+            &output,
+            &LogConfig::default(),
+            &stop,
+        );
+
+        let json_path = json_log_path(&output);
+        let json = json_path
+            .exists()
+            .then(|| std::fs::read_to_string(&json_path).unwrap())
+            .unwrap_or_default();
+        assert!(
+            !json.contains("secret-console"),
+            "log processor adopted console bytes through an ancestor junction: {json}"
+        );
+        assert_eq!(
+            std::fs::read(logs.join("console.log")).unwrap(),
+            b"secret-console\n"
         );
     }
 
