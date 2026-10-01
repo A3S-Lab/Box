@@ -191,6 +191,15 @@ struct ArchiveEntry {
 }
 
 fn load_archive_entries(archive_root: &Path) -> std::io::Result<Vec<ArchiveEntry>> {
+    #[cfg(windows)]
+    {
+        let mut archive_prefix = PathBuf::new();
+        for component in archive_root.components() {
+            archive_prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&archive_prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
     if !archive_root.exists() {
         return Ok(Vec::new());
     }
@@ -830,6 +839,60 @@ mod tests {
             Ok(count) => panic!("log prune removed {count} archives through an ancestor junction"),
             Err(_) => {}
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_archive_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let archive = outside.join("old-archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("secret.txt"), b"keep").unwrap();
+        let removed_at = Utc::now();
+        let metadata = RemovedLogArchive {
+            id: "old-archive".to_string(),
+            short_id: "old-archive".to_string(),
+            name: "old-archive".to_string(),
+            image: "alpine:latest".to_string(),
+            removed_at,
+            created_at: removed_at,
+            started_at: Some(removed_at),
+            exit_code: Some(1),
+            log_config: a3s_box_core::log::LogConfig::default(),
+        };
+        std::fs::write(
+            archive.join(METADATA_FILE),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let resolved = resolve_archive_in("old-archive", &link);
+        assert!(
+            resolved
+                .as_ref()
+                .ok()
+                .and_then(|value| value.as_ref())
+                .is_none(),
+            "log resolve read an archive through an ancestor junction: {resolved:?}"
+        );
+        assert!(
+            resolved.is_err(),
+            "log resolve followed an ancestor junction: {resolved:?}"
+        );
+        assert_eq!(std::fs::read(archive.join("secret.txt")).unwrap(), b"keep");
     }
 
     fn write_archive(
