@@ -106,10 +106,24 @@ enum TerminalStatusRead {
     Complete(GuestTerminalStatus),
 }
 
+#[cfg(windows)]
+fn refuse_windows_status_path(path: &Path) -> Result<()> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        crate::vm::refuse_directory_reparse(&prefix)?;
+    }
+    Ok(())
+}
+
 fn read_guest_terminal_status(box_dir: &Path) -> TerminalStatusRead {
     let path = box_dir
         .join("runtime-control")
         .join(GUEST_TERMINAL_STATUS_FILE_NAME);
+    #[cfg(windows)]
+    if refuse_windows_status_path(&path).is_err() {
+        return TerminalStatusRead::PendingOrInvalid;
+    }
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -236,6 +250,10 @@ pub fn resolve_workload_exit_code_for(
     candidates
         .into_iter()
         .find_map(|path| {
+            #[cfg(windows)]
+            if refuse_windows_status_path(&path).is_err() {
+                return None;
+            }
             std::fs::read_to_string(path)
                 .ok()
                 .and_then(|contents| contents.trim().parse::<i32>().ok())
@@ -866,5 +884,37 @@ mod tests {
         stage_box_terminal_rootfs_metadata(&box_dir).unwrap();
         assert_eq!(std::fs::read(&terminal).unwrap(), b"guest-owned");
         assert!(attach_persistent_rootfs(&box_dir).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persisted_exit_code_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let rootfs = outside.join("box").join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(".a3s_exit_code"), b"41\n").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        assert_eq!(
+            read_persisted_exit_code(&link.join("box")),
+            None,
+            "exit code was adopted through an ancestor junction"
+        );
+        assert_eq!(
+            std::fs::read(rootfs.join(".a3s_exit_code")).unwrap(),
+            b"41\n"
+        );
     }
 }

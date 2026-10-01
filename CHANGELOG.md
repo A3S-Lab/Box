@@ -673,6 +673,8 @@ All notable changes to A3S Box will be documented in this file.
   is an ancestor of the log file.
   Reading an OCI log projection marker does not read it through a Windows
   junction that is an ancestor of the marker file.
+  Reading a persisted exit code does not read it through a Windows
+  junction that is an ancestor of the box directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
