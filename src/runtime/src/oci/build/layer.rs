@@ -42,7 +42,13 @@ impl DirSnapshot {
     /// Take a snapshot of a directory, recording all files and their metadata.
     pub fn capture(root: &Path) -> Result<Self> {
         #[cfg(windows)]
-        crate::vm::refuse_directory_reparse(root)?;
+        {
+            let mut prefix = PathBuf::new();
+            for component in root.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         let mut entries = HashMap::new();
         walk_dir(root, root, &mut entries)?;
         Ok(DirSnapshot { entries })
@@ -610,6 +616,47 @@ mod tests {
                 .err()
                 .is_some_and(|error| error.to_string().contains("junction")),
             "build snapshot followed a directory junction: {captured:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_does_not_follow_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_target = outside.join("box");
+        fs::create_dir_all(&box_target).unwrap();
+        fs::write(box_target.join("secret.txt"), b"secret").unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let captured = DirSnapshot::capture(&link.join("box"));
+        let leaked = captured.as_ref().ok().is_some_and(|snapshot| {
+            snapshot.entries.keys().any(|path| {
+                path.components()
+                    .any(|component| component.as_os_str() == "secret.txt")
+            })
+        });
+        assert!(
+            !leaked,
+            "build snapshot recorded a file through an ancestor junction: {captured:?}"
+        );
+        assert!(
+            captured
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("junction")),
+            "build snapshot followed an ancestor junction: {captured:?}"
         );
     }
 

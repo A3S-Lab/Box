@@ -1658,6 +1658,8 @@ tip while harness reports still keep
   ancestor of the measured directory.
   A diff baseline does not record files through a Windows junction that is
   an ancestor of the rootfs directory.
+  A build snapshot does not record files through a Windows junction that is
+  an ancestor of the build root.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
