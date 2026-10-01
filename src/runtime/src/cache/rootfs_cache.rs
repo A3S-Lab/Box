@@ -51,6 +51,14 @@ pub struct RootfsCache {
 impl RootfsCache {
     /// Create a new rootfs cache at the given directory.
     pub fn new(cache_dir: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in cache_dir.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(cache_dir).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to create rootfs cache directory {}: {}",
@@ -473,6 +481,38 @@ mod tests {
             }
             std::fs::write(&file_path, content).unwrap();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_does_not_create_the_cache_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let created = RootfsCache::new(&link.join("rootfs"));
+        assert!(
+            created.is_err(),
+            "rootfs cache followed an ancestor junction"
+        );
+        assert!(
+            !outside.join("rootfs").exists(),
+            "rootfs cache was created through the junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
     }
 
     #[test]
