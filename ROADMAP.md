@@ -1730,6 +1730,8 @@ tip while harness reports still keep
   junction that is an ancestor of the binary.
   Staging a single-file mount does not read the source through a Windows
   junction that is an ancestor of the source file.
+  Materializing a Windows WHPX service bootstrap does not read its seed
+  through a Windows junction that is an ancestor of the seed directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

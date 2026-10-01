@@ -1300,6 +1300,19 @@ fn materialize_windows_whpx_service_bootstrap(
                 bootstrap.display()
             ))
         })?;
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in packaged_seed.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                    ExecutionManagerError::InvalidRequest(format!(
+                        "refusing to read Windows WHPX bootstrap seed {}: {error}",
+                        packaged_seed.display()
+                    ))
+                })?;
+            }
+        }
         if packaged_seed.is_dir() {
             let seed = packaged_seed.canonicalize().ok();
             if seed.as_ref() != Some(&bootstrap) {
@@ -1779,6 +1792,49 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&plant);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn windows_whpx_bootstrap_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-bootstrap").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let service_root = temporary.path().join("service");
+        std::fs::create_dir_all(&service_root).unwrap();
+
+        let materialized = materialize_windows_whpx_service_bootstrap(&service_root, &link);
+        let adopted = service_root.join("bootstrap-vm-rootfs").join("secret.txt");
+        if adopted.is_file() {
+            panic!(
+                "WHPX bootstrap read through an ancestor junction: {}",
+                String::from_utf8_lossy(&std::fs::read(&adopted).unwrap())
+            );
+        }
+        match materialized {
+            Ok(_) => panic!("WHPX bootstrap succeeded through an ancestor junction"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-bootstrap"
+        );
     }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
