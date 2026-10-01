@@ -52,6 +52,14 @@ pub(crate) fn persist_snapshot_image_config(
     box_dir: &Path,
     config: &SnapshotImageConfig,
 ) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in box_dir.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let mut encoded = serde_json::to_vec_pretty(&config).map_err(|error| {
         BoxError::SerializationError(format!(
             "Failed to encode resolved image configuration: {error}"
@@ -406,5 +414,42 @@ mod tests {
             ),
         }
         assert!(snapshot.join("metadata.json").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persist_resolved_image_config_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let box_target = outside.join("box");
+        std::fs::create_dir_all(&box_target).unwrap();
+        std::fs::write(box_target.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let persisted = persist_resolved_image_config(&link.join("box"), &image_config());
+        assert!(
+            !box_target.join(RESOLVED_IMAGE_CONFIG_FILE).exists(),
+            "resolved image config was created through the junction"
+        );
+        let error = persisted.expect_err("resolved image config followed an ancestor junction");
+        assert!(
+            error.to_string().contains("junction"),
+            "expected a junction refusal, got {error}"
+        );
+        assert_eq!(
+            std::fs::read(box_target.join("secret.txt")).unwrap(),
+            b"keep"
+        );
     }
 }

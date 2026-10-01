@@ -667,6 +667,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is an ancestor of the box directory.
   Loading a snapshot image configuration does not read it through a
   Windows junction that is an ancestor of the snapshot directory.
+  Persisting a resolved image configuration does not create it through a
+  Windows junction that is an ancestor of the box directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
