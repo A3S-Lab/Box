@@ -227,6 +227,14 @@ fn docker_config_path() -> Option<PathBuf> {
 }
 
 fn load_docker_config(path: &Path) -> Result<DockerConfigFile> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let data = std::fs::read_to_string(path).map_err(|e| {
         BoxError::ConfigError(format!(
             "Failed to read Docker credential config {}: {}",
@@ -695,5 +703,53 @@ mod tests {
             ),
         }
         assert!(auth.join("credentials.json").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn docker_credentials_do_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = TempDir::new().unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("config.json"),
+            br#"{
+  "auths": {
+    "ghcr.io": {
+      "username": "secret-user",
+      "password": "secret-pass"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let creds = {
+            let _guard = env_lock();
+            let previous = std::env::var_os("DOCKER_CONFIG");
+            std::env::set_var("DOCKER_CONFIG", &link);
+            let creds = docker_credentials("ghcr.io");
+            match previous {
+                Some(value) => std::env::set_var("DOCKER_CONFIG", value),
+                None => std::env::remove_var("DOCKER_CONFIG"),
+            }
+            creds
+        };
+        if let Some((username, password)) = creds {
+            panic!("read Docker credentials through a junction: {username} / {password}");
+        }
+        assert!(outside.join("config.json").is_file());
     }
 }

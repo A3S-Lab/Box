@@ -1696,6 +1696,8 @@ tip while harness reports still keep
   junction that is an ancestor of the box directory.
   Reading a credential store does not read it through a Windows junction
   that is an ancestor of the credential file.
+  Reading Docker credentials does not read them through a Windows junction
+  that is an ancestor of the config file.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
