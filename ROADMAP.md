@@ -1648,6 +1648,8 @@ tip while harness reports still keep
   through a Windows junction that is an ancestor of it.
   Archiving removed logs does not copy them through a Windows junction that
   is an ancestor of the log directory.
+  Pruning removed logs does not delete an archive through a Windows junction
+  that is an ancestor of the archive root.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

@@ -214,6 +214,15 @@ fn load_archive_entries(archive_root: &Path) -> std::io::Result<Vec<ArchiveEntry
 }
 
 fn prune_archives(archive_root: &Path, retention: LogArchiveRetention) -> std::io::Result<usize> {
+    #[cfg(windows)]
+    {
+        let mut archive_prefix = PathBuf::new();
+        for component in archive_root.components() {
+            archive_prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&archive_prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
     let mut entries = load_archive_entries(archive_root)?;
     let now = Utc::now();
     let mut removed = 0;
@@ -260,8 +269,14 @@ fn prune_archives(archive_root: &Path, retention: LogArchiveRetention) -> std::i
 
 fn remove_archive_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
-    crate::commands::commit::refuse_directory_reparse(path)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::commands::commit::refuse_directory_reparse(&prefix)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
     if path.exists() {
         std::fs::remove_dir_all(path)?;
     }
@@ -709,6 +724,57 @@ mod tests {
             crate::commands::commit::metadata_is_reparse_point(&metadata),
             "log prune removed the directory junction"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_archives_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let archive = outside.join("old-archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("secret.txt"), b"keep").unwrap();
+        let removed_at = Utc::now() - chrono::Duration::days(30);
+        let metadata = RemovedLogArchive {
+            id: "old-archive".to_string(),
+            short_id: "old-archive".to_string(),
+            name: "old-archive".to_string(),
+            image: "alpine:latest".to_string(),
+            removed_at,
+            created_at: removed_at,
+            started_at: Some(removed_at),
+            exit_code: Some(1),
+            log_config: a3s_box_core::log::LogConfig::default(),
+        };
+        std::fs::write(
+            archive.join(METADATA_FILE),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let pruned = prune_archives(&link, LogArchiveRetention::default());
+        assert_eq!(
+            std::fs::read(archive.join("secret.txt")).unwrap(),
+            b"keep",
+            "log prune deleted an archive through an ancestor junction"
+        );
+        match pruned {
+            Ok(0) => {}
+            Ok(count) => panic!("log prune removed {count} archives through an ancestor junction"),
+            Err(_) => {}
+        }
     }
 
     fn write_archive(
