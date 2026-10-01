@@ -2604,6 +2604,14 @@ pub(super) fn handle_add(
     // Ensure destination directory exists
     if dst.ends_with('/') || src_patterns.len() > 1 {
         let destination_existed = std::fs::symlink_metadata(&dst_in_rootfs).is_ok();
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in dst_in_rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(&dst_in_rootfs).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create ADD destination {}: {}",
@@ -2615,6 +2623,14 @@ pub(super) fn handle_add(
             record_guest_change(rootfs_dir, &dst_in_rootfs, &mut changed)?;
         }
     } else if let Some(parent) = dst_in_rootfs.parent() {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in parent.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         std::fs::create_dir_all(parent).map_err(|e| {
             BoxError::BuildError(format!("Failed to create parent directory: {}", e))
         })?;
@@ -2638,6 +2654,14 @@ pub(super) fn handle_add(
                 dst_in_rootfs.clone()
             };
             if let Some(parent) = dest_file.parent() {
+                #[cfg(windows)]
+                {
+                    let mut prefix = PathBuf::new();
+                    for component in parent.components() {
+                        prefix.push(component);
+                        crate::vm::refuse_directory_reparse(&prefix)?;
+                    }
+                }
                 std::fs::create_dir_all(parent).map_err(|e| {
                     BoxError::BuildError(format!("Failed to create parent for ADD URL: {}", e))
                 })?;
@@ -4983,6 +5007,123 @@ mod tests {
             None,
         )
         .expect("copy into a real rootfs");
+        assert_eq!(
+            std::fs::read(rootfs.join("app").join("input.txt")).unwrap(),
+            b"guest"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_add_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let context = temp_dir.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(context.join("input.txt"), b"guest").unwrap();
+        let layers = temp_dir.path().join("layers");
+        std::fs::create_dir_all(&layers).unwrap();
+
+        let added = super::handle_add(
+            &["input.txt".to_string()],
+            "/app/",
+            None,
+            &context,
+            &link.join("rootfs"),
+            &layers,
+            "/",
+            0,
+            None,
+        );
+        assert!(
+            !outside.join("rootfs").exists(),
+            "ADD created the guest directory through the junction"
+        );
+        assert!(added.is_err(), "ADD followed an ancestor junction");
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_add_file_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let context = temp_dir.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(context.join("input.txt"), b"guest").unwrap();
+        let layers = temp_dir.path().join("layers");
+        std::fs::create_dir_all(&layers).unwrap();
+
+        let added = super::handle_add(
+            &["input.txt".to_string()],
+            "/app/input.txt",
+            None,
+            &context,
+            &link.join("rootfs"),
+            &layers,
+            "/",
+            0,
+            None,
+        );
+        assert!(
+            !outside.join("rootfs").exists(),
+            "ADD created the file parent through the junction"
+        );
+        assert!(added.is_err(), "ADD followed an ancestor junction");
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_add_creates_a_real_destination() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let context = temp_dir.path().join("context");
+        let rootfs = temp_dir.path().join("rootfs");
+        let layers = temp_dir.path().join("layers");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir_all(&layers).unwrap();
+        std::fs::write(context.join("input.txt"), b"guest").unwrap();
+
+        super::handle_add(
+            &["input.txt".to_string()],
+            "/app/",
+            None,
+            &context,
+            &rootfs,
+            &layers,
+            "/",
+            0,
+            None,
+        )
+        .expect("add into a real rootfs");
         assert_eq!(
             std::fs::read(rootfs.join("app").join("input.txt")).unwrap(),
             b"guest"
