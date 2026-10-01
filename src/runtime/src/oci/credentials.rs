@@ -110,6 +110,14 @@ impl CredentialStore {
 
     /// Load the credential file from disk. Returns empty if not found.
     fn load(&self) -> Result<CredentialFile> {
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in self.path.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         if !self.path.exists() {
             return Ok(CredentialFile::default());
         }
@@ -647,5 +655,45 @@ mod tests {
             store.get("ecr.aws").unwrap(),
             Some(("u3".to_string(), "p3".to_string()))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn credential_store_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = TempDir::new().unwrap();
+        let outside = temporary.path().join("outside");
+        let auth = outside.join("auth");
+        std::fs::create_dir_all(&auth).unwrap();
+        std::fs::write(
+            auth.join("credentials.json"),
+            br#"{"registries":{"ghcr.io":{"username":"secret-user","password":"secret-pass"}}}"#,
+        )
+        .unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let store = CredentialStore::new(link.join("auth").join("credentials.json"));
+        let loaded = store.get("ghcr.io");
+        match loaded {
+            Ok(Some((username, password))) => {
+                panic!("read registry credentials through a junction: {username} / {password}")
+            }
+            Ok(None) => panic!("registry credentials through a junction were treated as missing"),
+            Err(error) => assert!(
+                error.to_string().contains("junction"),
+                "expected a junction refusal, got {error}"
+            ),
+        }
+        assert!(auth.join("credentials.json").is_file());
     }
 }
