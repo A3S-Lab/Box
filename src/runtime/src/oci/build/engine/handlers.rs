@@ -1483,6 +1483,14 @@ fn sync_run_cache_mount(target: &Path, cache_dir: &Path) -> Result<()> {
             cache_dir.display()
         ))
     })?;
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in parent.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     std::fs::create_dir_all(parent).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to create RUN cache parent {}: {}",
@@ -5341,5 +5349,48 @@ mod tests {
             std::fs::read(cache_dir.join("cached.txt")).unwrap(),
             b"seed"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sync_run_cache_does_not_create_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"keep").unwrap();
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let target = temp_dir.path().join("target");
+
+        let synced = super::sync_run_cache_mount(&target, &link.join("caches").join("id"));
+        assert!(
+            !outside.join("caches").exists(),
+            "RUN cache sync created a directory through the junction"
+        );
+        assert!(
+            synced.is_err(),
+            "RUN cache sync followed an ancestor junction"
+        );
+        assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sync_run_cache_creates_a_real_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("target");
+        let cache_dir = temp_dir.path().join("caches").join("id");
+        super::sync_run_cache_mount(&target, &cache_dir).expect("sync a real cache directory");
+        assert!(cache_dir.is_dir());
     }
 }
