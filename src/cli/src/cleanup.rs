@@ -154,11 +154,17 @@ pub fn cleanup_external_socket_dir(
         return Ok(());
     }
     #[cfg(windows)]
-    if let Err(error) = crate::commands::commit::refuse_directory_reparse(socket_dir) {
-        return Err(a3s_box_core::error::BoxError::Other(format!(
-            "refusing to remove external socket directory {}: {error}",
-            socket_dir.display()
-        )));
+    {
+        let mut socket_prefix = std::path::PathBuf::new();
+        for component in socket_dir.components() {
+            socket_prefix.push(component);
+            if let Err(error) = crate::commands::commit::refuse_directory_reparse(&socket_prefix) {
+                return Err(a3s_box_core::error::BoxError::Other(format!(
+                    "refusing to remove external socket directory {}: {error}",
+                    socket_dir.display()
+                )));
+            }
+        }
     }
     match std::fs::remove_dir_all(socket_dir) {
         Ok(()) => Ok(()),
@@ -528,6 +534,65 @@ mod tests {
             crate::commands::commit::metadata_is_reparse_point(&metadata),
             "socket cleanup removed the directory junction"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_external_socket_dir_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let sockets = outside.join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::write(sockets.join("secret.txt"), b"keep").unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed =
+            cleanup_external_socket_dir(&box_dir, &link.join("sockets").join("exec.sock"));
+        assert_eq!(
+            std::fs::read(sockets.join("secret.txt")).unwrap(),
+            b"keep",
+            "socket cleanup deleted a directory through an ancestor junction"
+        );
+        assert!(
+            removed.is_err(),
+            "socket cleanup followed an ancestor junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_external_socket_dir_removes_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let sockets = tmp.path().join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::write(sockets.join("secret.txt"), b"gone").unwrap();
+
+        let removed = cleanup_external_socket_dir(&box_dir, &sockets.join("exec.sock"));
+        assert!(
+            !sockets.exists(),
+            "socket cleanup left a real directory in place"
+        );
+        if let Err(error) = removed {
+            assert!(
+                !error.to_string().contains("junction"),
+                "real socket cleanup was refused as a junction: {error}"
+            );
+        }
     }
 
     #[test]
