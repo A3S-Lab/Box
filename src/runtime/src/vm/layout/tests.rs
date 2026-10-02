@@ -447,6 +447,44 @@ fn retained_rootfs_cache_marker_is_strict_and_canonical() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn retained_rootfs_cache_key_does_not_read_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    let box_dir = outside.join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let secret_key = "ab".repeat(32);
+    std::fs::write(box_dir.join(".rootfs-cache-key"), format!("{secret_key}\n")).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-cache-key").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let read = retained_rootfs_cache_key(&link.join("box"));
+    let error = match read {
+        Ok(found) => panic!("rootfs cache key followed an ancestor junction: {found:?}"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("junction"),
+        "rootfs cache key error did not name the junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-cache-key"
+    );
+}
+
 #[test]
 fn snapshot_restore_requires_its_exact_cached_rootfs() {
     let cache_key = "a".repeat(64);

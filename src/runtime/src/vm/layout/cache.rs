@@ -93,6 +93,14 @@ pub(super) fn snapshot_lower_dir(box_dir: &Path) -> Option<PathBuf> {
 
 pub(super) fn retained_rootfs_cache_key(box_dir: &Path) -> Result<Option<String>> {
     let marker = box_dir.join(".rootfs-cache-key");
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in marker.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let value = match std::fs::read_to_string(&marker) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
