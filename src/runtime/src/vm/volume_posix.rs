@@ -1086,6 +1086,14 @@ fn other_root_committed_directory_shadows(box_dir: &Path) -> Result<bool, BoxErr
 }
 
 fn nonempty_directory(path: &Path) -> Result<bool, BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !is_reparse_or_symlink(&metadata) => {
             let mut entries = std::fs::read_dir(path).map_err(BoxError::IoError)?;
@@ -2278,6 +2286,52 @@ mod tests {
         std::fs::create_dir(&empty).unwrap();
         assert!(prepare_bindings_write(&empty).expect("real empty directory"));
         assert!(!empty.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nonempty_directory_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let nested = outside.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("secret.txt"), b"secret-nonempty").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let listed = nonempty_directory(&link.join("nested"));
+        let error = match listed {
+            Ok(present) => panic!("nonempty directory followed an ancestor junction: {present}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "nonempty directory error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(nested.join("secret.txt")).unwrap(),
+            b"secret-nonempty"
+        );
+    }
+
+    #[test]
+    fn nonempty_directory_sees_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(!nonempty_directory(&nested).expect("empty real directory"));
+        std::fs::write(nested.join("secret.txt"), b"present").unwrap();
+        assert!(nonempty_directory(&nested).expect("nonempty real directory"));
     }
 
     #[cfg(windows)]
