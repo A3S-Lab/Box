@@ -410,6 +410,14 @@ impl SnapshotStore {
         for entry in entries {
             let entry = entry.map_err(BoxError::IoError)?;
             let marker = entry.path().join(".snapshot-lower");
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in marker.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             match std::fs::read_to_string(&marker) {
                 Ok(content) => {
                     set.insert(normalize_snapshot_reference(PathBuf::from(content.trim())));
@@ -813,6 +821,56 @@ mod tests {
         assert_eq!(
             std::fs::read(outside.join("secret.txt")).unwrap(),
             b"secret-marker"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_does_not_read_markers_through_a_box_directory_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = make_rootfs(&tmp);
+        store.save(make_metadata("s0", "s0"), &rootfs).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store.save(make_metadata("s1", "s1"), &rootfs).unwrap();
+
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join(".snapshot-lower"),
+            store.rootfs_path("s0").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-box").unwrap();
+        let boxes = tmp.path().join("boxes");
+        std::fs::create_dir_all(&boxes).unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            boxes.join("box1").display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let pruned = store.prune(1, 0);
+        let error = match pruned {
+            Ok(removed) => panic!(
+                "snapshot prune followed a box directory junction: removed={removed:?} s0_kept={}",
+                store.get("s0").unwrap().is_some()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "snapshot prune error did not name the junction: {error}"
+        );
+        assert!(store.get("s0").unwrap().is_some());
+        assert!(store.get("s1").unwrap().is_some());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-box"
         );
     }
 

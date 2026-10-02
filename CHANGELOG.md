@@ -739,6 +739,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of the box directory.
   Pruning filesystem snapshots does not read lower markers through a
   Windows junction that is the boxes directory.
+  Pruning filesystem snapshots does not read a lower marker through a
+  Windows junction that is a box directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
