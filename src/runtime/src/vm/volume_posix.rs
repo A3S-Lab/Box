@@ -1957,6 +1957,14 @@ fn remove_unless_nonempty_directory(path: &Path) -> Result<(), BoxError> {
 }
 
 fn prepare_bindings_write(path: &Path) -> Result<bool, BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if is_regular_file(&metadata) => Ok(true),
         Ok(metadata) if is_reparse_or_symlink(&metadata) => {
@@ -2221,6 +2229,55 @@ mod tests {
         std::fs::write(&secret, b"remove-me").unwrap();
         remove_regular_file(&secret).expect("real regular file is removable");
         assert!(!secret.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepare_bindings_write_does_not_delete_an_empty_directory_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let empty = outside.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-bindings-write").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let prepared = prepare_bindings_write(&link.join("empty"));
+        let error = match prepared {
+            Ok(ready) => panic!("bindings write followed an ancestor junction: {ready}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "bindings write error did not name the junction: {error}"
+        );
+        assert!(
+            empty.is_dir(),
+            "empty directory was deleted through the junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-bindings-write"
+        );
+    }
+
+    #[test]
+    fn prepare_bindings_write_removes_a_real_empty_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(prepare_bindings_write(&empty).expect("real empty directory"));
+        assert!(!empty.exists());
     }
 
     #[cfg(windows)]

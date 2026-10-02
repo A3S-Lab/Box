@@ -1782,6 +1782,8 @@ tip while harness reports still keep
   junction that is an ancestor of the metadata path.
   Removing a volume POSIX regular file does not delete it through a Windows
   junction that is an ancestor of the file.
+  Preparing a volume POSIX bindings write does not delete an empty directory
+  through a Windows junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
