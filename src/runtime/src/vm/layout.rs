@@ -229,6 +229,16 @@ impl VmManager {
         // path can never be taken for a normal box that happens to have a
         // leftover `rootfs` directory from a cache-miss build.
         let restore_marker = box_dir.join(".snapshot-rootfs");
+        #[cfg(windows)]
+        {
+            for path in [&restore_marker, &prebuilt_rootfs] {
+                let mut prefix = PathBuf::new();
+                for component in path.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
+        }
         let prebuilt_is_populated = restore_marker.exists()
             && std::fs::read_dir(&prebuilt_rootfs)
                 .map(|mut it| it.next().is_some())

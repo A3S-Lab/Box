@@ -610,6 +610,64 @@ fn prepare_preserved_rootfs_does_not_read_through_a_rootfs_junction() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn prepare_layout_does_not_boot_a_restored_rootfs_through_a_rootfs_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(outside.join("etc")).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-restore").unwrap();
+    let mut vm = make_vm_manager_with_home(tmp.path());
+    vm.config.isolation = a3s_box_core::config::ExecutionIsolation::Sandbox;
+    vm.config.image = "example.invalid/must-not-pull:latest".to_string();
+    let box_dir = tmp.path().join("boxes").join(&vm.box_id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::write(box_dir.join(".snapshot-rootfs"), b"restored").unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        box_dir.join("rootfs").display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+    let _socket_dir_guard = RuntimeSocketDirGuard(vm.socket_dir());
+
+    let layout = vm.prepare_layout().await;
+    let error = match layout {
+        Ok(layout) => panic!(
+            "restored layout booted a rootfs through a rootfs junction: {}",
+            layout.rootfs_path.display()
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("junction"),
+        "restored layout error did not name the junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-restore"
+    );
+}
+
+#[tokio::test]
+async fn prepare_layout_boots_a_real_restored_rootfs() {
+    let tmp = TempDir::new().unwrap();
+    let mut vm = make_vm_manager_with_home(tmp.path());
+    vm.config.isolation = a3s_box_core::config::ExecutionIsolation::Sandbox;
+    vm.config.image = "example.invalid/must-not-pull:latest".to_string();
+    let box_dir = tmp.path().join("boxes").join(&vm.box_id);
+    let rootfs = box_dir.join("rootfs");
+    std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+    std::fs::write(box_dir.join(".snapshot-rootfs"), b"restored").unwrap();
+    let _socket_dir_guard = RuntimeSocketDirGuard(vm.socket_dir());
+
+    let layout = vm.prepare_layout().await.expect("real restored rootfs");
+    assert_eq!(layout.rootfs_path, rootfs);
+}
+
 #[test]
 fn snapshot_restore_requires_its_exact_cached_rootfs() {
     let cache_key = "a".repeat(64);
