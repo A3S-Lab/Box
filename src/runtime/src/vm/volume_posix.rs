@@ -1888,6 +1888,14 @@ fn is_metadata_size_limit(error: &BoxError) -> bool {
 }
 
 fn read_bounded_regular_file(path: &Path) -> Result<Option<Vec<u8>>, BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) if is_regular_file(&metadata) => metadata,
         Ok(_) => {
@@ -2068,6 +2076,51 @@ mod tests {
             "box directory was created through the junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_bindings_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let box_dir = outside.join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let bindings = VolumePosixBindings::new(vec![VolumePosixBinding {
+            guest_path: "/secret-bind".to_string(),
+            host_path: outside.join("volume"),
+        }]);
+        std::fs::write(
+            box_dir.join(VOLUME_POSIX_BINDINGS_FILE),
+            serde_json::to_vec(&bindings).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-bindings").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let read = read_bindings(&link.join("box"));
+        let error = match read {
+            Ok(found) => panic!("volume bindings followed an ancestor junction: {found:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "volume bindings error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-bindings"
+        );
     }
 
     #[cfg(windows)]
