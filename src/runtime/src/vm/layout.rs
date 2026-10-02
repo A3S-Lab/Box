@@ -754,7 +754,16 @@ impl VmManager {
                     // Prune if needed — but never evict a cache entry that is in use as
                     // a live overlay lower for a concurrent box (deleting the lowerdir
                     // under its mount(2) is the same-image concurrency bug this guards).
-                    let protected = self.referenced_rootfs_cache_keys();
+                    let protected = match self.referenced_rootfs_cache_keys() {
+                        Ok(protected) => protected,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "Failed to inventory live rootfs cache keys; skipping prune"
+                            );
+                            return;
+                        }
+                    };
                     if let Err(e) = cache.prune_protecting(
                         self.config.cache.max_rootfs_entries,
                         self.config.cache.max_cache_bytes,
@@ -786,16 +795,37 @@ impl VmManager {
     /// Boxes live under `<home>/boxes/<id>/`; a removed box's marker is gone with
     /// its dir, so an evictable key is simply one no live box references.
     #[cfg(not(target_os = "macos"))]
-    fn referenced_rootfs_cache_keys(&self) -> std::collections::HashSet<String> {
+    fn referenced_rootfs_cache_keys(&self) -> Result<std::collections::HashSet<String>> {
         let mut set = std::collections::HashSet::new();
-        if let Ok(entries) = std::fs::read_dir(self.home_dir.join("boxes")) {
-            for entry in entries.flatten() {
-                if let Ok(k) = std::fs::read_to_string(entry.path().join(".rootfs-cache-key")) {
-                    set.insert(k.trim().to_string());
-                }
+        let boxes = self.home_dir.join("boxes");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in boxes.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
             }
         }
-        set
+        let entries = match std::fs::read_dir(&boxes) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(set),
+            Err(error) => return Err(BoxError::IoError(error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(BoxError::IoError)?;
+            let marker = entry.path().join(".rootfs-cache-key");
+            match std::fs::read_to_string(&marker) {
+                Ok(key) => {
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        set.insert(key.to_string());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(BoxError::IoError(error)),
+            }
+        }
+        Ok(set)
     }
 
     /// Resolve the cache directory from config or default.

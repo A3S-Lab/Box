@@ -1764,6 +1764,8 @@ tip while harness reports still keep
   junction that is an ancestor of the box directory.
   Reading a retained rootfs cache key does not read it through a Windows
   junction that is an ancestor of the box directory.
+  Pruning the rootfs cache does not read cache keys through a Windows
+  junction that is the boxes directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
