@@ -572,6 +572,44 @@ fn referenced_rootfs_cache_keys_reads_a_real_marker() {
     assert!(keys.contains(&key), "{keys:?}");
 }
 
+#[cfg(windows)]
+#[test]
+fn prepare_preserved_rootfs_does_not_read_through_a_rootfs_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-rootfs").unwrap();
+    let box_dir = tmp.path().join("boxes").join("test-box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        box_dir.join("rootfs").display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let manager = make_vm_manager_with_home(tmp.path());
+    let prepared = manager.prepare_preserved_rootfs();
+    let error = match prepared {
+        Ok(path) => panic!(
+            "preserved rootfs followed a rootfs junction: {}",
+            path.display()
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("junction"),
+        "preserved rootfs error did not name the junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-rootfs"
+    );
+}
+
 #[test]
 fn snapshot_restore_requires_its_exact_cached_rootfs() {
     let cache_key = "a".repeat(64);

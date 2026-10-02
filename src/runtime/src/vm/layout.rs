@@ -853,6 +853,14 @@ impl VmManager {
             writable_layer_bytes: self.config.resources.ephemeral_storage_bytes,
         };
         let rootfs = box_dir.join("rootfs");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         let populated_rootfs = std::fs::read_dir(&rootfs)
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false);
