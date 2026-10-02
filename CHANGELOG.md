@@ -767,6 +767,8 @@ All notable changes to A3S Box will be documented in this file.
   through a Windows junction that is an ancestor of that directory.
   Checking a nonempty volume POSIX directory does not read it through a
   Windows junction that is an ancestor of that directory.
+  Checking an empty volume POSIX directory does not read it through a Windows
+  junction that is an ancestor of that directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

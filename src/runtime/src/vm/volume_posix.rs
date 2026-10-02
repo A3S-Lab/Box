@@ -1110,6 +1110,14 @@ fn nonempty_directory(path: &Path) -> Result<bool, BoxError> {
 }
 
 fn empty_real_directory(path: &Path) -> Result<bool, BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !is_reparse_or_symlink(&metadata) => {
             let mut entries = std::fs::read_dir(path).map_err(BoxError::IoError)?;
@@ -2332,6 +2340,56 @@ mod tests {
         assert!(!nonempty_directory(&nested).expect("empty real directory"));
         std::fs::write(nested.join("secret.txt"), b"present").unwrap();
         assert!(nonempty_directory(&nested).expect("nonempty real directory"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_real_directory_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let empty = outside.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-empty").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let listed = empty_real_directory(&link.join("empty"));
+        let error = match listed {
+            Ok(empty_dir) => panic!("empty directory followed an ancestor junction: {empty_dir}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "empty directory error did not name the junction: {error}"
+        );
+        assert!(
+            empty.is_dir(),
+            "empty directory was removed through the junction"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-empty"
+        );
+    }
+
+    #[test]
+    fn empty_real_directory_sees_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(empty_real_directory(&empty).expect("empty real directory"));
+        std::fs::write(empty.join("secret.txt"), b"present").unwrap();
+        assert!(!empty_real_directory(&empty).expect("nonempty real directory"));
     }
 
     #[cfg(windows)]
