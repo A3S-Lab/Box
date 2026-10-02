@@ -2009,6 +2009,14 @@ fn reject_planted_file(path: &Path) -> Result<(), BoxError> {
 }
 
 fn remove_regular_file(path: &Path) -> Result<(), BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if is_regular_file(&metadata) => {
             std::fs::remove_file(path).map_err(BoxError::IoError)
@@ -2170,6 +2178,48 @@ mod tests {
         let secret = tmp.path().join("secret.txt");
         std::fs::write(&secret, b"remove-me").unwrap();
         remove_unless_nonempty_directory(&secret).expect("real metadata file is removable");
+        assert!(!secret.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_regular_file_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, b"secret-regular").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = remove_regular_file(&link.join("secret.txt"));
+        let error = match removed {
+            Ok(()) => panic!("regular file removal followed an ancestor junction"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "regular file removal error did not name the junction: {error}"
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), b"secret-regular");
+    }
+
+    #[test]
+    fn remove_regular_file_removes_a_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("secret.txt");
+        std::fs::write(&secret, b"remove-me").unwrap();
+        remove_regular_file(&secret).expect("real regular file is removable");
         assert!(!secret.exists());
     }
 
