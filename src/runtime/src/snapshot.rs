@@ -394,6 +394,14 @@ impl SnapshotStore {
             Some(home) => home.join("boxes"),
             None => return Ok(set),
         };
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in boxes.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         let entries = match std::fs::read_dir(&boxes) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(set),
@@ -757,6 +765,55 @@ mod tests {
         assert!(store.get("s2").unwrap().is_none());
         assert!(store.get("s3").unwrap().is_some());
         assert!(store.get("s4").unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_does_not_read_markers_through_a_boxes_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = make_rootfs(&tmp);
+        store.save(make_metadata("s0", "s0"), &rootfs).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store.save(make_metadata("s1", "s1"), &rootfs).unwrap();
+
+        let outside = tmp.path().join("outside");
+        let box_dir = outside.join("box1");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            store.rootfs_path("s0").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-marker").unwrap();
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            tmp.path().join("boxes").display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let pruned = store.prune(1, 0);
+        let error = match pruned {
+            Ok(removed) => panic!(
+                "snapshot prune followed a boxes junction: removed={removed:?} s0_kept={}",
+                store.get("s0").unwrap().is_some()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "snapshot prune error did not name the junction: {error}"
+        );
+        assert!(store.get("s0").unwrap().is_some());
+        assert!(store.get("s1").unwrap().is_some());
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-marker"
+        );
     }
 
     #[test]
