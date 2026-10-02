@@ -249,6 +249,14 @@ pub struct CopyProvider;
 impl RootfsProvider for CopyProvider {
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
         let rootfs = box_dir.join("rootfs");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         // Reuse existing rootfs when persistent and already populated
         if rootfs.exists() {
             tracing::info!(path = %rootfs.display(), "Reusing persistent rootfs");
@@ -845,6 +853,52 @@ mod tests {
         assert!(
             cleaned.is_err(),
             "copy provider cleanup followed an ancestor junction"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_provider_prepare_does_not_reuse_a_rootfs_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        let rootfs = outside.join("box").join("rootfs");
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(rootfs.join("secret.txt"), b"secret-reuse").unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        make_sample_rootfs(&cache_dir);
+        let parent = temp_dir.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let prepared = CopyProvider.prepare(&link.join("box"), &cache_dir);
+        let error = match prepared {
+            Ok(path) => panic!(
+                "copy provider reused a rootfs through an ancestor junction: {}",
+                path.display()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "copy provider error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(rootfs.join("secret.txt")).unwrap(),
+            b"secret-reuse"
+        );
+        assert!(
+            !rootfs.join("bin").exists(),
+            "copy provider wrote the cache through the junction"
         );
     }
 
