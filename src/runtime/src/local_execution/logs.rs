@@ -69,6 +69,7 @@ fn read_log_files(log_dir: &Path, max_files: u32) -> Result<Vec<LogEntry>, Strin
 
     for index in (1..=max_files).rev() {
         let path = rotated_path(&base, index);
+        refuse_log_path(&path)?;
         let Some(file) = open_if_present(&path)? else {
             continue;
         };
@@ -80,10 +81,32 @@ fn read_log_files(log_dir: &Path, max_files: u32) -> Result<Vec<LogEntry>, Strin
             &mut entries,
         )?;
     }
+    refuse_log_path(&base)?;
     if let Some(file) = open_if_present(&base)? {
         read_entries(file, &base, true, &mut bytes_read, &mut entries)?;
     }
     Ok(entries)
+}
+
+fn refuse_log_path(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                format!(
+                    "refusing to read structured log {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 fn open_if_present(path: &Path) -> Result<Option<std::fs::File>, String> {
@@ -207,5 +230,49 @@ mod tests {
         assert!(read_log_files(temporary.path(), 0)
             .unwrap_err()
             .contains("invalid JSON"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_log_files_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let logs = outside.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("container.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&entry("secret-log\n", "2026-07-14T12:00:00Z")).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-log-file").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let read = read_log_files(&link.join("logs"), 0);
+        let error = match read {
+            Ok(entries) => panic!("structured logs followed an ancestor junction: {entries:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("junction"),
+            "structured log error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-log-file"
+        );
     }
 }

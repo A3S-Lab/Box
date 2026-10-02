@@ -731,6 +731,8 @@ All notable changes to A3S Box will be documented in this file.
   junction that is an ancestor of the catalog file.
   Loading network egress rules does not read networks.json through a Windows
   junction that is an ancestor of the catalog file.
+  Reading structured container logs does not read them through a Windows
+  junction that is an ancestor of the log directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
