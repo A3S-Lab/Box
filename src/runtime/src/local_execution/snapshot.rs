@@ -1,6 +1,6 @@
 //! Crash-recoverable filesystem snapshots for managed executions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use a3s_box_core::snapshot::SnapshotMetadata;
 #[cfg(target_os = "linux")]
@@ -618,6 +618,7 @@ impl LocalExecutionManager {
                 ))
             })?;
             let rootfs = store.rootfs_path(snapshot_id.as_str());
+            let mut marker_error = None;
             let in_use = state.records().iter().any(|record| {
                 let requested = record
                     .managed_execution
@@ -628,11 +629,19 @@ impl LocalExecutionManager {
                     && !record
                         .managed_state()
                         .is_ok_and(|state| state.is_some_and(ManagedExecutionState::is_terminal));
-                let marker_uses_snapshot =
-                    std::fs::read_to_string(record.box_dir.join(".snapshot-lower"))
-                        .is_ok_and(|value| Path::new(value.trim()) == rootfs.as_path());
+                let marker_uses_snapshot = match marker_references_rootfs(&record.box_dir, &rootfs)
+                {
+                    Ok(uses) => uses,
+                    Err(error) => {
+                        marker_error = Some(error);
+                        false
+                    }
+                };
                 request_is_live || marker_uses_snapshot
             });
+            if let Some(error) = marker_error {
+                return Err(error);
+            }
             if in_use {
                 return Err(ExecutionManagerError::Conflict {
                     execution_id: ExecutionId::new(format!("snapshot-{snapshot_id}"))?,
@@ -650,6 +659,24 @@ impl LocalExecutionManager {
             ExecutionManagerError::Internal(format!("filesystem snapshot task failed: {error}"))
         })?
     }
+}
+
+fn marker_references_rootfs(box_dir: &Path, rootfs: &Path) -> ExecutionManagerResult<bool> {
+    let marker = box_dir.join(".snapshot-lower");
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in marker.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "refusing to read snapshot marker {}: {error}",
+                    marker.display()
+                ))
+            })?;
+        }
+    }
+    Ok(std::fs::read_to_string(&marker).is_ok_and(|value| Path::new(value.trim()) == rootfs))
 }
 
 fn snapshot_operation(
@@ -1033,4 +1060,68 @@ fn snapshot_error(
         "failed to {operation} for execution {}: {error}",
         record.id
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_references_rootfs_matches_a_real_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let box_dir = temporary.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let rootfs = temporary.path().join("rootfs");
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            format!("{}\n", rootfs.display()),
+        )
+        .unwrap();
+        assert!(marker_references_rootfs(&box_dir, &rootfs).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn marker_references_rootfs_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let box_dir = outside.join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let rootfs = outside
+            .join("snapshots")
+            .join("managed-snapshot")
+            .join("rootfs");
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            format!("{}\n", rootfs.display()),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-marker").unwrap();
+        let parent = temporary.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let referenced = marker_references_rootfs(&link.join("box"), &rootfs);
+        let error = match referenced {
+            Ok(uses) => panic!("snapshot marker followed an ancestor junction: uses={uses}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "snapshot marker error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-marker"
+        );
+    }
 }
