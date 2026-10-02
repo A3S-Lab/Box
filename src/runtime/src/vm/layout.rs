@@ -814,6 +814,14 @@ impl VmManager {
         for entry in entries {
             let entry = entry.map_err(BoxError::IoError)?;
             let marker = entry.path().join(".rootfs-cache-key");
+            #[cfg(windows)]
+            {
+                let mut prefix = PathBuf::new();
+                for component in marker.components() {
+                    prefix.push(component);
+                    crate::vm::refuse_directory_reparse(&prefix)?;
+                }
+            }
             match std::fs::read_to_string(&marker) {
                 Ok(key) => {
                     let key = key.trim();

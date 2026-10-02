@@ -521,6 +521,43 @@ fn referenced_rootfs_cache_keys_do_not_read_through_a_boxes_junction() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn referenced_rootfs_cache_keys_do_not_read_through_a_box_directory_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let secret_key = "ef".repeat(32);
+    std::fs::write(outside.join(".rootfs-cache-key"), format!("{secret_key}\n")).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-box-cache").unwrap();
+    let boxes = tmp.path().join("boxes");
+    std::fs::create_dir_all(&boxes).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        boxes.join("box1").display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let manager = make_vm_manager_with_home(tmp.path());
+    let read = manager.referenced_rootfs_cache_keys();
+    let error = match read {
+        Ok(keys) => panic!("rootfs cache inventory followed a box directory junction: {keys:?}"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("junction"),
+        "rootfs cache inventory error did not name the junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-box-cache"
+    );
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn referenced_rootfs_cache_keys_reads_a_real_marker() {
