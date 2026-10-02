@@ -1929,6 +1929,14 @@ fn regular_file_exists(path: &Path) -> Result<bool, BoxError> {
 }
 
 fn remove_unless_nonempty_directory(path: &Path) -> Result<(), BoxError> {
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            crate::vm::refuse_directory_reparse(&current)?;
+        }
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !is_reparse_or_symlink(&metadata) => {
             let mut entries = std::fs::read_dir(path).map_err(BoxError::IoError)?;
@@ -2121,6 +2129,48 @@ mod tests {
             std::fs::read(outside.join("secret.txt")).unwrap(),
             b"secret-bindings"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_unless_nonempty_directory_does_not_delete_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, b"secret-remove").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let removed = remove_unless_nonempty_directory(&link.join("secret.txt"));
+        let error = match removed {
+            Ok(()) => panic!("metadata removal followed an ancestor junction"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "metadata removal error did not name the junction: {error}"
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), b"secret-remove");
+    }
+
+    #[test]
+    fn remove_unless_nonempty_directory_removes_a_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("secret.txt");
+        std::fs::write(&secret, b"remove-me").unwrap();
+        remove_unless_nonempty_directory(&secret).expect("real metadata file is removable");
+        assert!(!secret.exists());
     }
 
     #[cfg(windows)]
