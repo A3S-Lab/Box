@@ -757,6 +757,8 @@ All notable changes to A3S Box will be documented in this file.
   Windows junction that is the rootfs directory.
   Booting a restored snapshot rootfs does not adopt it through a Windows
   junction that is the rootfs directory.
+  Detecting a persistent rootfs generation does not read it through a Windows
+  junction that is the rootfs directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

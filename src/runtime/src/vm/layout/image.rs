@@ -15,6 +15,14 @@ pub(super) fn registry_auth_for_image(
 
 pub(crate) fn persistent_rootfs_generation_exists(box_dir: &Path) -> Result<bool> {
     for directory in [box_dir.join("rootfs"), box_dir.join("upper")] {
+        #[cfg(windows)]
+        {
+            let mut prefix = std::path::PathBuf::new();
+            for component in directory.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         match std::fs::read_dir(&directory) {
             Ok(mut entries) => {
                 if entries.next().is_some() {

@@ -693,6 +693,40 @@ fn persistent_rootfs_generation_detection_ignores_empty_directories() {
     assert!(persistent_rootfs_generation_exists(box_dir).unwrap());
 }
 
+#[cfg(windows)]
+#[test]
+fn persistent_rootfs_generation_does_not_read_through_a_rootfs_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let temporary = TempDir::new().unwrap();
+    let outside = temporary.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-generation").unwrap();
+    let box_dir = temporary.path().join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        box_dir.join("rootfs").display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let detected = persistent_rootfs_generation_exists(&box_dir);
+    let error = match detected {
+        Ok(present) => panic!("persistent rootfs generation followed a rootfs junction: {present}"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("junction"),
+        "persistent rootfs generation error did not name the junction: {error}"
+    );
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-generation"
+    );
+}
+
 #[tokio::test]
 async fn snapshot_lower_layout_restores_the_resolved_image_entrypoint() {
     let home = TempDir::new().unwrap();
