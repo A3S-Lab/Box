@@ -753,6 +753,8 @@ All notable changes to A3S Box will be documented in this file.
   that is the rootfs directory.
   Preparing a copied rootfs does not reuse one through a Windows junction
   that is an ancestor of the box directory.
+  Selecting an overlay lower does not reuse an existing rootfs through a
+  Windows junction that is the rootfs directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

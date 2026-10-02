@@ -311,6 +311,14 @@ pub struct OverlayProvider;
 impl OverlayProvider {
     fn lower_dir(box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
         let rootfs = box_dir.join("rootfs");
+        #[cfg(windows)]
+        {
+            let mut prefix = PathBuf::new();
+            for component in rootfs.components() {
+                prefix.push(component);
+                crate::vm::refuse_directory_reparse(&prefix)?;
+            }
+        }
         match std::fs::read_dir(&rootfs) {
             Ok(mut entries) => {
                 if entries.next().is_some() {
@@ -1550,5 +1558,45 @@ mod tests {
                 "real overlay prepare was refused as a junction: {error}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_lower_dir_does_not_reuse_a_rootfs_through_a_rootfs_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-lower").unwrap();
+        let box_dir = temp_dir.path().join("box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        let rootfs = box_dir.join("rootfs");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            rootfs.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+        let cache = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let lower = OverlayProvider::lower_dir(&box_dir, &cache);
+        let error = match lower {
+            Ok(path) => panic!(
+                "overlay lower reused a rootfs through a rootfs junction: {}",
+                path.display()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "overlay lower error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-lower"
+        );
     }
 }
