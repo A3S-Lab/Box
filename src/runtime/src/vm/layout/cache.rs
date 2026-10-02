@@ -73,7 +73,16 @@ pub(super) fn prune_apfs_rootfs_cache(
 /// the runtime mounts it as a read-only overlay lower instead of copying the
 /// rootfs, so all forks share one pristine lower and each writes to its own upper.
 pub(super) fn snapshot_lower_dir(box_dir: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(box_dir.join(".snapshot-lower")).ok()?;
+    let marker = box_dir.join(".snapshot-lower");
+    #[cfg(windows)]
+    {
+        let mut prefix = PathBuf::new();
+        for component in marker.components() {
+            prefix.push(component);
+            crate::vm::refuse_directory_reparse(&prefix).ok()?;
+        }
+    }
+    let content = std::fs::read_to_string(&marker).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         None

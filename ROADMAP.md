@@ -1760,6 +1760,8 @@ tip while harness reports still keep
   Windows junction that is the boxes directory.
   Pruning filesystem snapshots does not read a lower marker through a
   Windows junction that is a box directory.
+  Reading a snapshot restore lower does not read it through a Windows
+  junction that is an ancestor of the box directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume

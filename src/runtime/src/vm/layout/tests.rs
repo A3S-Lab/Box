@@ -389,6 +389,47 @@ fn test_snapshot_lower_dir_marker() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn snapshot_lower_dir_does_not_read_through_an_ancestor_junction() {
+    use std::os::windows::process::CommandExt;
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    let box_dir = outside.join("box");
+    std::fs::create_dir_all(&box_dir).unwrap();
+    let secret_lower = outside.join("secret-lower");
+    std::fs::create_dir_all(&secret_lower).unwrap();
+    std::fs::write(
+        box_dir.join(".snapshot-lower"),
+        format!("{}\n", secret_lower.display()),
+    )
+    .unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret-lower-marker").unwrap();
+    let parent = tmp.path().join("parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let link = parent.join("link");
+    let mut command = std::process::Command::new("cmd");
+    command.raw_arg(format!(
+        "/C mklink /J \"{}\" \"{}\"",
+        link.display(),
+        outside.display()
+    ));
+    assert!(command.status().expect("mklink").success());
+
+    let found = snapshot_lower_dir(&link.join("box"));
+    if let Some(path) = found {
+        panic!(
+            "snapshot lower followed an ancestor junction: {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read(outside.join("secret.txt")).unwrap(),
+        b"secret-lower-marker"
+    );
+}
+
 #[test]
 fn retained_rootfs_cache_marker_is_strict_and_canonical() {
     let temporary = TempDir::new().unwrap();
