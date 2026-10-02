@@ -737,6 +737,14 @@ pub fn read_volume_posix_sidecar(volume_dir: &Path) -> std::io::Result<Option<Vo
     let Some(path) = volume_posix_sidecar_path(volume_dir) else {
         return Ok(None);
     };
+    #[cfg(windows)]
+    {
+        let mut prefix = std::path::PathBuf::new();
+        for component in path.components() {
+            prefix.push(component);
+            crate::fs_atomic::refuse_directory_reparse(&prefix)?;
+        }
+    }
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if is_regular_file(&metadata) => metadata,
         Ok(_) => {
@@ -970,6 +978,48 @@ mod tests {
             "sidecar parent was created through the junction"
         );
         assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_sidecar_does_not_read_through_an_ancestor_junction() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        let volume = outside.join("volumes").join("data");
+        std::fs::create_dir_all(&volume).unwrap();
+        let sidecar = volume_posix_sidecar_path(&volume).expect("sidecar path");
+        std::fs::write(
+            &sidecar,
+            serde_json::to_vec(&VolumePosixSidecar::new(Vec::new())).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret-sidecar").unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let link = parent.join("link");
+        let mut command = std::process::Command::new("cmd");
+        command.raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            outside.display()
+        ));
+        assert!(command.status().expect("mklink").success());
+
+        let read = read_volume_posix_sidecar(&link.join("volumes").join("data"));
+        let error = match read {
+            Ok(found) => panic!("volume sidecar followed an ancestor junction: {found:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("junction"),
+            "volume sidecar error did not name the junction: {error}"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("secret.txt")).unwrap(),
+            b"secret-sidecar"
+        );
     }
 
     #[test]

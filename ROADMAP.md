@@ -1788,6 +1788,8 @@ tip while harness reports still keep
   Windows junction that is an ancestor of that directory.
   Checking an empty volume POSIX directory does not read it through a Windows
   junction that is an ancestor of that directory.
+  Reading a volume POSIX sidecar does not read it through a Windows junction
+  that is an ancestor of the volume directory.
   Updating a volume cannot point its mount
   path outside that volume's managed directory. A stored mount point
   outside that directory is not used for a new mount or for named-volume
